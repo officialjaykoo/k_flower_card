@@ -1,0 +1,5 @@
+﻿node_modules/
+dist/
+logs/
+*.zip
+.tmp_*/
