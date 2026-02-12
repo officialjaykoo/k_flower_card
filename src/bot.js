@@ -6,8 +6,6 @@ import {
   declareBomb,
   chooseGo,
   chooseStop,
-  chooseKungUse,
-  chooseKungPass,
   choosePresidentStop,
   choosePresidentHold,
   chooseGukjinMode,
@@ -21,10 +19,6 @@ export function botChooseCard(state, playerKey) {
 }
 
 export function botPlay(state, playerKey) {
-  if (state.phase === "kung-choice" && state.pendingKung?.playerKey === playerKey) {
-    return Math.random() < 0.5 ? chooseKungUse(state, playerKey) : chooseKungPass(state, playerKey);
-  }
-
   if (state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey === playerKey) {
     return chooseGukjinMode(state, playerKey, Math.random() < 0.5 ? "five" : "junk");
   }

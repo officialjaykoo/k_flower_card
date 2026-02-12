@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="176" height="256" viewBox="0 0 176 256">
+  <rect x="3" y="3" width="170" height="250" rx="14" fill="#ffffff" stroke="#cb2a1b" stroke-width="6"/>
+  <rect x="14" y="14" width="148" height="228" rx="10" fill="#fff"/>
+  <text x="88" y="102" text-anchor="middle" font-size="28" font-weight="800" fill="#cb2a1b">BONUS</text>
+  <text x="88" y="164" text-anchor="middle" font-size="56" font-weight="900" fill="#cb2a1b">X3</text>
+</svg>

@@ -1,7 +1,7 @@
 {
   "name": "k_flower_card",
   "version": "1.0.0",
-  "description": "브라우저에서 실행되는 2인(플레이어 vs AI) 맞고 데모입니다. 이 문서는 `src/state.js`, `src/cards.js` 실제 동작을 기준으로 작성되었습니다. - AI 의사결정(카드 선택, Go/Stop, 매치 선택, 대통령/국진 선택)은 랜덤으로 동작합니다.",
+  "description": "Browser-based 2-player (Player vs AI) Matgo demo. Rules follow the actual implementation in src/state.js and src/cards.js. AI decisions are random.",
   "main": "index.js",
   "scripts": {
     "dev": "vite",
@@ -15,6 +15,11 @@
   "type": "module",
   "devDependencies": {
     "@vitejs/plugin-react": "^5.1.4",
+    "sharp": "^0.34.5",
     "vite": "^7.3.1"
+  },
+  "dependencies": {
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
   }
 }

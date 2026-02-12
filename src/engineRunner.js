@@ -3,8 +3,8 @@ export function getActionPlayerKey(state) {
   if (state.phase === "go-stop") return state.pendingGoStop || null;
   if (state.phase === "select-match") return state.pendingMatch?.playerKey || null;
   if (state.phase === "president-choice") return state.pendingPresident?.playerKey || null;
+  if (state.phase === "shaking-confirm") return state.pendingShakingConfirm?.playerKey || null;
   if (state.phase === "gukjin-choice") return state.pendingGukjinChoice?.playerKey || null;
-  if (state.phase === "kung-choice") return state.pendingKung?.playerKey || null;
   return null;
 }
 

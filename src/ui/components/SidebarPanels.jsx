@@ -1,130 +1,253 @@
-﻿import CardView from "./CardView.jsx";
+﻿import { useMemo, useRef, useState } from "react";
+import { buildDeck } from "../../cards.js";
+import { POINT_GOLD_UNIT } from "../../engine/economy.js";
+import CardView from "./CardView.jsx";
 
 export default function SidebarPanels({
   state,
   ui,
   setUi,
-  setState,
   startGame,
-  runAuto,
-  randomSeed,
+  onStartSpecifiedGame,
+  onStartRandomGame,
   participantType,
   safeLoadJson,
-  replayFrames,
-  replayIdx,
-  replayFrame,
-  formatActionText,
-  formatEventsText,
-  remain,
-  actions
+  replayModeEnabled,
+  onLoadReplay,
+  onClearReplay
 }) {
-  const savedLogs = safeLoadJson("kflower_game_logs", []);
+  const fileInputRef = useRef(null);
+  const [showCardGuide, setShowCardGuide] = useState(false);
+
+  const monthCards = useMemo(() => {
+    const order = { kwang: 0, five: 1, ribbon: 2, junk: 3 };
+    return buildDeck()
+      .filter((c) => c.month >= 1 && c.month <= 12)
+      .sort((a, b) => a.month - b.month || order[a.category] - order[b.category] || a.id.localeCompare(b.id));
+  }, []);
+
+  const bonusCards = useMemo(() => buildDeck().filter((c) => c.month === 13), []);
+
+  const dummyCard = {
+    id: "guide-pass",
+    month: 0,
+    name: "Dummy Pass",
+    asset: "/cards/pass.svg",
+    passCard: true
+  };
+  const backCard = { id: "guide-back", month: 0, name: "Back", asset: "/cards/back.svg" };
+  const deckCard = { id: "guide-deck", month: 0, name: "Deck", asset: "/cards/deck-stack.svg" };
+
+  const hiddenLogPatterns = ["게임 시작 - 룰:", "선턴 유지:", "매치 캡처", "카드 선택"];
+  const visibleLogs = state.log.filter(
+    (line) => !hiddenLogPatterns.some((pattern) => String(line).includes(pattern))
+  );
+
+  const extractReplayEntry = (parsed) => {
+    if (Array.isArray(parsed)) {
+      for (let i = parsed.length - 1; i >= 0; i -= 1) {
+        const item = parsed[i];
+        if (item && Array.isArray(item.kibo)) return item;
+      }
+      return null;
+    }
+    if (parsed && Array.isArray(parsed.kibo)) return parsed;
+    return null;
+  };
+
+  const loadReplayFromFile = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || ""));
+        const entry = extractReplayEntry(parsed);
+        if (!entry) {
+          window.alert("기보 형식을 찾지 못했습니다. kibo 배열이 있는 JSON 파일을 선택하세요.");
+          return;
+        }
+        onLoadReplay(entry, file.name);
+      } catch {
+        window.alert("JSON 파싱에 실패했습니다. 파일 내용을 확인하세요.");
+      } finally {
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    };
+    reader.readAsText(file, "utf-8");
+  };
 
   return (
     <div>
       <div className="panel controls">
-        <div>현재 턴: {state.players[state.currentTurn].label}</div>
-        <div className="meta">덱 잔여: {state.deck.length}장</div>
-        <div className="meta">시드: {ui.seed} / 누적배수: x{ui.carryOverMultiplier}</div>
-        <div className="control-row">
-          <input value={ui.seed} onChange={(e) => setUi((u) => ({ ...u, seed: e.target.value }))} />
-          <button onClick={() => startGame()}>시드 새 게임</button>
+        <div className="controls-section">
+          <div className="control-row">
+            <button onClick={() => window.open("./rules/index.html", "_blank")}>룰페이지 열기</button>
+            <button onClick={() => setShowCardGuide((v) => !v)}>{showCardGuide ? "패보기 닫기" : "패보기"}</button>
+          </div>
         </div>
-        <button
-          onClick={() => {
-            setUi((u) => ({ ...u, seed: randomSeed(), lastWinnerKey: null }));
-            setTimeout(() => startGame(), 0);
-          }}
-        >
-          랜덤 시드
-        </button>
-        <button onClick={() => setState((prev) => runAuto(prev, ui, true))}>AI 턴 진행</button>
-        <button
-          onClick={() => {
-            setUi((u) => ({ ...u, lastWinnerKey: null }));
-            setTimeout(() => startGame(), 0);
-          }}
-        >
-          새 게임
-        </button>
-        <div className="toggle-list">
-          <label className="toggle-item">
-            <span>진행 속도</span>
-            <select
-              value={ui.speedMode || "fast"}
-              onChange={(e) => setUi((u) => ({ ...u, speedMode: e.target.value }))}
-            >
-              <option value="fast">Fast (즉시)</option>
-              <option value="visual">Visual (턴 애니메이션)</option>
-            </select>
-          </label>
-          <label className="toggle-item">
-            <span>Visual 지연</span>
-            <select
-              value={ui.visualDelayMs || 400}
-              onChange={(e) => setUi((u) => ({ ...u, visualDelayMs: Number(e.target.value) }))}
-              disabled={(ui.speedMode || "fast") !== "visual"}
-            >
-              <option value={150}>0.15s</option>
-              <option value={300}>0.30s</option>
-              <option value={400}>0.40s</option>
-              <option value={700}>0.70s</option>
-              <option value={1000}>1.00s</option>
-            </select>
-          </label>
-          <label className="toggle-item">
+        <div className="controls-section">
+          <div className="meta-row">
+            <span className="meta-label">현재 턴</span>
+            <span>{state.players[state.currentTurn].label}</span>
+          </div>
+          <div className="meta-row">
+            <span className="meta-label">덱 잔여</span>
+            <span>{state.deck.length}장</span>
+          </div>
+          <div className="meta-row">
+            <span className="meta-label">시드</span>
+            <span>{ui.seed}</span>
+          </div>
+          <div className="meta-row">
+            <span className="meta-label">점당 골드</span>
+            <span>{POINT_GOLD_UNIT}골드</span>
+          </div>
+        </div>
+
+        <div className="controls-section">
+          <select
+            value={
+              participantType(ui, "human") === "human" && participantType(ui, "ai") === "ai"
+                ? "hva"
+                : participantType(ui, "human") === "human" && participantType(ui, "ai") === "human"
+                ? "hvh"
+                : "ava"
+            }
+            onChange={(e) => {
+              const value = e.target.value;
+              setUi((u) => ({
+                ...u,
+                participants:
+                  value === "hvh"
+                    ? { human: "human", ai: "human" }
+                    : value === "ava"
+                    ? { human: "ai", ai: "ai" }
+                    : { human: "human", ai: "ai" },
+                lastWinnerKey: null
+              }));
+              setTimeout(() => startGame(), 0);
+            }}
+          >
+            <option value="hva">사람 vs AI</option>
+            <option value="hvh">사람 vs 사람</option>
+            <option value="ava">AI vs AI</option>
+          </select>
+        </div>
+
+        <div className="controls-section">
+          <div className="control-row">
             <input
-              type="checkbox"
-              checked={ui.revealAiHand}
-              onChange={(e) => setUi((u) => ({ ...u, revealAiHand: e.target.checked }))}
+              className="seed-input"
+              value={ui.seed}
+              onChange={(e) => setUi((u) => ({ ...u, seed: e.target.value }))}
             />
-            <span>AI 패 공개</span>
-          </label>
-          <label className="toggle-item">
-            <input
-              type="checkbox"
-              checked={ui.sortHand}
-              onChange={(e) => setUi((u) => ({ ...u, sortHand: e.target.checked }))}
-            />
-            <span>패 정렬</span>
-          </label>
+            <button onClick={onStartSpecifiedGame}>지정 게임시작</button>
+          </div>
+          <div className="control-row">
+            <button onClick={onStartRandomGame}>새 게임시작</button>
+          </div>
+        </div>
+
+        <div className="controls-section">
+          <div className="toggle-list">
+            <label className="toggle-item">
+              <span>진행 속도</span>
+              <select
+                value={ui.speedMode || "fast"}
+                onChange={(e) => setUi((u) => ({ ...u, speedMode: e.target.value }))}
+              >
+                <option value="fast">Fast (즉시)</option>
+                <option value="visual">Visual (턴 애니메이션)</option>
+              </select>
+            </label>
+            <label className="toggle-item">
+              <span>Visual 지연</span>
+              <select
+                value={ui.visualDelayMs || 400}
+                onChange={(e) => setUi((u) => ({ ...u, visualDelayMs: Number(e.target.value) }))}
+                disabled={(ui.speedMode || "fast") !== "visual"}
+              >
+                <option value={150}>0.15s</option>
+                <option value={300}>0.30s</option>
+                <option value={400}>0.40s</option>
+                <option value={700}>0.70s</option>
+                <option value={1000}>1.00s</option>
+              </select>
+            </label>
+            <label className="toggle-item">
+              <input
+                type="checkbox"
+                checked={ui.revealAiHand}
+                onChange={(e) => setUi((u) => ({ ...u, revealAiHand: e.target.checked }))}
+              />
+              <span>AI 패 공개</span>
+            </label>
+            <label className="toggle-item">
+              <input
+                type="checkbox"
+                checked={ui.sortHand}
+                onChange={(e) => setUi((u) => ({ ...u, sortHand: e.target.checked }))}
+              />
+              <span>패 정렬</span>
+            </label>
+          </div>
         </div>
       </div>
 
-      <div className="panel">
-        <div className="section-title">플레이 모드</div>
-        <select
-          value={
-            participantType(ui, "human") === "human" && participantType(ui, "ai") === "ai"
-              ? "hva"
-              : participantType(ui, "human") === "human" && participantType(ui, "ai") === "human"
-              ? "hvh"
-              : "ava"
-          }
-          onChange={(e) => {
-            const value = e.target.value;
-            setUi((u) => ({
-              ...u,
-              participants:
-                value === "hvh"
-                  ? { human: "human", ai: "human" }
-                  : value === "ava"
-                  ? { human: "ai", ai: "ai" }
-                  : { human: "human", ai: "ai" },
-              lastWinnerKey: null
-            }));
-            setTimeout(() => startGame(), 0);
-          }}
-        >
-          <option value="hva">사람 vs AI</option>
-          <option value="hvh">사람 vs 사람</option>
-          <option value="ava">AI vs AI</option>
-        </select>
-      </div>
+      {showCardGuide && (
+        <div className="panel card-guide-panel">
+          <div className="section-title">패보기</div>
+          <div className="meta">초보자용 카드 목록: 1~12월 기본패, 보너스패, 더미패, 뒤집은 패, 덱</div>
+
+          <div className="card-guide-section">
+            <div className="meta">1~12월 기본패 (월/종류 순)</div>
+            <div className="card-guide-grid card-guide-grid-main">
+              {monthCards.map((card) => (
+                <div key={`guide-main-${card.id}`} className="card-guide-item">
+                  <CardView card={card} />
+                  <div className="card-guide-label">{card.month}월 {card.category}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="card-guide-section">
+            <div className="meta">특수/상태 카드</div>
+            <div className="card-guide-grid card-guide-grid-small">
+              {bonusCards.map((card) => (
+                <div key={`guide-bonus-${card.id}`} className="card-guide-item">
+                  <CardView card={card} />
+                  <div className="card-guide-label">보너스패</div>
+                </div>
+              ))}
+              <div className="card-guide-item">
+                <CardView card={dummyCard} />
+                <div className="card-guide-label">더미패</div>
+              </div>
+              <div className="card-guide-item">
+                <CardView card={backCard} />
+                <div className="card-guide-label">뒤집은 패</div>
+              </div>
+              <div className="card-guide-item">
+                <CardView card={deckCard} />
+                <div className="card-guide-label">덱</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="panel">
-        <div className="section-title">기보 로그</div>
-        <div className="meta">저장됨: {savedLogs.length}판 (브라우저 로컬)</div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json,application/json"
+          style={{ display: "none" }}
+          onChange={loadReplayFromFile}
+        />
+        <button onClick={() => fileInputRef.current?.click()}>기보 불러오기</button>
+        {replayModeEnabled && <button onClick={onClearReplay}>불러온 기보 닫기</button>}
         <button
           onClick={() => {
             const logs = safeLoadJson("kflower_game_logs", []);
@@ -151,143 +274,13 @@ export default function SidebarPanels({
         </button>
       </div>
 
-      <div className="panel">
-        <div className="section-title">턴 리플레이</div>
-        {replayFrame ? (
-          <>
-            <div className="meta">상태: {ui.replay.enabled ? "켜짐" : "꺼짐"} / 프레임 {replayIdx + 1} / {replayFrames.length}</div>
-            <div className="meta">턴: {replayFrame.turnNo} / 행동자: {replayFrame.actor ? state.players[replayFrame.actor].label : "-"} / 덱: {replayFrame.deckCount}장</div>
-            <div className="meta">행동: {formatActionText(replayFrame.action)}</div>
-            <div className="meta">뒤집기: {(replayFrame.action?.flips || []).map((c) => `${c.month}월 ${c.name}`).join(", ") || "-"}</div>
-            <div className="meta">강탈: 피 {replayFrame.steals?.pi || 0}, 골드 {replayFrame.steals?.gold || 0}</div>
-            <div className="meta">이벤트: {formatEventsText(replayFrame.events)}</div>
-            <div className="control-row">
-              <button onClick={() => setUi((u) => ({ ...u, replay: { ...u.replay, enabled: !u.replay.enabled, autoPlay: false } }))}>
-                {ui.replay.enabled ? "리플레이 종료" : "리플레이 시작"}
-              </button>
-              <button
-                disabled={!ui.replay.enabled || replayIdx <= 0}
-                onClick={() => setUi((u) => ({ ...u, replay: { ...u.replay, turnIndex: Math.max(0, u.replay.turnIndex - 1) } }))}
-              >
-                이전 턴
-              </button>
-              <button
-                disabled={!ui.replay.enabled || replayIdx >= replayFrames.length - 1}
-                onClick={() => setUi((u) => ({ ...u, replay: { ...u.replay, turnIndex: Math.min(replayFrames.length - 1, u.replay.turnIndex + 1) } }))}
-              >
-                다음 턴
-              </button>
-              <button
-                disabled={!ui.replay.enabled || replayFrames.length <= 1}
-                onClick={() => setUi((u) => ({ ...u, replay: { ...u.replay, autoPlay: !u.replay.autoPlay } }))}
-              >
-                {ui.replay.autoPlay ? "자동재생 정지" : "자동재생"}
-              </button>
-            </div>
-            <input
-              type="range"
-              min={0}
-              max={Math.max(0, replayFrames.length - 1)}
-              value={replayIdx}
-              disabled={!ui.replay.enabled}
-              onChange={(e) => setUi((u) => ({ ...u, replay: { ...u.replay, turnIndex: Number(e.target.value) } }))}
-            />
-            <div className="control-row">
-              <div className="meta">자동재생 간격</div>
-              <select
-                value={ui.replay.intervalMs}
-                disabled={!ui.replay.enabled}
-                onChange={(e) => setUi((u) => ({ ...u, replay: { ...u.replay, intervalMs: Number(e.target.value) } }))}
-              >
-                <option value={500}>0.5s</option>
-                <option value={900}>0.9s</option>
-                <option value={1300}>1.3s</option>
-                <option value={1800}>1.8s</option>
-              </select>
-            </div>
-            <div className="replay-stage">
-              <div className="meta">보드</div>
-              <div className="center-row">{(replayFrame.board || []).map((c) => <CardView key={`rb-${c.id}`} card={c} />)}</div>
-              <div className="meta">{state.players.human.label} 손패</div>
-              <div className="center-row">{(replayFrame.hands?.human || []).map((c) => <CardView key={`rh-${c.id}`} card={c} />)}</div>
-              <div className="meta">{state.players.ai.label} 손패</div>
-              <div className="center-row">{(replayFrame.hands?.ai || []).map((c) => <CardView key={`ra-${c.id}`} card={c} />)}</div>
-            </div>
-          </>
-        ) : (
-          <div className="meta">기보가 없어 리플레이를 시작할 수 없습니다.</div>
-        )}
-      </div>
-
-      {state.phase === "playing" && participantType(ui, state.currentTurn) === "human" && (
-        <div className="panel">
-          <div className="section-title">선언</div>
-          <div className="meta">선언 후 해당 카드를 바로 내지 않아도 됩니다.</div>
-          <div className="control-row">
-            {actions.getDeclarableShakingMonths(state, state.currentTurn).map((m) => (
-              <button key={`s-${m}`} onClick={() => actions.declareShaking(m)}>흔들기 {m}월</button>
-            ))}
-            {actions.getDeclarableBombMonths(state, state.currentTurn).map((m) => (
-              <button key={`b-${m}`} onClick={() => actions.declareBomb(m)}>폭탄 {m}월</button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {state.phase === "go-stop" && state.pendingGoStop && participantType(ui, state.pendingGoStop) === "human" && (
-        <div className="panel">
-          <div className="section-title">Go / Stop</div>
-          <button onClick={() => actions.chooseGo(state.pendingGoStop)}>Go</button>
-          <button onClick={() => actions.chooseStop(state.pendingGoStop)}>Stop</button>
-        </div>
-      )}
-
-      {state.phase === "president-choice" && state.pendingPresident?.playerKey && participantType(ui, state.pendingPresident.playerKey) === "human" && (
-        <div className="panel">
-          <div className="section-title">대통령 선택</div>
-          <button onClick={() => actions.choosePresidentStop(state.pendingPresident.playerKey)}>10점 종료</button>
-          <button onClick={() => actions.choosePresidentHold(state.pendingPresident.playerKey)}>들고치기</button>
-        </div>
-      )}
-
-      {state.phase === "kung-choice" && state.pendingKung?.playerKey && participantType(ui, state.pendingKung.playerKey) === "human" && (
-        <div className="panel">
-          <div className="section-title">쿵 선택</div>
-          <button onClick={() => actions.chooseKungUse(state.pendingKung.playerKey)}>쿵 사용</button>
-          <button onClick={() => actions.chooseKungPass(state.pendingKung.playerKey)}>패스</button>
-        </div>
-      )}
-
-      {state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey && participantType(ui, state.pendingGukjinChoice.playerKey) === "human" && (
-        <div className="panel">
-          <div className="section-title">국진 선택</div>
-          <button onClick={() => actions.chooseGukjinMode(state.pendingGukjinChoice.playerKey, "five")}>열로 확정</button>
-          <button onClick={() => actions.chooseGukjinMode(state.pendingGukjinChoice.playerKey, "junk")}>쌍피로 확정</button>
-        </div>
-      )}
-
-      <div className="panel">
-        <div className="section-title">국진(9월 열) 처리</div>
-        <div className="meta">
-          플레이어: {state.players.human.gukjinMode === "junk" ? "쌍피" : "열"} ({state.players.human.gukjinLocked ? "확정" : "미확정"}) / AI: {state.players.ai.gukjinMode === "junk" ? "쌍피" : "열"} ({state.players.ai.gukjinLocked ? "확정" : "미확정"})
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="section-title">남은 월 카드(전체 기준)</div>
-        <div className="meta">{Object.entries(remain).map(([m, c]) => `${m}월: ${c}장`).join(" · ")}</div>
-      </div>
-
       <div className="panel log">
-        {state.log.map((l, i) => (
+        {visibleLogs.map((l, i) => (
           <div key={i}>{l}</div>
         ))}
-      </div>
-
-      <div className="panel">
-        <div className="section-title">룰/변형 참고</div>
-        <button onClick={() => window.open("./rules/index.html", "_blank")}>룰 페이지 열기</button>
       </div>
     </div>
   );
 }
+
+

@@ -1,4 +1,4 @@
-import { STARTING_GOLD } from "./economy.js";
+﻿import { STARTING_GOLD } from "./economy.js";
 import { pushCaptured } from "./capturesEvents.js";
 
 export function decideFirstTurn(humanCard, aiCard, rng = Math.random) {
@@ -12,10 +12,10 @@ export function decideFirstTurn(humanCard, aiCard, rng = Math.random) {
     reason = "동월 랜덤";
   } else if (isNight) {
     winnerKey = humanCard.month < aiCard.month ? "human" : "ai";
-    reason = "밤일낮장(밤: 낮은 월 우선)";
+    reason = "밤일낮장(밤: 낮은 월 선)";
   } else {
     winnerKey = humanCard.month > aiCard.month ? "human" : "ai";
-    reason = "밤일낮장(낮: 높은 월 우선)";
+    reason = "밤일낮장(낮: 높은 월 선)";
   }
 
   const winnerLabel = winnerKey === "human" ? "플레이어" : "AI";
@@ -24,20 +24,6 @@ export function decideFirstTurn(humanCard, aiCard, rng = Math.random) {
     `플레이어 ${humanCard.month}월 vs AI ${aiCard.month}월 -> ${winnerLabel} 선 (${reason})`;
 
   return { winnerKey, log };
-}
-
-export function findKungMonth(hand, board) {
-  const counts = {};
-  for (const c of hand) {
-    if (c.month > 12) continue;
-    counts[c.month] = (counts[c.month] || 0) + 1;
-  }
-  const boardMonths = new Set(board.filter((c) => c.month <= 12).map((c) => c.month));
-  for (const [monthText, count] of Object.entries(counts)) {
-    const month = Number(monthText);
-    if (count >= 3 && boardMonths.has(month)) return month;
-  }
-  return null;
 }
 
 export function emptyPlayer(label) {
@@ -73,38 +59,15 @@ export function emptyPlayer(label) {
       ddadak: 0,
       ssul: 0,
       jabbeok: 0,
-      yeonPpuk: 0,
-      kung: 0
+      yeonPpuk: 0
     }
   };
 }
 
 export function normalizeOpeningHands(players, remain, initLog) {
-  let nextRemain = remain.slice();
-  ["human", "ai"].forEach((key) => {
-    const player = players[key];
-    const keep = [];
-    const pulled = [];
-    player.hand.forEach((card) => {
-      if (card.bonus?.stealPi) {
-        pulled.push(card);
-      } else {
-        keep.push(card);
-      }
-    });
-    if (pulled.length > 0) {
-      pulled.forEach((card) => {
-        pushCaptured(player.captured, card);
-        initLog.push(`시작 보정: ${player.label} 손패 ${card.name} 즉시 획득`);
-      });
-      while (keep.length < 10 && nextRemain.length > 0) {
-        keep.push(nextRemain[0]);
-        nextRemain = nextRemain.slice(1);
-      }
-      player.hand = keep;
-    }
-  });
-  return nextRemain;
+  // 손패 보너스 카드는 시작 시 자동 발동하지 않는다.
+  // 플레이어가 실제로 낼 때 보너스 효과가 적용된다.
+  return remain.slice();
 }
 
 export function normalizeOpeningBoard(board, remain, firstPlayer, initLog) {
@@ -118,7 +81,7 @@ export function normalizeOpeningBoard(board, remain, firstPlayer, initLog) {
     changed = true;
     bonus.forEach((card) => {
       pushCaptured(firstPlayer.captured, card);
-      initLog.push(`시작 보정: 바닥 ${card.name}는 선 플레이어가 획득`);
+      initLog.push(`시작 보정: 바닥 ${card.name}을(를) ${firstPlayer.label}가 획득`);
     });
     nextBoard = nextBoard.filter((c) => !c.bonus?.stealPi);
     while (nextBoard.length < 8 && nextRemain.length > 0) {

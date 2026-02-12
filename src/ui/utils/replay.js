@@ -62,8 +62,7 @@ export function formatEventsText(events) {
     `jabbeok:${events.jabbeok || 0}`,
     `yeonPpuk:${events.yeonPpuk || 0}`,
     `shaking:${events.shaking || 0}`,
-    `bomb:${events.bomb || 0}`,
-    `kung:${events.kung || 0}`
+    `bomb:${events.bomb || 0}`
   ].join(" / ");
 }
 

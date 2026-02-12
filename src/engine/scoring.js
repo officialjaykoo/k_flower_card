@@ -1,30 +1,44 @@
 ﻿import { ruleSets } from "./rules.js";
 
+function uniqueCards(cards = []) {
+  const seen = new Set();
+  return cards.filter((c) => {
+    if (!c || seen.has(c.id)) return false;
+    seen.add(c.id);
+    return true;
+  });
+}
+
 export function calculateScore(player, opponent, ruleKey) {
   const rules = ruleSets[ruleKey];
   const baseInfo = calculateBaseScore(player, rules);
   const goBonus = player.goCount;
 
-  let multiplier = 1;
-  if (player.goCount >= 3) multiplier *= player.goCount - 1;
-  if (player.events.shaking > 0) multiplier *= 2 ** player.events.shaking;
-  if (player.events.bomb > 0) multiplier *= 2 ** player.events.bomb;
-  if (rules.useEarlyStop && opponent.goCount > 0) multiplier *= rules.goStopMultiplier;
+  // base/total은 기본점수+GO 누적값, payoutTotal은 배수(고/흔들기/폭탄/박) 적용 후 금액 계산용.
+  const pointTotal = baseInfo.base + goBonus;
+
+  let payoutMultiplier = 1;
+  if (player.goCount >= 3) payoutMultiplier *= player.goCount - 1;
+  if (player.events.shaking > 0) payoutMultiplier *= 2 ** player.events.shaking;
+  if (player.events.bomb > 0) payoutMultiplier *= 2 ** player.events.bomb;
 
   const bak = detectBak(player, opponent, ruleKey);
-  multiplier *= bak.multiplier;
+  payoutMultiplier *= bak.multiplier;
 
   return {
-    base: baseInfo.base + goBonus,
-    multiplier,
-    total: (baseInfo.base + goBonus) * multiplier,
+    base: pointTotal,
+    multiplier: payoutMultiplier,
+    total: pointTotal,
+    payoutTotal: pointTotal * payoutMultiplier,
     bak,
     breakdown: { ...baseInfo.breakdown, goBonus }
   };
 }
 
+
 export function calculateBaseScore(player, rules = ruleSets.A) {
-  const { kwang, ribbon } = player.captured;
+  const kwang = uniqueCards(player.captured.kwang || []);
+  const ribbon = uniqueCards(player.captured.ribbon || []);
   const fiveCards = scoringFiveCards(player);
   const fiveCount = fiveCards.length;
   const ribbonCount = ribbon.length;
@@ -36,12 +50,7 @@ export function calculateBaseScore(player, rules = ruleSets.A) {
   const junkBase = junkCount >= 10 ? junkCount - 9 : 0;
   const ribbonSetBonus = ribbonBonus(ribbon);
   const fiveSetBonus = fiveBonus(fiveCards);
-  const eventBonus =
-    player.events.ttak * rules.ttakBonus +
-    player.events.ppuk * rules.ppukBonus +
-    player.events.jjob * rules.jjobBonus;
-
-  const base = kwangBase + fiveBase + ribbonBase + junkBase + ribbonSetBonus + fiveSetBonus + eventBonus;
+  const base = kwangBase + fiveBase + ribbonBase + junkBase + ribbonSetBonus + fiveSetBonus;
 
   return {
     base,
@@ -52,7 +61,6 @@ export function calculateBaseScore(player, rules = ruleSets.A) {
       junkBase,
       ribbonSetBonus,
       fiveSetBonus,
-      eventBonus,
       piCount: junkCount,
       gukjinMode: getGukjinMode(player)
     }
@@ -91,10 +99,14 @@ function detectBak(player, opponent, ruleKey) {
   const playerFiveCount = scoringFiveCards(player).length;
   const opponentFiveCount = scoringFiveCards(opponent).length;
 
+  const bakEnabled = (player.goCount || 0) > 0;
   const bak = {
-    gwang: player.captured.kwang.length >= 3 && opponent.captured.kwang.length === 0,
-    pi: opponentPi <= 7 && playerPi >= 10,
-    mongBak: opponentFiveCount === 0 && playerFiveCount >= 7
+    gwang:
+      bakEnabled &&
+      uniqueCards(player.captured.kwang || []).length >= 3 &&
+      uniqueCards(opponent.captured.kwang || []).length === 0,
+    pi: bakEnabled && opponentPi <= 7 && playerPi >= 10,
+    mongBak: bakEnabled && opponentFiveCount === 0 && playerFiveCount >= 7
   };
 
   let multiplier = 1;
@@ -110,6 +122,10 @@ export function piValue(card) {
   return 1;
 }
 
+export function sumPiValues(cards = []) {
+  return uniqueCards(cards).reduce((sum, card) => sum + piValue(card), 0);
+}
+
 export function isGukjinCard(card) {
   return card.month === 9 && card.category === "five";
 }
@@ -119,14 +135,14 @@ export function getGukjinMode(player) {
 }
 
 export function scoringFiveCards(player) {
-  const fives = player.captured.five || [];
+  const fives = uniqueCards(player.captured.five || []);
   if (getGukjinMode(player) === "five") return fives;
   return fives.filter((c) => !(isGukjinCard(c) && !c.gukjinTransformed));
 }
 
 export function scoringPiCount(player) {
-  const basePi = (player.captured.junk || []).reduce((sum, c) => sum + piValue(c), 0);
+  const basePi = sumPiValues(player.captured.junk || []);
   if (getGukjinMode(player) !== "junk") return basePi;
-  const hasGukjin = (player.captured.five || []).some((c) => isGukjinCard(c) && !c.gukjinTransformed);
+  const hasGukjin = uniqueCards(player.captured.five || []).some((c) => isGukjinCard(c) && !c.gukjinTransformed);
   return hasGukjin ? basePi + 2 : basePi;
 }

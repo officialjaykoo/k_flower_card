@@ -1,16 +1,16 @@
 ﻿const cardCatalog = [
   { month: 1, category: "kwang", name: "Pine Bright" },
   { month: 1, category: "ribbon", name: "Poetry Ribbon" },
-  { month: 1, category: "five", name: "Crane" },
-  { month: 1, category: "junk", name: "Pine Junk" },
+  { month: 1, category: "junk", name: "Pine Junk A" },
+  { month: 1, category: "junk", name: "Pine Junk B" },
 
   { month: 2, category: "ribbon", name: "Poetry Ribbon" },
   { month: 2, category: "five", name: "Bush Warbler" },
   { month: 2, category: "junk", name: "Plum Junk A" },
   { month: 2, category: "junk", name: "Plum Junk B" },
 
-  { month: 3, category: "kwang", name: "Cherry Bright" },
   { month: 3, category: "ribbon", name: "Poetry Ribbon" },
+  { month: 3, category: "kwang", name: "Cherry Bright" },
   { month: 3, category: "junk", name: "Cherry Junk A" },
   { month: 3, category: "junk", name: "Cherry Junk B" },
 
@@ -19,13 +19,13 @@
   { month: 4, category: "junk", name: "Wisteria Junk A" },
   { month: 4, category: "junk", name: "Wisteria Junk B" },
 
-  { month: 5, category: "ribbon", name: "Plant Ribbon" },
   { month: 5, category: "five", name: "Bridge" },
+  { month: 5, category: "ribbon", name: "Plant Ribbon" },
   { month: 5, category: "junk", name: "Iris Junk A" },
   { month: 5, category: "junk", name: "Iris Junk B" },
 
-  { month: 6, category: "ribbon", name: "Blue Ribbon" },
   { month: 6, category: "five", name: "Butterflies" },
+  { month: 6, category: "ribbon", name: "Blue Ribbon" },
   { month: 6, category: "junk", name: "Peony Junk" },
   { month: 6, category: "junk", name: "Double Junk", doubleJunk: true },
 
@@ -44,20 +44,20 @@
   { month: 9, category: "junk", name: "Chrysanthemum Junk A" },
   { month: 9, category: "junk", name: "Chrysanthemum Junk B" },
 
-  { month: 10, category: "kwang", name: "Rain Bright" },
   { month: 10, category: "five", name: "Deer" },
+  { month: 10, category: "ribbon", name: "Maple Ribbon" },
   { month: 10, category: "junk", name: "Maple Junk A" },
   { month: 10, category: "junk", name: "Maple Junk B" },
 
   { month: 11, category: "kwang", name: "Willow Bright" },
-  { month: 11, category: "five", name: "Swallow" },
-  { month: 11, category: "junk", name: "Willow Junk" },
+  { month: 11, category: "junk", name: "Willow Junk A" },
+  { month: 11, category: "junk", name: "Willow Junk B" },
   { month: 11, category: "junk", name: "Double Junk", doubleJunk: true },
 
   { month: 12, category: "kwang", name: "Paulownia Bright" },
   { month: 12, category: "five", name: "Rain" },
-  { month: 12, category: "junk", name: "Paulownia Junk A" },
-  { month: 12, category: "junk", name: "Paulownia Junk B" },
+  { month: 12, category: "ribbon", name: "Paulownia Ribbon" },
+  { month: 12, category: "junk", name: "Paulownia Junk" },
 
   {
     month: 13,
@@ -79,7 +79,7 @@ export function buildDeck() {
   return cardCatalog.map((card, idx) => ({
     ...card,
     id: `${card.month}-${idx}`,
-    asset: `/cards/${card.month}-${card.name}.png`
+    asset: `/cards/${card.month}-${idx}.svg`
   }));
 }
 

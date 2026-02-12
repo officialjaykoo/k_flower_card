@@ -1,4 +1,4 @@
-import { piValue, isGukjinCard, getGukjinMode } from "./scoring.js";
+﻿import { piValue, isGukjinCard, getGukjinMode } from "./scoring.js";
 
 export function categoryKey(card) {
   switch (card.category) {
@@ -13,7 +13,12 @@ export function categoryKey(card) {
   }
 }
 
+function hasCapturedCardId(captured, cardId) {
+  return ["kwang", "five", "ribbon", "junk"].some((k) => (captured[k] || []).some((c) => c.id === cardId));
+}
+
 export function pushCaptured(captured, card) {
+  if (!card || hasCapturedCardId(captured, card.id)) return;
   captured[categoryKey(card)].push(card);
 }
 
@@ -48,35 +53,77 @@ export function stealPiFromOpponent(players, takerKey, count) {
   let remaining = count;
 
   while (remaining > 0) {
-    const junkCandidates = giver.captured.junk.map((card, idx) => ({ idx, card, value: piValue(card) }));
-    const gukjinIdx = giver.captured.five.findIndex(
-      (card) => isGukjinCard(card) && !card.gukjinTransformed
-    );
-    const canStealGukjinAsPi = getGukjinMode(giver) === "junk" && gukjinIdx >= 0;
-    if (junkCandidates.length === 0 && canStealGukjinAsPi) {
-      giver.captured.five[gukjinIdx] = {
-        ...giver.captured.five[gukjinIdx],
-        gukjinTransformed: true
+    const junkOnlyCandidates = giver.captured.junk.map((card, idx) => {
+      return {
+        idx,
+        card,
+        value: piValue(card),
+        isGukjin: false,
+        source: "junk"
       };
-      giver.gukjinMode = "five";
-      giver.gukjinLocked = true;
-      stealLog.push(
-        `${taker.label}: ${giver.label} 국진 피 강탈 시도 -> 강탈 무효, ${giver.label} 열로 고정 전환`
-      );
-      remaining -= 1;
-      continue;
+    });
+    const candidates = junkOnlyCandidates.slice();
+
+    if (getGukjinMode(giver) === "junk") {
+      const gukjinIdx = giver.captured.five.findIndex((card) => isGukjinCard(card) && !card.gukjinTransformed);
+      if (gukjinIdx >= 0) {
+        // 국진쌍피 단독(일반피/쌍피/삼피 없음)인 경우에만 열로 도망 가능.
+        if (junkOnlyCandidates.length === 0) {
+          giver.captured.five[gukjinIdx] = {
+            ...giver.captured.five[gukjinIdx],
+            gukjinTransformed: true
+          };
+          giver.gukjinMode = "five";
+          giver.gukjinLocked = true;
+          stealLog.push(`${giver.label}: 국진쌍피 단독 보유로 열 전환(강탈 회피)`);
+          remaining -= 1;
+          continue;
+        }
+        candidates.push({
+          idx: gukjinIdx,
+          card: giver.captured.five[gukjinIdx],
+          value: 2,
+          isGukjin: true,
+          source: "gukjin"
+        });
+      }
     }
 
-    if (junkCandidates.length === 0) break;
+    if (candidates.length === 0) break;
 
-    junkCandidates.sort((a, b) => a.value - b.value || a.card.id.localeCompare(b.card.id));
-    const pick = junkCandidates[0];
-    const [stolen] = giver.captured.junk.splice(pick.idx, 1);
-    taker.captured.junk.push(stolen);
-    stealLog.push(
-      `${taker.label}: 보너스 효과로 ${giver.label}의 피 1장 강탈 (${stolen.name}, ${piValue(stolen)}피 처리)`
+    const stealRank = (x) => {
+      if (x.value === 1) return 1; // 일반피
+      if (x.value === 2 && !x.isGukjin) return 2; // 쌍피
+      if (x.isGukjin) return 3; // 국진
+      if (x.value >= 3) return 4; // 삼피
+      return 9;
+    };
+
+    candidates.sort(
+      (a, b) =>
+        stealRank(a) - stealRank(b) ||
+        b.idx - a.idx ||
+        a.card.id.localeCompare(b.card.id)
     );
 
+    const pick = candidates[0];
+    let stolen;
+
+    if (pick.source === "gukjin") {
+      const [gukjinCard] = giver.captured.five.splice(pick.idx, 1);
+      stolen = {
+        ...gukjinCard,
+        category: "junk",
+        doubleJunk: true,
+        gukjinTransformed: true,
+        name: `${gukjinCard.name} (국진피)`
+      };
+    } else {
+      [stolen] = giver.captured.junk.splice(pick.idx, 1);
+    }
+
+    taker.captured.junk.push(stolen);
+    stealLog.push(`${taker.label}: ${giver.label}에게서 피 1장 강탈 (${stolen.name}, ${piValue(stolen)}피 처리)`);
     remaining -= 1;
   }
 

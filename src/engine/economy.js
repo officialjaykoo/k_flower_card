@@ -1,6 +1,10 @@
 ﻿export const STARTING_GOLD = 1_000_000;
 export const POINT_GOLD_UNIT = 100;
 
+export function pointsToGold(points) {
+  return Math.max(0, Math.floor((points || 0) * POINT_GOLD_UNIT));
+}
+
 export function stealGoldFromOpponent(players, takerKey, amount) {
   const giverKey = takerKey === "human" ? "ai" : "human";
   const taker = { ...players[takerKey] };
@@ -25,7 +29,7 @@ export function settleRoundGold(players, winnerKey, scorePoint) {
   if (winnerKey !== "human" && winnerKey !== "ai") {
     return { players, log: [], paid: 0, requested: 0 };
   }
-  const requested = Math.max(0, Math.floor(scorePoint * POINT_GOLD_UNIT));
+  const requested = pointsToGold(scorePoint);
   const before = players[winnerKey].gold || 0;
   const result = stealGoldFromOpponent(players, winnerKey, requested);
   const after = result.updatedPlayers[winnerKey].gold || 0;

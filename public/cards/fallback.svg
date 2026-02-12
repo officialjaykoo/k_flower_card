@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="176" height="256" viewBox="0 0 176 256">
+  <rect x="3" y="3" width="170" height="250" rx="14" fill="#ffffff" stroke="#cb2a1b" stroke-width="6"/>
+  <text x="88" y="126" text-anchor="middle" font-size="20" fill="#333">CARD</text>
+  <text x="88" y="152" text-anchor="middle" font-size="14" fill="#666">missing image</text>
+</svg>

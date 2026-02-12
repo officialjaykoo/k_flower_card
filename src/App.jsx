@@ -2,18 +2,16 @@
 import {
   initGame,
   playTurn,
-  getDeclarableShakingMonths,
-  declareShaking,
   getShakingReveal,
+  calculateScore,
+  getDeclarableShakingMonths,
+  askShakingConfirm,
+  chooseShakingYes,
+  chooseShakingNo,
   getDeclarableBombMonths,
   declareBomb,
-  calculateScore,
-  estimateRemaining,
-  ruleSets,
   chooseGo,
   chooseStop,
-  chooseKungUse,
-  chooseKungPass,
   choosePresidentStop,
   choosePresidentHold,
   chooseGukjinMode,
@@ -51,6 +49,13 @@ export default function App() {
   });
 
   const [state, setState] = useState(() => initGame("A", createSeededRng(randomSeed()), { carryOverMultiplier: 1 }));
+  const [loadedReplay, setLoadedReplay] = useState(null);
+  const [openingPick, setOpeningPick] = useState({
+    active: true,
+    humanCard: null,
+    aiCard: null,
+    winnerKey: null
+  });
   const timerRef = useRef(null);
 
   const applyParticipantLabels = (s, u = ui) => {
@@ -71,9 +76,10 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (openingPick.active) return;
     setState((prev) => runAuto(applyParticipantLabels(prev)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [openingPick.active]);
 
   useEffect(() => {
     const reveal = getShakingReveal(state);
@@ -116,9 +122,21 @@ export default function App() {
     setUi((u) => ({ ...u, lastRecordedRoundKey: roundKey }));
   }, [state, ui]);
 
+  const replaySource = loadedReplay
+    ? {
+        kibo: loadedReplay.kibo || [],
+        players: loadedReplay.players || state.players
+      }
+    : state;
+  const replayFrames = useMemo(() => buildReplayFrames(replaySource), [replaySource]);
+  const replayIdx = replayFrames.length
+    ? Math.max(0, Math.min(replayFrames.length - 1, ui.replay.turnIndex))
+    : 0;
+  const replayFrame = replayFrames[replayIdx] || null;
+
   useEffect(() => {
     if (!ui.replay.autoPlay || !ui.replay.enabled) return;
-    const frames = buildReplayFrames(state);
+    const frames = replayFrames;
     if (frames.length <= 1) return;
     timerRef.current = setInterval(() => {
       setUi((u) => {
@@ -138,9 +156,10 @@ export default function App() {
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = null;
     };
-  }, [ui.replay.autoPlay, ui.replay.enabled, ui.replay.intervalMs, state]);
+  }, [ui.replay.autoPlay, ui.replay.enabled, ui.replay.intervalMs, replayFrames]);
 
   useEffect(() => {
+    if (openingPick.active) return;
     if (ui.speedMode !== "visual") return;
     if (state.phase === "resolution") return;
     const actor = getActionPlayerKey(state);
@@ -160,7 +179,8 @@ export default function App() {
     const keepCarry = opts.keepCarry ?? false;
     const keepStarter = opts.keepStarter ?? false;
     const keepGold = opts.keepGold ?? false;
-    const seed = (ui.seed || "").trim() || randomSeed();
+    const seedBase = opts.seedOverride != null ? String(opts.seedOverride) : ui.seed;
+    const seed = (seedBase || "").trim() || randomSeed();
     const carryOverMultiplier = keepCarry ? ui.carryOverMultiplier : 1;
     const nextFirstTurnKey = keepStarter ? ui.nextFirstTurnKey : null;
     const firstTurnKey = opts.firstTurnKey ?? nextFirstTurnKey;
@@ -187,26 +207,62 @@ export default function App() {
     setState(next);
   };
 
-  const updateNextFirstTurnFromResult = () => {
-    const resultWinner = state.result?.winner;
-    const isValidWinner = resultWinner === "human" || resultWinner === "ai";
-    setUi((u) => {
-      if (state.result?.nagari) return { ...u, nextFirstTurnKey: u.lastWinnerKey || state.startingTurnKey || "human" };
-      if (isValidWinner) return { ...u, lastWinnerKey: resultWinner, nextFirstTurnKey: resultWinner };
-      return { ...u, nextFirstTurnKey: u.lastWinnerKey || state.startingTurnKey || "human" };
+  const decideStarterByPickedCards = (humanCard, aiCard) => {
+    if (!humanCard || !aiCard) return "human";
+    const hour = new Date().getHours();
+    const isNight = hour >= 18 || hour < 6;
+    if (humanCard.month === aiCard.month) {
+      return Math.random() < 0.5 ? "human" : "ai";
+    }
+    if (isNight) {
+      return humanCard.month < aiCard.month ? "human" : "ai";
+    }
+    return humanCard.month > aiCard.month ? "human" : "ai";
+  };
+
+  const onOpeningPick = (cardId) => {
+    if (!openingPick.active || openingPick.humanCard) return;
+    const humanCard = state.board.find((c) => c.id === cardId);
+    if (!humanCard) return;
+    const remain = state.board.filter((c) => c.id !== cardId);
+    if (remain.length === 0) return;
+    const aiCard = remain[Math.floor(Math.random() * remain.length)];
+    const winnerKey = decideStarterByPickedCards(humanCard, aiCard);
+
+    setOpeningPick({
+      active: true,
+      humanCard,
+      aiCard,
+      winnerKey
     });
+
+    setTimeout(() => {
+      setOpeningPick({
+        active: false,
+        humanCard,
+        aiCard,
+        winnerKey
+      });
+      setUi((u) => ({ ...u, nextFirstTurnKey: winnerKey, lastWinnerKey: winnerKey }));
+      startGame({ firstTurnKey: winnerKey });
+    }, 900);
   };
 
   const reveal = getShakingReveal(state);
-  const locked = !!reveal;
-  const replayFrames = useMemo(() => buildReplayFrames(state), [state]);
-  const replayIdx = Math.max(0, Math.min(replayFrames.length - 1, ui.replay.turnIndex));
-  const replayFrame = replayFrames[replayIdx] || null;
+  const locked = openingPick.active;
+
+  const onStartSpecifiedGame = () => {
+    startGame();
+  };
+
+  const onStartRandomGame = () => {
+    const nextSeed = randomSeed();
+    setUi((u) => ({ ...u, seed: nextSeed, lastWinnerKey: null }));
+    setTimeout(() => startGame({ seedOverride: nextSeed }), 0);
+  };
 
   const hScore = calculateScore(state.players.human, state.players.ai, state.ruleKey);
   const aScore = calculateScore(state.players.ai, state.players.human, state.ruleKey);
-  const remain = estimateRemaining(state);
-
   const dispatchGameAction = (actionType, payload, reducer, options = {}) => {
     const { auto = false } = options;
     setState((prev) => {
@@ -232,110 +288,153 @@ export default function App() {
       auto: true
     });
   const onPlayCard = (cardId) =>
-    dispatchGameAction("PLAY_CARD", { cardId }, (prev) => playTurn(prev, cardId), { auto: true });
+    dispatchGameAction(
+      "PLAY_CARD",
+      { cardId },
+      (prev) => {
+        if (prev.phase === "playing") {
+          const actor = prev.currentTurn;
+          if (participantType(ui, actor) === "human") {
+            const selected = prev.players[actor]?.hand?.find((c) => c.id === cardId);
+            if (selected) {
+              const bombMonths = getDeclarableBombMonths(prev, actor);
+              if (bombMonths.includes(selected.month)) {
+                return declareBomb(prev, actor, selected.month);
+              }
+              const shakingMonths = getDeclarableShakingMonths(prev, actor);
+              if (shakingMonths.includes(selected.month)) {
+                return askShakingConfirm(prev, actor, cardId);
+              }
+            }
+          }
+        }
+        return playTurn(prev, cardId);
+      },
+      { auto: true }
+    );
+  const onChooseGo = (playerKey) =>
+    dispatchGameAction("CHOOSE_GO", { playerKey }, (prev) => chooseGo(prev, playerKey), {
+      auto: true
+    });
+  const onChooseStop = (playerKey) =>
+    dispatchGameAction("CHOOSE_STOP", { playerKey }, (prev) => chooseStop(prev, playerKey), {
+      auto: false
+    });
+  const onChoosePresidentStop = (playerKey) =>
+    dispatchGameAction("PRESIDENT_STOP", { playerKey }, (prev) => choosePresidentStop(prev, playerKey), {
+      auto: true
+    });
+  const onChoosePresidentHold = (playerKey) =>
+    dispatchGameAction("PRESIDENT_HOLD", { playerKey }, (prev) => choosePresidentHold(prev, playerKey), {
+      auto: true
+    });
+  const onChooseGukjinMode = (playerKey, mode) =>
+    dispatchGameAction("GUKJIN_MODE", { playerKey, mode }, (prev) => chooseGukjinMode(prev, playerKey, mode), {
+      auto: true
+    });
+  const onChooseShakingYes = (playerKey) =>
+    dispatchGameAction("SHAKING_YES", { playerKey }, (prev) => chooseShakingYes(prev, playerKey), {
+      auto: true
+    });
+  const onChooseShakingNo = (playerKey) =>
+    dispatchGameAction("SHAKING_NO", { playerKey }, (prev) => chooseShakingNo(prev, playerKey), {
+      auto: true
+    });
 
   return (
     <div className="layout">
-      <GameBoard
-        state={state}
-        ruleName={ruleSets[state.ruleKey].name}
-        ui={ui}
-        locked={locked}
-        participantType={participantType}
-        onChooseMatch={onChooseMatch}
-        onPlayCard={onPlayCard}
-        hScore={hScore}
-        aScore={aScore}
-        sortCards={sortCards}
-      />
+      <div className="board-wrap">
+        <GameBoard
+          state={state}
+          ui={ui}
+          locked={locked}
+          participantType={participantType}
+          onChooseMatch={onChooseMatch}
+          onPlayCard={onPlayCard}
+          hScore={hScore}
+          aScore={aScore}
+          sortCards={sortCards}
+          replayModeEnabled={!!loadedReplay}
+          replaySourceLabel={loadedReplay?.label || null}
+          replayPlayers={loadedReplay?.players || state.players}
+          replayFrames={replayFrames}
+          replayIdx={replayIdx}
+          replayFrame={replayFrame}
+          formatActionText={formatActionText}
+          formatEventsText={formatEventsText}
+          openingPick={openingPick}
+          onOpeningPick={onOpeningPick}
+          onReplayToggle={() =>
+            setUi((u) => ({ ...u, replay: { ...u.replay, enabled: !u.replay.enabled, autoPlay: false } }))
+          }
+          onReplayPrev={() =>
+            setUi((u) => ({ ...u, replay: { ...u.replay, turnIndex: Math.max(0, u.replay.turnIndex - 1) } }))
+          }
+          onReplayNext={() =>
+            setUi((u) => ({
+              ...u,
+              replay: { ...u.replay, turnIndex: Math.min(replayFrames.length - 1, u.replay.turnIndex + 1) }
+            }))
+          }
+          onReplayAutoToggle={() =>
+            setUi((u) => ({ ...u, replay: { ...u.replay, autoPlay: !u.replay.autoPlay } }))
+          }
+          onReplaySeek={(idx) =>
+            setUi((u) => ({ ...u, replay: { ...u.replay, turnIndex: Number(idx) } }))
+          }
+          onReplayIntervalChange={(ms) =>
+            setUi((u) => ({ ...u, replay: { ...u.replay, intervalMs: Number(ms) } }))
+          }
+        />
+
+        <GameOverlays
+          state={state}
+          ui={ui}
+          reveal={reveal}
+          participantType={participantType}
+          onChooseMatch={onChooseMatch}
+          onChooseGo={onChooseGo}
+          onChooseStop={onChooseStop}
+          onChoosePresidentStop={onChoosePresidentStop}
+          onChoosePresidentHold={onChoosePresidentHold}
+          onChooseGukjinMode={onChooseGukjinMode}
+          onChooseShakingYes={onChooseShakingYes}
+          onChooseShakingNo={onChooseShakingNo}
+          onStartSpecifiedGame={onStartSpecifiedGame}
+          onStartRandomGame={onStartRandomGame}
+        />
+      </div>
 
       <SidebarPanels
         state={state}
         ui={ui}
         setUi={setUi}
-        setState={setState}
         startGame={startGame}
-        runAuto={runAuto}
-        randomSeed={randomSeed}
+        onStartSpecifiedGame={onStartSpecifiedGame}
+        onStartRandomGame={onStartRandomGame}
         participantType={participantType}
         safeLoadJson={safeLoadJson}
-        replayFrames={replayFrames}
-        replayIdx={replayIdx}
-        replayFrame={replayFrame}
-        formatActionText={formatActionText}
-        formatEventsText={formatEventsText}
-        remain={remain}
-        actions={{
-          getDeclarableShakingMonths,
-          declareShaking: (month) =>
-            dispatchGameAction(
-              "DECLARE_SHAKING",
-              { month, actor: state.currentTurn },
-              (prev) => declareShaking(prev, prev.currentTurn, month),
-              { auto: false }
-            ),
-          getDeclarableBombMonths,
-          declareBomb: (month) =>
-            dispatchGameAction(
-              "DECLARE_BOMB",
-              { month, actor: state.currentTurn },
-              (prev) => declareBomb(prev, prev.currentTurn, month),
-              { auto: true }
-            ),
-          chooseGo: (playerKey) =>
-            dispatchGameAction("CHOOSE_GO", { playerKey }, (prev) => chooseGo(prev, playerKey), {
-              auto: true
-            }),
-          chooseStop: (playerKey) =>
-            dispatchGameAction("CHOOSE_STOP", { playerKey }, (prev) => chooseStop(prev, playerKey), {
-              auto: false
-            }),
-          choosePresidentStop: (playerKey) =>
-            dispatchGameAction(
-              "PRESIDENT_STOP",
-              { playerKey },
-              (prev) => choosePresidentStop(prev, playerKey),
-              { auto: true }
-            ),
-          choosePresidentHold: (playerKey) =>
-            dispatchGameAction(
-              "PRESIDENT_HOLD",
-              { playerKey },
-              (prev) => choosePresidentHold(prev, playerKey),
-              { auto: true }
-            ),
-          chooseKungUse: (playerKey) =>
-            dispatchGameAction("KUNG_USE", { playerKey }, (prev) => chooseKungUse(prev, playerKey), {
-              auto: true
-            }),
-          chooseKungPass: (playerKey) =>
-            dispatchGameAction(
-              "KUNG_PASS",
-              { playerKey },
-              (prev) => chooseKungPass(prev, playerKey),
-              { auto: true }
-            ),
-          chooseGukjinMode: (playerKey, mode) =>
-            dispatchGameAction(
-              "GUKJIN_MODE",
-              { playerKey, mode },
-              (prev) => chooseGukjinMode(prev, playerKey, mode),
-              { auto: true }
-            )
+        replayModeEnabled={!!loadedReplay}
+        onLoadReplay={(entry, label = "불러온 기보") => {
+          setLoadedReplay({
+            label,
+            kibo: Array.isArray(entry?.kibo) ? entry.kibo : [],
+            players: entry?.players || state.players
+          });
+          setUi((u) => ({
+            ...u,
+            replay: { ...u.replay, enabled: true, autoPlay: false, turnIndex: 0 }
+          }));
+        }}
+        onClearReplay={() => {
+          setLoadedReplay(null);
+          setUi((u) => ({
+            ...u,
+            replay: { ...u.replay, enabled: false, autoPlay: false, turnIndex: 0 }
+          }));
         }}
       />
 
-      <GameOverlays
-        state={state}
-        ui={ui}
-        reveal={reveal}
-        participantType={participantType}
-        onChooseMatch={onChooseMatch}
-        updateNextFirstTurnFromResult={updateNextFirstTurnFromResult}
-        setUi={setUi}
-        startGame={startGame}
-        randomSeed={randomSeed}
-      />
     </div>
   );
 }
