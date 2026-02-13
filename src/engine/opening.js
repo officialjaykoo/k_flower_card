@@ -95,7 +95,10 @@ export function normalizeOpeningBoard(board, remain, firstPlayer, initLog) {
 export function findPresidentMonth(cards) {
   const counts = {};
   for (const card of cards) {
-    if (card.month > 12) continue;
+    // 대통령은 실제 월패(1~12월)만 대상으로 한다.
+    // pass/dummy 카드(0월)와 보너스 카드(13월)는 제외.
+    if (!card || card.passCard) continue;
+    if (card.month < 1 || card.month > 12) continue;
     counts[card.month] = (counts[card.month] || 0) + 1;
     if (counts[card.month] >= 4) return card.month;
   }

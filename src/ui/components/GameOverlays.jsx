@@ -69,6 +69,15 @@ export default function GameOverlays({
     }
   }, [timedChoiceKey, remainSec, state.phase, state.pendingGoStop, onChooseStop]);
 
+  const winnerKey = state.result?.winner;
+  const winnerScore =
+    winnerKey === "human" ? state.result?.human : winnerKey === "ai" ? state.result?.ai : null;
+  const resultCauseText = state.result?.nagari
+    ? `나가리: ${(state.result.nagariReasons || []).join(", ")}`
+    : winnerScore?.breakdown?.presidentStop
+    ? "대통령!"
+    : "일반 종료";
+
   return (
     <>
       {reveal && (
@@ -169,7 +178,7 @@ export default function GameOverlays({
                 ? `${state.players.ai.label} 승리`
                 : "무승부"}
             </div>
-            <div className="meta">{state.result.nagari ? `나가리: ${(state.result.nagariReasons || []).join(", ")}` : "나가리 아님"}</div>
+            <div className="meta">{resultCauseText}</div>
             <div className="meta">{state.players.human.label} {state.result.human.total} / {state.players.ai.label} {state.result.ai.total}</div>
             <div className="control-row">
               <button onClick={onStartSpecifiedGame}>같은패로 게임시작</button>

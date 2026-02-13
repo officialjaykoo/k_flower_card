@@ -25,27 +25,24 @@ import {
   isBotPlayer,
   participantType,
   randomSeed,
-  safeLoadJson,
   sortCards
 } from "./ui/utils/common.js";
 import GameBoard from "./ui/components/GameBoard.jsx";
-import SidebarPanels from "./ui/components/SidebarPanels.jsx";
 import GameOverlays from "./ui/components/GameOverlays.jsx";
 import "../styles.css";
 
 export default function App() {
-  const [ui, setUi] = useState({
-    revealAiHand: true,
-    sortHand: true,
-    seed: randomSeed(),
-    carryOverMultiplier: 1,
-    lastWinnerKey: null,
-    nextFirstTurnKey: null,
-    participants: { human: "human", ai: "ai" },
-    lastRecordedRoundKey: null,
-    speedMode: "fast",
-    visualDelayMs: 400,
-    replay: { enabled: false, turnIndex: 0, autoPlay: false, intervalMs: 900 }
+  const [ui, setUi] = useState(() => {
+    return {
+      revealAiHand: true,
+      sortHand: true,
+      seed: randomSeed(),
+      participants: { human: "human", ai: "ai" },
+      lastRecordedRoundKey: null,
+      speedMode: "fast",
+      visualDelayMs: 400,
+      replay: { enabled: false, turnIndex: 0, autoPlay: false, intervalMs: 900 }
+    };
   });
 
   const [state, setState] = useState(() => initGame("A", createSeededRng(randomSeed()), { carryOverMultiplier: 1 }));
@@ -57,7 +54,6 @@ export default function App() {
     winnerKey: null
   });
   const timerRef = useRef(null);
-
   const applyParticipantLabels = (s, u = ui) => {
     const humanLabel = participantType(u, "human") === "ai" ? "AI-1" : "플레이어1";
     const aiLabel = participantType(u, "ai") === "ai" ? "AI-2" : "플레이어2";
@@ -101,24 +97,7 @@ export default function App() {
     ].join("|");
     if (ui.lastRecordedRoundKey === roundKey) return;
 
-    const entry = {
-      recordedAt: new Date().toISOString(),
-      seed: ui.seed,
-      ruleKey: state.ruleKey,
-      participants: { ...ui.participants },
-      winner: state.result.winner,
-      nagari: state.result.nagari,
-      nagariReasons: state.result.nagariReasons || [],
-      totals: { human: state.result.human.total, ai: state.result.ai.total },
-      startingTurnKey: state.startingTurnKey,
-      endingTurnKey: state.currentTurn,
-      log: state.log.slice(),
-      kibo: state.kibo || []
-    };
-    const key = "kflower_game_logs";
-    const prev = safeLoadJson(key, []);
-    prev.push(entry);
-    localStorage.setItem(key, JSON.stringify(prev.slice(-500)));
+    // Browser persistence is intentionally disabled.
     setUi((u) => ({ ...u, lastRecordedRoundKey: roundKey }));
   }, [state, ui]);
 
@@ -176,28 +155,22 @@ export default function App() {
   }, [state, ui.speedMode, ui.visualDelayMs, ui.participants]);
 
   const startGame = (opts = {}) => {
-    const keepCarry = opts.keepCarry ?? false;
-    const keepStarter = opts.keepStarter ?? false;
-    const keepGold = opts.keepGold ?? false;
+    const keepGold = opts.keepGold ?? true;
     const seedBase = opts.seedOverride != null ? String(opts.seedOverride) : ui.seed;
     const seed = (seedBase || "").trim() || randomSeed();
-    const carryOverMultiplier = keepCarry ? ui.carryOverMultiplier : 1;
-    const nextFirstTurnKey = keepStarter ? ui.nextFirstTurnKey : null;
-    const firstTurnKey = opts.firstTurnKey ?? nextFirstTurnKey;
+    const firstTurnKey = opts.firstTurnKey ?? null;
     const initialGold = keepGold
       ? { human: state.players.human.gold, ai: state.players.ai.gold }
       : undefined;
 
     let next = initGame(state.ruleKey, createSeededRng(seed), {
-      carryOverMultiplier,
+      carryOverMultiplier: 1,
       firstTurnKey,
       initialGold
     });
     const nextUi = {
       ...ui,
       seed,
-      carryOverMultiplier,
-      nextFirstTurnKey,
       lastRecordedRoundKey: null,
       replay: { ...ui.replay, enabled: false, autoPlay: false, turnIndex: 0 }
     };
@@ -243,9 +216,8 @@ export default function App() {
         aiCard,
         winnerKey
       });
-      setUi((u) => ({ ...u, nextFirstTurnKey: winnerKey, lastWinnerKey: winnerKey }));
       startGame({ firstTurnKey: winnerKey });
-    }, 900);
+    }, 1000);
   };
 
   const reveal = getShakingReveal(state);
@@ -257,7 +229,7 @@ export default function App() {
 
   const onStartRandomGame = () => {
     const nextSeed = randomSeed();
-    setUi((u) => ({ ...u, seed: nextSeed, lastWinnerKey: null }));
+    setUi((u) => ({ ...u, seed: nextSeed }));
     setTimeout(() => startGame({ seedOverride: nextSeed }), 0);
   };
 
@@ -347,10 +319,14 @@ export default function App() {
         <GameBoard
           state={state}
           ui={ui}
+          setUi={setUi}
           locked={locked}
           participantType={participantType}
+          startGame={startGame}
           onChooseMatch={onChooseMatch}
           onPlayCard={onPlayCard}
+          onStartSpecifiedGame={onStartSpecifiedGame}
+          onStartRandomGame={onStartRandomGame}
           hScore={hScore}
           aScore={aScore}
           sortCards={sortCards}
@@ -385,6 +361,24 @@ export default function App() {
           onReplayIntervalChange={(ms) =>
             setUi((u) => ({ ...u, replay: { ...u.replay, intervalMs: Number(ms) } }))
           }
+          onLoadReplay={(entry, label = "불러온 기보") => {
+            setLoadedReplay({
+              label,
+              kibo: Array.isArray(entry?.kibo) ? entry.kibo : [],
+              players: entry?.players || state.players
+            });
+            setUi((u) => ({
+              ...u,
+              replay: { ...u.replay, enabled: true, autoPlay: false, turnIndex: 0 }
+            }));
+          }}
+          onClearReplay={() => {
+            setLoadedReplay(null);
+            setUi((u) => ({
+              ...u,
+              replay: { ...u.replay, enabled: false, autoPlay: false, turnIndex: 0 }
+            }));
+          }}
         />
 
         <GameOverlays
@@ -404,37 +398,6 @@ export default function App() {
           onStartRandomGame={onStartRandomGame}
         />
       </div>
-
-      <SidebarPanels
-        state={state}
-        ui={ui}
-        setUi={setUi}
-        startGame={startGame}
-        onStartSpecifiedGame={onStartSpecifiedGame}
-        onStartRandomGame={onStartRandomGame}
-        participantType={participantType}
-        safeLoadJson={safeLoadJson}
-        replayModeEnabled={!!loadedReplay}
-        onLoadReplay={(entry, label = "불러온 기보") => {
-          setLoadedReplay({
-            label,
-            kibo: Array.isArray(entry?.kibo) ? entry.kibo : [],
-            players: entry?.players || state.players
-          });
-          setUi((u) => ({
-            ...u,
-            replay: { ...u.replay, enabled: true, autoPlay: false, turnIndex: 0 }
-          }));
-        }}
-        onClearReplay={() => {
-          setLoadedReplay(null);
-          setUi((u) => ({
-            ...u,
-            replay: { ...u.replay, enabled: false, autoPlay: false, turnIndex: 0 }
-          }));
-        }}
-      />
-
     </div>
   );
 }

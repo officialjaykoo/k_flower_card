@@ -9,10 +9,8 @@ import {
   stealPiFromOpponent
 } from "../capturesEvents.js";
 import { clearExpiredReveal, ensurePassCardFor } from "../turnFlow.js";
-import { junkRowCount } from "../../shared/junkLayout.js";
 import {
   normalizeUniqueCardZones,
-  normalizeJunkByRowChange,
   packCard
 } from "./normalize.js";
 
@@ -32,10 +30,6 @@ export function finalizeTurn({
   turnMeta = null
 }) {
   const nextPlayerKey = currentKey === "human" ? "ai" : "human";
-  const prevJunkRows = {
-    human: junkRowCount(state.players.human.captured?.junk || []),
-    ai: junkRowCount(state.players.ai.captured?.junk || [])
-  };
   const prevPlayer = state.players[currentKey];
   const ppukOccurred = (events.ppuk || 0) > (prevPlayer.events.ppuk || 0);
   const capturedAny = newlyCaptured.length > 0;
@@ -162,7 +156,7 @@ export function finalizeTurn({
   const uniq = normalizeUniqueCardZones(nextState.players, nextState.board, nextState.deck);
   nextState = {
     ...nextState,
-    players: normalizeJunkByRowChange(uniq.players, prevJunkRows),
+    players: uniq.players,
     board: uniq.board,
     deck: uniq.deck
   };

@@ -6,7 +6,9 @@ export function getDeclarableShakingMonths(state, playerKey) {
   const declared = new Set(player.shakingDeclaredMonths || []);
   const counts = {};
   player.hand.forEach((c) => {
-    if (c.month <= 12) counts[c.month] = (counts[c.month] || 0) + 1;
+    if (!c || c.passCard) return;
+    if (c.month < 1 || c.month > 12) return;
+    counts[c.month] = (counts[c.month] || 0) + 1;
   });
   return Object.entries(counts)
     .map(([m, count]) => ({ month: Number(m), count }))
@@ -20,7 +22,9 @@ export function getDeclarableBombMonths(state, playerKey) {
   const player = state.players[playerKey];
   const counts = {};
   player.hand.forEach((c) => {
-    if (c.month <= 12) counts[c.month] = (counts[c.month] || 0) + 1;
+    if (!c || c.passCard) return;
+    if (c.month < 1 || c.month > 12) return;
+    counts[c.month] = (counts[c.month] || 0) + 1;
   });
   return Object.entries(counts)
     .map(([m, count]) => ({ month: Number(m), count }))

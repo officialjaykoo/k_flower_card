@@ -1,5 +1,3 @@
-import { flattenPackedJunk, junkRowCount } from "../../shared/junkLayout.js";
-
 export function normalizeUniqueCardZones(players, board, deck) {
   const seen = new Set();
 
@@ -73,25 +71,6 @@ export function normalizeUniqueCardZones(players, board, deck) {
   };
 }
 
-export function normalizeJunkByRowChange(nextPlayers, prevRowCounts) {
-  const normalized = { ...nextPlayers };
-  ["human", "ai"].forEach((key) => {
-    const player = nextPlayers[key];
-    if (!player) return;
-    const currentRows = junkRowCount(player.captured?.junk || []);
-    if (currentRows !== (prevRowCounts?.[key] ?? currentRows)) {
-      normalized[key] = {
-        ...player,
-        captured: {
-          ...player.captured,
-          junk: flattenPackedJunk(player.captured?.junk || [])
-        }
-      };
-    }
-  });
-  return normalized;
-}
-
 export function packCard(card) {
   return {
     id: card.id,
@@ -100,12 +79,5 @@ export function packCard(card) {
     name: card.name,
     asset: card.asset || null,
     passCard: !!card.passCard
-  };
-}
-
-export function getPrevJunkRows(players) {
-  return {
-    human: junkRowCount(players.human.captured?.junk || []),
-    ai: junkRowCount(players.ai.captured?.junk || [])
   };
 }
