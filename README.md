@@ -234,10 +234,13 @@ Stop 선택:
 AI vs AI 시뮬레이션(UI 없이 서버 실행):
 - `node scripts/simulate-ai-vs-ai.mjs 1000`
 - 델타 모드: `node scripts/simulate-ai-vs-ai.mjs 1000 logs/run.jsonl --log-mode=delta`
+- 학습 전용 경량 모드: `node scripts/simulate-ai-vs-ai.mjs 1000 logs/train.jsonl --log-mode=train`
 - 결과는 `logs/ai-vs-ai-*.jsonl` 파일로 생성
 - 같은 이름의 `*-report.json`이 함께 생성되며 이벤트 빈도, Go 효율, Luck/Skill 지표를 포함
 - 카탈로그는 `logs/catalog/cards-catalog.json` 1회 생성 후 재사용합니다. (카드 ID -> 카드 정보 매핑)
 - JSONL은 대량 실험용 compact 포맷(짧은 키 + ID 중심)으로 기록됩니다.
+- `--log-mode=train`은 `decision_trace` 중심으로 기록되어 학습 파이프라인(01~03)에 권장됩니다.
+- `--log-mode=delta`는 분석용이며 현재 `01_train_policy.py` 학습 입력으로는 사용하지 않습니다.
 - Luck/Skill은 2종으로 제공:
 - 이벤트 프록시: `matchEvents`의 `hand/flip` 비율
 - 가중 캡처 프록시: `captureBySource` 카드 가중치(`광6/열4/띠2/피1`) 기준 `hand/flip` 비율

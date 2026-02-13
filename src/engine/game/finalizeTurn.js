@@ -163,6 +163,7 @@ export function finalizeTurn({
 
   const turnNo = (nextState.turnSeq || 0) + 1;
   const kiboNo = (nextState.kiboSeq || 0) + 1;
+  const isLeanKibo = nextState.kiboDetail === "lean";
   nextState = {
     ...nextState,
     turnSeq: turnNo,
@@ -174,11 +175,21 @@ export function finalizeTurn({
       actor: currentKey,
       action: turnMeta,
       deckCount: nextState.deck.length,
-      board: nextState.board.map(packCard),
-      hands: {
-        human: nextState.players.human.hand.map(packCard),
-        ai: nextState.players.ai.hand.map(packCard)
-      },
+      ...(isLeanKibo
+        ? {
+            boardCount: nextState.board.length,
+            handsCount: {
+              human: nextState.players.human.hand.length,
+              ai: nextState.players.ai.hand.length
+            }
+          }
+        : {
+            board: nextState.board.map(packCard),
+            hands: {
+              human: nextState.players.human.hand.map(packCard),
+              ai: nextState.players.ai.hand.map(packCard)
+            }
+          }),
       steals: { pi: extraSteal, gold: goldSteal },
       heldBonus: nextState.players[currentKey].heldBonusCards?.map(packCard) || [],
       events: { ...nextEvents },

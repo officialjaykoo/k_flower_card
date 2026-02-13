@@ -50,6 +50,7 @@ export function createSeededRng(seedText = "") {
 
 export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
   let carryOverMultiplier = options.carryOverMultiplier ?? 1;
+  const kiboDetail = options.kiboDetail === "lean" ? "lean" : "full";
   const fixedFirstTurnKey =
     options.firstTurnKey === "human" || options.firstTurnKey === "ai"
       ? options.firstTurnKey
@@ -137,17 +138,29 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
       log: [...openLog, ...carryLogs, ...initLog],
       turnSeq: 0,
       kiboSeq: 1,
+      kiboDetail,
       kibo: [
         {
           no: 1,
           type: "initial_deal",
           firstTurn: firstTurnInfo.winnerKey,
-          hands: {
-            human: players.human.hand.map(packCard),
-            ai: players.ai.hand.map(packCard)
-          },
-          board: board.map(packCard),
-          deck: remain.map(packCard)
+          ...(kiboDetail === "full"
+            ? {
+                hands: {
+                  human: players.human.hand.map(packCard),
+                  ai: players.ai.hand.map(packCard)
+                },
+                board: board.map(packCard),
+                deck: remain.map(packCard)
+              }
+            : {
+                handsCount: {
+                  human: players.human.hand.length,
+                  ai: players.ai.hand.length
+                },
+                boardCount: board.length,
+                deckCount: remain.length
+              })
         }
       ],
       ruleKey,
