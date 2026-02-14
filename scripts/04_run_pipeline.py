@@ -21,6 +21,15 @@ def main():
     parser.add_argument("--policy-old", default=None, help="Optional old policy for stage 03 compare.")
     parser.add_argument("--value-old", default=None, help="Optional old value for stage 03 compare.")
     parser.add_argument("--skip-eval", action="store_true", help="Run only 01,02 and skip 03.")
+    parser.add_argument("--fast", action="store_true", help="Fast loop preset (policy metrics skip + value GPU quick settings).")
+    parser.add_argument("--policy-max-samples", type=int, default=None, help="Limit samples for stage 01.")
+    parser.add_argument("--policy-skip-train-metrics", action="store_true", help="Skip stage 01 train metrics pass.")
+    parser.add_argument("--value-max-samples", type=int, default=None, help="Limit samples for stage 02.")
+    parser.add_argument("--value-device", choices=["cpu", "cuda"], default=None, help="Device for stage 02.")
+    parser.add_argument("--value-dim", type=int, default=None, help="Hash dimension for stage 02.")
+    parser.add_argument("--value-epochs", type=int, default=None, help="Epochs for stage 02.")
+    parser.add_argument("--value-batch-size", type=int, default=None, help="Batch size for stage 02.")
+    parser.add_argument("--value-progress-every", type=int, default=None, help="Progress print interval for stage 02.")
     args = parser.parse_args()
 
     tag = args.tag or datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
@@ -31,8 +40,53 @@ def main():
     value_new = f"models/value-{tag}.json"
     eval_out = f"logs/model-eval-{tag}.json"
 
-    run([args.python, "scripts/01_train_policy.py", "--input", *args.input, "--output", policy_new])
-    run([args.python, "scripts/02_train_value.py", "--input", *args.input, "--output", value_new])
+    policy_max_samples = args.policy_max_samples
+    policy_skip_train_metrics = args.policy_skip_train_metrics
+    value_max_samples = args.value_max_samples
+    value_device = args.value_device
+    value_dim = args.value_dim
+    value_epochs = args.value_epochs
+    value_batch_size = args.value_batch_size
+    value_progress_every = args.value_progress_every
+
+    if args.fast:
+        if policy_max_samples is None:
+            policy_max_samples = 100000
+        policy_skip_train_metrics = True
+        if value_max_samples is None:
+            value_max_samples = 200000
+        if value_device is None:
+            value_device = "cuda"
+        if value_dim is None:
+            value_dim = 128
+        if value_epochs is None:
+            value_epochs = 1
+        if value_batch_size is None:
+            value_batch_size = 8192
+        if value_progress_every is None:
+            value_progress_every = 0
+
+    policy_cmd = [args.python, "scripts/01_train_policy.py", "--input", *args.input, "--output", policy_new]
+    if policy_max_samples is not None:
+        policy_cmd.extend(["--max-samples", str(policy_max_samples)])
+    if policy_skip_train_metrics:
+        policy_cmd.append("--skip-train-metrics")
+    run(policy_cmd)
+
+    value_cmd = [args.python, "scripts/02_train_value.py", "--input", *args.input, "--output", value_new]
+    if value_max_samples is not None:
+        value_cmd.extend(["--max-samples", str(value_max_samples)])
+    if value_device is not None:
+        value_cmd.extend(["--device", value_device])
+    if value_dim is not None:
+        value_cmd.extend(["--dim", str(value_dim)])
+    if value_epochs is not None:
+        value_cmd.extend(["--epochs", str(value_epochs)])
+    if value_batch_size is not None:
+        value_cmd.extend(["--batch-size", str(value_batch_size)])
+    if value_progress_every is not None:
+        value_cmd.extend(["--progress-every", str(value_progress_every)])
+    run(value_cmd)
 
     if not args.skip_eval:
         eval_cmd = [

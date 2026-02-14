@@ -1,0 +1,80 @@
+param(
+  [int]$TrainGames = 200000,
+  [int]$Workers = 4,
+  [string]$Tag = "",
+  [string]$PolicyHuman = "heuristic_v1",
+  [string]$PolicyAi = "heuristic_v2",
+  [string]$PolicyModelHuman = "",
+  [string]$ValueModelHuman = "",
+  [string]$PolicyModelAi = "",
+  [string]$ValueModelAi = "",
+  [switch]$ModelOnly,
+  [switch]$SkipEval
+)
+
+if ($TrainGames -le 0) {
+  Write-Error "TrainGames must be > 0."
+  exit 2
+}
+if ($TrainGames % 2 -ne 0) {
+  Write-Error "TrainGames must be even."
+  exit 2
+}
+if ($Workers -le 0) {
+  Write-Error "Workers must be > 0."
+  exit 2
+}
+
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$baseTag = if ([string]::IsNullOrWhiteSpace($Tag)) { "fast-$stamp" } else { "$Tag-$stamp" }
+$trainLog = "logs/train-$baseTag.jsonl"
+
+$genArgs = @(
+  "-3", "scripts/parallel_simulate_ai_vs_ai.py",
+  "$TrainGames",
+  "--workers", "$Workers",
+  "--output", $trainLog,
+  "--",
+  "--log-mode=train",
+  "--policy-human=$PolicyHuman",
+  "--policy-ai=$PolicyAi"
+)
+
+if (-not [string]::IsNullOrWhiteSpace($PolicyModelHuman)) {
+  $genArgs += "--policy-model-human=$PolicyModelHuman"
+}
+if (-not [string]::IsNullOrWhiteSpace($ValueModelHuman)) {
+  $genArgs += "--value-model-human=$ValueModelHuman"
+}
+if (-not [string]::IsNullOrWhiteSpace($PolicyModelAi)) {
+  $genArgs += "--policy-model-ai=$PolicyModelAi"
+}
+if (-not [string]::IsNullOrWhiteSpace($ValueModelAi)) {
+  $genArgs += "--value-model-ai=$ValueModelAi"
+}
+if ($ModelOnly) {
+  $genArgs += "--model-only"
+}
+
+Write-Host "> py $($genArgs -join ' ')"
+& py @genArgs
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Parallel self-play failed."
+  exit $LASTEXITCODE
+}
+
+$pipelineArgs = @("-3", "scripts/04_run_pipeline.py", "--input", $trainLog, "--tag", $baseTag, "--fast")
+if ($SkipEval) {
+  $pipelineArgs += "--skip-eval"
+}
+
+Write-Host "> py $($pipelineArgs -join ' ')"
+& py @pipelineArgs
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Fast pipeline failed."
+  exit $LASTEXITCODE
+}
+
+Write-Host "Fast loop completed."
+Write-Host "Train log: $trainLog"
+Write-Host "Tag: $baseTag"

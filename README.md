@@ -215,6 +215,13 @@ Stop 선택:
 - 개발 서버: `npm run dev`
 - 배포 빌드: `npm run build`
 - 빌드 미리보기: `npm run preview`
+- RAM 가드 실행(PowerShell): `.\scripts\run-with-ram-guard.ps1 -- -3 scripts/02_train_value.py --input "logs/2_selfplay_1M/train-100k-1.jsonl" "logs/2_selfplay_1M/train-100k-2.jsonl" --output models/value-guarded.json --dim 128 --epochs 1`
+- RAM 가드 옵션 예시: `.\scripts\run-with-ram-guard.ps1 -Threshold 92 -IntervalSec 30 -WindowSec 180 -- -3 scripts/02_train_value.py ...`
+- 챔피언 사이클(A/B 대결 자동): `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-champion-cycle.ps1 -Champion heuristic_v1 -Challenger random_v2 -GamesPerSide 100000 -PromoteThreshold 0.52 -Rounds 1 -Tag stage4`
+- 결과: `logs/champ-cycle-*-summary.json`에 승패/승격 여부/다음 챔피언이 기록됩니다.
+- 사이클 복구 실행: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-champion-cycle.ps1 -Tag stage4 -Resume`
+- 고정 fast 루프(병렬 self-play + fast 학습): `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-fast-loop.ps1 -TrainGames 200000 -Workers 4 -Tag fast`
+- 챔피언전 누적 점수표 갱신: `py -3 scripts/update_champion_scoreboard.py`
 
 모드:
 - 사람 vs AI
@@ -233,8 +240,17 @@ Stop 선택:
 
 AI vs AI 시뮬레이션(UI 없이 서버 실행):
 - `node scripts/simulate-ai-vs-ai.mjs 1000`
+- 병렬 실행(권장): `py -3 scripts/parallel_simulate_ai_vs_ai.py 200000 --workers 4 --output logs/train-parallel-200k.jsonl -- --log-mode=train --policy-human=heuristic_v1 --policy-ai=heuristic_v2`
+- 병렬 생성 래퍼: `py -3 scripts/parallel_generate.py --total-games 200000 --workers 4 --out-dir logs/train_data --policy-human=heuristic_v1 --policy-ai=heuristic_v2`
 - 델타 모드: `node scripts/simulate-ai-vs-ai.mjs 1000 logs/run.jsonl --log-mode=delta`
 - 학습 전용 경량 모드: `node scripts/simulate-ai-vs-ai.mjs 1000 logs/train.jsonl --log-mode=train`
+- 정책 지정:
+- 양쪽 동일 정책: `node scripts/simulate-ai-vs-ai.mjs 1000 logs/run.jsonl --log-mode=train --policy=heuristic_v1`
+- 휴리스틱 v1 vs 랜덤: `node scripts/simulate-ai-vs-ai.mjs 100000 logs/heurv1-vs-random-100k.jsonl --log-mode=train --policy-human=heuristic_v1 --policy-ai=random`
+- 휴리스틱 v2 vs 휴리스틱 v1: `node scripts/simulate-ai-vs-ai.mjs 100000 logs/heurv2-vs-heurv1-100k.jsonl --log-mode=train --policy-human=heuristic_v2 --policy-ai=heuristic_v1`
+- `--policy-human/--policy-ai` 지원 정책: `random`, `random_v2`, `heuristic_v1`, `heuristic_v2`
+- 모델 전용 대결(fallback 금지): `node scripts/simulate-ai-vs-ai.mjs 100000 logs/model-vs-model-100k.jsonl --log-mode=train --model-only --policy-model-a=models/policy-randomplus.json --value-model-a=models/value-randomplus.json --policy-model-b=models/policy-dolbaram.json --value-model-b=models/value-dolbaram.json`
+- 모델 경로 옵션: `--policy-model-a/b`, `--value-model-a/b` (`a=human`, `b=ai`)
 - 결과는 `logs/ai-vs-ai-*.jsonl` 파일로 생성
 - 같은 이름의 `*-report.json`이 함께 생성되며 이벤트 빈도, Go 효율, Luck/Skill 지표를 포함
 - 카탈로그는 `logs/catalog/cards-catalog.json` 1회 생성 후 재사용합니다. (카드 ID -> 카드 정보 매핑)
@@ -288,9 +304,12 @@ AI vs AI 시뮬레이션(UI 없이 서버 실행):
 - `scripts/01_train_policy.py`
   - 행동 분류 정책 모델 학습
   - 실행: `python scripts/01_train_policy.py --input logs/*.jsonl --output models/policy-v1.json`
+  - 속도 옵션: `--max-samples 100000 --skip-train-metrics`
 - `scripts/02_train_value.py`
   - 골드 기대값 회귀 모델 학습
   - 실행: `python scripts/02_train_value.py --input logs/*.jsonl --output models/value-v1.json`
+  - 디바이스 옵션: `--device cuda|cpu` (기본값: `cuda`)
+  - GPU 빠른 루프 예시: `python scripts/02_train_value.py --input logs/*.jsonl --output models/value-v1.json --device cuda --dim 128 --epochs 1 --batch-size 8192 --progress-every 0 --max-samples 200000`
 - `scripts/03_evaluate.py`
   - 구모델 vs 신모델 비교 리포트 생성
   - 실행:
@@ -298,6 +317,18 @@ AI vs AI 시뮬레이션(UI 없이 서버 실행):
 - `scripts/04_run_pipeline.py`
   - 01 -> 02 -> 03 순차 실행 파이프라인
   - 실행: `python scripts/04_run_pipeline.py --input logs/*.jsonl --tag v1`
+  - 빠른 루프 프리셋: `python scripts/04_run_pipeline.py --input logs/*.jsonl --tag fast-v1 --fast`
+- `scripts/run-fast-loop.ps1`
+  - 병렬 self-play 생성 + `04_run_pipeline.py --fast`를 한 번에 실행하는 고정 운영 스크립트
+- `scripts/parallel_generate.py`
+  - `parallel_simulate_ai_vs_ai.py`를 감싼 데이터 생성용 래퍼 (`--total-games/--workers/--out-dir`)
+- `scripts/run-champion-cycle.ps1`
+  - 병렬 self-play 기반 챔피언/도전자 사이클
+  - 중단 복구: `-Resume` + state 파일(`logs/champ-cycle-<tag>-state.json`)
+- `scripts/update_champion_scoreboard.py`
+  - 챔피언전 summary(report 기반)에서 누적 점수표 JSON/Markdown/문서 섹션 자동 갱신
+- `scripts/TRAIN_DUAL_NET_DESIGN.md`
+  - 통합 PyTorch 모델(`train_dual_net.py`) 전환 설계 초안
 - `scripts/TRAINING_PIPELINE.md`
   - 학습 순서/핵심내용/실행방법 문서
 

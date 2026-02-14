@@ -4,7 +4,6 @@ import glob
 import json
 import math
 import os
-import random
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -89,7 +88,8 @@ def extract_sample(trace):
     return None
 
 
-def iter_samples(paths):
+def iter_samples(paths, max_samples=None):
+    yielded = 0
     for path in paths:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -108,6 +108,9 @@ def iter_samples(paths):
                         "chosen": chosen,
                         "context_key": context_key(trace, decision_type),
                     }
+                    yielded += 1
+                    if max_samples is not None and yielded >= max_samples:
+                        return
 
 
 def train_model(samples, alpha):
@@ -183,31 +186,40 @@ def main():
         help="Output model JSON path.",
     )
     parser.add_argument("--alpha", type=float, default=1.0, help="Laplace smoothing.")
-    parser.add_argument("--seed", type=int, default=7, help="Shuffle seed.")
+    parser.add_argument("--seed", type=int, default=7, help="Unused compatibility option.")
+    parser.add_argument("--max-samples", type=int, default=None, help="Limit number of training samples.")
+    parser.add_argument("--skip-train-metrics", action="store_true", help="Skip train-set accuracy/NLL pass for faster training.")
     args = parser.parse_args()
 
     input_paths = expand_inputs(args.input)
-    samples = list(iter_samples(input_paths))
-    if not samples:
-        raise RuntimeError("No trainable decision samples found.")
-    random.Random(args.seed).shuffle(samples)
+    model = train_model(iter_samples(input_paths, args.max_samples), alpha=args.alpha)
 
-    model = train_model(samples, alpha=args.alpha)
-
+    total = 0
     correct = 0
     nll = 0.0
-    for s in samples:
-        pred, _ = predict_top1(model, s)
-        if pred == s["chosen"]:
-            correct += 1
-        p = max(1e-12, prob_of_choice(model, s, s["chosen"]))
-        nll += -math.log(p)
+    if args.skip_train_metrics:
+        # Keep training single-pass fast when metrics are not needed for the current loop.
+        total = sum(sum(v.values()) for v in (model.get("global_counts") or {}).values())
+        if total <= 0:
+            raise RuntimeError("No trainable decision samples found.")
+    else:
+        for s in iter_samples(input_paths, args.max_samples):
+            total += 1
+            pred, _ = predict_top1(model, s)
+            if pred == s["chosen"]:
+                correct += 1
+            p = max(1e-12, prob_of_choice(model, s, s["chosen"]))
+            nll += -math.log(p)
+        if total <= 0:
+            raise RuntimeError("No trainable decision samples found.")
 
     model["train_summary"] = {
-        "samples": len(samples),
-        "accuracy_top1": correct / max(1, len(samples)),
-        "nll_per_sample": nll / max(1, len(samples)),
+        "samples": total,
+        "accuracy_top1": None if args.skip_train_metrics else (correct / total),
+        "nll_per_sample": None if args.skip_train_metrics else (nll / total),
         "input_files": input_paths,
+        "max_samples": args.max_samples,
+        "skip_train_metrics": bool(args.skip_train_metrics),
     }
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)

@@ -1,15 +1,23 @@
 import fs from "node:fs";
 import path from "node:path";
 import { once } from "node:events";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   initGame,
   createSeededRng,
+  playTurn,
+  chooseGo,
+  chooseStop,
+  choosePresidentStop,
+  choosePresidentHold,
+  chooseGukjinMode,
+  chooseMatch,
   getDeclarableBombMonths,
   getDeclarableShakingMonths
 } from "../src/gameEngine.js";
 import { buildDeck } from "../src/cards.js";
-import { botPlay } from "../src/bot.js";
+import { BOT_POLICIES, botPlay } from "../src/bot.js";
 import { getActionPlayerKey } from "../src/engineRunner.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -17,12 +25,41 @@ const __dirname = path.dirname(__filename);
 
 const DEFAULT_LOG_MODE = "compact";
 const SUPPORTED_LOG_MODES = new Set(["compact", "delta", "train"]);
+const SUPPORTED_POLICIES = new Set(BOT_POLICIES);
+const DEFAULT_POLICY = "random";
+const DECISION_CACHE_MAX = 200000;
+const HASH_CACHE_MAX = 500000;
+
+const decisionInferenceCache = new Map();
+const hashIndexCache = new Map();
+
+function setBoundedCache(cache, key, value, maxEntries) {
+  if (cache.size >= maxEntries) cache.clear();
+  cache.set(key, value);
+}
+
+function normalizePolicyInput(raw) {
+  const p = String(raw || DEFAULT_POLICY).trim().toLowerCase();
+  if (p === "heuristic" || p === "smart") return "heuristic_v1";
+  if (p === "smart_v2") return "heuristic_v2";
+  if (p === "random-plus" || p === "plus" || p === "semi_random" || p === "random_plus") {
+    return "random_v2";
+  }
+  return p;
+}
 
 function parseArgs(argv) {
   const args = [...argv];
   let games = 1000;
   let outArg = null;
   let logMode = DEFAULT_LOG_MODE;
+  let policyHuman = DEFAULT_POLICY;
+  let policyAi = DEFAULT_POLICY;
+  let modelOnly = false;
+  let policyModelHuman = null;
+  let policyModelAi = null;
+  let valueModelHuman = null;
+  let valueModelAi = null;
 
   if (args.length > 0 && /^\d+$/.test(args[0])) {
     games = Number(args.shift());
@@ -44,23 +81,177 @@ function parseArgs(argv) {
     }
     if (SUPPORTED_LOG_MODES.has(arg)) {
       logMode = arg;
+      continue;
+    }
+    if (arg === "--policy" && args.length > 0) {
+      const p = normalizePolicyInput(args.shift());
+      policyHuman = p;
+      policyAi = p;
+      continue;
+    }
+    if (arg.startsWith("--policy=")) {
+      const p = normalizePolicyInput(arg.split("=", 2)[1]);
+      policyHuman = p;
+      policyAi = p;
+      continue;
+    }
+    if (arg === "--policy-human" && args.length > 0) {
+      policyHuman = normalizePolicyInput(args.shift());
+      continue;
+    }
+    if (arg.startsWith("--policy-human=")) {
+      policyHuman = normalizePolicyInput(arg.split("=", 2)[1]);
+      continue;
+    }
+    if (arg === "--policy-ai" && args.length > 0) {
+      policyAi = normalizePolicyInput(args.shift());
+      continue;
+    }
+    if (arg.startsWith("--policy-ai=")) {
+      policyAi = normalizePolicyInput(arg.split("=", 2)[1]);
+      continue;
+    }
+    if (arg === "--policy-model-human" && args.length > 0) {
+      policyModelHuman = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--policy-model-human=")) {
+      policyModelHuman = arg.split("=", 2)[1].trim();
+      continue;
+    }
+    if (arg === "--policy-model-ai" && args.length > 0) {
+      policyModelAi = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--policy-model-ai=")) {
+      policyModelAi = arg.split("=", 2)[1].trim();
+      continue;
+    }
+    if (arg === "--policy-model-a" && args.length > 0) {
+      policyModelHuman = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--policy-model-a=")) {
+      policyModelHuman = arg.split("=", 2)[1].trim();
+      continue;
+    }
+    if (arg === "--policy-model-b" && args.length > 0) {
+      policyModelAi = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--policy-model-b=")) {
+      policyModelAi = arg.split("=", 2)[1].trim();
+      continue;
+    }
+    if (arg === "--value-model-human" && args.length > 0) {
+      valueModelHuman = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--value-model-human=")) {
+      valueModelHuman = arg.split("=", 2)[1].trim();
+      continue;
+    }
+    if (arg === "--value-model-ai" && args.length > 0) {
+      valueModelAi = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--value-model-ai=")) {
+      valueModelAi = arg.split("=", 2)[1].trim();
+      continue;
+    }
+    if (arg === "--value-model-a" && args.length > 0) {
+      valueModelHuman = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--value-model-a=")) {
+      valueModelHuman = arg.split("=", 2)[1].trim();
+      continue;
+    }
+    if (arg === "--value-model-b" && args.length > 0) {
+      valueModelAi = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--value-model-b=")) {
+      valueModelAi = arg.split("=", 2)[1].trim();
+      continue;
+    }
+    if (arg === "--model-only" || arg === "--strict-model-only") {
+      modelOnly = true;
+      continue;
     }
   }
 
   if (!SUPPORTED_LOG_MODES.has(logMode)) {
     throw new Error(`Unsupported log mode: ${logMode}. Use one of: compact, delta, train`);
   }
+  if (!SUPPORTED_POLICIES.has(policyHuman)) {
+    throw new Error(`Unsupported policy-human: ${policyHuman}. Use one of: ${[...SUPPORTED_POLICIES].join(", ")}`);
+  }
+  if (!SUPPORTED_POLICIES.has(policyAi)) {
+    throw new Error(`Unsupported policy-ai: ${policyAi}. Use one of: ${[...SUPPORTED_POLICIES].join(", ")}`);
+  }
 
-  return { games, outArg, logMode };
+  return {
+    games,
+    outArg,
+    logMode,
+    policyHuman,
+    policyAi,
+    policyModelHuman,
+    policyModelAi,
+    valueModelHuman,
+    valueModelAi,
+    modelOnly
+  };
 }
 
 const parsed = parseArgs(process.argv.slice(2));
 const games = parsed.games;
 const outArg = parsed.outArg;
 const logMode = parsed.logMode;
+const policyHuman = parsed.policyHuman;
+const policyAi = parsed.policyAi;
+const policyModelHumanPath = parsed.policyModelHuman;
+const policyModelAiPath = parsed.policyModelAi;
+const valueModelHumanPath = parsed.valueModelHuman;
+const valueModelAiPath = parsed.valueModelAi;
+const modelOnly = !!parsed.modelOnly;
 const isTrainMode = logMode === "train";
 const isDeltaMode = logMode === "delta";
 const useLeanKibo = isTrainMode || isDeltaMode;
+const actorConfig = {
+  human: {
+    fallbackPolicy: policyHuman,
+    policyModelPath: policyModelHumanPath,
+    valueModelPath: valueModelHumanPath
+  },
+  ai: {
+    fallbackPolicy: policyAi,
+    policyModelPath: policyModelAiPath,
+    valueModelPath: valueModelAiPath
+  }
+};
+actorConfig.human.policyModel = loadJsonModel(actorConfig.human.policyModelPath, "policy-model-human");
+actorConfig.ai.policyModel = loadJsonModel(actorConfig.ai.policyModelPath, "policy-model-ai");
+actorConfig.human.valueModel = loadJsonModel(actorConfig.human.valueModelPath, "value-model-human");
+actorConfig.ai.valueModel = loadJsonModel(actorConfig.ai.valueModelPath, "value-model-ai");
+
+if (modelOnly) {
+  for (const actor of ["human", "ai"]) {
+    if (!actorConfig[actor].policyModel && !actorConfig[actor].valueModel) {
+      throw new Error(`model-only requires model for ${actor}. Provide --policy-model-${actor} and/or --value-model-${actor}`);
+    }
+  }
+}
+
+const agentLabelByActor = {
+  human: actorConfig.human.policyModel || actorConfig.human.valueModel
+    ? `model:${path.basename(actorConfig.human.policyModelPath || actorConfig.human.valueModelPath)}`
+    : actorConfig.human.fallbackPolicy,
+  ai: actorConfig.ai.policyModel || actorConfig.ai.valueModel
+    ? `model:${path.basename(actorConfig.ai.policyModelPath || actorConfig.ai.valueModelPath)}`
+    : actorConfig.ai.fallbackPolicy
+};
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const outPath = outArg || path.resolve(__dirname, "..", "logs", `ai-vs-ai-${stamp}.jsonl`);
@@ -110,6 +301,25 @@ const aggregate = {
   luckFlipCaptureValue: 0,
   luckHandCaptureValue: 0
 };
+
+function createBalancedFirstTurnPlan(totalGames) {
+  if (totalGames % 2 !== 0) {
+    throw new Error(
+      `games must be even for exact 50:50 first-turn split. Received: ${totalGames}`
+    );
+  }
+  const half = totalGames / 2;
+  const plan = [];
+  for (let i = 0; i < half; i += 1) plan.push("human");
+  for (let i = 0; i < half; i += 1) plan.push("ai");
+  for (let i = plan.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = plan[i];
+    plan[i] = plan[j];
+    plan[j] = tmp;
+  }
+  return plan;
+}
 
 function captureWeight(card) {
   if (!card) return 0;
@@ -204,6 +414,199 @@ function decisionContext(state, actor) {
   };
 }
 
+function stableHash(token, dim) {
+  const digest = crypto.createHash("md5").update(token, "utf8").digest("hex");
+  return Number.parseInt(digest.slice(0, 8), 16) % dim;
+}
+
+function stableHashCached(token, dim) {
+  const key = `${dim}|${token}`;
+  const cached = hashIndexCache.get(key);
+  if (cached != null) return cached;
+  const idx = stableHash(token, dim);
+  setBoundedCache(hashIndexCache, key, idx, HASH_CACHE_MAX);
+  return idx;
+}
+
+function policyContextKey(trace, decisionType) {
+  const dc = trace.dc || {};
+  const sp = trace.sp || {};
+  const deckBucket = Math.floor((dc.deckCount || 0) / 3);
+  const handSelf = dc.handCountSelf || 0;
+  const handOpp = dc.handCountOpp || 0;
+  const goSelf = dc.goCountSelf || 0;
+  const goOpp = dc.goCountOpp || 0;
+  const cands = (sp.cards || sp.boardCardIds || sp.options || []).length;
+  return [
+    `dt=${decisionType}`,
+    `ph=${dc.phase || "?"}`,
+    `o=${trace.o || "?"}`,
+    `db=${deckBucket}`,
+    `hs=${handSelf}`,
+    `ho=${handOpp}`,
+    `gs=${goSelf}`,
+    `go=${goOpp}`,
+    `cc=${cands}`
+  ].join("|");
+}
+
+function policyProb(model, sample, choice) {
+  const alpha = Number(model?.alpha ?? 1.0);
+  const dt = sample.decisionType;
+  const candidates = sample.candidates || [];
+  const ck = sample.contextKey;
+  const k = Math.max(1, candidates.length);
+
+  const dtContextCounts = model?.context_counts?.[dt] || {};
+  const dtContextTotals = model?.context_totals?.[dt] || {};
+  const ctxCounts = dtContextCounts?.[ck];
+  if (ctxCounts) {
+    const total = Number(dtContextTotals?.[ck] || 0);
+    return (Number(ctxCounts?.[choice] || 0) + alpha) / (total + alpha * k);
+  }
+
+  const dtGlobal = model?.global_counts?.[dt] || {};
+  let total = 0;
+  for (const c of candidates) total += Number(dtGlobal?.[c] || 0);
+  return (Number(dtGlobal?.[choice] || 0) + alpha) / (total + alpha * k);
+}
+
+function valueTokens(dc, order, decisionType, actionLabel) {
+  return [
+    `phase=${dc.phase || "?"}`,
+    `order=${order || "?"}`,
+    `decision_type=${decisionType}`,
+    `action=${actionLabel || "?"}`,
+    `deck_bucket=${Math.floor((dc.deckCount || 0) / 3)}`,
+    `self_hand=${Math.floor(dc.handCountSelf || 0)}`,
+    `opp_hand=${Math.floor(dc.handCountOpp || 0)}`,
+    `self_go=${Math.floor(dc.goCountSelf || 0)}`,
+    `opp_go=${Math.floor(dc.goCountOpp || 0)}`
+  ];
+}
+
+function valueNumeric(dc, candidateCount) {
+  return {
+    deck_count: Number(dc.deckCount || 0),
+    hand_self: Number(dc.handCountSelf || 0),
+    hand_opp: Number(dc.handCountOpp || 0),
+    go_self: Number(dc.goCountSelf || 0),
+    go_opp: Number(dc.goCountOpp || 0),
+    cand_count: Number(candidateCount || 0),
+    immediate_reward: 0
+  };
+}
+
+function valuePredict(model, sample) {
+  if (!model || !Array.isArray(model.weights)) return 0;
+  const dim = Number(model.dim || 0);
+  if (dim <= 0) return 0;
+  const w = model.weights;
+  const b = Number(model.bias || 0);
+  const scale = model.numeric_scale || {};
+  let total = b;
+  for (const tok of sample.tokens) {
+    const i = stableHashCached(`tok:${tok}`, dim);
+    total += Number(w[i] || 0);
+  }
+  for (const [k, v] of Object.entries(sample.numeric || {})) {
+    const i = stableHashCached(`num:${k}`, dim);
+    const denom = Math.max(1e-9, Number(scale[k] || 1.0));
+    total += Number(w[i] || 0) * (Number(v) / denom);
+  }
+  return total;
+}
+
+function modelCacheKey(actor, cfg, decisionType, contextKey, candidates) {
+  const p = cfg.policyModelPath || "-";
+  const v = cfg.valueModelPath || "-";
+  return `${actor}|${p}|${v}|${decisionType}|${contextKey}|${candidates.join(",")}`;
+}
+
+function optionActionToType(action) {
+  const aliases = {
+    go: "choose_go",
+    stop: "choose_stop",
+    kung_use: "choose_kung_use",
+    kung_pass: "choose_kung_pass",
+    president_stop: "choose_president_stop",
+    president_hold: "choose_president_hold"
+  };
+  return aliases[action] || action;
+}
+
+function modelSelectCandidate(state, actor, cfg) {
+  const sp = selectPool(state, actor);
+  const cards = sp.cards || null;
+  const boardCardIds = sp.boardCardIds || null;
+  const options = sp.options || null;
+  const candidates = cards || boardCardIds || options || [];
+  if (!candidates.length) return null;
+
+  const decisionType = cards ? "play" : boardCardIds ? "match" : "option";
+  const order = actor === state.startingTurnKey ? "first" : "second";
+  const dc = decisionContext(state, actor);
+  const traceLike = { o: order, dc, sp: { cards, boardCardIds, options } };
+  const contextKey = policyContextKey(traceLike, decisionType);
+  const cacheKey = modelCacheKey(actor, cfg, decisionType, contextKey, candidates);
+  const cached = decisionInferenceCache.get(cacheKey);
+  if (cached) return { decisionType, candidate: cached, sp };
+
+  const baseSample = { decisionType, candidates, contextKey };
+  const useValue = !!cfg.valueModel;
+  const numeric = useValue ? valueNumeric(dc, candidates.length) : null;
+  const tokens = useValue ? valueTokens(dc, order, decisionType, "?") : null;
+
+  let bestCandidate = candidates[0];
+  let bestValue = Number.NEGATIVE_INFINITY;
+  let bestPolicy = -1;
+  for (const candidate of candidates) {
+    const candidateLabel = decisionType === "option" ? candidate : String(candidate);
+    const pp = cfg.policyModel ? policyProb(cfg.policyModel, baseSample, candidateLabel) : 0;
+    let vs = 0;
+    if (useValue) {
+      tokens[3] = `action=${candidateLabel}`;
+      vs = valuePredict(cfg.valueModel, { tokens, numeric });
+    }
+    const cmpPrimary = useValue ? vs : pp;
+    const tieBreaker = useValue ? pp : vs;
+    const currentPrimary = useValue ? bestValue : bestPolicy;
+    const better = cmpPrimary > currentPrimary + 1e-12;
+    const tieBetter = Math.abs(cmpPrimary - currentPrimary) <= 1e-12 && tieBreaker > (useValue ? bestPolicy : bestValue);
+    if (better || tieBetter) {
+      bestCandidate = candidate;
+      bestValue = vs;
+      bestPolicy = pp;
+    }
+  }
+  setBoundedCache(decisionInferenceCache, cacheKey, bestCandidate, DECISION_CACHE_MAX);
+  return { decisionType, candidate: bestCandidate, sp };
+}
+
+function applyModelChoice(state, actor, picked) {
+  if (!picked) return state;
+  const c = picked.candidate;
+  if (picked.decisionType === "play") return playTurn(state, c);
+  if (picked.decisionType === "match") return chooseMatch(state, c);
+  if (picked.decisionType !== "option") return state;
+
+  if (c === "go") return chooseGo(state, actor);
+  if (c === "stop") return chooseStop(state, actor);
+  if (c === "president_stop") return choosePresidentStop(state, actor);
+  if (c === "president_hold") return choosePresidentHold(state, actor);
+  if (c === "five" || c === "junk") return chooseGukjinMode(state, actor, c);
+  return state;
+}
+
+function loadJsonModel(modelPath, label) {
+  if (!modelPath) return null;
+  const full = path.resolve(modelPath);
+  if (!fs.existsSync(full)) {
+    throw new Error(`${label} not found: ${modelPath}`);
+  }
+  return JSON.parse(fs.readFileSync(full, "utf8"));
+}
+
 function compactInitial(initialDeal) {
   if (!initialDeal) return null;
   return {
@@ -254,7 +657,7 @@ function boardCountFromTurn(turn) {
   return 0;
 }
 
-function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey) {
+function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, policyByActorRef) {
   const turns = (kibo || []).filter((e) => e.type === "turn_end");
   return turns.map((t) => {
     const actor = t.actor;
@@ -278,7 +681,7 @@ function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey) {
       dc: before?.decisionContext || null,
       sp: before?.selectionPool || null,
       reasoning: {
-        policy: "random",
+        policy: policyByActorRef[actor] || DEFAULT_POLICY,
         candidatesCount: countCandidates(before?.selectionPool),
         evaluation: null
       },
@@ -298,7 +701,7 @@ function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey) {
   });
 }
 
-function buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo) {
+function buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, policyByActorRef) {
   const turns = (kibo || []).filter((e) => e.type === "turn_end");
   return turns.map((t) => {
     const actor = t.actor;
@@ -316,12 +719,13 @@ function buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo) {
       ir: immediateReward,
       tr: terminalReward,
       dc: before?.decisionContext || null,
-      sp: before?.selectionPool || null
+      sp: before?.selectionPool || null,
+      policy: policyByActorRef[actor] || DEFAULT_POLICY
     };
   });
 }
 
-function buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo) {
+function buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, policyByActorRef) {
   const turns = (kibo || []).filter((e) => e.type === "turn_end");
   let prevDeck = null;
   let prevHand = { human: null, ai: null };
@@ -364,7 +768,7 @@ function buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo) {
           .map((m) => `${m.source}:${m.eventTag}`)
       },
       reasoning: {
-        policy: "random",
+        policy: policyByActorRef[actor] || DEFAULT_POLICY,
         candidatesCount: countCandidates(before?.selectionPool),
         evaluation: null
       }
@@ -515,14 +919,36 @@ async function writeLine(writer, line) {
   await once(writer, "drain");
 }
 
+function executeActorTurn(state, actor) {
+  const cfg = actorConfig[actor];
+  const canUseModel = !!(cfg?.policyModel || cfg?.valueModel);
+  if (canUseModel) {
+    const picked = modelSelectCandidate(state, actor, cfg);
+    if (picked) {
+      const next = applyModelChoice(state, actor, picked);
+      if (next !== state) return next;
+    }
+    if (modelOnly) {
+      throw new Error(`model-only decision failed for actor=${actor}, phase=${state.phase}`);
+    }
+  }
+  if (modelOnly) {
+    throw new Error(`model-only missing model for actor=${actor}`);
+  }
+  return botPlay(state, actor, { policy: cfg?.fallbackPolicy || DEFAULT_POLICY });
+}
+
 async function run() {
   const outStream = fs.createWriteStream(outPath, { encoding: "utf8" });
+  const firstTurnPlan = createBalancedFirstTurnPlan(games);
 
   for (let i = 0; i < games; i += 1) {
     const seed = `sim-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
+    const forcedFirstTurnKey = firstTurnPlan[i];
     let state = initGame("A", createSeededRng(seed), {
       carryOverMultiplier: 1,
-      kiboDetail: useLeanKibo ? "lean" : "full"
+      kiboDetail: useLeanKibo ? "lean" : "full",
+      firstTurnKey: forcedFirstTurnKey
     });
     state.players.human.label = "AI-1";
     state.players.ai.label = "AI-2";
@@ -541,7 +967,7 @@ async function run() {
         selectionPool: selectPool(state, actor)
       };
       const prevTurnSeq = state.turnSeq || 0;
-      const next = botPlay(state, actor);
+      const next = executeActorTurn(state, actor);
       if (next === state) break;
       const nextTurnSeq = next.turnSeq || 0;
       if (nextTurnSeq > prevTurnSeq) {
@@ -554,10 +980,10 @@ async function run() {
     const winner = state.result?.winner || "unknown";
     const kibo = state.kibo || [];
     const decisionTrace = isDeltaMode
-      ? buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo)
+      ? buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, agentLabelByActor)
       : isTrainMode
-      ? buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo)
-      : buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey);
+      ? buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, agentLabelByActor)
+      : buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, agentLabelByActor);
     const firstScore = firstTurnKey === "human" ? state.result?.human?.total || 0 : state.result?.ai?.total || 0;
     const secondScore = secondTurnKey === "human" ? state.result?.human?.total || 0 : state.result?.ai?.total || 0;
     const winnerTurnOrder =
@@ -576,6 +1002,7 @@ async function run() {
         logMode,
         firstTurn: firstTurnKey,
         secondTurn: secondTurnKey,
+        policy: agentLabelByActor,
         winner,
         score: {
           human: state.result?.human?.total ?? null,
@@ -642,6 +1069,7 @@ async function run() {
       logMode,
       firstTurn: firstTurnKey,
       secondTurn: secondTurnKey,
+      policy: agentLabelByActor,
       winner,
       winnerTurnOrder,
       nagari: state.result?.nagari || false,

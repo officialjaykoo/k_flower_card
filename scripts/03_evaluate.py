@@ -107,6 +107,22 @@ def policy_prob(model, sample, choice):
     return (dt_global.get(choice, 0) + alpha) / (total + alpha * k)
 
 
+def policy_prob_raw(model, decision_type, candidates, context_key, choice):
+    alpha = model.get("alpha", 1.0)
+    k = max(1, len(candidates))
+
+    dt_context_counts = (model.get("context_counts") or {}).get(decision_type) or {}
+    dt_context_totals = (model.get("context_totals") or {}).get(decision_type) or {}
+    ctx_counts = dt_context_counts.get(context_key)
+    if ctx_counts:
+        total = dt_context_totals.get(context_key, 0)
+        return (ctx_counts.get(choice, 0) + alpha) / (total + alpha * k)
+
+    dt_global = (model.get("global_counts") or {}).get(decision_type) or {}
+    total = sum(dt_global.get(c, 0) for c in candidates)
+    return (dt_global.get(choice, 0) + alpha) / (total + alpha * k)
+
+
 def policy_top1(model, sample):
     best = None
     best_p = -1.0
@@ -118,22 +134,28 @@ def policy_top1(model, sample):
     return best, best_p
 
 
+def policy_top1_raw(model, decision_type, candidates, context_key):
+    best = None
+    best_p = -1.0
+    for c in candidates:
+        p = policy_prob_raw(model, decision_type, candidates, context_key, c)
+        if p > best_p:
+            best = c
+            best_p = p
+    return best, best_p
+
+
 def stable_hash(token, dim):
     digest = hashlib.md5(token.encode("utf-8")).hexdigest()
     return int(digest[:8], 16) % dim
 
 
-def value_sample(line, trace, gold_per_point):
+def value_sample(trace, decision_type, chosen, score, gold_per_point):
     actor = trace.get("a")
     if actor not in ("human", "ai"):
         return None
-    p = extract_policy_sample(trace)
-    if not p:
-        return None
-    _, _, chosen = p
     dc = trace.get("dc") or {}
     sp = trace.get("sp") or {}
-    score = line.get("score") or {}
     self_score = score.get(actor)
     opp = "ai" if actor == "human" else "human"
     opp_score = score.get(opp)
@@ -143,7 +165,7 @@ def value_sample(line, trace, gold_per_point):
     tokens = [
         f"phase={dc.get('phase','?')}",
         f"order={trace.get('o','?')}",
-        "decision_type=play" if sp.get("cards") else "decision_type=match" if sp.get("boardCardIds") else "decision_type=option",
+        f"decision_type={decision_type}",
         f"action={chosen or '?'}",
         f"deck_bucket={int((dc.get('deckCount') or 0)//3)}",
         f"self_hand={int(dc.get('handCountSelf') or 0)}",
@@ -228,24 +250,21 @@ def main():
                 if not line_raw:
                     continue
                 line = json.loads(line_raw)
-                for trace in line.get("decision_trace") or []:
+                decision_trace = line.get("decision_trace") or []
+                score = line.get("score") or {}
+                for trace in decision_trace:
                     s = extract_policy_sample(trace)
                     if s is None:
                         continue
                     dt, candidates, chosen = s
-                    sample = {
-                        "decision_type": dt,
-                        "candidates": candidates,
-                        "chosen": chosen,
-                        "context_key": policy_context_key(trace, dt),
-                    }
+                    ck = policy_context_key(trace, dt)
                     total += 1
-                    p_old = max(1e-12, policy_prob(policy_old, sample, chosen))
-                    p_new = max(1e-12, policy_prob(policy_new, sample, chosen))
+                    p_old = max(1e-12, policy_prob_raw(policy_old, dt, candidates, ck, chosen))
+                    p_new = max(1e-12, policy_prob_raw(policy_new, dt, candidates, ck, chosen))
                     old_nll += -math.log(p_old)
                     new_nll += -math.log(p_new)
-                    old_top, _ = policy_top1(policy_old, sample)
-                    new_top, _ = policy_top1(policy_new, sample)
+                    old_top, _ = policy_top1_raw(policy_old, dt, candidates, ck)
+                    new_top, _ = policy_top1_raw(policy_new, dt, candidates, ck)
                     if old_top == chosen:
                         old_correct += 1
                     if new_top == chosen:
@@ -259,7 +278,7 @@ def main():
 
                     if value_old and value_new:
                         gold_per_point = value_new.get("gold_per_point", 100.0)
-                        vs = value_sample(line, trace, gold_per_point)
+                        vs = value_sample(trace, dt, chosen, score, gold_per_point)
                         if vs:
                             y = vs["y"]
                             pred_old = value_predict(value_old, vs)
