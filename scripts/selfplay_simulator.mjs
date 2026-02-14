@@ -273,6 +273,17 @@ const aggregate = {
     firstScoreSum: 0,
     secondScoreSum: 0
   },
+  economy: {
+    humanGoldSum: 0,
+    aiGoldSum: 0,
+    humanDeltaSum: 0,
+    firstGoldSum: 0,
+    secondGoldSum: 0,
+    firstDeltaSum: 0,
+    secondDeltaSum: 0,
+    first1000HumanDeltaSum: 0,
+    first1000Games: 0
+  },
   nagari: 0,
   eventTotals: { ppuk: 0, ddadak: 0, jjob: 0, ssul: 0, ttak: 0 },
   goCalls: 0,
@@ -776,7 +787,7 @@ function buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, po
   });
 }
 
-function baseSummary(line, winnerTurnOrder, firstScore, secondScore) {
+function baseSummary(line, winnerTurnOrder, firstScore, secondScore, firstGold, secondGold) {
   aggregate.completed += line.completed ? 1 : 0;
   if (aggregate.winners[line.winner] != null) aggregate.winners[line.winner] += 1;
   else aggregate.winners.unknown += 1;
@@ -785,6 +796,20 @@ function baseSummary(line, winnerTurnOrder, firstScore, secondScore) {
   else aggregate.byTurnOrder.draw += 1;
   aggregate.byTurnOrder.firstScoreSum += firstScore;
   aggregate.byTurnOrder.secondScoreSum += secondScore;
+  const humanGold = Number(line?.gold?.human ?? 0);
+  const aiGold = Number(line?.gold?.ai ?? 0);
+  const humanDelta = humanGold - aiGold;
+  aggregate.economy.humanGoldSum += humanGold;
+  aggregate.economy.aiGoldSum += aiGold;
+  aggregate.economy.humanDeltaSum += humanDelta;
+  aggregate.economy.firstGoldSum += Number(firstGold || 0);
+  aggregate.economy.secondGoldSum += Number(secondGold || 0);
+  aggregate.economy.firstDeltaSum += Number(firstGold || 0) - Number(secondGold || 0);
+  aggregate.economy.secondDeltaSum += Number(secondGold || 0) - Number(firstGold || 0);
+  if (aggregate.economy.first1000Games < 1000) {
+    aggregate.economy.first1000HumanDeltaSum += humanDelta;
+    aggregate.economy.first1000Games += 1;
+  }
 }
 
 function fullSummary({
@@ -802,9 +827,11 @@ function fullSummary({
   flipEvents,
   handEvents,
   flipCaptureValue,
-  handCaptureValue
+  handCaptureValue,
+  firstGold,
+  secondGold
 }) {
-  baseSummary(line, winnerTurnOrder, firstScore, secondScore);
+  baseSummary(line, winnerTurnOrder, firstScore, secondScore, firstGold, secondGold);
   if (line.nagari) aggregate.nagari += 1;
   aggregate.eventTotals.ppuk += line.eventFrequency.ppuk;
   aggregate.eventTotals.ddadak += line.eventFrequency.ddadak;
@@ -847,7 +874,19 @@ function buildTrainReport() {
       drawRate: aggregate.byTurnOrder.draw / Math.max(1, aggregate.games),
       averageScoreFirst: aggregate.byTurnOrder.firstScoreSum / Math.max(1, aggregate.games),
       averageScoreSecond: aggregate.byTurnOrder.secondScoreSum / Math.max(1, aggregate.games)
-    }
+    },
+    economy: {
+      averageGoldHuman: aggregate.economy.humanGoldSum / Math.max(1, aggregate.games),
+      averageGoldAi: aggregate.economy.aiGoldSum / Math.max(1, aggregate.games),
+      averageGoldDeltaHuman: aggregate.economy.humanDeltaSum / Math.max(1, aggregate.games),
+      averageGoldFirst: aggregate.economy.firstGoldSum / Math.max(1, aggregate.games),
+      averageGoldSecond: aggregate.economy.secondGoldSum / Math.max(1, aggregate.games),
+      averageGoldDeltaFirst: aggregate.economy.firstDeltaSum / Math.max(1, aggregate.games),
+      cumulativeGoldDeltaOver1000:
+        (aggregate.economy.humanDeltaSum / Math.max(1, aggregate.games)) * 1000,
+      cumulativeGoldDeltaFirst1000: aggregate.economy.first1000HumanDeltaSum
+    },
+    primaryMetric: "averageGoldDeltaHuman"
   };
 }
 
@@ -865,6 +904,18 @@ function buildFullReport() {
       averageScoreFirst: aggregate.byTurnOrder.firstScoreSum / Math.max(1, aggregate.games),
       averageScoreSecond: aggregate.byTurnOrder.secondScoreSum / Math.max(1, aggregate.games)
     },
+    economy: {
+      averageGoldHuman: aggregate.economy.humanGoldSum / Math.max(1, aggregate.games),
+      averageGoldAi: aggregate.economy.aiGoldSum / Math.max(1, aggregate.games),
+      averageGoldDeltaHuman: aggregate.economy.humanDeltaSum / Math.max(1, aggregate.games),
+      averageGoldFirst: aggregate.economy.firstGoldSum / Math.max(1, aggregate.games),
+      averageGoldSecond: aggregate.economy.secondGoldSum / Math.max(1, aggregate.games),
+      averageGoldDeltaFirst: aggregate.economy.firstDeltaSum / Math.max(1, aggregate.games),
+      cumulativeGoldDeltaOver1000:
+        (aggregate.economy.humanDeltaSum / Math.max(1, aggregate.games)) * 1000,
+      cumulativeGoldDeltaFirst1000: aggregate.economy.first1000HumanDeltaSum
+    },
+    primaryMetric: "averageGoldDeltaHuman",
     nagariRate: aggregate.nagari / Math.max(1, aggregate.games),
     eventFrequencyPerGame: {
       ppuk: aggregate.eventTotals.ppuk / Math.max(1, aggregate.games),
@@ -992,6 +1043,10 @@ async function run() {
         : winner === firstTurnKey
         ? "first"
         : "second";
+    const humanGold = Number(state.players?.human?.gold || 0);
+    const aiGold = Number(state.players?.ai?.gold || 0);
+    const firstGold = firstTurnKey === "human" ? humanGold : aiGold;
+    const secondGold = secondTurnKey === "human" ? humanGold : aiGold;
 
     if (isTrainMode) {
       const line = {
@@ -1008,9 +1063,13 @@ async function run() {
           human: state.result?.human?.total ?? null,
           ai: state.result?.ai?.total ?? null
         },
+        gold: {
+          human: humanGold,
+          ai: aiGold
+        },
         decision_trace: decisionTrace
       };
-      baseSummary(line, winnerTurnOrder, firstScore, secondScore);
+      baseSummary(line, winnerTurnOrder, firstScore, secondScore, firstGold, secondGold);
       await writeLine(outStream, line);
       continue;
     }
@@ -1080,6 +1139,12 @@ async function run() {
         first: firstScore,
         second: secondScore
       },
+      gold: {
+        human: humanGold,
+        ai: aiGold,
+        first: firstGold,
+        second: secondGold
+      },
       goCalls,
       goStopEfficiency: goEfficiency,
       goDecision: {
@@ -1128,7 +1193,9 @@ async function run() {
       flipEvents,
       handEvents,
       flipCaptureValue,
-      handCaptureValue
+      handCaptureValue,
+      firstGold,
+      secondGold
     });
 
     await writeLine(outStream, line);

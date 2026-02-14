@@ -20,6 +20,8 @@ def load_summaries(pattern):
                 "challenger_before": obj.get("challenger_before"),
                 "champion_after": obj.get("champion_after"),
                 "challenger_after": obj.get("challenger_after"),
+                "challenger_avg_gold_delta": float(obj.get("challenger_avg_gold_delta", 0.0)),
+                "challenger_cum_gold_1000": float(obj.get("challenger_cum_gold_1000", 0.0)),
                 "challenger_win_rate_decisive": float(obj.get("challenger_win_rate_decisive", 0.0)),
                 "draws": int(obj.get("draws", 0)),
                 "total_games": int(obj.get("total_games", 0)),
@@ -36,11 +38,12 @@ def make_markdown(rows, limit):
     lines.append(f"- updated_at: {datetime.now(timezone.utc).isoformat()}")
     lines.append(f"- source: logs/champ-cycle-*-summary.json (report 기반 산출)")
     lines.append("")
-    lines.append("| tag | challenger_before | champion_before | challenger_dec_win_rate | promoted | champion_after |")
-    lines.append("|---|---|---|---:|---:|---|")
+    lines.append("| tag | challenger_before | champion_before | avg_gold_delta | cum_gold_1000 | challenger_dec_win_rate | promoted | champion_after |")
+    lines.append("|---|---|---|---:|---:|---:|---:|---|")
     for r in rows:
         lines.append(
             f"| {r['tag']} | {r['challenger_before']} | {r['champion_before']} | "
+            f"{r['challenger_avg_gold_delta']:.4f} | {r['challenger_cum_gold_1000']:.2f} | "
             f"{r['challenger_win_rate_decisive']*100:.4f}% | {str(r['promoted']).lower()} | {r['champion_after']} |"
         )
     lines.append("")

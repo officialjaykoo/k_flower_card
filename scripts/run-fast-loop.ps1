@@ -1,7 +1,9 @@
-param(
+﻿param(
   [int]$TrainGames = 200000,
   [int]$Workers = 4,
   [string]$Tag = "",
+  [string]$LeagueConfig = "",
+  [int]$LeagueChunkGames = 20000,
   [string]$PolicyHuman = "heuristic_v1",
   [string]$PolicyAi = "heuristic_v2",
   [string]$PolicyModelHuman = "",
@@ -29,31 +31,42 @@ $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $baseTag = if ([string]::IsNullOrWhiteSpace($Tag)) { "fast-$stamp" } else { "$Tag-$stamp" }
 $trainLog = "logs/train-$baseTag.jsonl"
 
-$genArgs = @(
-  "-3", "scripts/parallel_simulate_ai_vs_ai.py",
-  "$TrainGames",
-  "--workers", "$Workers",
-  "--output", $trainLog,
-  "--",
-  "--log-mode=train",
-  "--policy-human=$PolicyHuman",
-  "--policy-ai=$PolicyAi"
-)
+if (-not [string]::IsNullOrWhiteSpace($LeagueConfig)) {
+  $genArgs = @(
+    "-3", "scripts/run_league_selfplay.py",
+    "--config", $LeagueConfig,
+    "--total-games", "$TrainGames",
+    "--workers", "$Workers",
+    "--chunk-games", "$LeagueChunkGames",
+    "--output", $trainLog
+  )
+} else {
+  $genArgs = @(
+    "-3", "scripts/run_parallel_selfplay.py",
+    "$TrainGames",
+    "--workers", "$Workers",
+    "--output", $trainLog,
+    "--",
+    "--log-mode=train",
+    "--policy-human=$PolicyHuman",
+    "--policy-ai=$PolicyAi"
+  )
 
-if (-not [string]::IsNullOrWhiteSpace($PolicyModelHuman)) {
-  $genArgs += "--policy-model-human=$PolicyModelHuman"
-}
-if (-not [string]::IsNullOrWhiteSpace($ValueModelHuman)) {
-  $genArgs += "--value-model-human=$ValueModelHuman"
-}
-if (-not [string]::IsNullOrWhiteSpace($PolicyModelAi)) {
-  $genArgs += "--policy-model-ai=$PolicyModelAi"
-}
-if (-not [string]::IsNullOrWhiteSpace($ValueModelAi)) {
-  $genArgs += "--value-model-ai=$ValueModelAi"
-}
-if ($ModelOnly) {
-  $genArgs += "--model-only"
+  if (-not [string]::IsNullOrWhiteSpace($PolicyModelHuman)) {
+    $genArgs += "--policy-model-human=$PolicyModelHuman"
+  }
+  if (-not [string]::IsNullOrWhiteSpace($ValueModelHuman)) {
+    $genArgs += "--value-model-human=$ValueModelHuman"
+  }
+  if (-not [string]::IsNullOrWhiteSpace($PolicyModelAi)) {
+    $genArgs += "--policy-model-ai=$PolicyModelAi"
+  }
+  if (-not [string]::IsNullOrWhiteSpace($ValueModelAi)) {
+    $genArgs += "--value-model-ai=$ValueModelAi"
+  }
+  if ($ModelOnly) {
+    $genArgs += "--model-only"
+  }
 }
 
 Write-Host "> py $($genArgs -join ' ')"
@@ -78,3 +91,4 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Fast loop completed."
 Write-Host "Train log: $trainLog"
 Write-Host "Tag: $baseTag"
+

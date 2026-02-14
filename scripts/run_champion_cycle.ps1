@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$Champion = "heuristic_v1",
   [string]$Challenger = "random_v2",
   [int]$GamesPerSide = 100000,
@@ -37,6 +37,12 @@ function Ratio {
   return $Numerator / $Denominator
 }
 
+function NumOrZero {
+  param($Value)
+  if ($null -eq $Value) { return 0.0 }
+  try { return [double]$Value } catch { return 0.0 }
+}
+
 function Save-State {
   param([string]$Path, $Obj)
   $Obj | ConvertTo-Json -Depth 8 | Set-Content -Path $Path -Encoding utf8
@@ -60,7 +66,7 @@ function Run-ParallelSim {
     [int]$WorkerCount
   )
   $args = @(
-    "-3", "scripts/parallel_simulate_ai_vs_ai.py",
+    "-3", "scripts/run_parallel_selfplay.py",
     "$Games",
     "--workers", "$WorkerCount",
     "--output", $OutPath,
@@ -142,9 +148,24 @@ while ([int]$state.round -le [int]$state.rounds) {
     $challengerWinRateAll = Ratio -Numerator $challengerWins -Denominator $total
     $challengerWinRateDecisive = Ratio -Numerator $challengerWins -Denominator $decisive
 
+    # Gold-first metric (primary), win rate is secondary.
+    # run_a: challenger=human, run_b: challenger=ai
+    $rep1Eco = $rep1.economy
+    $rep2Eco = $rep2.economy
+    $challengerAvgGoldDelta =
+      (NumOrZero($rep1Eco.averageGoldDeltaHuman) + (-(NumOrZero($rep2Eco.averageGoldDeltaHuman)))) / 2.0
+    $challengerCumGold1000 =
+      (NumOrZero($rep1Eco.cumulativeGoldDeltaOver1000) + (-(NumOrZero($rep2Eco.cumulativeGoldDeltaOver1000)))) / 2.0
+
     $championBefore = [string]$state.champion
     $challengerBefore = [string]$state.challenger
-    $promoted = $challengerWinRateDecisive -ge $PromoteThreshold
+    if ($challengerAvgGoldDelta -gt 0) {
+      $promoted = $true
+    } elseif ($challengerAvgGoldDelta -lt 0) {
+      $promoted = $false
+    } else {
+      $promoted = $challengerWinRateDecisive -ge $PromoteThreshold
+    }
     if ($promoted) {
       $oldChampion = $state.champion
       $state.champion = $state.challenger
@@ -161,6 +182,8 @@ while ([int]$state.round -le [int]$state.rounds) {
       challenger_wins = $challengerWins
       champion_wins = $championWins
       draws = $draws
+      challenger_avg_gold_delta = $challengerAvgGoldDelta
+      challenger_cum_gold_1000 = $challengerCumGold1000
       challenger_win_rate_all = $challengerWinRateAll
       challenger_win_rate_decisive = $challengerWinRateDecisive
       promote_threshold = $PromoteThreshold
@@ -185,6 +208,8 @@ while ([int]$state.round -le [int]$state.rounds) {
     Write-Host "  challenger wins : $challengerWins"
     Write-Host "  champion wins   : $championWins"
     Write-Host "  draws           : $draws"
+    Write-Host ("  challenger avg_gold_delta : {0:N4}" -f $challengerAvgGoldDelta)
+    Write-Host ("  challenger cum_gold_1000  : {0:N2}" -f $challengerCumGold1000)
     Write-Host ("  challenger WR (decisive): {0:P2}" -f $challengerWinRateDecisive)
     Write-Host ("  threshold             : {0:P2}" -f $PromoteThreshold)
     Write-Host "  promoted         : $promoted"
@@ -207,3 +232,4 @@ while ([int]$state.round -le [int]$state.rounds) {
 
 Write-Host "Cycle complete. Champion: $($state.champion) | Challenger: $($state.challenger)"
 Write-Host "State file kept for audit/resume metadata: $statePath"
+

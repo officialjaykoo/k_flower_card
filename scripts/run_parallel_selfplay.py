@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 import argparse
 import json
 import os
@@ -22,12 +22,12 @@ def build_default_out():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run simulate-ai-vs-ai.mjs in parallel workers and merge outputs.")
+    parser = argparse.ArgumentParser(description="Run selfplay_simulator.mjs in parallel workers and merge outputs.")
     parser.add_argument("games", type=int, help="Total number of games.")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers.")
     parser.add_argument("--output", default=None, help="Merged JSONL output path.")
     parser.add_argument("--node", default="node", help="Node executable.")
-    parser.add_argument("--script", default="scripts/simulate-ai-vs-ai.mjs", help="Path to simulate script.")
+    parser.add_argument("--script", default="scripts/selfplay_simulator.mjs", help="Path to simulate script.")
     parser.add_argument("--keep-shards", action="store_true", help="Keep worker shard outputs.")
     args, passthrough = parser.parse_known_args()
 
@@ -70,6 +70,13 @@ def main():
     draws = 0
     first_score_sum = 0.0
     second_score_sum = 0.0
+    human_gold_sum = 0.0
+    ai_gold_sum = 0.0
+    human_gold_delta_sum = 0.0
+    first_gold_sum = 0.0
+    second_gold_sum = 0.0
+    first1000_human_gold_delta_sum = 0.0
+    first1000_count = 0
 
     with open(out_path, "w", encoding="utf-8") as fout:
         for shard in shard_paths:
@@ -97,6 +104,19 @@ def main():
                     score = obj.get("score") or {}
                     first_score_sum += float(score.get("first") or 0)
                     second_score_sum += float(score.get("second") or 0)
+                    gold = obj.get("gold") or {}
+                    g_h = float(gold.get("human") or 0)
+                    g_a = float(gold.get("ai") or 0)
+                    g_f = float(gold.get("first") or 0)
+                    g_s = float(gold.get("second") or 0)
+                    human_gold_sum += g_h
+                    ai_gold_sum += g_a
+                    human_gold_delta_sum += g_h - g_a
+                    first_gold_sum += g_f
+                    second_gold_sum += g_s
+                    if first1000_count < 1000:
+                        first1000_human_gold_delta_sum += g_h - g_a
+                        first1000_count += 1
 
     report_path = out_path[:-6] + "-report.json" if out_path.endswith(".jsonl") else out_path + "-report.json"
     games = max(1, args.games)
@@ -112,6 +132,17 @@ def main():
             "averageScoreFirst": first_score_sum / games,
             "averageScoreSecond": second_score_sum / games,
         },
+        "economy": {
+            "averageGoldHuman": human_gold_sum / games,
+            "averageGoldAi": ai_gold_sum / games,
+            "averageGoldDeltaHuman": human_gold_delta_sum / games,
+            "averageGoldFirst": first_gold_sum / games,
+            "averageGoldSecond": second_gold_sum / games,
+            "averageGoldDeltaFirst": (first_gold_sum - second_gold_sum) / games,
+            "cumulativeGoldDeltaOver1000": (human_gold_delta_sum / games) * 1000,
+            "cumulativeGoldDeltaFirst1000": first1000_human_gold_delta_sum,
+        },
+        "primaryMetric": "averageGoldDeltaHuman",
         "workers": args.workers,
         "shards": shard_paths,
     }
@@ -132,3 +163,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
