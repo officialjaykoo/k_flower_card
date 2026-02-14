@@ -25,6 +25,8 @@ export default function GameBoard({
   replayFrame,
   formatActionText,
   formatEventsText,
+  modelOptions,
+  aiPlayProbMap,
   openingPick,
   onOpeningPick,
   onReplayToggle,
@@ -80,6 +82,9 @@ export default function GameBoard({
             interactive={canSelect}
             onClick={() => canSelect && onPlayCard(card.id)}
           />
+          {playerKey === "ai" && typeof aiPlayProbMap?.[card.id] === "number" ? (
+            <span className="hand-prob-badge">{`${(aiPlayProbMap[card.id] * 100).toFixed(1)}%`}</span>
+          ) : null}
           {monthMatched ? <span className="hand-month-badge">매치</span> : null}
         </div>
       );
@@ -253,12 +258,33 @@ export default function GameBoard({
   const renderCenterStatusCard = (playerKey) => {
     const isActive = state.currentTurn === playerKey && state.phase !== "resolution";
     const player = state.players[playerKey];
+    const isAiSlot = participantType(ui, playerKey) === "ai";
     return (
       <div key={`center-status-${playerKey}`} className={`status-card compact ${isActive ? "turn-active" : ""}`}>
         <div className="status-head">
           <div className="turn-tag">{turnRole(playerKey)}</div>
         </div>
-        <div className="status-name">{player.label}</div>
+        <div className="status-name">
+          {isAiSlot ? (
+            <select
+              value={ui.modelPicks?.[playerKey] || (playerKey === "human" ? "sendol" : "dolbaram")}
+              onChange={(e) =>
+                setUi((u) => ({
+                  ...u,
+                  modelPicks: { ...(u.modelPicks || {}), [playerKey]: e.target.value }
+                }))
+              }
+            >
+              {(modelOptions || []).map((opt) => (
+                <option key={`status-model-${playerKey}-${opt.value}`} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            player.label
+          )}
+        </div>
         <div className="status-meta">골드 {formatGold(player.gold)}</div>
       </div>
     );

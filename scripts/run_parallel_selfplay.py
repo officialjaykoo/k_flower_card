@@ -22,6 +22,9 @@ def build_default_out():
 
 
 def main():
+    if os.environ.get("NO_SIMULATION") == "1":
+        raise RuntimeError("Simulation blocked: NO_SIMULATION=1")
+
     parser = argparse.ArgumentParser(description="Run selfplay_simulator.mjs in parallel workers and merge outputs.")
     parser.add_argument("games", type=int, help="Total number of games.")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers.")

@@ -4,31 +4,31 @@
   "chunk_games": 20000,
   "focal": {
     "name": "dolbaram",
-    "fallback_policy": "heuristic_v2",
+    "fallback_policy": "heuristic_v3",
     "policy_model": "models/policy-dolbaram.json",
     "value_model": "models/value-dolbaram.json"
   },
   "opponents": [
     {
       "name": "sendol",
-      "fallback_policy": "heuristic_v1",
+      "fallback_policy": "heuristic_v3",
       "policy_model": "models/policy-sendol.json",
       "value_model": "models/value-sendol.json",
       "weight": 0.5
     },
     {
-      "name": "heuristic_v1",
-      "fallback_policy": "heuristic_v1",
+      "name": "heuristic_v3-a",
+      "fallback_policy": "heuristic_v3",
       "weight": 0.25
     },
     {
-      "name": "heuristic_v2",
-      "fallback_policy": "heuristic_v2",
+      "name": "heuristic_v3-b",
+      "fallback_policy": "heuristic_v3",
       "weight": 0.15
     },
     {
-      "name": "random_v2",
-      "fallback_policy": "random_v2",
+      "name": "heuristic_v3-c",
+      "fallback_policy": "heuristic_v3",
       "weight": 0.1
     }
   ]

@@ -15,69 +15,40 @@ PAD_TOKEN = "<PAD>"
 UNK_TOKEN = "<UNK>"
 GO_STOP_ACTIONS = {"go": 0, "stop": 1}
 NUMERIC_KEYS = [
-    "deck_count",
-    "hand_self",
-    "hand_opp",
-    "go_self",
-    "go_opp",
-    "cand_count",
+    "opp_danger_level",
+    "my_win_progress",
+    "deck_end_ratio",
+    "high_value_match",
+    "jokbo_potential",
+    "can_match",
     "immediate_reward",
-    "gold_self",
-    "gold_opp",
-    "bomb_months",
-    "shaking_months",
-    "captured_cards",
-    "ev_ttak",
-    "ev_ppuk",
-    "ev_jjob",
-    "ev_shaking",
-    "ev_bomb",
-    "ev_ddadak",
-    "ev_ssul",
-    "ev_jabbeok",
-    "ev_yeon_ppuk",
-    "steal_pi_total",
-    "steal_gold_total",
-    "go_declared",
-    "go_success",
-    "go_stop_efficiency",
-    "pi_state",
-    "gwang_state",
-    "dan_state",
-    "hongdan_state",
-    "cheongdan_state",
-    "chodan_state",
-    "godori_state",
     "pi_bak_risk",
     "gwang_bak_risk",
     "mong_bak_risk",
     "shake_multiplier_state",
-    "go_3plus_state",
-    "go_4plus_state",
-    "go_5plus_state",
-    "go_6plus_state",
-    "nagari_state",
-    "carryover_multiplier_state",
+    "gold_self",
+    "gold_opp",
+    "hand_self",
+    "hand_opp",
 ]
 
 # Feature-priority weights for score-critical states.
 # Applied after per-feature normalization so importance differences remain.
 NUMERIC_FEATURE_WEIGHTS = {
+    "opp_danger_level": 2.2,
+    "my_win_progress": 2.0,
+    "deck_end_ratio": 1.2,
+    "high_value_match": 1.8,
+    "jokbo_potential": 1.5,
+    "can_match": 1.6,
+    "immediate_reward": 1.3,
     "pi_bak_risk": 2.0,
     "gwang_bak_risk": 2.2,
     "mong_bak_risk": 2.0,
-    "go_3plus_state": 1.8,
-    "go_4plus_state": 2.2,
-    "go_5plus_state": 2.6,
-    "go_6plus_state": 3.0,
-    "nagari_state": 1.8,
-    "carryover_multiplier_state": 2.4,
     "shake_multiplier_state": 2.0,
-    "hongdan_state": 1.3,
-    "cheongdan_state": 1.3,
-    "chodan_state": 1.3,
-    "godori_state": 1.6,
 }
+
+_CATALOG_CACHE = {}
 
 
 def expand_inputs(patterns):
@@ -192,79 +163,218 @@ def _extract_first_number(line, names, default=0.0):
     return float(default)
 
 
+def _load_catalog(path):
+    if not path:
+        return None
+    if path in _CATALOG_CACHE:
+        return _CATALOG_CACHE[path]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _CATALOG_CACHE[path] = data
+            return data
+    except Exception:
+        pass
+    _CATALOG_CACHE[path] = None
+    return None
+
+
+def _card_id_from_item(item):
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        cid = item.get("id")
+        if isinstance(cid, str):
+            return cid
+    return None
+
+
+def _extract_card_ids(items):
+    out = []
+    if not isinstance(items, list):
+        return out
+    for it in items:
+        cid = _card_id_from_item(it)
+        if cid:
+            out.append(cid)
+    return out
+
+
+def _month_from_card_id(card_id):
+    if not isinstance(card_id, str):
+        return None
+    head = card_id.split("-", 1)[0]
+    try:
+        return int(head)
+    except Exception:
+        return None
+
+
+def _card_meta(line, card_id):
+    meta = None
+    catalog = _load_catalog(line.get("catalogPath"))
+    if isinstance(catalog, dict):
+        cand = catalog.get(card_id)
+        if isinstance(cand, dict):
+            meta = cand
+    month = None
+    category = None
+    if isinstance(meta, dict):
+        try:
+            month = int(meta.get("month")) if meta.get("month") is not None else None
+        except Exception:
+            month = None
+        cat = meta.get("category")
+        if isinstance(cat, str):
+            category = cat
+    if month is None:
+        month = _month_from_card_id(card_id)
+    return month, category
+
+
+def _category_alias(cat):
+    if not isinstance(cat, str):
+        return None
+    c = cat.strip().lower()
+    if c == "kwang":
+        return "gwang"
+    if c == "five":
+        return "yeol"
+    if c == "ribbon":
+        return "ttie"
+    if c == "junk":
+        return "pee"
+    return c
+
+
 def extract_numeric(line, trace, actor):
     dc = trace.get("dc") or {}
     sp = trace.get("sp") or {}
     fv = trace.get("fv") or {}
     ev = fv.get("eventCounts") or {}
-    cap = trace.get("cap") or {}
-    steals = line.get("steals") or {}
-    go_decision = line.get("goDecision") or {}
-    cands = len(sp.get("cards") or sp.get("boardCardIds") or sp.get("options") or [])
-    captured_cards = len(cap.get("hand") or []) + len(cap.get("flip") or [])
-    event_freq = line.get("eventFrequency") or {}
-    # Best-effort high-impact scoring states.
-    # If not present in log schema, they stay 0.
-    go_self = float(dc.get("goCountSelf") or 0)
+    opp = "ai" if actor == "human" else "human"
+
     shake_events = _to_float(ev.get("shaking"), 0.0)
-    nagari_state = 1.0 if bool(line.get("nagari", False)) else 0.0
-    carry_mult = _extract_first_number(
-        line,
-        ["carryOverMultiplier", "carry_over_multiplier", "nextRoundMultiplier", "next_round_multiplier"],
-        default=1.0,
+    deck_count = float(dc.get("deckCount") or 0.0)
+    init_deck_count = _extract_first_number(line, ["deckCount", "boardDeckCount"], default=22.0)
+    if init_deck_count <= 0:
+        init_deck_count = 22.0
+    deck_end_ratio = max(0.0, min(1.0, 1.0 - (deck_count / init_deck_count)))
+
+    hand_self_raw = float(dc.get("handCountSelf") or 0.0)
+    hand_opp_raw = float(dc.get("handCountOpp") or 0.0)
+    hand_self = max(0.0, min(1.0, hand_self_raw / 10.0))
+    hand_opp = max(0.0, min(1.0, hand_opp_raw / 10.0))
+
+    hand_ids = _extract_card_ids((dc.get("handCards") or [])) or _extract_card_ids(sp.get("cards") or [])
+    board_ids = _extract_card_ids(dc.get("boardCards") or []) or _extract_card_ids(sp.get("boardCards") or [])
+    if not board_ids and isinstance(sp.get("boardCardIds"), list):
+        board_ids = _extract_card_ids(sp.get("boardCardIds"))
+    hand_months = {m for m in (_month_from_card_id(c) for c in hand_ids) if m is not None}
+    board_months = {m for m in (_month_from_card_id(c) for c in board_ids) if m is not None}
+    can_match = 1.0 if hand_months and board_months and (hand_months & board_months) else 0.0
+
+    hand_by_month = {}
+    board_by_month = {}
+    for cid in hand_ids:
+        m, cat = _card_meta(line, cid)
+        if m is None:
+            continue
+        hand_by_month.setdefault(m, set()).add(cat or "?")
+    for cid in board_ids:
+        m, cat = _card_meta(line, cid)
+        if m is None:
+            continue
+        board_by_month.setdefault(m, set()).add(cat or "?")
+    high_value_months = hand_months & board_months
+    high_value_match = 0.0
+    godori_months = {2, 4, 8}
+    for m in high_value_months:
+        hand_cats = hand_by_month.get(m, set())
+        board_cats = board_by_month.get(m, set())
+        if ("kwang" in hand_cats or "kwang" in board_cats or "five" in hand_cats or "five" in board_cats or m in godori_months):
+            high_value_match = 1.0
+            break
+
+    pi_self = _extract_actor_stat(line, actor, ["pi", "piCount", "junk", "junkCount"])
+    gwang_self = _extract_actor_stat(line, actor, ["gwang", "gwangCount", "bright", "brightCount"])
+    ribbon_self = _extract_actor_stat(line, actor, ["dan", "danCount", "tti", "ribbon", "ribbonCount"])
+    hongdan_self = _extract_actor_stat(line, actor, ["hongdan", "hongDan", "redDan"])
+    cheongdan_self = _extract_actor_stat(line, actor, ["cheongdan", "cheongDan", "blueDan"])
+    chodan_self = _extract_actor_stat(line, actor, ["chodan", "choDan"])
+    godori_self = _extract_actor_stat(line, actor, ["godori", "goDori"])
+
+    go_self = float(dc.get("goCountSelf") or 0.0)
+    go_opp = float(dc.get("goCountOpp") or 0.0)
+    pi_opp = _extract_actor_stat(line, opp, ["pi", "piCount", "junk", "junkCount"])
+    gwang_opp = _extract_actor_stat(line, opp, ["gwang", "gwangCount", "bright", "brightCount"])
+
+    score_self_now = _to_float(dc.get("currentScoreSelf"), 0.0)
+    score_opp_now = _to_float(dc.get("currentScoreOpp"), 0.0)
+    opp_danger_level = (
+        0.35 * min(1.0, go_opp / 3.0)
+        + 0.25 * min(1.0, max(0.0, 1.0 - hand_opp))
+        + 0.20 * min(1.0, pi_opp / 10.0)
+        + 0.20 * min(1.0, gwang_opp / 3.0)
     )
+    opp_danger_level = max(opp_danger_level, min(1.0, score_opp_now / 7.0))
+    opp_danger_level = max(0.0, min(1.0, opp_danger_level))
+
+    my_win_progress = (
+        0.30 * min(1.0, go_self / 3.0)
+        + 0.25 * min(1.0, pi_self / 10.0)
+        + 0.20 * min(1.0, gwang_self / 3.0)
+        + 0.15 * can_match
+        + 0.10 * min(1.0, max(0.0, 1.0 - hand_self))
+    )
+    my_win_progress = max(my_win_progress, min(1.0, score_self_now / 7.0))
+    my_win_progress = max(0.0, min(1.0, my_win_progress))
+    jp = trace.get("jp") or {}
+    if int(jp.get("completed_now") or 0) == 1:
+        jokbo_potential = 1.0
+    else:
+        jokbo_potential = max(
+            min(1.0, max(hongdan_self, cheongdan_self, chodan_self) / 3.0),
+            min(1.0, godori_self / 5.0),
+            min(1.0, ribbon_self / 7.0),
+        )
+    gold_self_raw = float(dc.get("goldSelf") or 0.0)
+    gold_opp_raw = float(dc.get("goldOpp") or 0.0)
+    gold_self = max(0.0, min(2.0, math.log1p(max(0.0, gold_self_raw)) / 10.0))
+    gold_opp = max(0.0, min(2.0, math.log1p(max(0.0, gold_opp_raw)) / 10.0))
+
     return {
-        "deck_count": float(dc.get("deckCount") or 0),
-        "hand_self": float(dc.get("handCountSelf") or 0),
-        "hand_opp": float(dc.get("handCountOpp") or 0),
-        "go_self": go_self,
-        "go_opp": float(dc.get("goCountOpp") or 0),
-        "cand_count": float(cands),
-        "immediate_reward": float(trace.get("ir") or 0),
-        "gold_self": float(dc.get("goldSelf") or 0),
-        "gold_opp": float(dc.get("goldOpp") or 0),
-        "bomb_months": float(len(sp.get("bombMonths") or [])),
-        "shaking_months": float(len(sp.get("shakingMonths") or [])),
-        "captured_cards": float(captured_cards),
-        "ev_ttak": _to_float(ev.get("ttak"), _to_float(event_freq.get("ttak"), 0.0)),
-        "ev_ppuk": _to_float(ev.get("ppuk"), _to_float(event_freq.get("ppuk"), 0.0)),
-        "ev_jjob": _to_float(ev.get("jjob"), _to_float(event_freq.get("jjob"), 0.0)),
-        "ev_shaking": _to_float(ev.get("shaking"), 0.0),
-        "ev_bomb": _to_float(ev.get("bomb"), 0.0),
-        "ev_ddadak": _to_float(ev.get("ddadak"), _to_float(event_freq.get("ddadak"), 0.0)),
-        "ev_ssul": _to_float(ev.get("ssul"), _to_float(event_freq.get("ssul"), 0.0)),
-        "ev_jabbeok": _to_float(ev.get("jabbeok"), 0.0),
-        "ev_yeon_ppuk": _to_float(ev.get("yeonPpuk"), 0.0),
-        "steal_pi_total": _to_float(steals.get("piTotal"), 0.0),
-        "steal_gold_total": _to_float(steals.get("goldTotal"), 0.0),
-        "go_declared": _to_float(go_decision.get("declared"), 0.0),
-        "go_success": _to_float(go_decision.get("success"), 0.0),
-        "go_stop_efficiency": _to_float(line.get("goStopEfficiency"), 0.0),
-        # Optional extraction; train logs often lack these, then they remain 0.
-        "pi_state": _extract_actor_stat(line, actor, ["pi", "piCount", "junk", "junkCount"]),
-        "gwang_state": _extract_actor_stat(line, actor, ["gwang", "gwangCount", "bright", "brightCount"]),
-        "dan_state": _extract_actor_stat(line, actor, ["dan", "danCount", "tti", "ribbon", "ribbonCount"]),
-        "hongdan_state": _extract_actor_stat(line, actor, ["hongdan", "hongDan", "redDan"]),
-        "cheongdan_state": _extract_actor_stat(line, actor, ["cheongdan", "cheongDan", "blueDan"]),
-        "chodan_state": _extract_actor_stat(line, actor, ["chodan", "choDan"]),
-        "godori_state": _extract_actor_stat(line, actor, ["godori", "goDori"]),
-        "pi_bak_risk": _extract_actor_stat(line, actor, ["piBakRisk", "pibakRisk"]),
-        "gwang_bak_risk": _extract_actor_stat(line, actor, ["gwangBakRisk"]),
-        "mong_bak_risk": _extract_actor_stat(line, actor, ["mongBakRisk", "meongBakRisk"]),
-        # shaking affects multiplier in your rules; at minimum we expose current go + shaking signal.
-        "shake_multiplier_state": max(0.0, shake_events) + max(0.0, go_self),
-        "go_3plus_state": 1.0 if go_self >= 3.0 else 0.0,
-        "go_4plus_state": 1.0 if go_self >= 4.0 else 0.0,
-        "go_5plus_state": 1.0 if go_self >= 5.0 else 0.0,
-        "go_6plus_state": 1.0 if go_self >= 6.0 else 0.0,
-        "nagari_state": nagari_state,
-        "carryover_multiplier_state": max(1.0, carry_mult),
+        "opp_danger_level": opp_danger_level,
+        "my_win_progress": my_win_progress,
+        "deck_end_ratio": deck_end_ratio,
+        "high_value_match": high_value_match,
+        "jokbo_potential": jokbo_potential,
+        "can_match": can_match,
+        "immediate_reward": float(trace.get("ir") or 0.0),
+        "pi_bak_risk": _to_float(dc.get("piBakRisk"), _extract_actor_stat(line, actor, ["piBakRisk", "pibakRisk"])),
+        "gwang_bak_risk": _to_float(dc.get("gwangBakRisk"), _extract_actor_stat(line, actor, ["gwangBakRisk"])),
+        "mong_bak_risk": _to_float(dc.get("mongBakRisk"), _extract_actor_stat(line, actor, ["mongBakRisk", "meongBakRisk"])),
+        "shake_multiplier_state": max(0.0, shake_events),
+        "gold_self": gold_self,
+        "gold_opp": gold_opp,
+        "hand_self": hand_self,
+        "hand_opp": hand_opp,
     }
 
 
-def extract_tokens(trace, decision_type, actor):
+def extract_tokens(line, trace, decision_type, actor):
     dc = trace.get("dc") or {}
-    return [
+    score = line.get("score") or {}
+    opp = "ai" if actor == "human" else "human"
+    self_score = float(score.get(actor) or 0.0)
+    opp_score = float(score.get(opp) or 0.0)
+    score_diff = self_score - opp_score
+    bak_escape = line.get("bakEscape") or {}
+    loser = bak_escape.get("loser")
+    escaped = bak_escape.get("escaped")
+    actor_bak = _extract_actor_stat(line, actor, ["piBak", "pi", "gwangBak", "gwang", "mongBak"])
+    tokens = [
         f"phase={dc.get('phase','?')}",
         f"order={trace.get('o','?')}",
         f"decision_type={decision_type}",
@@ -274,7 +384,68 @@ def extract_tokens(trace, decision_type, actor):
         f"self_go={int(dc.get('goCountSelf') or 0)}",
         f"opp_go={int(dc.get('goCountOpp') or 0)}",
         f"actor={actor}",
+        f"self_score_b={int(self_score // 2)}",
+        f"opp_score_b={int(opp_score // 2)}",
+        f"score_diff_b={int(score_diff // 2)}",
+        f"is_nagari={1 if bool(line.get('nagari', False)) else 0}",
+        f"is_bak_loser={1 if (loser == actor and escaped is False) else 0}",
+        f"bak_signal={int(actor_bak)}",
     ]
+    hand_ids = _extract_card_ids((dc.get("handCards") or [])) or _extract_card_ids((trace.get("sp") or {}).get("cards") or [])
+    board_ids = _extract_card_ids((dc.get("boardCards") or [])) or _extract_card_ids((trace.get("sp") or {}).get("boardCards") or [])
+    if not board_ids and isinstance((trace.get("sp") or {}).get("boardCardIds"), list):
+        board_ids = _extract_card_ids((trace.get("sp") or {}).get("boardCardIds"))
+    hand_info = []
+    board_info = []
+    for cid in hand_ids:
+        m, cat = _card_meta(line, cid)
+        hand_info.append((m, cat))
+        if m is not None:
+            tokens.append(f"hand_month={m}")
+        if cat:
+            tokens.append(f"hand_cat={cat}")
+    for cid in board_ids:
+        m, cat = _card_meta(line, cid)
+        board_info.append((m, cat))
+        if m is not None:
+            tokens.append(f"board_month={m}")
+        if cat:
+            tokens.append(f"board_cat={cat}")
+    cap = trace.get("cap") or {}
+    for cid in _extract_card_ids(cap.get("hand") or []) + _extract_card_ids(cap.get("flip") or []):
+        m, cat = _card_meta(line, cid)
+        if m is not None:
+            tokens.append(f"cap_self_month={m}")
+        if cat:
+            tokens.append(f"cap_self_cat={cat}")
+    hand_months = {m for m in (_month_from_card_id(c) for c in hand_ids) if m is not None}
+    board_months = {m for m in (_month_from_card_id(c) for c in board_ids) if m is not None}
+    tokens.append(f"can_match={1 if hand_months and board_months and (hand_months & board_months) else 0}")
+
+    # Semantic tokens for better generalization than raw card IDs.
+    for m in sorted({m for m, _ in hand_info if m is not None}):
+        tokens.append(f"hand_m{m}")
+    for m in sorted({m for m, _ in board_info if m is not None}):
+        tokens.append(f"board_m{m}")
+    for cat_alias in sorted({_category_alias(cat) for _, cat in hand_info if _category_alias(cat)}):
+        tokens.append(f"hand_{cat_alias}")
+    for cat_alias in sorted({_category_alias(cat) for _, cat in board_info if _category_alias(cat)}):
+        tokens.append(f"board_{cat_alias}")
+
+    matchable_months = hand_months & board_months
+    if matchable_months:
+        tokens.append("can_match_any")
+    else:
+        tokens.append("can_match_none")
+    matchable_board_aliases = set()
+    for m, cat in board_info:
+        if m in matchable_months:
+            ca = _category_alias(cat)
+            if ca:
+                matchable_board_aliases.add(ca)
+    for ca in sorted(matchable_board_aliases):
+        tokens.append(f"can_match_{ca}")
+    return tokens
 
 
 def target_value(line, actor, value_scale):
@@ -320,6 +491,8 @@ def build_cache(input_paths, cache_path, max_samples, value_scale):
     token_counter = {}
     action_set = set()
     raw = []
+    go_stop_count = 0
+    decision_type_counts = {}
 
     for path in input_paths:
         with open(path, "r", encoding="utf-8") as f:
@@ -338,8 +511,11 @@ def build_cache(input_paths, cache_path, max_samples, value_scale):
                     tv = target_value(line, actor, value_scale)
                     if tv is None:
                         continue
-                    tokens = extract_tokens(trace, decision_type, actor)
+                    tokens = extract_tokens(line, trace, decision_type, actor)
                     numeric = extract_numeric(line, trace, actor)
+                    decision_type_counts[decision_type] = decision_type_counts.get(decision_type, 0) + 1
+                    if chosen in GO_STOP_ACTIONS:
+                        go_stop_count += 1
                     raw.append(
                         {
                             "tokens": tokens,
@@ -409,6 +585,12 @@ def build_cache(input_paths, cache_path, max_samples, value_scale):
         "numeric_feature_weights": NUMERIC_FEATURE_WEIGHTS,
         "numeric_scale": numeric_scale,
         "samples": samples,
+        "stats": {
+            "go_stop_samples": int(go_stop_count),
+            "decision_type_counts": decision_type_counts,
+            "action_has_go": bool("go" in action_to_idx),
+            "action_has_stop": bool("stop" in action_to_idx),
+        },
     }
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     torch.save(payload, cache_path)
@@ -521,7 +703,8 @@ def evaluate(model, samples, action_size, batch_size, device):
                 go_stop_value_weight=1.0,
             )
             p_logits, gs_logits, value_p = model(token_ids_flat, offsets, numeric)
-            p_logits = p_logits.masked_fill(~cand_mask, -1e9)
+            mask_fill = torch.finfo(p_logits.dtype).min
+            p_logits = p_logits.masked_fill(~cand_mask, mask_fill)
             pred = torch.argmax(p_logits, dim=1)
             acc_n += int(torch.sum(pred == target).item())
             valid_gs = gs_target >= 0
@@ -563,8 +746,11 @@ def main():
     parser.add_argument("--epochs", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr-min", type=float, default=1e-6)
     parser.add_argument("--weight-decay", type=float, default=1e-6)
     parser.add_argument("--value-loss-weight", type=float, default=0.7)
+    parser.add_argument("--value-loss-weight-start", type=float, default=0.1)
+    parser.add_argument("--value-loss-weight-end", type=float, default=None)
     parser.add_argument("--go-stop-policy-weight", type=float, default=1.8)
     parser.add_argument("--go-stop-value-weight", type=float, default=1.3)
     parser.add_argument("--value-scale", type=float, default=10.0)
@@ -591,6 +777,7 @@ def main():
         raise RuntimeError("No samples in cache.")
     action_size = len(cache["idx_to_action"])
     vocab_size = len(cache["token_to_idx"])
+    cache_stats = cache.get("stats") or {}
 
     order = list(range(len(samples)))
     random.Random(args.seed).shuffle(order)
@@ -599,6 +786,24 @@ def main():
     valid_ids = order[split:] if split < len(order) else []
     train_samples = [samples[i] for i in train_ids]
     valid_samples = [samples[i] for i in valid_ids]
+
+    print(
+        json.dumps(
+            {
+                "dataset_stats": {
+                    "samples_total": len(samples),
+                    "go_stop_samples": int(cache_stats.get("go_stop_samples", 0)),
+                    "go_stop_ratio": float(cache_stats.get("go_stop_samples", 0)) / max(1, len(samples)),
+                    "action_has_go": bool(cache_stats.get("action_has_go", False)),
+                    "action_has_stop": bool(cache_stats.get("action_has_stop", False)),
+                    "decision_type_counts": cache_stats.get("decision_type_counts", {}),
+                    "split_train": len(train_samples),
+                    "split_valid": len(valid_samples),
+                }
+            },
+            ensure_ascii=False,
+        )
+    )
 
     model = KFlowerDualNet(
         vocab_size=vocab_size,
@@ -609,13 +814,17 @@ def main():
         dropout=args.dropout,
     ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, args.epochs), eta_min=args.lr_min)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     best = {"loss": float("inf"), "state": None, "epoch": 0}
     bad_epochs = 0
     rng = random.Random(args.seed)
+    value_w_end = args.value_loss_weight if args.value_loss_weight_end is None else args.value_loss_weight_end
 
     for ep in range(args.epochs):
+        phase = 0.0 if args.epochs <= 1 else (ep / (args.epochs - 1))
+        value_w = args.value_loss_weight_start + (value_w_end - args.value_loss_weight_start) * phase
         model.train()
         perm = list(range(len(train_samples)))
         rng.shuffle(perm)
@@ -632,7 +841,8 @@ def main():
             opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=use_amp):
                 p_logits, gs_logits, value_p = model(token_ids_flat, offsets, numeric)
-                p_logits = p_logits.masked_fill(~cand_mask, -1e9)
+                mask_fill = torch.finfo(p_logits.dtype).min
+                p_logits = p_logits.masked_fill(~cand_mask, mask_fill)
                 p_loss_raw = F.cross_entropy(p_logits, target, reduction="none")
                 p_loss = torch.mean(p_loss_raw * gs_policy_weight)
                 valid_gs = gs_target >= 0
@@ -642,10 +852,11 @@ def main():
                     gs_loss = torch.tensor(0.0, dtype=torch.float32, device=device)
                 v_loss_raw = (value_p - value_t) * (value_p - value_t)
                 v_loss = torch.mean(v_loss_raw * gs_value_weight)
-                loss = p_loss + args.value_loss_weight * v_loss + 0.3 * gs_loss
+                loss = p_loss + value_w * v_loss + 0.3 * gs_loss
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
+        scheduler.step()
 
         metrics = evaluate(model, valid_samples, action_size, args.batch_size, device) if valid_samples else {
             "policy_acc": 0.0,
@@ -658,7 +869,9 @@ def main():
             f"epoch {ep + 1}/{args.epochs} "
             f"| valid_policy_acc {metrics['policy_acc']:.4f} "
             f"| valid_go_stop_acc {metrics['go_stop_acc']:.4f} "
-            f"| valid_value_rmse {metrics['value_rmse']:.4f}"
+            f"| valid_value_rmse {metrics['value_rmse']:.4f} "
+            f"| value_w {value_w:.4f} "
+            f"| lr {scheduler.get_last_lr()[0]:.6g}"
         )
 
         if metrics["valid_loss"] < best["loss"]:
@@ -709,7 +922,17 @@ def main():
         "amp_enabled": use_amp,
         "go_stop_policy_weight": args.go_stop_policy_weight,
         "go_stop_value_weight": args.go_stop_value_weight,
-        "value_loss_weight": args.value_loss_weight,
+        "value_loss_weight_start": args.value_loss_weight_start,
+        "value_loss_weight_end": value_w_end,
+        "lr_start": args.lr,
+        "lr_min": args.lr_min,
+        "dataset_stats": {
+            "go_stop_samples": int(cache_stats.get("go_stop_samples", 0)),
+            "go_stop_ratio": float(cache_stats.get("go_stop_samples", 0)) / max(1, len(samples)),
+            "action_has_go": bool(cache_stats.get("action_has_go", False)),
+            "action_has_stop": bool(cache_stats.get("action_has_stop", False)),
+            "decision_type_counts": cache_stats.get("decision_type_counts", {}),
+        },
         "train_metrics": train_metrics,
         "valid_metrics": valid_metrics,
     }

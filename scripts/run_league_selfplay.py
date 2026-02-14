@@ -43,7 +43,7 @@ def weighted_pick(items, rng):
 def build_actor(base):
     return {
         "name": base.get("name", "anon"),
-        "policy": base.get("fallback_policy", "heuristic_v1"),
+        "policy": base.get("fallback_policy", "heuristic_v3"),
         "policy_model": base.get("policy_model", ""),
         "value_model": base.get("value_model", ""),
     }
@@ -58,6 +58,9 @@ def add_actor_args(cmd, role, actor):
 
 
 def main():
+    if os.environ.get("NO_SIMULATION") == "1":
+        raise RuntimeError("Simulation blocked: NO_SIMULATION=1")
+
     parser = argparse.ArgumentParser(description="League self-play generator with weighted opponent pool.")
     parser.add_argument("--config", required=True, help="League config JSON path.")
     parser.add_argument("--total-games", type=int, required=True, help="Total games to generate (even).")

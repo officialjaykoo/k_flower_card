@@ -7,6 +7,7 @@ import {
   initGame,
   createSeededRng,
   playTurn,
+  calculateScore,
   chooseGo,
   chooseStop,
   choosePresidentStop,
@@ -20,13 +21,18 @@ import { buildDeck } from "../src/cards.js";
 import { BOT_POLICIES, botPlay } from "../src/bot.js";
 import { getActionPlayerKey } from "../src/engineRunner.js";
 
+if (process.env.NO_SIMULATION === "1") {
+  console.error("Simulation blocked: NO_SIMULATION=1");
+  process.exit(2);
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_LOG_MODE = "compact";
 const SUPPORTED_LOG_MODES = new Set(["compact", "delta", "train"]);
 const SUPPORTED_POLICIES = new Set(BOT_POLICIES);
-const DEFAULT_POLICY = "random";
+const DEFAULT_POLICY = "heuristic_v3";
 const DECISION_CACHE_MAX = 200000;
 const HASH_CACHE_MAX = 500000;
 
@@ -40,12 +46,10 @@ function setBoundedCache(cache, key, value, maxEntries) {
 
 function normalizePolicyInput(raw) {
   const p = String(raw || DEFAULT_POLICY).trim().toLowerCase();
-  if (p === "heuristic" || p === "smart") return "heuristic_v1";
-  if (p === "smart_v2") return "heuristic_v2";
-  if (p === "random-plus" || p === "plus" || p === "semi_random" || p === "random_plus") {
-    return "random_v2";
+  if (p === "heuristic_v3") {
+    return "heuristic_v3";
   }
-  return p;
+  return "heuristic_v3";
 }
 
 function parseArgs(argv) {
@@ -386,6 +390,7 @@ function selectPool(state, actor) {
   if (state.phase === "playing" && state.currentTurn === actor) {
     return {
       cards: (state.players?.[actor]?.hand || []).map((c) => c.id),
+      boardCards: (state.board || []).map((c) => c.id),
       bombMonths: getDeclarableBombMonths(state, actor),
       shakingMonths: getDeclarableShakingMonths(state, actor)
     };
@@ -412,6 +417,34 @@ function selectPool(state, actor) {
 
 function decisionContext(state, actor) {
   const opp = actor === "human" ? "ai" : "human";
+  const capturedSelf = state.players?.[actor]?.captured || {};
+  const capturedOpp = state.players?.[opp]?.captured || {};
+  const flattenCaptured = (captured) =>
+    [
+      ...(captured.kwang || []),
+      ...(captured.five || []),
+      ...(captured.ribbon || []),
+      ...(captured.junk || [])
+    ]
+      .map((c) => c?.id)
+      .filter((id) => typeof id === "string");
+  const jokboProgress = (playerKey) => {
+    const captured = state.players?.[playerKey]?.captured || {};
+    const ribbons = captured.ribbon || [];
+    const fives = captured.five || [];
+    const ribbonMonths = new Set(ribbons.map((c) => c?.month).filter((m) => Number.isInteger(m)));
+    const fiveMonths = new Set(fives.map((c) => c?.month).filter((m) => Number.isInteger(m)));
+    const countSet = (months, src) => months.reduce((n, m) => n + (src.has(m) ? 1 : 0), 0);
+    const hongdan = countSet([1, 2, 3], ribbonMonths);
+    const cheongdan = countSet([6, 9, 10], ribbonMonths);
+    const chodan = countSet([4, 5, 7], ribbonMonths);
+    const godori = countSet([2, 4, 8], fiveMonths);
+    return { hongdan, cheongdan, chodan, godori };
+  };
+  const jokboSelf = jokboProgress(actor);
+  const jokboOpp = jokboProgress(opp);
+  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
   return {
     phase: state.phase,
     turnNoBefore: (state.turnSeq || 0) + 1,
@@ -421,8 +454,29 @@ function decisionContext(state, actor) {
     goCountSelf: state.players[actor].goCount || 0,
     goCountOpp: state.players[opp].goCount || 0,
     goldSelf: state.players[actor].gold,
-    goldOpp: state.players[opp].gold
+    goldOpp: state.players[opp].gold,
+    handCards: (state.players?.[actor]?.hand || []).map((c) => c.id),
+    boardCards: (state.board || []).map((c) => c.id),
+    capturedCardsSelf: flattenCaptured(capturedSelf),
+    capturedCardsOpp: flattenCaptured(capturedOpp),
+    currentScoreSelf: Number(scoreSelf?.total || 0),
+    currentScoreOpp: Number(scoreOpp?.total || 0),
+    piBakRisk: scoreSelf?.bak?.pi ? 1 : 0,
+    gwangBakRisk: scoreSelf?.bak?.gwang ? 1 : 0,
+    mongBakRisk: scoreSelf?.bak?.mongBak ? 1 : 0,
+    jokboProgressSelf: jokboSelf,
+    jokboProgressOpp: jokboOpp
   };
+}
+
+function jokboCompleted(progress) {
+  if (!progress) return false;
+  return (
+    Number(progress.hongdan || 0) >= 3 ||
+    Number(progress.cheongdan || 0) >= 3 ||
+    Number(progress.chodan || 0) >= 3 ||
+    Number(progress.godori || 0) >= 3
+  );
 }
 
 function stableHash(token, dim) {
@@ -668,6 +722,28 @@ function boardCountFromTurn(turn) {
   return 0;
 }
 
+function weightedImmediateReward(turn, jpCompletedNow, beforeDc, afterDc) {
+  const t = turn || {};
+  const action = t.action || {};
+  const captureBySource = action.captureBySource || { hand: [], flip: [] };
+  const captured = [...(captureBySource.hand || []), ...(captureBySource.flip || [])];
+  let reward = (t.steals?.pi || 0) + (t.steals?.gold || 0) / 100;
+  for (const c of captured) {
+    if (!c) continue;
+    if (c.category === "kwang") reward += 2.0;
+    else if (c.category === "five") reward += 1.0;
+    else if (c.category === "ribbon") reward += 0.4;
+    else if (c.category === "junk") reward += c.tripleJunk ? 0.45 : c.doubleJunk ? 0.3 : 0.15;
+  }
+  if (jpCompletedNow) reward += 5.0;
+  const b = beforeDc || {};
+  const a = afterDc || {};
+  if ((a.piBakRisk || 0) > (b.piBakRisk || 0)) reward += 1.5;
+  if ((a.gwangBakRisk || 0) > (b.gwangBakRisk || 0)) reward += 2.0;
+  if ((a.mongBakRisk || 0) > (b.mongBakRisk || 0)) reward += 1.5;
+  return reward;
+}
+
 function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, policyByActorRef) {
   const turns = (kibo || []).filter((e) => e.type === "turn_end");
   return turns.map((t) => {
@@ -675,10 +751,20 @@ function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, policyB
     const action = t.action || {};
     const matchEvents = action.matchEvents || [];
     const captureBySource = action.captureBySource || { hand: [], flip: [] };
-    const immediateReward = (t.steals?.pi || 0) + (t.steals?.gold || 0) / 100;
     const terminalReward = winner === "draw" ? 0 : winner === actor ? 1 : -1;
-    const before = contextByTurnNo.get(t.turnNo) || null;
+    const turnCtx = contextByTurnNo.get(t.turnNo) || null;
+    const before = turnCtx?.before || null;
+    const after = turnCtx?.after || null;
     const opp = actor === "human" ? "ai" : "human";
+    const jpPre = before?.decisionContext?.jokboProgressSelf || null;
+    const jpPost = after?.decisionContext?.jokboProgressSelf || null;
+    const jpCompletedNow = !!(jokboCompleted(jpPost) && !jokboCompleted(jpPre));
+    const immediateReward = weightedImmediateReward(
+      t,
+      jpCompletedNow,
+      before?.decisionContext || null,
+      after?.decisionContext || null
+    );
 
     return {
       t: t.turnNo,
@@ -707,6 +793,11 @@ function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, policyB
         handCountOppAfter: handCountFromTurn(t, opp),
         eventCounts: t.events || {},
         matchEvents
+      },
+      jp: {
+        pre: jpPre,
+        post: jpPost,
+        completed_now: jpCompletedNow ? 1 : 0
       }
     };
   });
@@ -717,9 +808,19 @@ function buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, po
   return turns.map((t) => {
     const actor = t.actor;
     const action = t.action || {};
-    const immediateReward = (t.steals?.pi || 0) + (t.steals?.gold || 0) / 100;
     const terminalReward = winner === "draw" ? 0 : winner === actor ? 1 : -1;
-    const before = contextByTurnNo.get(t.turnNo) || null;
+    const turnCtx = contextByTurnNo.get(t.turnNo) || null;
+    const before = turnCtx?.before || null;
+    const after = turnCtx?.after || null;
+    const jpPre = before?.decisionContext?.jokboProgressSelf || null;
+    const jpPost = after?.decisionContext?.jokboProgressSelf || null;
+    const jpCompletedNow = !!(jokboCompleted(jpPost) && !jokboCompleted(jpPre));
+    const immediateReward = weightedImmediateReward(
+      t,
+      jpCompletedNow,
+      before?.decisionContext || null,
+      after?.decisionContext || null
+    );
     return {
       t: t.turnNo,
       a: actor,
@@ -731,7 +832,12 @@ function buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, po
       tr: terminalReward,
       dc: before?.decisionContext || null,
       sp: before?.selectionPool || null,
-      policy: policyByActorRef[actor] || DEFAULT_POLICY
+      policy: policyByActorRef[actor] || DEFAULT_POLICY,
+      jp: {
+        pre: jpPre,
+        post: jpPost,
+        completed_now: jpCompletedNow ? 1 : 0
+      }
     };
   });
 }
@@ -751,7 +857,8 @@ function buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, po
     const deckDelta = prevDeck == null ? null : deckAfter - prevDeck;
     const handSelfDelta = prevHand[actor] == null ? null : handSelfAfter - prevHand[actor];
     const handOppDelta = prevHand[opp] == null ? null : handOppAfter - prevHand[opp];
-    const before = contextByTurnNo.get(t.turnNo) || null;
+    const turnCtx = contextByTurnNo.get(t.turnNo) || null;
+    const before = turnCtx?.before || null;
     prevDeck = deckAfter;
     prevHand = {
       human: handCountFromTurn(t, "human"),
@@ -1022,7 +1129,14 @@ async function run() {
       if (next === state) break;
       const nextTurnSeq = next.turnSeq || 0;
       if (nextTurnSeq > prevTurnSeq) {
-        contextByTurnNo.set(nextTurnSeq, beforeContext);
+        contextByTurnNo.set(nextTurnSeq, {
+          before: beforeContext,
+          after: {
+            actor,
+            decisionContext: decisionContext(next, actor),
+            selectionPool: null
+          }
+        });
       }
       state = next;
       steps += 1;

@@ -300,6 +300,21 @@ body {
   font-weight: 700;
 }
 
+.hand-prob-badge {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 999px;
+  border: 1px solid rgba(156, 230, 255, 0.85);
+  background: rgba(10, 31, 46, 0.88);
+  color: #b8efff;
+  z-index: 2;
+  font-weight: 700;
+}
+
 .player-hand-lane .hand-month-badge {
   top: 6px;
   right: 6px;

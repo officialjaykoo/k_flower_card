@@ -18,7 +18,8 @@ import {
   chooseMatch,
   createSeededRng
 } from "./gameEngine.js";
-import { botPlay } from "./bot.js";
+import { botPlay, getHeuristicCardProbabilities } from "./bot.js";
+import { getModelCandidateProbabilities, modelPolicyPlay } from "./modelPolicyBot.js";
 import { advanceAutoTurns, getActionPlayerKey } from "./engineRunner.js";
 import { buildReplayFrames, formatActionText, formatEventsText } from "./ui/utils/replay.js";
 import {
@@ -31,13 +32,28 @@ import GameBoard from "./ui/components/GameBoard.jsx";
 import GameOverlays from "./ui/components/GameOverlays.jsx";
 import "../styles.css";
 
+const MODEL_CATALOG = {
+  sendol: { label: "센돌", kind: "policy_model", policyPath: "/models/policy-sendol.json" },
+  dolbaram: { label: "돌바람", kind: "policy_model", policyPath: "/models/policy-dolbaram-v5.json" },
+  heuristic_v3: { label: "휴리스틱v3", kind: "bot_policy", botPolicy: "heuristic_v3" }
+};
+
+const MODEL_OPTIONS = [
+  { value: "sendol", label: "센돌" },
+  { value: "dolbaram", label: "돌바람" },
+  { value: "heuristic_v3", label: "휴리스틱v3" }
+];
+
 export default function App() {
+  const policyModelRef = useRef({ human: null, ai: null });
+  const [modelVersion, setModelVersion] = useState(0);
   const [ui, setUi] = useState(() => {
     return {
       revealAiHand: true,
       sortHand: true,
       seed: randomSeed(),
       participants: { human: "human", ai: "ai" },
+      modelPicks: { human: "sendol", ai: "dolbaram" },
       lastRecordedRoundKey: null,
       speedMode: "fast",
       visualDelayMs: 400,
@@ -55,11 +71,31 @@ export default function App() {
   });
   const timerRef = useRef(null);
   const applyParticipantLabels = (s, u = ui) => {
-    const humanLabel = participantType(u, "human") === "ai" ? "AI-1" : "플레이어1";
-    const aiLabel = participantType(u, "ai") === "ai" ? "AI-2" : "플레이어2";
+    const humanModelLabel = MODEL_CATALOG[u.modelPicks?.human]?.label || "AI-1";
+    const aiModelLabel = MODEL_CATALOG[u.modelPicks?.ai]?.label || "AI-2";
+    const humanLabel =
+      participantType(u, "human") === "ai" ? humanModelLabel : "플레이어1";
+    const aiLabel =
+      participantType(u, "ai") === "ai" ? aiModelLabel : "플레이어2";
     s.players.human.label = humanLabel;
     s.players.ai.label = aiLabel;
     return s;
+  };
+
+  const chooseBotAction = (ss, playerKey, u = ui) => {
+    if (participantType(u, playerKey) === "ai") {
+      const pick = u.modelPicks?.[playerKey];
+      const cfg = MODEL_CATALOG[pick] || null;
+      if (cfg?.kind === "bot_policy") {
+        return botPlay(ss, playerKey, { policy: cfg.botPolicy || "heuristic_v3" });
+      }
+      const model = policyModelRef.current[playerKey];
+      if (model) {
+        const next = modelPolicyPlay(ss, playerKey, model);
+        if (next !== ss) return next;
+      }
+    }
+    return botPlay(ss, playerKey, { policy: "heuristic_v3" });
   };
 
   const runAuto = (s, u = ui, forceFast = false) => {
@@ -67,9 +103,58 @@ export default function App() {
     return advanceAutoTurns(
       s,
       (playerKey) => isBotPlayer(u, playerKey),
-      (ss, playerKey) => botPlay(ss, playerKey)
+      (ss, playerKey) => chooseBotAction(ss, playerKey, u)
     );
   };
+
+  useEffect(() => {
+    let mounted = true;
+    const loadFor = async (slot) => {
+      const pick = ui.modelPicks?.[slot];
+      const cfg = MODEL_CATALOG[pick] || null;
+      if (!cfg || cfg.kind !== "policy_model") {
+        policyModelRef.current[slot] = null;
+        return;
+      }
+      const path = cfg.policyPath;
+      if (!path) {
+        policyModelRef.current[slot] = null;
+        return;
+      }
+      try {
+        const r = await fetch(path);
+        policyModelRef.current[slot] = r.ok ? await r.json() : null;
+      } catch {
+        policyModelRef.current[slot] = null;
+      }
+    };
+    Promise.all([loadFor("human"), loadFor("ai")])
+      .then(() => setModelVersion((v) => v + 1))
+      .catch(() => {
+        if (!mounted) return;
+        policyModelRef.current.human = null;
+        policyModelRef.current.ai = null;
+        setModelVersion((v) => v + 1);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [ui.modelPicks?.human, ui.modelPicks?.ai]);
+
+  useEffect(() => {
+    setState((prev) => {
+      const next = {
+        ...prev,
+        players: {
+          ...prev.players,
+          human: { ...prev.players.human },
+          ai: { ...prev.players.ai }
+        }
+      };
+      return applyParticipantLabels(next);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ui.participants, ui.modelPicks?.human, ui.modelPicks?.ai]);
 
   useEffect(() => {
     if (openingPick.active) return;
@@ -113,6 +198,21 @@ export default function App() {
     : 0;
   const replayFrame = replayFrames[replayIdx] || null;
 
+  const aiPlayProbMap = useMemo(() => {
+    if (state.phase !== "playing") return null;
+    if (participantType(ui, "ai") !== "ai") return null;
+    const aiPick = ui.modelPicks?.ai;
+    const aiCfg = MODEL_CATALOG[aiPick] || null;
+    if (aiCfg?.kind === "bot_policy") {
+      return getHeuristicCardProbabilities(state, "ai", aiCfg.botPolicy || "heuristic_v3");
+    }
+    const model = policyModelRef.current.ai;
+    if (!model) return null;
+    const scored = getModelCandidateProbabilities(state, "ai", model, { previewPlay: true });
+    if (!scored || scored.decisionType !== "play") return null;
+    return scored.probabilities || null;
+  }, [state, ui.participants, ui.modelPicks?.ai, modelVersion]);
+
   useEffect(() => {
     if (!ui.replay.autoPlay || !ui.replay.enabled) return;
     const frames = replayFrames;
@@ -147,7 +247,7 @@ export default function App() {
       setState((prev) => {
         const stepActor = getActionPlayerKey(prev);
         if (!stepActor || !isBotPlayer(ui, stepActor)) return prev;
-        const next = botPlay(prev, stepActor);
+        const next = chooseBotAction(prev, stepActor, ui);
         return next === prev ? prev : next;
       });
     }, ui.visualDelayMs);
@@ -338,6 +438,8 @@ export default function App() {
           replayFrame={replayFrame}
           formatActionText={formatActionText}
           formatEventsText={formatEventsText}
+          modelOptions={MODEL_OPTIONS}
+          aiPlayProbMap={aiPlayProbMap}
           openingPick={openingPick}
           onOpeningPick={onOpeningPick}
           onReplayToggle={() =>

@@ -1,6 +1,6 @@
 ﻿param(
-  [string]$Champion = "heuristic_v1",
-  [string]$Challenger = "random_v2",
+  [string]$Champion = "heuristic_v3",
+  [string]$Challenger = "heuristic_v3",
   [int]$GamesPerSide = 100000,
   [double]$PromoteThreshold = 0.52,
   [string]$Tag = "",

@@ -67,18 +67,6 @@ export function stealPiFromOpponent(players, takerKey, count) {
     if (getGukjinMode(giver) === "junk") {
       const gukjinIdx = giver.captured.five.findIndex((card) => isGukjinCard(card) && !card.gukjinTransformed);
       if (gukjinIdx >= 0) {
-        // 국진쌍피 단독(일반피/쌍피/삼피 없음)인 경우에만 열로 도망 가능.
-        if (junkOnlyCandidates.length === 0) {
-          giver.captured.five[gukjinIdx] = {
-            ...giver.captured.five[gukjinIdx],
-            gukjinTransformed: true
-          };
-          giver.gukjinMode = "five";
-          giver.gukjinLocked = true;
-          stealLog.push(`${giver.label}: 국진쌍피 단독 보유로 열 전환(강탈 회피)`);
-          remaining -= 1;
-          continue;
-        }
         candidates.push({
           idx: gukjinIdx,
           card: giver.captured.five[gukjinIdx],
