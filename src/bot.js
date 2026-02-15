@@ -10,11 +10,19 @@ import {
   choosePresidentHold,
   chooseGukjinMode,
   chooseMatch,
-  calculateScore
+  calculateScore,
+  scoringFiveCards
 } from "./gameEngine.js";
 import { COMBO_MONTHS, COMBO_MONTH_SETS, countComboTag, missingComboMonths } from "./engine/combos.js";
 
 const POLICY_HEURISTIC_V3 = "heuristic_v3";
+const GWANG_MONTHS = Object.freeze([1, 3, 8, 11, 12]);
+const COMBO_REQUIRED_CATEGORY = Object.freeze({
+  redRibbons: "ribbon",
+  blueRibbons: "ribbon",
+  plainRibbons: "ribbon",
+  fiveBirds: "five"
+});
 
 export const BOT_POLICIES = [POLICY_HEURISTIC_V3];
 
@@ -111,6 +119,10 @@ function capturedCountByCategory(player, category) {
   return (player.captured[category] || []).length;
 }
 
+function scoringFiveCount(player) {
+  return scoringFiveCards(player).length;
+}
+
 function currentScoreTotal(state, playerKey) {
   const opp = playerKey === "human" ? "ai" : "human";
   const selfScore = calculateScore(state.players[playerKey], state.players[opp], state.ruleKey);
@@ -128,6 +140,27 @@ function comboProgress(player) {
   };
 }
 
+function hasCapturedCategoryMonth(player, category, month) {
+  return (player?.captured?.[category] || []).some((c) => c?.month === month);
+}
+
+function availableMissingMonths(missingMonths, requiredCategory, defenderPlayer) {
+  if (!Array.isArray(missingMonths) || !missingMonths.length) return [];
+  if (!defenderPlayer) return missingMonths;
+  return missingMonths.filter((month) => !hasCapturedCategoryMonth(defenderPlayer, requiredCategory, month));
+}
+
+function missingGwangMonths(player) {
+  const own = new Set((player?.captured?.kwang || []).map((c) => c?.month).filter((m) => Number.isInteger(m)));
+  return GWANG_MONTHS.filter((m) => !own.has(m));
+}
+
+function isSecondMover(state, playerKey) {
+  const first = state?.startingTurnKey;
+  if (first === "human" || first === "ai") return first !== playerKey;
+  return false;
+}
+
 function analyzeGameContext(state, playerKey) {
   const opp = playerKey === "human" ? "ai" : "human";
   const myScore = currentScoreTotal(state, playerKey);
@@ -137,14 +170,38 @@ function analyzeGameContext(state, playerKey) {
   const oppGoCount = state.players?.[opp]?.goCount || 0;
   const selfPi = capturedCountByCategory(state.players?.[playerKey], "junk");
   const oppPi = capturedCountByCategory(state.players?.[opp], "junk");
+  const mong = computeMongRiskProfile(state, playerKey);
+  const oppCombo = comboProgress(state.players?.[opp]);
+  const oppGwang = capturedCountByCategory(state.players?.[opp], "kwang");
+  const isSecond = isSecondMover(state, playerKey);
+  const turnSeq = state.turnSeq || 0;
+  const defenseOpening = isSecond && turnSeq <= 6;
+  const trailing = myScore < oppScore;
+  const opponentNearSeven = oppScore >= 6;
+  const opponentNearCombo =
+    oppCombo.redRibbons >= 2 ||
+    oppCombo.blueRibbons >= 2 ||
+    oppCombo.plainRibbons >= 2 ||
+    oppCombo.fiveBirds >= 2 ||
+    oppGwang >= 2;
+  const nagariDelayMode = isSecond && trailing && deckCount >= 8 && deckCount <= 12 && opponentNearSeven;
+  const endgameSafePitch = deckCount <= 8;
+  const midgameBlockFocus = deckCount >= 8 && deckCount <= 12 && opponentNearCombo;
+
   let mode = "BALANCED";
-  if (oppScore >= 5 && myScore <= 2) mode = "DESPERATE_DEFENSE";
+  if (defenseOpening) mode = "DEFENSE_OPENING";
+  else if (oppScore >= 5 && myScore <= 2) mode = "DESPERATE_DEFENSE";
   else if (myScore >= 7 && oppScore <= 3 && deckCount >= 8) mode = "AGGRESSIVE";
   else if (deckCount <= 8) mode = "ENDGAME";
+  if (!defenseOpening && mong.stage === "CRITICAL" && myScore <= oppScore + 2) mode = "DESPERATE_DEFENSE";
   let blockWeight = 1.0;
   let piWeight = 1.0;
   let pukPenalty = 1.0;
-  if (mode === "DESPERATE_DEFENSE") {
+  if (mode === "DEFENSE_OPENING") {
+    blockWeight = 1.35;
+    piWeight = 1.35;
+    pukPenalty = 1.2;
+  } else if (mode === "DESPERATE_DEFENSE") {
     blockWeight = 1.45;
     piWeight = 1.2;
     pukPenalty = 1.35;
@@ -157,15 +214,35 @@ function analyzeGameContext(state, playerKey) {
     piWeight = oppPi <= 5 ? 1.4 : 1.2;
     pukPenalty = 1.25;
   }
+  if (mong.danger >= 0.7) {
+    blockWeight *= 1.18;
+    piWeight *= 1.08;
+    pukPenalty *= 1.12;
+  } else if (mong.danger >= 0.4) {
+    blockWeight *= 1.08;
+    pukPenalty *= 1.05;
+  }
   const survivalMode = carryOverMultiplier >= 2;
   const endgameSprint = deckCount <= 8;
   return {
     mode,
+    isSecond,
+    turnSeq,
+    defenseOpening,
+    nagariDelayMode,
+    endgameSafePitch,
+    midgameBlockFocus,
+    opponentNearCombo,
+    opponentNearSeven,
     myScore,
     oppScore,
     deckCount,
     selfPi,
     oppPi,
+    selfFive: mong.selfFive,
+    oppFive: mong.oppFive,
+    mongDanger: mong.danger,
+    mongStage: mong.stage,
     oppGoCount,
     carryOverMultiplier,
     survivalMode,
@@ -176,46 +253,73 @@ function analyzeGameContext(state, playerKey) {
   };
 }
 
-function blockingMonthsAgainst(player) {
+function blockingMonthsAgainst(player, defenderPlayer = null) {
   const p = comboProgress(player);
   const out = new Set();
-  if (p.redRibbons >= 2) COMBO_MONTHS.redRibbons.forEach((m) => out.add(m));
-  if (p.blueRibbons >= 2) COMBO_MONTHS.blueRibbons.forEach((m) => out.add(m));
-  if (p.plainRibbons >= 2) COMBO_MONTHS.plainRibbons.forEach((m) => out.add(m));
-  if (p.fiveBirds >= 2) COMBO_MONTHS.fiveBirds.forEach((m) => out.add(m));
+  const addMissing = (tag, got, sourceCards) => {
+    if (got < 2) return;
+    const requiredCategory = COMBO_REQUIRED_CATEGORY[tag];
+    const missing = missingComboMonths(sourceCards, tag);
+    for (const m of availableMissingMonths(missing, requiredCategory, defenderPlayer)) out.add(m);
+  };
+  addMissing("redRibbons", p.redRibbons, player?.captured?.ribbon || []);
+  addMissing("blueRibbons", p.blueRibbons, player?.captured?.ribbon || []);
+  addMissing("plainRibbons", p.plainRibbons, player?.captured?.ribbon || []);
+  addMissing("fiveBirds", p.fiveBirds, player?.captured?.five || []);
+
+  const gwangCount = capturedCountByCategory(player, "kwang");
+  if (gwangCount >= 2) {
+    for (const m of availableMissingMonths(missingGwangMonths(player), "kwang", defenderPlayer)) out.add(m);
+  }
   return out;
 }
 
-function blockingUrgencyByMonth(player) {
+function blockingUrgencyByMonth(player, defenderPlayer = null) {
   const p = comboProgress(player);
   const urg = new Map();
   const put = (months, level) => {
     for (const m of months) urg.set(m, Math.max(urg.get(m) || 0, level));
   };
-  if (p.redRibbons >= 2) put(COMBO_MONTHS.redRibbons, p.redRibbons >= 3 ? 3 : 2);
-  if (p.blueRibbons >= 2) put(COMBO_MONTHS.blueRibbons, p.blueRibbons >= 3 ? 3 : 2);
-  if (p.plainRibbons >= 2) put(COMBO_MONTHS.plainRibbons, p.plainRibbons >= 3 ? 3 : 2);
-  if (p.fiveBirds >= 2) put(COMBO_MONTHS.fiveBirds, p.fiveBirds >= 3 ? 3 : 2);
+  const putMissing = (tag, got, sourceCards) => {
+    if (got < 2) return;
+    const requiredCategory = COMBO_REQUIRED_CATEGORY[tag];
+    const missing = missingComboMonths(sourceCards, tag);
+    put(availableMissingMonths(missing, requiredCategory, defenderPlayer), got >= 3 ? 3 : 2);
+  };
+  putMissing("redRibbons", p.redRibbons, player?.captured?.ribbon || []);
+  putMissing("blueRibbons", p.blueRibbons, player?.captured?.ribbon || []);
+  putMissing("plainRibbons", p.plainRibbons, player?.captured?.ribbon || []);
+  putMissing("fiveBirds", p.fiveBirds, player?.captured?.five || []);
+
+  const gwangCount = capturedCountByCategory(player, "kwang");
+  if (gwangCount >= 2) {
+    put(availableMissingMonths(missingGwangMonths(player), "kwang", defenderPlayer), gwangCount >= 3 ? 3 : 2);
+  }
   return urg;
 }
 
 function checkOpponentJokboProgress(state, playerKey) {
   const opp = playerKey === "human" ? "ai" : "human";
   const oppPlayer = state.players?.[opp];
+  const selfPlayer = state.players?.[playerKey];
   const boardMonths = new Set((state.board || []).map((c) => c.month));
   const p = comboProgress(oppPlayer);
   const rules = [
-    { key: "redRibbons", months: COMBO_MONTHS.redRibbons, got: p.redRibbons },
-    { key: "blueRibbons", months: COMBO_MONTHS.blueRibbons, got: p.blueRibbons },
-    { key: "plainRibbons", months: COMBO_MONTHS.plainRibbons, got: p.plainRibbons },
-    { key: "fiveBirds", months: COMBO_MONTHS.fiveBirds, got: p.fiveBirds }
+    { key: "redRibbons", got: p.redRibbons, requiredCategory: "ribbon" },
+    { key: "blueRibbons", got: p.blueRibbons, requiredCategory: "ribbon" },
+    { key: "plainRibbons", got: p.plainRibbons, requiredCategory: "ribbon" },
+    { key: "fiveBirds", got: p.fiveBirds, requiredCategory: "five" }
   ];
   const monthUrgency = new Map();
   let threat = 0;
   for (const r of rules) {
     const sourceCards = r.key === "fiveBirds" ? oppPlayer?.captured?.five || [] : oppPlayer?.captured?.ribbon || [];
-    const missing = missingComboMonths(sourceCards, r.key);
-    const near = r.got >= 2;
+    const missing = availableMissingMonths(
+      missingComboMonths(sourceCards, r.key),
+      r.requiredCategory,
+      selfPlayer
+    );
+    const near = r.got >= 2 && missing.length > 0;
     const canCompleteSoon = near && missing.some((m) => boardMonths.has(m));
     if (near) {
       threat += canCompleteSoon ? 0.28 : 0.18;
@@ -223,10 +327,30 @@ function checkOpponentJokboProgress(state, playerKey) {
         const base = canCompleteSoon ? 30 : 20;
         monthUrgency.set(m, Math.max(monthUrgency.get(m) || 0, base));
       }
-    } else if (r.got === 1) {
+    } else if (r.got === 1 && missing.length > 0) {
       threat += 0.05;
     }
   }
+
+  const oppGwangCount = capturedCountByCategory(oppPlayer, "kwang");
+  const missingGwang = availableMissingMonths(missingGwangMonths(oppPlayer), "kwang", selfPlayer);
+  if (oppGwangCount >= 2 && missingGwang.length > 0) {
+    const canCompleteSoon = missingGwang.some((m) => boardMonths.has(m));
+    threat += canCompleteSoon
+      ? oppGwangCount >= 3
+        ? 0.24
+        : 0.18
+      : oppGwangCount >= 3
+      ? 0.16
+      : 0.12;
+    for (const m of missingGwang) {
+      const base = canCompleteSoon ? (oppGwangCount >= 3 ? 28 : 24) : oppGwangCount >= 3 ? 20 : 16;
+      monthUrgency.set(m, Math.max(monthUrgency.get(m) || 0, base));
+    }
+  } else if (oppGwangCount === 1 && missingGwang.length > 0) {
+    threat += 0.03;
+  }
+
   return {
     threat: Math.max(0, Math.min(1, threat)),
     monthUrgency
@@ -273,6 +397,129 @@ function clamp01(v) {
   return Math.max(0, Math.min(1, Number(v) || 0));
 }
 
+function computeMongRiskProfile(state, playerKey) {
+  const opp = playerKey === "human" ? "ai" : "human";
+  const selfFive = scoringFiveCount(state.players?.[playerKey]);
+  const oppFive = scoringFiveCount(state.players?.[opp]);
+  const deckCount = state.deck?.length || 0;
+
+  let baseDanger = 0;
+  if (oppFive >= 7) baseDanger = 1.0;
+  else if (oppFive === 6) baseDanger = 0.82;
+  else if (oppFive === 5) baseDanger = 0.58;
+  else if (oppFive === 4) baseDanger = 0.34;
+
+  // Holding at least one five reduces mong-bak pressure, but does not erase it.
+  const guardFactor = selfFive === 0 ? 1.0 : selfFive === 1 ? 0.55 : 0.3;
+  let danger = baseDanger * guardFactor;
+  if (baseDanger > 0 && deckCount <= 8) danger += 0.08;
+  if (baseDanger > 0 && deckCount <= 5) danger += 0.06;
+
+  let stage = "SAFE";
+  if (selfFive === 0 && oppFive >= 6) stage = "CRITICAL";
+  else if (oppFive >= 6) stage = "HIGH";
+  else if (oppFive >= 5) stage = selfFive === 0 ? "ELEVATED" : "WATCH";
+  else if (oppFive >= 4) stage = "WATCH";
+
+  return {
+    selfFive,
+    oppFive,
+    danger: clamp01(danger),
+    stage
+  };
+}
+
+function hasMonthCard(cards, month) {
+  return (cards || []).some((c) => c?.month === month);
+}
+
+function hasMonthCategoryCard(cards, month, category) {
+  return (cards || []).some((c) => c?.month === month && c?.category === category);
+}
+
+function estimateMonthCaptureChance(state, actorKey, month, requiredCategory) {
+  const actor = state.players?.[actorKey];
+  const hand = actor?.hand || [];
+  const board = state.board || [];
+  const deckCount = state.deck?.length || 0;
+  const drawFactor = deckCount <= 5 ? 0.68 : deckCount <= 8 ? 0.82 : 1.0;
+  const handHasAny = hasMonthCard(hand, month);
+  const handHasRequired = hasMonthCategoryCard(hand, month, requiredCategory);
+  const boardHasAny = hasMonthCard(board, month);
+  const boardRequiredCount = board.filter((c) => c?.month === month && c?.category === requiredCategory).length;
+  let chance = 0.12 * drawFactor;
+
+  if (handHasRequired) chance = Math.max(chance, boardHasAny ? 0.64 : 0.5);
+  if (boardRequiredCount > 0) {
+    chance = Math.max(chance, handHasAny ? 0.78 : 0.42);
+  }
+  if (handHasAny) chance = Math.max(chance, 0.28);
+  if (boardRequiredCount >= 2 && handHasAny) chance = Math.max(chance, 0.86);
+  return Math.max(0, Math.min(0.92, chance));
+}
+
+function estimateJokboExpectedPotential(state, actorKey, blockerKey) {
+  const actor = state.players?.[actorKey];
+  const blocker = state.players?.[blockerKey];
+  if (!actor) {
+    return {
+      total: 0,
+      nearCompleteCount: 0,
+      oneAwayCount: 0
+    };
+  }
+
+  const p = comboProgress(actor);
+  const ribbons = actor.captured?.ribbon || [];
+  const fives = actor.captured?.five || [];
+  let nearCompleteCount = 0;
+  let oneAwayCount = 0;
+
+  const comboPotential = (tag, got, sourceCards, requiredCategory, nearWeight, midWeight) => {
+    const missing = availableMissingMonths(missingComboMonths(sourceCards, tag), requiredCategory, blocker);
+    if (!missing.length) return 0;
+    const probs = missing.map((m) => estimateMonthCaptureChance(state, actorKey, m, requiredCategory));
+    const avg = probs.reduce((sum, v) => sum + v, 0) / probs.length;
+    const top = Math.max(...probs);
+    const baseWeight = got >= 2 ? nearWeight : got === 1 ? midWeight : 0.16;
+    let score = baseWeight * (avg * 0.65 + top * 0.35);
+    if (got >= 2) nearCompleteCount += 1;
+    if (got >= 2 && missing.length === 1) {
+      score += 0.18;
+      oneAwayCount += 1;
+    }
+    return score;
+  };
+
+  const red = comboPotential("redRibbons", p.redRibbons, ribbons, "ribbon", 1.0, 0.38);
+  const blue = comboPotential("blueRibbons", p.blueRibbons, ribbons, "ribbon", 1.0, 0.38);
+  const plain = comboPotential("plainRibbons", p.plainRibbons, ribbons, "ribbon", 0.92, 0.35);
+  const birds = comboPotential("fiveBirds", p.fiveBirds, fives, "five", 1.12, 0.42);
+
+  const gwangCount = capturedCountByCategory(actor, "kwang");
+  const gwMissing = availableMissingMonths(missingGwangMonths(actor), "kwang", blocker);
+  let gwang = 0;
+  if (gwMissing.length > 0) {
+    const probs = gwMissing.map((m) => estimateMonthCaptureChance(state, actorKey, m, "kwang"));
+    const avg = probs.reduce((sum, v) => sum + v, 0) / probs.length;
+    const top = Math.max(...probs);
+    const baseWeight = gwangCount >= 2 ? 1.2 : gwangCount === 1 ? 0.42 : 0.12;
+    gwang = baseWeight * (avg * 0.6 + top * 0.4);
+    if (gwangCount >= 2) nearCompleteCount += 1;
+    if (gwangCount >= 2 && gwMissing.length === 1) {
+      gwang += 0.2;
+      oneAwayCount += 1;
+    }
+  }
+
+  const total = Math.max(0, Math.min(3.5, red + blue + plain + birds + gwang));
+  return {
+    total,
+    nearCompleteCount,
+    oneAwayCount
+  };
+}
+
 function buildDynamicWeights(state, playerKey, ctx) {
   const opp = playerKey === "human" ? "ai" : "human";
   const oppPlayer = state.players?.[opp];
@@ -281,6 +528,9 @@ function buildDynamicWeights(state, playerKey, ctx) {
   const carry = ctx.carryOverMultiplier || 1;
   const selfPi = ctx.selfPi ?? capturedCountByCategory(selfPlayer, "junk");
   const oppPi = ctx.oppPi ?? capturedCountByCategory(oppPlayer, "junk");
+  const selfFive = ctx.selfFive ?? scoringFiveCount(selfPlayer);
+  const oppFive = ctx.oppFive ?? scoringFiveCount(oppPlayer);
+  const mongDanger = ctx.mongDanger ?? 0;
   const oppGoCount = ctx.oppGoCount ?? (oppPlayer?.goCount || 0);
   const weights = {
     pi: 1.0,
@@ -290,6 +540,16 @@ function buildDynamicWeights(state, playerKey, ctx) {
     hold: 1.0,
     safety: 1.0
   };
+
+  if (ctx.defenseOpening) {
+    // Requested second-player opening profile.
+    weights.pi *= 1.35;
+    weights.combo *= 0.75;
+    weights.risk *= 1.2;
+    weights.block *= 1.2;
+    weights.hold *= 1.15;
+    weights.safety *= 1.15;
+  }
 
   if (deckCount <= 8) {
     weights.pi *= 1.28;
@@ -320,6 +580,25 @@ function buildDynamicWeights(state, playerKey, ctx) {
   }
   if (selfPi >= 8) weights.pi *= 1.22;
   if (oppPi <= 6) weights.pi *= 1.15;
+  if (mongDanger >= 0.7) {
+    weights.safety *= 1.22;
+    weights.risk *= 1.18;
+    weights.hold *= 1.12;
+    weights.combo *= 0.9;
+  } else if (mongDanger >= 0.4) {
+    weights.safety *= 1.1;
+    weights.risk *= 1.08;
+  }
+  if (selfFive === 0 && oppFive >= 6) {
+    weights.block *= 1.18;
+    weights.hold *= 1.08;
+  }
+  if (ctx.nagariDelayMode) {
+    weights.combo *= 0.78;
+    weights.block *= 1.25;
+    weights.safety *= 1.18;
+    weights.hold *= 1.12;
+  }
   return weights;
 }
 
@@ -360,6 +639,60 @@ function estimateDangerMonthRisk(state, playerKey, month, boardCountByMonth, han
   if (oppGoCount > 0) risk += 0.1;
   if ((state.carryOverMultiplier || 1) >= 2) risk += 0.08;
   return Math.max(0, Math.min(1.25, risk));
+}
+
+function estimateOpponentImmediateGainIfDiscard(state, playerKey, month) {
+  const opp = playerKey === "human" ? "ai" : "human";
+  const oppHand = state.players?.[opp]?.hand || [];
+  const boardMonthCards = (state.board || []).filter((c) => c?.month === month);
+  const oppMonthCards = oppHand.filter((c) => c?.month === month);
+  if (!oppMonthCards.length) return 0;
+
+  let best = 0;
+  for (const c of oppMonthCards) {
+    // If we discard this month now, opponent can capture discard + one board card.
+    const target = boardMonthCards.length
+      ? Math.max(...boardMonthCards.map((b) => cardCaptureValue(b)))
+      : 0;
+    let local = 0.45 + target * 0.38 + cardCaptureValue(c) * 0.18;
+    if (c.category === "kwang" || c.category === "five") local += 0.35;
+    best = Math.max(best, local);
+  }
+  return Math.max(0, Math.min(3.6, best));
+}
+
+function isHighImpactBomb(state, playerKey, month) {
+  const player = state.players?.[playerKey];
+  const monthHand = (player?.hand || []).filter((c) => c?.month === month);
+  const monthBoard = (state.board || []).filter((c) => c?.month === month);
+  const all = monthHand.concat(monthBoard);
+  const hasDoublePiLine = all.some((c) => c?.category === "junk" && junkPiValue(c) >= 2);
+  const selfGwang = capturedCountByCategory(player, "kwang");
+  const monthHasGwang = all.some((c) => c?.category === "kwang");
+  const directThreeGwang = selfGwang >= 2 && monthHasGwang;
+  const immediateGain = all.reduce((sum, c) => sum + cardCaptureValue(c), 0);
+  return {
+    highImpact: hasDoublePiLine || directThreeGwang || immediateGain >= 8,
+    hasDoublePiLine,
+    directThreeGwang,
+    immediateGain
+  };
+}
+
+function isHighImpactShaking(state, playerKey, month) {
+  const player = state.players?.[playerKey];
+  const monthHand = (player?.hand || []).filter((c) => c?.month === month);
+  const monthBoard = (state.board || []).filter((c) => c?.month === month);
+  const all = monthHand.concat(monthBoard);
+  const hasDoublePiLine = all.some((c) => c?.category === "junk" && junkPiValue(c) >= 2);
+  const selfGwang = capturedCountByCategory(player, "kwang");
+  const monthHasGwang = all.some((c) => c?.category === "kwang");
+  const directThreeGwang = selfGwang >= 2 && monthHasGwang;
+  return {
+    highImpact: hasDoublePiLine || directThreeGwang,
+    hasDoublePiLine,
+    directThreeGwang
+  };
 }
 
 function isRiskOfPuk(state, playerKey, card, boardCountByMonth, handCountByMonth) {
@@ -462,7 +795,8 @@ function opponentThreatScore(state, playerKey) {
 
 function boardHighValueThreatForPlayer(state, playerKey) {
   const handMonths = new Set((state.players?.[playerKey]?.hand || []).map((c) => c.month));
-  const blockMonths = blockingMonthsAgainst(state.players?.[playerKey]);
+  const blockerKey = playerKey === "human" ? "ai" : "human";
+  const blockMonths = blockingMonthsAgainst(state.players?.[playerKey], state.players?.[blockerKey]);
   for (const c of state.board || []) {
     if (!handMonths.has(c.month)) continue;
     if (c.category === "kwang" || c.category === "five") return true;
@@ -515,18 +849,26 @@ function rankHandCards(state, playerKey) {
   const oppPlayer = state.players?.[opp];
   const ctx = analyzeGameContext(state, playerKey);
   const jokboThreat = checkOpponentJokboProgress(state, playerKey);
-  const blockMonths = blockingMonthsAgainst(oppPlayer);
-  const blockUrgency = blockingUrgencyByMonth(oppPlayer);
+  const blockMonths = blockingMonthsAgainst(oppPlayer, player);
+  const blockUrgency = blockingUrgencyByMonth(oppPlayer, player);
   const oppPi = capturedCountByCategory(oppPlayer, "junk");
   const nextThreat = nextTurnThreatScore(state, playerKey);
   const selfPi = capturedCountByCategory(player, "junk");
   const deckCount = state.deck?.length || 0;
   const lateGame = deckCount <= 10;
+  const mongDanger = ctx.mongDanger || 0;
+  const selfFive = ctx.selfFive || 0;
+  const oppFive = ctx.oppFive || 0;
+  const urgentMongDefense = selfFive === 0 && oppFive >= 6;
   const firstTurnPiPlan = getFirstTurnDoublePiPlan(state, playerKey);
   const boardCountByMonth = monthCounts(state.board || []);
   const handCountByMonth = monthCounts(player.hand || []);
   const capturedByMonth = capturedMonthCounts(state);
   const dyn = buildDynamicWeights(state, playerKey, ctx);
+  const defenseOpening = !!ctx.defenseOpening;
+  const nagariDelayMode = !!ctx.nagariDelayMode;
+  const endgameSafePitch = !!ctx.endgameSafePitch;
+  const midgameBlockFocus = !!ctx.midgameBlockFocus;
   const byMonth = boardMatchesByMonth(state);
   const ranked = player.hand.map((card) => {
     const matches = byMonth.get(card.month) || [];
@@ -539,6 +881,47 @@ function rankHandCards(state, playerKey) {
     else score = 12 + captureGain;
     if (matches.some((m) => m.category === "kwang" || m.category === "five")) score += 5;
     if (score > 0) score *= dyn.combo;
+
+    const knownMonth =
+      (boardCountByMonth.get(card.month) || 0) +
+      (handCountByMonth.get(card.month) || 0) +
+      (capturedByMonth.get(card.month) || 0);
+    const oppFeedRisk = estimateOpponentImmediateGainIfDiscard(state, playerKey, card.month);
+
+    const fiveCaptureGain = matches.reduce((n, m) => n + (m.category === "five" ? 1 : 0), 0);
+    if (card.category === "five" && matches.length > 0) {
+      score += (2.6 + fiveCaptureGain * 2.2) * (1 + mongDanger * 0.9);
+    }
+    if (fiveCaptureGain > 0) {
+      score += (1.6 + fiveCaptureGain * 1.4) * (1 + mongDanger * 0.8);
+    }
+    if (card.category === "five" && matches.length === 0) {
+      score -= (0.8 + mongDanger * 2.8) * dyn.hold;
+    }
+    if (urgentMongDefense && matches.length === 0 && card.category !== "five") {
+      score -= 0.45;
+    }
+
+    if (defenseOpening) {
+      // Opening as second mover: prioritize pi/ssangpi safety over raw combo growth.
+      const piGain = matches.reduce((n, m) => n + junkPiValue(m), 0);
+      if (card.category === "junk") score += 1.6 * dyn.pi;
+      score += piGain * (1.9 * dyn.pi);
+      if (matches.length === 0 && card.category !== "junk") score -= 1.15 * dyn.risk;
+      if (oppFeedRisk >= 1.35 && matches.length === 0) score -= 1.2 * dyn.safety;
+    }
+
+    if (midgameBlockFocus && blockMonths.has(card.month)) {
+      if (matches.length > 0) score += 18.0 * dyn.block;
+      else score -= 18.0 * dyn.hold;
+    }
+
+    if (nagariDelayMode) {
+      // When trailing as second mover, prefer delaying opponent completion over own greedy lines.
+      if (blockMonths.has(card.month) && matches.length > 0) score += 10.0 * dyn.block;
+      if (!blockMonths.has(card.month) && matches.length === 0) score -= 3.6 * dyn.safety;
+      if (oppFeedRisk > 0.9 && matches.length === 0) score -= 1.5 * dyn.safety;
+    }
 
     // First-turn limited tactic: if only clear value is double-pi, prioritize it strongly.
     if (firstTurnPiPlan.active && firstTurnPiPlan.months.has(card.month)) {
@@ -576,6 +959,13 @@ function rankHandCards(state, playerKey) {
     const dangerRisk = estimateDangerMonthRisk(state, playerKey, card.month, boardCountByMonth, handCountByMonth, capturedByMonth);
     if (matches.length === 0) score -= dangerRisk * (3.3 * dyn.safety);
     else if (matches.length === 1 && deckCount <= 8) score -= dangerRisk * (0.75 * dyn.safety);
+
+    if (endgameSafePitch && matches.length === 0) {
+      if (knownMonth >= 3) score += 3.1 * dyn.safety;
+      else if (knownMonth === 2) score += 0.9 * dyn.safety;
+      else score -= 1.0 * dyn.safety;
+      score -= oppFeedRisk * (1.55 * dyn.safety);
+    }
 
     // Priority #3: hard blocking against opponent near-combo.
     if (blockMonths.has(card.month)) {
@@ -654,10 +1044,13 @@ function chooseMatchHeuristic(state, playerKey) {
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
   const opp = playerKey === "human" ? "ai" : "human";
-  const blockMonths = blockingMonthsAgainst(state.players?.[opp]);
-  const blockUrgency = blockingUrgencyByMonth(state.players?.[opp]);
+  const blockMonths = blockingMonthsAgainst(state.players?.[opp], state.players?.[playerKey]);
+  const blockUrgency = blockingUrgencyByMonth(state.players?.[opp], state.players?.[playerKey]);
   const jokboThreat = checkOpponentJokboProgress(state, playerKey);
   const ctx = analyzeGameContext(state, playerKey);
+  const mongDanger = ctx.mongDanger || 0;
+  const midgameBlockFocus = !!ctx.midgameBlockFocus;
+  const defenseOpening = !!ctx.defenseOpening;
   const oppPi = capturedCountByCategory(state.players?.[opp], "junk");
   const selfPi = capturedCountByCategory(state.players?.[playerKey], "junk");
   const nextThreat = nextTurnThreatScore(state, playerKey);
@@ -678,6 +1071,12 @@ function chooseMatchHeuristic(state, playerKey) {
     if (oppPi <= 5 && b.category === "junk") bs += 3;
     if (selfPi >= 7 && selfPi <= 8 && a.category === "junk") as += 4;
     if (selfPi >= 7 && selfPi <= 8 && b.category === "junk") bs += 4;
+    if (a.category === "five") as += 2.2 + mongDanger * 5.0;
+    if (b.category === "five") bs += 2.2 + mongDanger * 5.0;
+    if (midgameBlockFocus && blockMonths.has(a.month)) as += 12.0;
+    if (midgameBlockFocus && blockMonths.has(b.month)) bs += 12.0;
+    if (defenseOpening && a.category === "junk") as += 2.1;
+    if (defenseOpening && b.category === "junk") bs += 2.1;
     return bs - as;
   });
   return candidates[0].id;
@@ -713,12 +1112,35 @@ function shouldGo(state, playerKey, policy) {
   const carry = state.carryOverMultiplier || 1;
   const selfPi = capturedCountByCategory(player, "junk");
   const oppPi = capturedCountByCategory(state.players?.[opp], "junk");
+  const selfJokboEV = estimateJokboExpectedPotential(state, playerKey, opp);
+  const oppJokboEV = estimateJokboExpectedPotential(state, opp, playerKey);
+  const selfFive = ctx.selfFive || 0;
+  const oppFive = ctx.oppFive || 0;
+  const mongDanger = ctx.mongDanger || 0;
+  const isSecond = !!ctx.isSecond;
   const strongLead = myScore >= 10 && oppScore <= 4;
   // Hard stop layer
   if (ctx.mode === "DESPERATE_DEFENSE") return false;
+  if (ctx.nagariDelayMode) return false;
+  // Absolute bak-defense rule requested: no aggressive GO before pi safety.
+  if (selfPi < 9) return false;
+  if (selfFive === 0 && oppFive >= 7) return false;
+  if (selfFive === 0 && oppFive >= 6 && deckCount <= 10) return false;
+  if (isSecond && !strongLead && oppJokboEV.oneAwayCount >= 1) return false;
+  if (!strongLead && deckCount <= 10 && oppJokboEV.oneAwayCount >= 1 && selfJokboEV.oneAwayCount === 0) return false;
+  if (mongDanger >= 0.75 && !strongLead) return false;
+  if (mongDanger >= 0.6 && (oppThreat || oppProgThreat >= 0.45 || oppNextTurnThreat >= 0.3) && !strongLead) {
+    return false;
+  }
   if (carry >= 2) {
     // Survival mode in carry-over rounds: stop unless edge is very clear.
-    const lowRisk = oppProgThreat < 0.35 && oppNextTurnThreat < 0.25 && jokboThreat.threat < 0.2;
+    const lowRisk =
+      oppProgThreat < 0.35 &&
+      oppNextTurnThreat < 0.25 &&
+      jokboThreat.threat < 0.2 &&
+      oppJokboEV.total < 0.6 &&
+      mongDanger < 0.45 &&
+      !(selfFive === 0 && oppFive >= 6);
     const noImmediateCounter = oppNextMatchCount === 0 && deckCount >= 7;
     if (!(strongLead && lowRisk && noImmediateCounter && selfPi >= 9 && oppPi <= 7)) {
       return false;
@@ -735,10 +1157,25 @@ function shouldGo(state, playerKey, policy) {
     if (goCount >= 3) return false;
     if (goCount >= 2 && !strongLead) return false;
     // Expected gain layer
-    const myGainPotential = Math.max(0, myScore - 6) * 0.12 + (10 - Math.min(10, ctx.deckCount)) * 0.02 + (capturedCountByCategory(state.players?.[playerKey], "junk") >= 9 ? 0.2 : 0);
-    const oppGainPotential = oppProgThreat * 0.65 + oppNextTurnThreat * 0.55 + jokboThreat.threat * 0.45;
-    if (!strongLead && myGainPotential < oppGainPotential + 0.18) return false;
+    const myGainPotential =
+      Math.max(0, myScore - 6) * 0.12 +
+      (10 - Math.min(10, ctx.deckCount)) * 0.02 +
+      (capturedCountByCategory(state.players?.[playerKey], "junk") >= 9 ? 0.2 : 0) +
+      selfJokboEV.total * 0.34 +
+      selfJokboEV.oneAwayCount * 0.12;
+    const oppGainPotential =
+      oppProgThreat * 0.65 +
+      oppNextTurnThreat * 0.55 +
+      jokboThreat.threat * 0.45 +
+      mongDanger * 0.55 +
+      oppJokboEV.total * 0.4 +
+      oppJokboEV.oneAwayCount * 0.14;
+    const goMargin = isSecond ? 0.28 : 0.12;
+    if (!strongLead && myGainPotential < oppGainPotential + goMargin) return false;
+    if (!strongLead && deckCount <= 8 && selfJokboEV.total < 0.45) return false;
+    if (isSecond && !strongLead && (oppProgThreat >= 0.35 || oppNextMatchCount > 0)) return false;
     if (oppProgThreat >= 0.45 || oppNextTurnThreat >= 0.3) return false;
+    if (selfFive === 0 && oppFive >= 6) return false;
     if (oppNextMatchCount > 0 && !strongLead) return false;
     // Bak layer
     if (capturedCountByCategory(state.players?.[opp], "junk") < 6) return true;
@@ -769,13 +1206,24 @@ function selectBestMonth(state, months) {
 
 function shouldBomb(state, playerKey, bombMonths, policy) {
   const p = normalizePolicy(policy);
+  const ctx = analyzeGameContext(state, playerKey);
   const firstTurnPiPlan = getFirstTurnDoublePiPlan(state, playerKey);
   if (p === POLICY_HEURISTIC_V3 && firstTurnPiPlan.active) {
     const target = bombMonths.find((m) => firstTurnPiPlan.months.has(m));
     if (target != null) return true;
   }
-  const bestGain = monthBoardGain(state, selectBestMonth(state, bombMonths));
-  if (p === POLICY_HEURISTIC_V3) return bestGain >= 1;
+  const bestMonth = selectBestMonth(state, bombMonths);
+  const bestGain = monthBoardGain(state, bestMonth);
+  if (p === POLICY_HEURISTIC_V3) {
+    if (bestMonth == null) return false;
+    const impact = isHighImpactBomb(state, playerKey, bestMonth);
+    if (ctx.defenseOpening) {
+      // Requested: opening-second mode allows bomb only on high immediate impact.
+      return impact.highImpact;
+    }
+    if (ctx.nagariDelayMode && !impact.highImpact && impact.immediateGain < 6) return false;
+    return bestGain >= 1;
+  }
   return bestGain >= 1;
 }
 
@@ -889,16 +1337,28 @@ function decideShaking(state, playerKey, shakingMonths, policy) {
   const piFinishWindow = selfPi >= 9;
   const piPressureWindow = selfPi >= 8 || oppPi <= 6;
 
-  let best = { allow: false, month: null, score: -Infinity };
+  let best = { allow: false, month: null, score: -Infinity, highImpact: false, immediateGain: 0, comboGain: 0 };
   for (const month of shakingMonths) {
     let immediateGain = shakingImmediateGainScore(state, playerKey, month);
     if (firstTurnPiPlan.active && firstTurnPiPlan.months.has(month)) immediateGain += 0.45;
     const comboGain = ownComboOpportunityScore(state, playerKey, month);
+    const impact = isHighImpactShaking(state, playerKey, month);
+    if (impact.directThreeGwang) immediateGain += 0.55;
+    if (impact.hasDoublePiLine) immediateGain += 0.35;
     const slowPenalty = slowPlayPenalty(immediateGain, comboGain, tempoPressure, ctx);
     const monthTieBreak = monthStrategicPriority(month) * 0.25;
     let score = immediateGain * 1.3 + comboGain * 1.15 + tempoPressure - riskPenalty - slowPenalty + monthTieBreak;
     if (trailingBy >= 3) score += 0.35;
-    if (score > best.score) best = { allow: false, month, score };
+    if (score > best.score) {
+      best = {
+        allow: false,
+        month,
+        score,
+        highImpact: impact.highImpact,
+        immediateGain,
+        comboGain
+      };
+    }
   }
 
   let threshold = 0.65;
@@ -922,6 +1382,15 @@ function decideShaking(state, playerKey, shakingMonths, policy) {
   }
 
   if (oppThreat >= 0.8 && (ctx.myScore || 0) >= (ctx.oppScore || 0) + 1 && tempoPressure < 1.6) {
+    return { ...best, allow: false };
+  }
+  if (ctx.defenseOpening && !best.highImpact) {
+    return { ...best, allow: false };
+  }
+  if (ctx.defenseOpening && best.immediateGain < 1.05 && best.comboGain < 1.35) {
+    return { ...best, allow: false };
+  }
+  if (ctx.nagariDelayMode && !best.highImpact && best.score < threshold + 0.35) {
     return { ...best, allow: false };
   }
   return { ...best, allow: best.score >= threshold };
