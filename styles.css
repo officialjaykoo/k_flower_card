@@ -3,8 +3,8 @@
   --card-h: 58px;
   --side-col-w: 226px;
   --capture-zone-w: 230px;
-  --capture-junk-zone-w: 440px;
-  --capture-state-zone-w: 80px;
+  --capture-junk-zone-w: 430px;
+  --capture-state-zone-w: 90px;
   font-family: "Jua", "Noto Sans KR", sans-serif;
   color: #ebffe8;
 }
@@ -236,6 +236,12 @@ body {
   flex: 0 0 40px;
 }
 
+.hand-card-empty-slot {
+  border: 1px dashed rgba(255, 245, 184, 0.38);
+  border-radius: 6px;
+  background: rgba(8, 35, 10, 0.25);
+}
+
 .player-hand-lane .hand-grid {
   gap: 8px;
   min-height: 116px;
@@ -245,6 +251,10 @@ body {
   width: 80px;
   height: 116px;
   flex: 0 0 80px;
+}
+
+.player-hand-lane .hand-card-empty-slot {
+  border-radius: 8px;
 }
 
 .player-hand-lane .card {

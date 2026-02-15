@@ -1,4 +1,4 @@
-﻿import { piValue, isGukjinCard, getGukjinMode } from "./scoring.js";
+import { piValue, isGukjinCard, getGukjinMode } from "./scoring.js";
 
 export function categoryKey(card) {
   switch (card.category) {
@@ -20,11 +20,6 @@ function hasCapturedCardId(captured, cardId) {
 export function pushCaptured(captured, card) {
   if (!card || hasCapturedCardId(captured, card.id)) return;
   captured[categoryKey(card)].push(card);
-}
-
-export function shouldPromptGukjinChoice(player) {
-  if (!player || player.gukjinLocked) return false;
-  return (player.captured.five || []).some((c) => isGukjinCard(c) && !c.gukjinTransformed);
 }
 
 export function bestMatchCard(cards) {
@@ -54,11 +49,14 @@ export function stealPiFromOpponent(players, takerKey, count) {
 
   while (remaining > 0) {
     const junkOnlyCandidates = giver.captured.junk.map((card, idx) => {
+      const isGukjinPi =
+        !!card?.gukjinTransformed ||
+        (isGukjinCard(card) && card?.category === "junk");
       return {
         idx,
         card,
         value: piValue(card),
-        isGukjin: false,
+        isGukjin: isGukjinPi,
         source: "junk"
       };
     });
@@ -96,13 +94,12 @@ export function stealPiFromOpponent(players, takerKey, count) {
 
     const pick = candidates[0];
     let stolen;
-
     if (pick.source === "gukjin") {
       const [gukjinCard] = giver.captured.five.splice(pick.idx, 1);
       stolen = {
         ...gukjinCard,
         category: "junk",
-        doubleJunk: true,
+        piValue: 2,
         gukjinTransformed: true,
         name: `${gukjinCard.name} (국진피)`
       };
@@ -120,3 +117,4 @@ export function stealPiFromOpponent(players, takerKey, count) {
     stealLog
   };
 }
+

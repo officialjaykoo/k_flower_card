@@ -1,4 +1,4 @@
-﻿import { STARTING_GOLD } from "./economy.js";
+import { STARTING_GOLD } from "./economy.js";
 import { pushCaptured } from "./capturesEvents.js";
 
 export function decideFirstTurn(humanCard, aiCard, rng = Math.random) {

@@ -1,4 +1,4 @@
-﻿import { buildDeck } from "../../cards.js";
+import { buildDeck } from "../../cards.js";
 
 const cardAssetById = new Map(buildDeck().map((c) => [c.id, c.asset]));
 
@@ -31,16 +31,5 @@ export function sortCards(cards) {
         (categoryOrder[a.category] ?? 9) - (categoryOrder[b.category] ?? 9) ||
         a.id.localeCompare(b.id)
     );
-}
-
-export function safeLoadJson(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : fallback;
-  } catch {
-    return fallback;
-  }
 }
 

@@ -49,6 +49,12 @@ NUMERIC_FEATURE_WEIGHTS = {
 }
 
 _CATALOG_CACHE = {}
+SIDE_MY = "mySide"
+SIDE_YOUR = "yourSide"
+
+
+def _opp_side(actor):
+    return SIDE_YOUR if actor == SIDE_MY else SIDE_MY
 
 
 def expand_inputs(patterns):
@@ -122,7 +128,7 @@ def _to_float(v, default=0.0):
 
 
 def _extract_actor_stat(line, actor, names):
-    opp = "ai" if actor == "human" else "human"
+    opp = _opp_side(actor)
     roots = [
         line.get("result"),
         line.get("summary"),
@@ -204,11 +210,28 @@ def _extract_card_ids(items):
 def _month_from_card_id(card_id):
     if not isinstance(card_id, str):
         return None
+
+    # Legacy runtime IDs: "<month>-<globalIndex>" (e.g. "9-32")
     head = card_id.split("-", 1)[0]
     try:
         return int(head)
     except Exception:
+        pass
+
+    # New stable IDs: A0..L3 (months 1..12), M0..M1 (bonus month 13)
+    if len(card_id) < 2:
         return None
+    prefix = card_id[0].upper()
+    tail = card_id[1:]
+    if not tail.isdigit():
+        return None
+    idx = int(tail)
+
+    if "A" <= prefix <= "L" and 0 <= idx <= 3:
+        return ord(prefix) - ord("A") + 1
+    if prefix == "M" and 0 <= idx <= 1:
+        return 13
+    return None
 
 
 def _card_meta(line, card_id):
@@ -253,7 +276,7 @@ def extract_numeric(line, trace, actor):
     sp = trace.get("sp") or {}
     fv = trace.get("fv") or {}
     ev = fv.get("eventCounts") or {}
-    opp = "ai" if actor == "human" else "human"
+    opp = _opp_side(actor)
 
     shake_events = _to_float(ev.get("shaking"), 0.0)
     deck_count = float(dc.get("deckCount") or 0.0)
@@ -366,7 +389,7 @@ def extract_numeric(line, trace, actor):
 def extract_tokens(line, trace, decision_type, actor):
     dc = trace.get("dc") or {}
     score = line.get("score") or {}
-    opp = "ai" if actor == "human" else "human"
+    opp = _opp_side(actor)
     self_score = float(score.get(actor) or 0.0)
     opp_score = float(score.get(opp) or 0.0)
     score_diff = self_score - opp_score
@@ -451,7 +474,7 @@ def extract_tokens(line, trace, decision_type, actor):
 def target_value(line, actor, value_scale):
     score = line.get("score") or {}
     self_score = score.get(actor)
-    opp = "ai" if actor == "human" else "human"
+    opp = _opp_side(actor)
     opp_score = score.get(opp)
     if self_score is None or opp_score is None:
         return None
@@ -465,7 +488,7 @@ def target_value(line, actor, value_scale):
     bak_escape = line.get("bakEscape") or {}
     loser = bak_escape.get("loser")
     escaped = bak_escape.get("escaped")
-    if loser in ("human", "ai") and escaped is False:
+    if loser in (SIDE_MY, SIDE_YOUR) and escaped is False:
         mult *= 1.2
 
     go_decision = line.get("goDecision") or {}
@@ -503,7 +526,7 @@ def build_cache(input_paths, cache_path, max_samples, value_scale):
                 line = json.loads(line_raw)
                 for trace in line.get("decision_trace") or []:
                     actor = trace.get("a")
-                    if actor not in ("human", "ai"):
+                    if actor not in (SIDE_MY, SIDE_YOUR):
                         continue
                     chosen, decision_type, candidates = choose_label_and_candidates(trace)
                     if chosen is None:
@@ -946,3 +969,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

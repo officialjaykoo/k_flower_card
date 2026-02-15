@@ -7,6 +7,9 @@ import math
 import os
 from datetime import datetime
 
+SIDE_MY = "mySide"
+SIDE_YOUR = "yourSide"
+
 
 def expand_inputs(patterns):
     paths = []
@@ -152,12 +155,12 @@ def stable_hash(token, dim):
 
 def value_sample(trace, decision_type, chosen, score, gold_per_point):
     actor = trace.get("a")
-    if actor not in ("human", "ai"):
+    if actor not in (SIDE_MY, SIDE_YOUR):
         return None
     dc = trace.get("dc") or {}
     sp = trace.get("sp") or {}
     self_score = score.get(actor)
-    opp = "ai" if actor == "human" else "human"
+    opp = SIDE_YOUR if actor == SIDE_MY else SIDE_MY
     opp_score = score.get(opp)
     if self_score is None or opp_score is None:
         return None

@@ -1,9 +1,23 @@
-﻿import fs from "fs/promises";
+import fs from "fs/promises";
 import path from "path";
 import sharp from "sharp";
 
 const cardsDir = path.resolve("public/cards");
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
+const MONTH_ID_PREFIX = {
+  1: "A",
+  2: "B",
+  3: "C",
+  4: "D",
+  5: "E",
+  6: "F",
+  7: "G",
+  8: "H",
+  9: "I",
+  10: "J",
+  11: "K",
+  12: "L"
+};
 
 function isRed(r, g, b, a) {
   return a > 120 && r > 140 && g < 120 && b < 120 && r - g > 40 && r - b > 40;
@@ -90,13 +104,17 @@ async function writeSvgFromCrop(srcPath, box, outPath) {
 for (const month of MONTHS) {
   const srcPath = path.join(cardsDir, `${month}.webp`);
   const boxes = await detectCardBoxes(srcPath);
-  const startIdx = (month - 1) * 4;
+  const prefix = MONTH_ID_PREFIX[month];
+
+  if (!prefix) {
+    throw new Error(`Missing card ID prefix for month ${month}`);
+  }
 
   for (let i = 0; i < 4; i += 1) {
-    const outPath = path.join(cardsDir, `${month}-${startIdx + i}.svg`);
+    const outPath = path.join(cardsDir, `${prefix}${i}.svg`);
     await writeSvgFromCrop(srcPath, boxes[i], outPath);
   }
 
   const summary = boxes.map((b) => `[x=${b.minX},y=${b.minY},w=${b.w},h=${b.h}]`).join(" ");
-  console.log(`${month}.webp -> ${month}-${startIdx}..${month}-${startIdx + 3} ${summary}`);
+  console.log(`${month}.webp -> ${prefix}0..${prefix}3 ${summary}`);
 }

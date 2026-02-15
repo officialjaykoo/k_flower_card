@@ -49,9 +49,9 @@ function dedupeHandNonPass(hand = []) {
   return result;
 }
 
-function makePassCard(playerKey, seed, idx) {
+function makePassCard(serial) {
   return {
-    id: `pass-${playerKey}-${seed}-${idx}`,
+    id: `N${serial}`,
     month: 0,
     category: "junk",
     name: "Pass",
@@ -87,18 +87,26 @@ export function ensurePassCardFor(state, playerKey) {
 
   if (nextHand.length < expectedHandCount) {
     const addCount = expectedHandCount - nextHand.length;
-    const seed = `${state.turnSeq || 0}-${state.kiboSeq || 0}-${(state.log || []).length}`;
     const existingIds = collectExistingCardIds(state);
     const added = [];
-    let serial = 0;
+    let serial = Number(state.passCardCounter || 0);
     while (added.length < addCount) {
-      const passCard = makePassCard(playerKey, seed, serial);
+      const passCard = makePassCard(serial);
       serial += 1;
       if (existingIds.has(passCard.id)) continue;
       existingIds.add(passCard.id);
       added.push(passCard);
     }
     nextHand = nextHand.concat(added);
+    const nextPlayers = {
+      ...state.players,
+      [playerKey]: { ...player, hand: nextHand }
+    };
+    return {
+      ...state,
+      players: nextPlayers,
+      passCardCounter: serial
+    };
   }
 
   const prevHand = player.hand || [];

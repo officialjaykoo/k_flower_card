@@ -1,4 +1,8 @@
-﻿import { ruleSets } from "./rules.js";
+import { ruleSets } from "./rules.js";
+import { countComboTag } from "./combos.js";
+
+const NON_BRIGHT_KWANG_ID = "L0";
+const GUKJIN_CARD_ID = "I0";
 
 function uniqueCards(cards = []) {
   const seen = new Set();
@@ -14,11 +18,11 @@ export function calculateScore(player, opponent, ruleKey) {
   const baseInfo = calculateBaseScore(player, rules);
   const goBonus = player.goCount;
 
-  // base/total은 기본점수+GO 누적값, payoutTotal은 배수(고/흔들기/폭탄/박) 적용 후 금액 계산용.
+  // base/total is base score + GO bonus; payoutTotal applies multipliers.
   const pointTotal = baseInfo.base + goBonus;
 
   let payoutMultiplier = 1;
-  if (player.goCount >= 3) payoutMultiplier *= player.goCount - 1;
+  if (player.goCount >= 3) payoutMultiplier *= 2 ** (player.goCount - 2);
   if (player.events.shaking > 0) payoutMultiplier *= 2 ** player.events.shaking;
   if (player.events.bomb > 0) payoutMultiplier *= 2 ** player.events.bomb;
 
@@ -68,10 +72,9 @@ export function calculateBaseScore(player, rules = ruleSets.A) {
 }
 
 function ribbonBonus(ribbons) {
-  const months = new Set(ribbons.map((c) => c.month));
-  const hasRed = [1, 2, 3].every((m) => months.has(m));
-  const hasBlue = [6, 9, 10].every((m) => months.has(m));
-  const hasPlant = [4, 5, 7].every((m) => months.has(m));
+  const hasRed = countComboTag(ribbons, "redRibbons") >= 3;
+  const hasBlue = countComboTag(ribbons, "blueRibbons") >= 3;
+  const hasPlant = countComboTag(ribbons, "plainRibbons") >= 3;
   let bonus = 0;
   if (hasRed) bonus += 3;
   if (hasBlue) bonus += 3;
@@ -80,14 +83,13 @@ function ribbonBonus(ribbons) {
 }
 
 function fiveBonus(fives) {
-  const months = new Set(fives.map((c) => c.month));
-  return [2, 4, 8].every((m) => months.has(m)) ? 5 : 0;
+  return countComboTag(fives, "fiveBirds") >= 3 ? 5 : 0;
 }
 
 function kwangBaseScore(kwangCards) {
   const count = kwangCards.length;
   if (count < 3) return 0;
-  if (count === 3) return kwangCards.some((c) => c.month === 10) ? 2 : 3;
+  if (count === 3) return kwangCards.some((c) => c?.id === NON_BRIGHT_KWANG_ID) ? 2 : 3;
   if (count === 4) return 4;
   return 15;
 }
@@ -99,14 +101,14 @@ function detectBak(player, opponent, ruleKey) {
   const playerFiveCount = scoringFiveCards(player).length;
   const opponentFiveCount = scoringFiveCards(opponent).length;
 
-  const bakEnabled = (player.goCount || 0) > 0;
   const bak = {
     gwang:
-      bakEnabled &&
       uniqueCards(player.captured.kwang || []).length >= 3 &&
       uniqueCards(opponent.captured.kwang || []).length === 0,
-    pi: bakEnabled && opponentPi <= 7 && playerPi >= 10,
-    mongBak: bakEnabled && opponentFiveCount === 0 && playerFiveCount >= 7
+    // 피박은 고 여부와 무관. 단, 상대 피가 0이면 면박(피박 면제).
+    pi: opponentPi >= 1 && opponentPi <= 7 && playerPi >= 10,
+    // User rule: mongBak is checked on win condition context without GO prerequisite.
+    mongBak: opponentFiveCount === 0 && playerFiveCount >= 7
   };
 
   let multiplier = 1;
@@ -117,8 +119,8 @@ function detectBak(player, opponent, ruleKey) {
 }
 
 export function piValue(card) {
-  if (card.tripleJunk) return 3;
-  if (card.doubleJunk) return 2;
+  const explicit = Number(card?.piValue);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
   return 1;
 }
 
@@ -127,7 +129,7 @@ export function sumPiValues(cards = []) {
 }
 
 export function isGukjinCard(card) {
-  return card.month === 9 && card.category === "five";
+  return card?.id === GUKJIN_CARD_ID;
 }
 
 export function getGukjinMode(player) {

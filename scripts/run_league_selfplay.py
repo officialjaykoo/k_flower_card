@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 import argparse
 import json
 import os
@@ -95,7 +95,7 @@ def main():
     remaining = args.total_games
     side_flip = False
     chunk_infos = []
-    aggregate = {"games": 0, "completed": 0, "winners": {"human": 0, "ai": 0, "draw": 0, "unknown": 0}, "matchups": {}}
+    aggregate = {"games": 0, "completed": 0, "winners": {"mySide": 0, "yourSide": 0, "draw": 0, "unknown": 0}, "matchups": {}}
 
     i = 0
     while remaining > 0:

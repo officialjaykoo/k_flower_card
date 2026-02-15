@@ -1,4 +1,4 @@
-﻿param(
+param(
   [string]$Champion = "heuristic_v3",
   [string]$Challenger = "heuristic_v3",
   [int]$GamesPerSide = 100000,
@@ -54,6 +54,69 @@ function Read-JsonFile {
     throw "Missing file: $Path"
   }
   return (Get-Content $Path -Raw | ConvertFrom-Json)
+}
+
+function Summarize-RunJsonl {
+  param(
+    [string]$Path,
+    [string]$ChallengerLabel,
+    [string]$ChampionLabel
+  )
+  if (-not (Test-Path $Path)) {
+    throw "Missing file: $Path"
+  }
+  $s = [ordered]@{
+    total = 0
+    challengerWins = 0
+    championWins = 0
+    draws = 0
+    challengerGoldDeltaSum = 0.0
+  }
+  Get-Content -Path $Path | ForEach-Object {
+    $line = $_
+    if ([string]::IsNullOrWhiteSpace($line)) { return }
+    $obj = $line | ConvertFrom-Json
+    $s.total += 1
+
+    $winner = [string]$obj.winner
+    if ($winner -eq "draw") { $s.draws += 1 }
+
+    $policy = $obj.policy
+    $gold = $obj.gold
+    if ($null -eq $policy -or $null -eq $gold) { return }
+
+    $myLabel = [string]$policy.mySide
+    $yourLabel = [string]$policy.yourSide
+    $myGold = NumOrZero($gold.mySide)
+    $yourGold = NumOrZero($gold.yourSide)
+
+    $challengerSide = $null
+    if ($ChallengerLabel -ne $ChampionLabel) {
+      if ($myLabel -eq $ChallengerLabel -and $yourLabel -eq $ChampionLabel) {
+        $challengerSide = "mySide"
+      } elseif ($yourLabel -eq $ChallengerLabel -and $myLabel -eq $ChampionLabel) {
+        $challengerSide = "yourSide"
+      } elseif ($myLabel -eq $ChallengerLabel -and $yourLabel -ne $ChallengerLabel) {
+        $challengerSide = "mySide"
+      } elseif ($yourLabel -eq $ChallengerLabel -and $myLabel -ne $ChallengerLabel) {
+        $challengerSide = "yourSide"
+      }
+    }
+
+    if ($challengerSide -eq "mySide") {
+      $s.challengerGoldDeltaSum += ($myGold - $yourGold)
+      if ($winner -eq "mySide") { $s.challengerWins += 1 }
+      elseif ($winner -eq "yourSide") { $s.championWins += 1 }
+    } elseif ($challengerSide -eq "yourSide") {
+      $s.challengerGoldDeltaSum += ($yourGold - $myGold)
+      if ($winner -eq "yourSide") { $s.challengerWins += 1 }
+      elseif ($winner -eq "mySide") { $s.championWins += 1 }
+    } elseif ($winner -eq "mySide" -or $winner -eq "yourSide") {
+      # Unresolvable label mapping (for example, identical labels on both sides).
+      $s.draws += 1
+    }
+  }
+  return $s
 }
 
 function Run-ParallelSim {
@@ -136,26 +199,26 @@ while ([int]$state.round -le [int]$state.rounds) {
   }
 
   if (-not $state.summary_done) {
-    $rep1 = Read-JsonFile -Path ($state.run_a -replace "\.jsonl$", "-report.json")
-    $rep2 = Read-JsonFile -Path ($state.run_b -replace "\.jsonl$", "-report.json")
+    $sum1 = Summarize-RunJsonl -Path $state.run_a -ChallengerLabel $state.challenger -ChampionLabel $state.champion
+    $sum2 = Summarize-RunJsonl -Path $state.run_b -ChallengerLabel $state.challenger -ChampionLabel $state.champion
 
-    $challengerWins = [int]$rep1.winners.human + [int]$rep2.winners.ai
-    $championWins = [int]$rep1.winners.ai + [int]$rep2.winners.human
-    $draws = [int]$rep1.winners.draw + [int]$rep2.winners.draw
-    $total = ($GamesPerSide * 2)
+    $challengerWins = [int]$sum1.challengerWins + [int]$sum2.challengerWins
+    $championWins = [int]$sum1.championWins + [int]$sum2.championWins
+    $draws = [int]$sum1.draws + [int]$sum2.draws
+    $total = [int]$sum1.total + [int]$sum2.total
     $decisive = $challengerWins + $championWins
 
     $challengerWinRateAll = Ratio -Numerator $challengerWins -Denominator $total
     $challengerWinRateDecisive = Ratio -Numerator $challengerWins -Denominator $decisive
 
     # Gold-first metric (primary), win rate is secondary.
-    # run_a: challenger=human, run_b: challenger=ai
-    $rep1Eco = $rep1.economy
-    $rep2Eco = $rep2.economy
-    $challengerAvgGoldDelta =
-      (NumOrZero($rep1Eco.averageGoldDeltaHuman) + (-(NumOrZero($rep2Eco.averageGoldDeltaHuman)))) / 2.0
-    $challengerCumGold1000 =
-      (NumOrZero($rep1Eco.cumulativeGoldDeltaOver1000) + (-(NumOrZero($rep2Eco.cumulativeGoldDeltaOver1000)))) / 2.0
+    $challengerGoldDeltaSum = NumOrZero($sum1.challengerGoldDeltaSum) + NumOrZero($sum2.challengerGoldDeltaSum)
+    if ($total -gt 0) {
+      $challengerAvgGoldDelta = $challengerGoldDeltaSum / [double]$total
+    } else {
+      $challengerAvgGoldDelta = 0.0
+    }
+    $challengerCumGold1000 = $challengerAvgGoldDelta * 1000.0
 
     $championBefore = [string]$state.champion
     $challengerBefore = [string]$state.challenger

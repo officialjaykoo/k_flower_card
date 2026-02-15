@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   initGame,
   playTurn,
@@ -22,35 +22,40 @@ import { botPlay, getHeuristicCardProbabilities } from "./bot.js";
 import { getModelCandidateProbabilities, modelPolicyPlay } from "./modelPolicyBot.js";
 import { advanceAutoTurns, getActionPlayerKey } from "./engineRunner.js";
 import { buildReplayFrames, formatActionText, formatEventsText } from "./ui/utils/replay.js";
-import {
-  isBotPlayer,
-  participantType,
-  randomSeed,
-  sortCards
-} from "./ui/utils/common.js";
+import { isBotPlayer, participantType, randomSeed, sortCards } from "./ui/utils/common.js";
+import { DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, makeTranslator, translate } from "./ui/i18n/index.js";
 import GameBoard from "./ui/components/GameBoard.jsx";
 import GameOverlays from "./ui/components/GameOverlays.jsx";
 import "../styles.css";
 
-const MODEL_CATALOG = {
-  sendol: { label: "센돌", kind: "policy_model", policyPath: "/models/policy-sendol.json" },
-  dolbaram: { label: "돌바람", kind: "policy_model", policyPath: "/models/policy-dolbaram-v5.json" },
-  heuristic_v3: { label: "휴리스틱v3", kind: "bot_policy", botPolicy: "heuristic_v3" }
-};
+const MODEL_CATALOG = Object.freeze({
+  sendol: { labelKey: "model.sendol", kind: "policy_model", policyPath: "/models/policy-sendol.json" },
+  dolbaram: { labelKey: "model.dolbaram", kind: "policy_model", policyPath: "/models/policy-dolbaram-v5.json" },
+  heuristic_v3: { labelKey: "model.heuristicV3", kind: "bot_policy", botPolicy: "heuristic_v3" }
+});
 
-const MODEL_OPTIONS = [
-  { value: "sendol", label: "센돌" },
-  { value: "dolbaram", label: "돌바람" },
-  { value: "heuristic_v3", label: "휴리스틱v3" }
-];
+function getModelLabel(pick, language) {
+  const cfg = MODEL_CATALOG[pick] || null;
+  if (!cfg) return String(pick || "AI");
+  return translate(language, cfg.labelKey, {}, String(pick));
+}
+
+function buildModelOptions(language) {
+  return Object.entries(MODEL_CATALOG).map(([value, config]) => ({
+    value,
+    label: translate(language, config.labelKey, {}, value)
+  }));
+}
 
 export default function App() {
   const policyModelRef = useRef({ human: null, ai: null });
   const [modelVersion, setModelVersion] = useState(0);
   const [ui, setUi] = useState(() => {
     return {
+      language: DEFAULT_LANGUAGE,
       revealAiHand: true,
-      sortHand: true,
+      fixedHand: true,
+      handLayoutNonce: 0,
       seed: randomSeed(),
       participants: { human: "human", ai: "ai" },
       modelPicks: { human: "sendol", ai: "dolbaram" },
@@ -61,6 +66,8 @@ export default function App() {
     };
   });
 
+  const t = useMemo(() => makeTranslator(ui.language || DEFAULT_LANGUAGE), [ui.language]);
+  const modelOptions = useMemo(() => buildModelOptions(ui.language || DEFAULT_LANGUAGE), [ui.language]);
   const [state, setState] = useState(() => initGame("A", createSeededRng(randomSeed()), { carryOverMultiplier: 1 }));
   const [loadedReplay, setLoadedReplay] = useState(null);
   const [openingPick, setOpeningPick] = useState({
@@ -70,13 +77,15 @@ export default function App() {
     winnerKey: null
   });
   const timerRef = useRef(null);
+
   const applyParticipantLabels = (s, u = ui) => {
-    const humanModelLabel = MODEL_CATALOG[u.modelPicks?.human]?.label || "AI-1";
-    const aiModelLabel = MODEL_CATALOG[u.modelPicks?.ai]?.label || "AI-2";
+    const lang = u.language || DEFAULT_LANGUAGE;
+    const humanModelLabel = getModelLabel(u.modelPicks?.human, lang) || "AI-1";
+    const aiModelLabel = getModelLabel(u.modelPicks?.ai, lang) || "AI-2";
     const humanLabel =
-      participantType(u, "human") === "ai" ? humanModelLabel : "플레이어1";
+      participantType(u, "human") === "ai" ? humanModelLabel : translate(lang, "player.player1");
     const aiLabel =
-      participantType(u, "ai") === "ai" ? aiModelLabel : "플레이어2";
+      participantType(u, "ai") === "ai" ? aiModelLabel : translate(lang, "player.player2");
     s.players.human.label = humanLabel;
     s.players.ai.label = aiLabel;
     return s;
@@ -106,6 +115,10 @@ export default function App() {
       (ss, playerKey) => chooseBotAction(ss, playerKey, u)
     );
   };
+
+  useEffect(() => {
+    document.documentElement.lang = ui.language || DEFAULT_LANGUAGE;
+  }, [ui.language]);
 
   useEffect(() => {
     let mounted = true;
@@ -154,7 +167,7 @@ export default function App() {
       return applyParticipantLabels(next);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ui.participants, ui.modelPicks?.human, ui.modelPicks?.ai]);
+  }, [ui.participants, ui.modelPicks?.human, ui.modelPicks?.ai, ui.language]);
 
   useEffect(() => {
     if (openingPick.active) return;
@@ -166,8 +179,8 @@ export default function App() {
     const reveal = getShakingReveal(state);
     if (!reveal) return;
     const ms = Math.max(30, reveal.expiresAt - Date.now());
-    const t = setTimeout(() => setState((s) => ({ ...s })), ms);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => setState((s) => ({ ...s })), ms);
+    return () => clearTimeout(timer);
   }, [state]);
 
   useEffect(() => {
@@ -182,7 +195,6 @@ export default function App() {
     ].join("|");
     if (ui.lastRecordedRoundKey === roundKey) return;
 
-    // Browser persistence is intentionally disabled.
     setUi((u) => ({ ...u, lastRecordedRoundKey: roundKey }));
   }, [state, ui]);
 
@@ -201,16 +213,24 @@ export default function App() {
   const aiPlayProbMap = useMemo(() => {
     if (state.phase !== "playing") return null;
     if (participantType(ui, "ai") !== "ai") return null;
+    const fallbackPolicy = "heuristic_v3";
+    const fallbackProbs = () => getHeuristicCardProbabilities(state, "ai", fallbackPolicy);
     const aiPick = ui.modelPicks?.ai;
     const aiCfg = MODEL_CATALOG[aiPick] || null;
     if (aiCfg?.kind === "bot_policy") {
-      return getHeuristicCardProbabilities(state, "ai", aiCfg.botPolicy || "heuristic_v3");
+      return getHeuristicCardProbabilities(state, "ai", aiCfg.botPolicy || fallbackPolicy);
     }
-    const model = policyModelRef.current.ai;
-    if (!model) return null;
-    const scored = getModelCandidateProbabilities(state, "ai", model, { previewPlay: true });
-    if (!scored || scored.decisionType !== "play") return null;
-    return scored.probabilities || null;
+    if (aiCfg?.kind === "policy_model") {
+      const model = policyModelRef.current.ai;
+      if (model) {
+        const scored = getModelCandidateProbabilities(state, "ai", model, { previewPlay: true });
+        if (scored && scored.decisionType === "play") {
+          return scored.probabilities || null;
+        }
+      }
+      return fallbackProbs();
+    }
+    return fallbackProbs();
   }, [state, ui.participants, ui.modelPicks?.ai, modelVersion]);
 
   useEffect(() => {
@@ -243,7 +263,7 @@ export default function App() {
     if (state.phase === "resolution") return;
     const actor = getActionPlayerKey(state);
     if (!actor || !isBotPlayer(ui, actor)) return;
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       setState((prev) => {
         const stepActor = getActionPlayerKey(prev);
         if (!stepActor || !isBotPlayer(ui, stepActor)) return prev;
@@ -251,7 +271,7 @@ export default function App() {
         return next === prev ? prev : next;
       });
     }, ui.visualDelayMs);
-    return () => clearTimeout(t);
+    return () => clearTimeout(timer);
   }, [state, ui.speedMode, ui.visualDelayMs, ui.participants]);
 
   const startGame = (opts = {}) => {
@@ -259,17 +279,19 @@ export default function App() {
     const seedBase = opts.seedOverride != null ? String(opts.seedOverride) : ui.seed;
     const seed = (seedBase || "").trim() || randomSeed();
     const firstTurnKey = opts.firstTurnKey ?? null;
+    const carryOverMultiplier = opts.carryOverMultiplier ?? state.nextCarryOverMultiplier ?? 1;
     const initialGold = keepGold
       ? { human: state.players.human.gold, ai: state.players.ai.gold }
       : undefined;
 
     let next = initGame(state.ruleKey, createSeededRng(seed), {
-      carryOverMultiplier: 1,
+      carryOverMultiplier,
       firstTurnKey,
       initialGold
     });
     const nextUi = {
       ...ui,
+      handLayoutNonce: (ui.handLayoutNonce || 0) + 1,
       seed,
       lastRecordedRoundKey: null,
       replay: { ...ui.replay, enabled: false, autoPlay: false, turnIndex: 0 }
@@ -422,7 +444,6 @@ export default function App() {
           setUi={setUi}
           locked={locked}
           participantType={participantType}
-          startGame={startGame}
           onChooseMatch={onChooseMatch}
           onPlayCard={onPlayCard}
           onStartSpecifiedGame={onStartSpecifiedGame}
@@ -436,9 +457,9 @@ export default function App() {
           replayFrames={replayFrames}
           replayIdx={replayIdx}
           replayFrame={replayFrame}
-          formatActionText={formatActionText}
+          formatActionText={(action) => formatActionText(action, t)}
           formatEventsText={formatEventsText}
-          modelOptions={MODEL_OPTIONS}
+          modelOptions={modelOptions}
           aiPlayProbMap={aiPlayProbMap}
           openingPick={openingPick}
           onOpeningPick={onOpeningPick}
@@ -463,7 +484,7 @@ export default function App() {
           onReplayIntervalChange={(ms) =>
             setUi((u) => ({ ...u, replay: { ...u.replay, intervalMs: Number(ms) } }))
           }
-          onLoadReplay={(entry, label = "불러온 기보") => {
+          onLoadReplay={(entry, label = t("replay.loadedSourceDefault")) => {
             setLoadedReplay({
               label,
               kibo: Array.isArray(entry?.kibo) ? entry.kibo : [],
@@ -481,6 +502,8 @@ export default function App() {
               replay: { ...u.replay, enabled: false, autoPlay: false, turnIndex: 0 }
             }));
           }}
+          t={t}
+          supportedLanguages={SUPPORTED_LANGUAGES}
         />
 
         <GameOverlays
@@ -498,6 +521,7 @@ export default function App() {
           onChooseShakingNo={onChooseShakingNo}
           onStartSpecifiedGame={onStartSpecifiedGame}
           onStartRandomGame={onStartRandomGame}
+          t={t}
         />
       </div>
     </div>

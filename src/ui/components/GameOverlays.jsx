@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import CardView from "./CardView.jsx";
 
 const CHOICE_LIMIT_MS = 10000;
@@ -17,7 +17,8 @@ export default function GameOverlays({
   onChooseShakingYes,
   onChooseShakingNo,
   onStartSpecifiedGame,
-  onStartRandomGame
+  onStartRandomGame,
+  t
 }) {
   const timedChoiceKey = useMemo(() => {
     if (state.phase === "select-match" && state.pendingMatch?.playerKey && participantType(ui, state.pendingMatch.playerKey) === "human") {
@@ -49,8 +50,8 @@ export default function GameOverlays({
 
   useEffect(() => {
     if (!deadlineAt) return;
-    const t = setInterval(() => setTick(Date.now()), 200);
-    return () => clearInterval(t);
+    const timer = setInterval(() => setTick(Date.now()), 200);
+    return () => clearInterval(timer);
   }, [deadlineAt]);
 
   const remainSec = deadlineAt ? Math.max(0, Math.ceil((deadlineAt - tick) / 1000)) : null;
@@ -70,54 +71,57 @@ export default function GameOverlays({
   }, [timedChoiceKey, remainSec, state.phase, state.pendingGoStop, onChooseStop]);
 
   const winnerKey = state.result?.winner;
-  const winnerScore =
-    winnerKey === "human" ? state.result?.human : winnerKey === "ai" ? state.result?.ai : null;
+  const winnerScore = winnerKey === "human" ? state.result?.human : winnerKey === "ai" ? state.result?.ai : null;
   const resultCauseText = state.result?.nagari
-    ? `나가리: ${(state.result.nagariReasons || []).join(", ")}`
+    ? t("overlay.result.nagari", { reasons: (state.result.nagariReasons || []).join(", ") })
     : winnerScore?.breakdown?.presidentStop
-    ? "대통령!"
-    : "일반 종료";
+    ? t("overlay.result.president")
+    : t("overlay.result.normal");
 
   return (
     <>
       {reveal && (
         <div className="result-overlay result-overlay-passive">
           <div className="panel result-panel">
-            <div className="section-title">{reveal.title || "알림"}</div>
+            <div className="section-title">{reveal.title || t("overlay.notice")}</div>
             <div className="meta">
               {reveal.message ||
                 (reveal.playerKey
-                  ? `${state.players[reveal.playerKey].label} ${reveal.month || ""}월 카드 공개`
+                  ? t("overlay.revealMessage", {
+                      player: state.players[reveal.playerKey].label,
+                      month: reveal.month || ""
+                    })
                   : "")}
             </div>
-            <div className="hand">{(reveal.cards || []).map((c) => <CardView key={`rv-${c.id}`} card={c} />)}</div>
+            <div className="hand">{(reveal.cards || []).map((c) => <CardView key={`rv-${c.id}`} card={c} t={t} />)}</div>
           </div>
         </div>
       )}
 
-
-      {state.phase === "select-match" && state.pendingMatch?.playerKey && participantType(ui, state.pendingMatch.playerKey) === "human" && (
-        <div className="result-overlay">
-          <div className="panel result-panel">
-            <div className="section-title">카드 선택</div>
-            <div className="meta">{state.pendingMatch?.message || "보드 카드 1장을 선택하세요."}</div>
-            <div className="meta">남은 시간: {remainSec ?? 10}초</div>
-            <div className="hand">
-              {state.board
-                .filter((c) => (state.pendingMatch?.boardCardIds || []).includes(c.id))
-                .map((c) => (
-                  <CardView key={`m-${c.id}`} card={c} interactive onClick={() => onChooseMatch(c.id)} />
-                ))}
+      {state.phase === "select-match" &&
+        state.pendingMatch?.playerKey &&
+        participantType(ui, state.pendingMatch.playerKey) === "human" && (
+          <div className="result-overlay">
+            <div className="panel result-panel">
+              <div className="section-title">{t("overlay.selectCard.title")}</div>
+              <div className="meta">{state.pendingMatch?.message || t("overlay.selectCard.defaultMessage")}</div>
+              <div className="meta">{t("overlay.remainingTime", { seconds: remainSec ?? 10 })}</div>
+              <div className="hand">
+                {state.board
+                  .filter((c) => (state.pendingMatch?.boardCardIds || []).includes(c.id))
+                  .map((c) => (
+                    <CardView key={`m-${c.id}`} card={c} interactive onClick={() => onChooseMatch(c.id)} t={t} />
+                  ))}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
       {state.phase === "go-stop" && state.pendingGoStop && participantType(ui, state.pendingGoStop) === "human" && (
         <div className="result-overlay">
           <div className="panel result-panel">
-            <div className="section-title">Go / Stop 선택</div>
-            <div className="meta">남은 시간: {remainSec ?? 10}초</div>
+            <div className="section-title">{t("overlay.goStop.title")}</div>
+            <div className="meta">{t("overlay.remainingTime", { seconds: remainSec ?? 10 })}</div>
             <div className="control-row">
               <button onClick={() => onChooseGo(state.pendingGoStop)}>Go</button>
               <button onClick={() => onChooseStop(state.pendingGoStop)}>Stop</button>
@@ -126,63 +130,71 @@ export default function GameOverlays({
         </div>
       )}
 
-      {state.phase === "president-choice" && state.pendingPresident?.playerKey && participantType(ui, state.pendingPresident.playerKey) === "human" && (
-        <div className="result-overlay">
-          <div className="panel result-panel">
-            <div className="section-title">대통령 선택</div>
-            <div className="meta">남은 시간: {remainSec ?? 10}초</div>
-            <div className="control-row">
-              <button onClick={() => onChoosePresidentStop(state.pendingPresident.playerKey)}>10점 종료</button>
-              <button onClick={() => onChoosePresidentHold(state.pendingPresident.playerKey)}>들고치기</button>
+      {state.phase === "president-choice" &&
+        state.pendingPresident?.playerKey &&
+        participantType(ui, state.pendingPresident.playerKey) === "human" && (
+          <div className="result-overlay">
+            <div className="panel result-panel">
+              <div className="section-title">{t("overlay.president.title")}</div>
+              <div className="meta">{t("overlay.remainingTime", { seconds: remainSec ?? 10 })}</div>
+              <div className="control-row">
+                <button onClick={() => onChoosePresidentStop(state.pendingPresident.playerKey)}>{t("overlay.president.stop")}</button>
+                <button onClick={() => onChoosePresidentHold(state.pendingPresident.playerKey)}>{t("overlay.president.hold")}</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
       {state.phase === "shaking-confirm" &&
         state.pendingShakingConfirm?.playerKey &&
         participantType(ui, state.pendingShakingConfirm.playerKey) === "human" && (
           <div className="result-overlay">
             <div className="panel result-panel">
-              <div className="section-title">흔들기 선택</div>
-              <div className="meta">{state.players[state.pendingShakingConfirm.playerKey].label}: 흔들기 선언할까요?</div>
+              <div className="section-title">{t("overlay.shaking.title")}</div>
+              <div className="meta">
+                {t("overlay.shaking.confirm", {
+                  player: state.players[state.pendingShakingConfirm.playerKey].label
+                })}
+              </div>
               <div className="control-row">
-                <button onClick={() => onChooseShakingYes(state.pendingShakingConfirm.playerKey)}>예</button>
-                <button onClick={() => onChooseShakingNo(state.pendingShakingConfirm.playerKey)}>아니요</button>
+                <button onClick={() => onChooseShakingYes(state.pendingShakingConfirm.playerKey)}>{t("overlay.yes")}</button>
+                <button onClick={() => onChooseShakingNo(state.pendingShakingConfirm.playerKey)}>{t("overlay.no")}</button>
               </div>
             </div>
           </div>
         )}
 
-      {state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey && participantType(ui, state.pendingGukjinChoice.playerKey) === "human" && (
-        <div className="result-overlay">
-          <div className="panel result-panel">
-            <div className="section-title">국진 선택</div>
-            <div className="meta">남은 시간: {remainSec ?? 10}초</div>
-            <div className="control-row">
-              <button onClick={() => onChooseGukjinMode(state.pendingGukjinChoice.playerKey, "five")}>열로 확정</button>
-              <button onClick={() => onChooseGukjinMode(state.pendingGukjinChoice.playerKey, "junk")}>쌍피로 확정</button>
+      {state.phase === "gukjin-choice" &&
+        state.pendingGukjinChoice?.playerKey &&
+        participantType(ui, state.pendingGukjinChoice.playerKey) === "human" && (
+          <div className="result-overlay">
+            <div className="panel result-panel">
+              <div className="section-title">{t("overlay.gukjin.title")}</div>
+              <div className="meta">{t("overlay.remainingTime", { seconds: remainSec ?? 10 })}</div>
+              <div className="control-row">
+                <button onClick={() => onChooseGukjinMode(state.pendingGukjinChoice.playerKey, "five")}>{t("overlay.gukjin.five")}</button>
+                <button onClick={() => onChooseGukjinMode(state.pendingGukjinChoice.playerKey, "junk")}>{t("overlay.gukjin.junk")}</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
       {state.phase === "resolution" && state.result && (
         <div className="result-overlay">
           <div className="panel result-panel">
-            <div className="section-title">라운드 종료</div>
+            <div className="section-title">{t("overlay.roundEnd.title")}</div>
             <div className="meta">
               {state.result.winner === "human"
-                ? `${state.players.human.label} 승리`
+                ? t("overlay.result.win", { player: state.players.human.label })
                 : state.result.winner === "ai"
-                ? `${state.players.ai.label} 승리`
-                : "무승부"}
+                ? t("overlay.result.win", { player: state.players.ai.label })
+                : t("overlay.result.draw")}
             </div>
             <div className="meta">{resultCauseText}</div>
             <div className="meta">{state.players.human.label} {state.result.human.total} / {state.players.ai.label} {state.result.ai.total}</div>
             <div className="control-row">
-              <button onClick={onStartSpecifiedGame}>같은패로 게임시작</button>
-              <button onClick={onStartRandomGame}>새 게임시작</button>
+              <button onClick={onStartSpecifiedGame}>{t("overlay.button.startSpecified")}</button>
+              <button onClick={onStartRandomGame}>{t("overlay.button.startRandom")}</button>
             </div>
           </div>
         </div>
@@ -190,3 +202,4 @@ export default function GameOverlays({
     </>
   );
 }
+

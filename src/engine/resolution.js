@@ -1,4 +1,4 @@
-﻿import { calculateScore } from "./scoring.js";
+import { calculateScore } from "./scoring.js";
 import { POINT_GOLD_UNIT, settleRoundGold } from "./economy.js";
 import { ruleSets } from "./rules.js";
 
@@ -69,6 +69,7 @@ export function resolveRound(state, stopperKey) {
   const carry = state.carryOverMultiplier || 1;
   let nextCarryOverMultiplier = 1;
   let resolvedWinner = winner;
+  let dokbakApplied = false;
 
   if (nagari) {
     nextCarryOverMultiplier = carry * 2;
@@ -109,6 +110,30 @@ export function resolveRound(state, stopperKey) {
         }
       }
     }
+
+    // 독박: 고한 플레이어가 다시 고/스톱 전에 상대 STOP으로 지면 2배 배상.
+    if (resolvedWinner !== "draw" && hasStopper) {
+      const loserKey = resolvedWinner === "human" ? "ai" : "human";
+      const loserPlayer = state.players[loserKey];
+      if ((loserPlayer?.goCount || 0) > 0) {
+        dokbakApplied = true;
+        if (resolvedWinner === "human") {
+          humanScore = {
+            ...humanScore,
+            multiplier: humanScore.multiplier * 2,
+            payoutTotal: humanScore.payoutTotal * 2,
+            bak: { ...(humanScore.bak || {}), dokbak: true }
+          };
+        } else {
+          aiScore = {
+            ...aiScore,
+            multiplier: aiScore.multiplier * 2,
+            payoutTotal: aiScore.payoutTotal * 2,
+            bak: { ...(aiScore.bak || {}), dokbak: true }
+          };
+        }
+      }
+    }
   }
 
   const settled =
@@ -133,6 +158,7 @@ export function resolveRound(state, stopperKey) {
         : []
     )
     .concat(settled.log)
+    .concat(dokbakApplied ? ["독박 적용: STOP 승리 배상 2배"] : [])
     .concat(nagari ? [`나가리(${nagariReasons.join(", ")}): 다음 판 배수 x${nextCarryOverMultiplier}`] : []);
 
   return {

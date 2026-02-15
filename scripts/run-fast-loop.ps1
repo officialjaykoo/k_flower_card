@@ -1,4 +1,4 @@
-﻿param(
+param(
   [int]$TrainGames = 200000,
   [int]$Workers = 4,
   [string]$Tag = "",

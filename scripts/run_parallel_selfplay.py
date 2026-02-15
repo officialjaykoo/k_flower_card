@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 import argparse
 import json
 import os
@@ -67,18 +67,18 @@ def main():
         raise RuntimeError("One or more worker processes failed.")
 
     completed = 0
-    winners = {"human": 0, "ai": 0, "draw": 0, "unknown": 0}
+    winners = {"mySide": 0, "yourSide": 0, "draw": 0, "unknown": 0}
     first_wins = 0
     second_wins = 0
     draws = 0
     first_score_sum = 0.0
     second_score_sum = 0.0
-    human_gold_sum = 0.0
-    ai_gold_sum = 0.0
-    human_gold_delta_sum = 0.0
+    my_side_gold_sum = 0.0
+    your_side_gold_sum = 0.0
+    my_side_gold_delta_sum = 0.0
     first_gold_sum = 0.0
     second_gold_sum = 0.0
-    first1000_human_gold_delta_sum = 0.0
+    first1000_my_side_gold_delta_sum = 0.0
     first1000_count = 0
 
     with open(out_path, "w", encoding="utf-8") as fout:
@@ -105,20 +105,20 @@ def main():
                     else:
                         draws += 1
                     score = obj.get("score") or {}
-                    first_score_sum += float(score.get("first") or 0)
-                    second_score_sum += float(score.get("second") or 0)
+                    first_score_sum += float(score.get("mySide") or 0)
+                    second_score_sum += float(score.get("yourSide") or 0)
                     gold = obj.get("gold") or {}
-                    g_h = float(gold.get("human") or 0)
-                    g_a = float(gold.get("ai") or 0)
-                    g_f = float(gold.get("first") or 0)
-                    g_s = float(gold.get("second") or 0)
-                    human_gold_sum += g_h
-                    ai_gold_sum += g_a
-                    human_gold_delta_sum += g_h - g_a
+                    g_m = float(gold.get("mySide") or 0)
+                    g_y = float(gold.get("yourSide") or 0)
+                    g_f = g_m
+                    g_s = g_y
+                    my_side_gold_sum += g_m
+                    your_side_gold_sum += g_y
+                    my_side_gold_delta_sum += g_m - g_y
                     first_gold_sum += g_f
                     second_gold_sum += g_s
                     if first1000_count < 1000:
-                        first1000_human_gold_delta_sum += g_h - g_a
+                        first1000_my_side_gold_delta_sum += g_m - g_y
                         first1000_count += 1
 
     report_path = out_path[:-6] + "-report.json" if out_path.endswith(".jsonl") else out_path + "-report.json"
@@ -136,16 +136,16 @@ def main():
             "averageScoreSecond": second_score_sum / games,
         },
         "economy": {
-            "averageGoldHuman": human_gold_sum / games,
-            "averageGoldAi": ai_gold_sum / games,
-            "averageGoldDeltaHuman": human_gold_delta_sum / games,
+            "averageGoldMySide": my_side_gold_sum / games,
+            "averageGoldYourSide": your_side_gold_sum / games,
+            "averageGoldDeltaMySide": my_side_gold_delta_sum / games,
             "averageGoldFirst": first_gold_sum / games,
             "averageGoldSecond": second_gold_sum / games,
             "averageGoldDeltaFirst": (first_gold_sum - second_gold_sum) / games,
-            "cumulativeGoldDeltaOver1000": (human_gold_delta_sum / games) * 1000,
-            "cumulativeGoldDeltaFirst1000": first1000_human_gold_delta_sum,
+            "cumulativeGoldDeltaOver1000": (my_side_gold_delta_sum / games) * 1000,
+            "cumulativeGoldDeltaFirst1000": first1000_my_side_gold_delta_sum,
         },
-        "primaryMetric": "averageGoldDeltaHuman",
+        "primaryMetric": "averageGoldDeltaMySide",
         "workers": args.workers,
         "shards": shard_paths,
     }

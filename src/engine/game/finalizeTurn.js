@@ -1,11 +1,10 @@
 import { ruleSets } from "../rules.js";
-import { calculateScore } from "../scoring.js";
+import { calculateScore, isGukjinCard } from "../scoring.js";
 import { pointsToGold, stealGoldFromOpponent } from "../economy.js";
 import { resolveRound } from "../resolution.js";
 import { findPresidentMonth } from "../opening.js";
 import {
   pushCaptured,
-  shouldPromptGukjinChoice,
   stealPiFromOpponent
 } from "../capturesEvents.js";
 import { clearExpiredReveal, ensurePassCardFor } from "../turnFlow.js";
@@ -13,6 +12,73 @@ import {
   normalizeUniqueCardZones,
   packCard
 } from "./normalize.js";
+
+function hasPendingGukjinChoice(player) {
+  if (!player || player.gukjinLocked) return false;
+  return (player.captured?.five || []).some((card) => isGukjinCard(card) && !card.gukjinTransformed);
+}
+
+function scoreWithGukjinMode(player, opponent, ruleKey, mode) {
+  return calculateScore({ ...player, gukjinMode: mode }, opponent, ruleKey);
+}
+
+function shouldPromptGukjinChoiceAtScoring(state, playerKey) {
+  const player = state.players?.[playerKey];
+  if (!hasPendingGukjinChoice(player)) return false;
+
+  const opponentKey = playerKey === "human" ? "ai" : "human";
+  const opponent = state.players?.[opponentKey];
+  if (!opponent) return false;
+
+  const rules = ruleSets[state.ruleKey];
+  if (!rules) return false;
+
+  const scoreAsFive = scoreWithGukjinMode(player, opponent, state.ruleKey, "five");
+  const scoreAsJunk = scoreWithGukjinMode(player, opponent, state.ruleKey, "junk");
+  const bakAsFive = scoreAsFive.bak || {};
+  const bakAsJunk = scoreAsJunk.bak || {};
+  const hasScoringDifference =
+    scoreAsFive.base !== scoreAsJunk.base ||
+    scoreAsFive.total !== scoreAsJunk.total ||
+    scoreAsFive.multiplier !== scoreAsJunk.multiplier ||
+    scoreAsFive.payoutTotal !== scoreAsJunk.payoutTotal ||
+    !!bakAsFive.gwang !== !!bakAsJunk.gwang ||
+    !!bakAsFive.pi !== !!bakAsJunk.pi ||
+    !!bakAsFive.mongBak !== !!bakAsJunk.mongBak;
+
+  const handCount = (player.hand || []).length;
+  const lastGoBase = player.lastGoBase || 0;
+  const hasGo = (player.goCount || 0) > 0;
+  const isRaisedFive = scoreAsFive.base > lastGoBase;
+  const isRaisedJunk = scoreAsJunk.base > lastGoBase;
+
+  const canGoStopAsFive =
+    rules.useEarlyStop &&
+    scoreAsFive.base >= rules.goMinScore &&
+    isRaisedFive &&
+    handCount > 0;
+  const canGoStopAsJunk =
+    rules.useEarlyStop &&
+    scoreAsJunk.base >= rules.goMinScore &&
+    isRaisedJunk &&
+    handCount > 0;
+
+  if (canGoStopAsFive !== canGoStopAsJunk) return true;
+  if ((canGoStopAsFive || canGoStopAsJunk) && hasScoringDifference) return true;
+
+  const canAutoResolveAfterGoAsFive = hasGo && handCount === 0 && isRaisedFive;
+  const canAutoResolveAfterGoAsJunk = hasGo && handCount === 0 && isRaisedJunk;
+  if (canAutoResolveAfterGoAsFive !== canAutoResolveAfterGoAsJunk) return true;
+  if ((canAutoResolveAfterGoAsFive || canAutoResolveAfterGoAsJunk) && hasScoringDifference) return true;
+
+  const bothHandsEmpty =
+    (state.players?.human?.hand || []).length === 0 &&
+    (state.players?.ai?.hand || []).length === 0;
+
+  if (bothHandsEmpty) return hasScoringDifference;
+
+  return false;
+}
 
 export function finalizeTurn({
   state,
@@ -31,6 +97,7 @@ export function finalizeTurn({
 }) {
   const nextPlayerKey = currentKey === "human" ? "ai" : "human";
   const prevPlayer = state.players[currentKey];
+  const prevOpponent = state.players[nextPlayerKey];
   const ppukOccurred = (events.ppuk || 0) > (prevPlayer.events.ppuk || 0);
   const capturedAny = newlyCaptured.length > 0;
 
@@ -46,9 +113,59 @@ export function finalizeTurn({
     lastSource: null,
     lastMonth: null
   };
+  const prevOppPpukState = prevOpponent.ppukState || {
+    active: false,
+    streak: 0,
+    lastTurnNo: 0,
+    lastSource: null,
+    lastMonth: null
+  };
   const currentTurnNo = (state.turnSeq || 0) + 1;
   const prevHeldBonus = (prevPlayer.heldBonusCards || []).slice();
   let nextHeldBonus = prevHeldBonus.concat(heldBonusCards || []);
+  let nextOpponentPatch = null;
+
+  const clearPpukState = (ppukState) => ({
+    active: false,
+    streak: 0,
+    lastTurnNo: currentTurnNo,
+    lastSource: ppukState?.lastSource || null,
+    lastMonth: ppukState?.lastMonth || null
+  });
+
+  const applyPpukEat = (ownerKey) => {
+    const ownerIsSelf = ownerKey === currentKey;
+    const ownerLabel = ownerIsSelf ? "자뻑" : "상대뻑";
+    const ownerHeldBonus = ownerIsSelf
+      ? nextHeldBonus
+      : (state.players[ownerKey]?.heldBonusCards || []).slice();
+    const ownerPpukState = ownerIsSelf ? prevPpukState : prevOppPpukState;
+
+    // Unified rule: self-ppuk eat and opponent-ppuk eat are treated identically.
+    nextEvents.jabbeok = (nextEvents.jabbeok || 0) + 1;
+    extraSteal += 1;
+    nextLog.push(`${prevPlayer.label}: ${ownerLabel} 먹기 성공 (상대 피 1장 강탈 예약)`);
+
+    if (ownerHeldBonus.length > 0) {
+      ownerHeldBonus.forEach((b) => pushCaptured(captured, b));
+      const bonusSteal = ownerHeldBonus.reduce((sum, c) => sum + (c.bonus?.stealPi || 0), 0);
+      extraSteal += bonusSteal;
+      nextLog.push(
+        `${prevPlayer.label}: 뻑 보류 보너스 ${ownerHeldBonus.length}장 회수 (추가 강탈 ${bonusSteal})`
+      );
+    }
+
+    if (ownerIsSelf) {
+      nextHeldBonus = [];
+      nextPlayerPatch.ppukState = clearPpukState(ownerPpukState);
+    } else {
+      nextOpponentPatch = {
+        ...(nextOpponentPatch || {}),
+        ppukState: clearPpukState(ownerPpukState),
+        heldBonusCards: []
+      };
+    }
+  };
 
   if (ppukOccurred) {
     const nextStreak = (prevPpukState.streak || 0) + 1;
@@ -61,39 +178,29 @@ export function finalizeTurn({
         : "HAND",
       lastMonth: turnMeta?.card?.month ?? null
     };
-    if ((prevPlayer.turnCount || 0) === 0) {
-      goldSteal += pointsToGold(5);
-      nextLog.push(`${prevPlayer.label}: 첫뻑 보상(5점, ${pointsToGold(5)}골드)`);
-    }
-    if (nextStreak >= 2) {
+
+    const turnCount = prevPlayer.turnCount || 0;
+    if (turnCount === 0) {
+      goldSteal += pointsToGold(7);
+      nextLog.push(`${prevPlayer.label}: 첫뻑 보상(7점, ${pointsToGold(7)}골드)`);
+    } else if (turnCount === 1 && nextStreak >= 2) {
+      goldSteal += pointsToGold(14);
+      nextLog.push(`${prevPlayer.label}: 2연뻑 보상(14점, ${pointsToGold(14)}골드)`);
       nextEvents.yeonPpuk = (nextEvents.yeonPpuk || 0) + 1;
-      goldSteal += pointsToGold(5);
-      nextLog.push(`${prevPlayer.label}: 연뻑 보상(5점, ${pointsToGold(5)}골드)`);
-    }
-  } else if (prevPpukState.active && capturedAny) {
-    nextEvents.jabbeok = (nextEvents.jabbeok || 0) + 1;
-    nextPlayerPatch.ppukState = {
-      active: false,
-      streak: 0,
-      lastTurnNo: currentTurnNo,
-      lastSource: prevPpukState.lastSource,
-      lastMonth: prevPpukState.lastMonth
-    };
-    extraSteal += 1;
-    nextLog.push(`${prevPlayer.label}: 자뻑 먹기 성공 (상대 피 1장 강탈 예약)`);
-    if (nextHeldBonus.length > 0) {
-      nextHeldBonus.forEach((b) => {
-        pushCaptured(captured, b);
-      });
-      const bonusSteal = nextHeldBonus.reduce((sum, c) => sum + (c.bonus?.stealPi || 0), 0);
-      extraSteal += bonusSteal;
-      nextLog.push(
-        `${prevPlayer.label}: 홀딩 보너스 ${nextHeldBonus.length}장 회수 (추가 강탈 ${bonusSteal})`
-      );
-      nextHeldBonus = [];
+    } else if (turnCount === 2 && nextStreak >= 3) {
+      goldSteal += pointsToGold(21);
+      nextLog.push(`${prevPlayer.label}: 3연뻑 보상(21점, ${pointsToGold(21)}골드)`);
+      nextEvents.yeonPpuk = (nextEvents.yeonPpuk || 0) + 1;
     }
   } else {
     nextPlayerPatch.ppukState = { ...prevPpukState };
+  }
+
+  if (capturedAny && !ppukOccurred && prevPpukState.active) {
+    applyPpukEat(currentKey);
+  }
+  if (capturedAny && prevOppPpukState.active) {
+    applyPpukEat(nextPlayerKey);
   }
 
   if (!isLastHandTurn && board.length === 0 && capturedAny) {
@@ -102,7 +209,7 @@ export function finalizeTurn({
     nextLog.push(`${prevPlayer.label}: 판쓸 발생 (상대 피 1장 강탈 예약)`);
   }
 
-  const nextPlayers = {
+  let nextPlayers = {
     ...state.players,
     [currentKey]: {
       ...state.players[currentKey],
@@ -114,6 +221,15 @@ export function finalizeTurn({
       events: nextEvents
     }
   };
+  if (nextOpponentPatch) {
+    nextPlayers = {
+      ...nextPlayers,
+      [nextPlayerKey]: {
+        ...nextPlayers[nextPlayerKey],
+        ...nextOpponentPatch
+      }
+    };
+  }
 
   let nextState = {
     ...state,
@@ -202,13 +318,13 @@ export function finalizeTurn({
     return nextState;
   }
 
-  if (shouldPromptGukjinChoice(nextState.players[currentKey])) {
+  if (shouldPromptGukjinChoiceAtScoring(nextState, currentKey)) {
     return {
       ...nextState,
       phase: "gukjin-choice",
       pendingGukjinChoice: { playerKey: currentKey },
       log: nextState.log.concat(
-        `${nextState.players[currentKey].label}: 국진(9월 열) 첫 소유 - 열/쌍피 선택`
+        `${nextState.players[currentKey].label}: 국진(9월 열) 점수 판정 시점 선택`
       )
     };
   }
@@ -229,7 +345,7 @@ export function continueAfterTurnIfNeeded(state, justPlayedKey) {
   const isRaisedSinceLastGo = scoreInfo.base > playerAfterTurn.lastGoBase;
   if (state.players[justPlayedKey].goCount > 0 && state.players[justPlayedKey].hand.length === 0) {
     if (isRaisedSinceLastGo) {
-      // GO 이후 손패 소진 시, 마지막 GO 기준점보다 점수가 올랐으면 자동 종료한다.
+      // GO 이후 손패 소진 시 마지막 GO 기준점보다 점수가 오르면 자동 종료.
       return resolveRound(state, justPlayedKey);
     }
   }
@@ -255,7 +371,7 @@ export function continueAfterTurnIfNeeded(state, justPlayedKey) {
     return resolveRound(state, justPlayedKey);
   }
 
-  // 누구나 자기 첫 턴 시작 시 손패 대통령(동월 4장)이면 즉시 선언/선택 단계로 진입.
+  // 자기 첫 턴 시작 시 손패 대통령(동월 4장)이면 즉시 선언/선택 단계로 진입.
   const actorKey = state.currentTurn;
   const actor = state.players[actorKey];
   if (
@@ -280,3 +396,4 @@ export function continueAfterTurnIfNeeded(state, justPlayedKey) {
 
   return ensurePassCardFor(state, state.currentTurn);
 }
+

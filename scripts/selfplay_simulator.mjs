@@ -30,7 +30,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_LOG_MODE = "compact";
-const SUPPORTED_LOG_MODES = new Set(["compact", "delta", "train"]);
+const SUPPORTED_LOG_MODES = new Set(["compact", "delta", "train", "short"]);
 const SUPPORTED_POLICIES = new Set(BOT_POLICIES);
 const DEFAULT_POLICY = "heuristic_v3";
 const DECISION_CACHE_MAX = 200000;
@@ -186,7 +186,7 @@ function parseArgs(argv) {
   }
 
   if (!SUPPORTED_LOG_MODES.has(logMode)) {
-    throw new Error(`Unsupported log mode: ${logMode}. Use one of: compact, delta, train`);
+    throw new Error(`Unsupported log mode: ${logMode}. Use one of: compact, delta, train, short`);
   }
   if (!SUPPORTED_POLICIES.has(policyHuman)) {
     throw new Error(`Unsupported policy-human: ${policyHuman}. Use one of: ${[...SUPPORTED_POLICIES].join(", ")}`);
@@ -222,6 +222,8 @@ const valueModelAiPath = parsed.valueModelAi;
 const modelOnly = !!parsed.modelOnly;
 const isTrainMode = logMode === "train";
 const isDeltaMode = logMode === "delta";
+const isShortMode = logMode === "short";
+const needsDecisionTrace = true;
 const useLeanKibo = isTrainMode || isDeltaMode;
 const actorConfig = {
   human: {
@@ -269,7 +271,7 @@ fs.mkdirSync(path.dirname(outPath), { recursive: true });
 const aggregate = {
   games,
   completed: 0,
-  winners: { human: 0, ai: 0, draw: 0, unknown: 0 },
+  winners: { mySide: 0, yourSide: 0, draw: 0, unknown: 0 },
   byTurnOrder: {
     firstWins: 0,
     secondWins: 0,
@@ -278,14 +280,14 @@ const aggregate = {
     secondScoreSum: 0
   },
   economy: {
-    humanGoldSum: 0,
-    aiGoldSum: 0,
-    humanDeltaSum: 0,
+    mySideGoldSum: 0,
+    yourSideGoldSum: 0,
+    mySideDeltaSum: 0,
     firstGoldSum: 0,
     secondGoldSum: 0,
     firstDeltaSum: 0,
     secondDeltaSum: 0,
-    first1000HumanDeltaSum: 0,
+    first1000MySideDeltaSum: 0,
     first1000Games: 0
   },
   nagari: 0,
@@ -354,8 +356,8 @@ function cardTypeCode(card) {
 
 function piLikeValue(card) {
   if (card.category !== "junk") return 0;
-  if (card.tripleJunk) return 3;
-  if (card.doubleJunk) return 2;
+  const explicit = Number(card?.piValue);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
   return 1;
 }
 
@@ -386,14 +388,21 @@ function ensureSharedCatalog() {
   return sharedCatalogPath;
 }
 
-function selectPool(state, actor) {
+function selectPool(state, actor, options = {}) {
+  const includeCardLists = options.includeCardLists !== false;
   if (state.phase === "playing" && state.currentTurn === actor) {
-    return {
-      cards: (state.players?.[actor]?.hand || []).map((c) => c.id),
-      boardCards: (state.board || []).map((c) => c.id),
+    const pool = {
       bombMonths: getDeclarableBombMonths(state, actor),
       shakingMonths: getDeclarableShakingMonths(state, actor)
     };
+    if (includeCardLists) {
+      pool.cards = (state.players?.[actor]?.hand || []).map((c) => c.id);
+      pool.boardCards = (state.board || []).map((c) => c.id);
+    } else {
+      pool.cardCount = state.players?.[actor]?.hand?.length || 0;
+      pool.boardCount = state.board?.length || 0;
+    }
+    return pool;
   }
   if (state.phase === "select-match" && state.pendingMatch?.playerKey === actor) {
     return {
@@ -415,7 +424,8 @@ function selectPool(state, actor) {
   return {};
 }
 
-function decisionContext(state, actor) {
+function decisionContext(state, actor, options = {}) {
+  const includeCardLists = options.includeCardLists !== false;
   const opp = actor === "human" ? "ai" : "human";
   const capturedSelf = state.players?.[actor]?.captured || {};
   const capturedOpp = state.players?.[opp]?.captured || {};
@@ -445,7 +455,7 @@ function decisionContext(state, actor) {
   const jokboOpp = jokboProgress(opp);
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
   const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-  return {
+  const context = {
     phase: state.phase,
     turnNoBefore: (state.turnSeq || 0) + 1,
     deckCount: state.deck.length,
@@ -455,10 +465,6 @@ function decisionContext(state, actor) {
     goCountOpp: state.players[opp].goCount || 0,
     goldSelf: state.players[actor].gold,
     goldOpp: state.players[opp].gold,
-    handCards: (state.players?.[actor]?.hand || []).map((c) => c.id),
-    boardCards: (state.board || []).map((c) => c.id),
-    capturedCardsSelf: flattenCaptured(capturedSelf),
-    capturedCardsOpp: flattenCaptured(capturedOpp),
     currentScoreSelf: Number(scoreSelf?.total || 0),
     currentScoreOpp: Number(scoreOpp?.total || 0),
     piBakRisk: scoreSelf?.bak?.pi ? 1 : 0,
@@ -467,6 +473,13 @@ function decisionContext(state, actor) {
     jokboProgressSelf: jokboSelf,
     jokboProgressOpp: jokboOpp
   };
+  if (includeCardLists) {
+    context.handCards = (state.players?.[actor]?.hand || []).map((c) => c.id);
+    context.boardCards = (state.board || []).map((c) => c.id);
+    context.capturedCardsSelf = flattenCaptured(capturedSelf);
+    context.capturedCardsOpp = flattenCaptured(capturedOpp);
+  }
+  return context;
 }
 
 function jokboCompleted(progress) {
@@ -674,13 +687,16 @@ function loadJsonModel(modelPath, label) {
 
 function compactInitial(initialDeal) {
   if (!initialDeal) return null;
+  const mySideKey = initialDeal.firstTurn;
+  const yourSideKey = mySideKey === "human" ? "ai" : "human";
   return {
-    firstTurn: initialDeal.firstTurn,
+    firstTurn: "mySide",
+    secondTurn: "yourSide",
     hands:
       initialDeal.hands != null
         ? {
-            human: (initialDeal.hands?.human || []).map((c) => c.id),
-            ai: (initialDeal.hands?.ai || []).map((c) => c.id)
+            mySide: (initialDeal.hands?.[mySideKey] || []).map((c) => c.id),
+            yourSide: (initialDeal.hands?.[yourSideKey] || []).map((c) => c.id)
           }
         : null,
     handsCount: initialDeal.handsCount || null,
@@ -704,7 +720,7 @@ function countCandidates(selectionPool) {
   if (!selectionPool) return 0;
   if (Array.isArray(selectionPool.options)) return selectionPool.options.length;
   if (Array.isArray(selectionPool.boardCardIds)) return selectionPool.boardCardIds.length;
-  const cards = selectionPool.cards?.length || 0;
+  const cards = selectionPool.cards?.length || Number(selectionPool.cardCount || 0);
   const bomb = selectionPool.bombMonths?.length || 0;
   const shaking = selectionPool.shakingMonths?.length || 0;
   return cards + bomb + shaking;
@@ -733,7 +749,10 @@ function weightedImmediateReward(turn, jpCompletedNow, beforeDc, afterDc) {
     if (c.category === "kwang") reward += 2.0;
     else if (c.category === "five") reward += 1.0;
     else if (c.category === "ribbon") reward += 0.4;
-    else if (c.category === "junk") reward += c.tripleJunk ? 0.45 : c.doubleJunk ? 0.3 : 0.15;
+    else if (c.category === "junk") {
+      const pv = piLikeValue(c);
+      reward += pv >= 3 ? 0.45 : pv >= 2 ? 0.3 : 0.15;
+    }
   }
   if (jpCompletedNow) reward += 5.0;
   const b = beforeDc || {};
@@ -748,6 +767,7 @@ function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, policyB
   const turns = (kibo || []).filter((e) => e.type === "turn_end");
   return turns.map((t) => {
     const actor = t.actor;
+    const actorSide = actor === firstTurnKey ? "mySide" : "yourSide";
     const action = t.action || {};
     const matchEvents = action.matchEvents || [];
     const captureBySource = action.captureBySource || { hand: [], flip: [] };
@@ -768,7 +788,7 @@ function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, policyB
 
     return {
       t: t.turnNo,
-      a: actor,
+      a: actorSide,
       o: actor === firstTurnKey ? "first" : "second",
       at: action.type || "unknown",
       c: action.card?.id || null,
@@ -807,6 +827,7 @@ function buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, po
   const turns = (kibo || []).filter((e) => e.type === "turn_end");
   return turns.map((t) => {
     const actor = t.actor;
+    const actorSide = actor === firstTurnKey ? "mySide" : "yourSide";
     const action = t.action || {};
     const terminalReward = winner === "draw" ? 0 : winner === actor ? 1 : -1;
     const turnCtx = contextByTurnNo.get(t.turnNo) || null;
@@ -823,7 +844,7 @@ function buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, po
     );
     return {
       t: t.turnNo,
-      a: actor,
+      a: actorSide,
       o: actor === firstTurnKey ? "first" : "second",
       at: action.type || "unknown",
       c: action.card?.id || null,
@@ -848,6 +869,7 @@ function buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, po
   let prevHand = { human: null, ai: null };
   return turns.map((t) => {
     const actor = t.actor;
+    const actorSide = actor === firstTurnKey ? "mySide" : "yourSide";
     const action = t.action || {};
     const terminalReward = winner === "draw" ? 0 : winner === actor ? 1 : -1;
     const deckAfter = t.deckCount ?? 0;
@@ -867,7 +889,7 @@ function buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, po
 
     return {
       t: t.turnNo,
-      a: actor,
+      a: actorSide,
       o: actor === firstTurnKey ? "first" : "second",
       at: action.type || "unknown",
       c: action.card?.id || null,
@@ -903,18 +925,18 @@ function baseSummary(line, winnerTurnOrder, firstScore, secondScore, firstGold, 
   else aggregate.byTurnOrder.draw += 1;
   aggregate.byTurnOrder.firstScoreSum += firstScore;
   aggregate.byTurnOrder.secondScoreSum += secondScore;
-  const humanGold = Number(line?.gold?.human ?? 0);
-  const aiGold = Number(line?.gold?.ai ?? 0);
-  const humanDelta = humanGold - aiGold;
-  aggregate.economy.humanGoldSum += humanGold;
-  aggregate.economy.aiGoldSum += aiGold;
-  aggregate.economy.humanDeltaSum += humanDelta;
+  const mySideGold = Number(line?.gold?.mySide ?? 0);
+  const yourSideGold = Number(line?.gold?.yourSide ?? 0);
+  const mySideDelta = mySideGold - yourSideGold;
+  aggregate.economy.mySideGoldSum += mySideGold;
+  aggregate.economy.yourSideGoldSum += yourSideGold;
+  aggregate.economy.mySideDeltaSum += mySideDelta;
   aggregate.economy.firstGoldSum += Number(firstGold || 0);
   aggregate.economy.secondGoldSum += Number(secondGold || 0);
   aggregate.economy.firstDeltaSum += Number(firstGold || 0) - Number(secondGold || 0);
   aggregate.economy.secondDeltaSum += Number(secondGold || 0) - Number(firstGold || 0);
   if (aggregate.economy.first1000Games < 1000) {
-    aggregate.economy.first1000HumanDeltaSum += humanDelta;
+    aggregate.economy.first1000MySideDeltaSum += mySideDelta;
     aggregate.economy.first1000Games += 1;
   }
 }
@@ -983,17 +1005,17 @@ function buildTrainReport() {
       averageScoreSecond: aggregate.byTurnOrder.secondScoreSum / Math.max(1, aggregate.games)
     },
     economy: {
-      averageGoldHuman: aggregate.economy.humanGoldSum / Math.max(1, aggregate.games),
-      averageGoldAi: aggregate.economy.aiGoldSum / Math.max(1, aggregate.games),
-      averageGoldDeltaHuman: aggregate.economy.humanDeltaSum / Math.max(1, aggregate.games),
+      averageGoldMySide: aggregate.economy.mySideGoldSum / Math.max(1, aggregate.games),
+      averageGoldYourSide: aggregate.economy.yourSideGoldSum / Math.max(1, aggregate.games),
+      averageGoldDeltaMySide: aggregate.economy.mySideDeltaSum / Math.max(1, aggregate.games),
       averageGoldFirst: aggregate.economy.firstGoldSum / Math.max(1, aggregate.games),
       averageGoldSecond: aggregate.economy.secondGoldSum / Math.max(1, aggregate.games),
       averageGoldDeltaFirst: aggregate.economy.firstDeltaSum / Math.max(1, aggregate.games),
       cumulativeGoldDeltaOver1000:
-        (aggregate.economy.humanDeltaSum / Math.max(1, aggregate.games)) * 1000,
-      cumulativeGoldDeltaFirst1000: aggregate.economy.first1000HumanDeltaSum
+        (aggregate.economy.mySideDeltaSum / Math.max(1, aggregate.games)) * 1000,
+      cumulativeGoldDeltaFirst1000: aggregate.economy.first1000MySideDeltaSum
     },
-    primaryMetric: "averageGoldDeltaHuman"
+    primaryMetric: "averageGoldDeltaMySide"
   };
 }
 
@@ -1012,17 +1034,17 @@ function buildFullReport() {
       averageScoreSecond: aggregate.byTurnOrder.secondScoreSum / Math.max(1, aggregate.games)
     },
     economy: {
-      averageGoldHuman: aggregate.economy.humanGoldSum / Math.max(1, aggregate.games),
-      averageGoldAi: aggregate.economy.aiGoldSum / Math.max(1, aggregate.games),
-      averageGoldDeltaHuman: aggregate.economy.humanDeltaSum / Math.max(1, aggregate.games),
+      averageGoldMySide: aggregate.economy.mySideGoldSum / Math.max(1, aggregate.games),
+      averageGoldYourSide: aggregate.economy.yourSideGoldSum / Math.max(1, aggregate.games),
+      averageGoldDeltaMySide: aggregate.economy.mySideDeltaSum / Math.max(1, aggregate.games),
       averageGoldFirst: aggregate.economy.firstGoldSum / Math.max(1, aggregate.games),
       averageGoldSecond: aggregate.economy.secondGoldSum / Math.max(1, aggregate.games),
       averageGoldDeltaFirst: aggregate.economy.firstDeltaSum / Math.max(1, aggregate.games),
       cumulativeGoldDeltaOver1000:
-        (aggregate.economy.humanDeltaSum / Math.max(1, aggregate.games)) * 1000,
-      cumulativeGoldDeltaFirst1000: aggregate.economy.first1000HumanDeltaSum
+        (aggregate.economy.mySideDeltaSum / Math.max(1, aggregate.games)) * 1000,
+      cumulativeGoldDeltaFirst1000: aggregate.economy.first1000MySideDeltaSum
     },
-    primaryMetric: "averageGoldDeltaHuman",
+    primaryMetric: "averageGoldDeltaMySide",
     nagariRate: aggregate.nagari / Math.max(1, aggregate.games),
     eventFrequencyPerGame: {
       ppuk: aggregate.eventTotals.ppuk / Math.max(1, aggregate.games),
@@ -1113,22 +1135,24 @@ async function run() {
     const firstTurnKey = state.startingTurnKey;
     const secondTurnKey = firstTurnKey === "human" ? "ai" : "human";
 
-    const contextByTurnNo = new Map();
+    const contextByTurnNo = needsDecisionTrace ? new Map() : null;
     let steps = 0;
     const maxSteps = 4000;
     while (state.phase !== "resolution" && steps < maxSteps) {
       const actor = getActionPlayerKey(state);
       if (!actor) break;
-      const beforeContext = {
-        actor,
-        decisionContext: decisionContext(state, actor),
-        selectionPool: selectPool(state, actor)
-      };
+      const beforeContext = needsDecisionTrace
+        ? {
+            actor,
+            decisionContext: decisionContext(state, actor),
+            selectionPool: selectPool(state, actor)
+          }
+        : null;
       const prevTurnSeq = state.turnSeq || 0;
       const next = executeActorTurn(state, actor);
       if (next === state) break;
       const nextTurnSeq = next.turnSeq || 0;
-      if (nextTurnSeq > prevTurnSeq) {
+      if (needsDecisionTrace && nextTurnSeq > prevTurnSeq) {
         contextByTurnNo.set(nextTurnSeq, {
           before: beforeContext,
           after: {
@@ -1144,11 +1168,13 @@ async function run() {
 
     const winner = state.result?.winner || "unknown";
     const kibo = state.kibo || [];
-    const decisionTrace = isDeltaMode
-      ? buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, agentLabelByActor)
-      : isTrainMode
-      ? buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, agentLabelByActor)
-      : buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, agentLabelByActor);
+    const decisionTrace = needsDecisionTrace
+      ? isDeltaMode
+        ? buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, agentLabelByActor)
+        : isTrainMode
+        ? buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, agentLabelByActor)
+        : buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, agentLabelByActor)
+      : null;
     const firstScore = firstTurnKey === "human" ? state.result?.human?.total || 0 : state.result?.ai?.total || 0;
     const secondScore = secondTurnKey === "human" ? state.result?.human?.total || 0 : state.result?.ai?.total || 0;
     const winnerTurnOrder =
@@ -1161,6 +1187,10 @@ async function run() {
     const aiGold = Number(state.players?.ai?.gold || 0);
     const firstGold = firstTurnKey === "human" ? humanGold : aiGold;
     const secondGold = secondTurnKey === "human" ? humanGold : aiGold;
+    const mySideGold = firstGold;
+    const yourSideGold = secondGold;
+    const winnerSide =
+      winner === "draw" || winner === "unknown" ? winner : winner === firstTurnKey ? "mySide" : "yourSide";
 
     if (isTrainMode) {
       const line = {
@@ -1169,17 +1199,22 @@ async function run() {
         steps,
         completed: state.phase === "resolution",
         logMode,
-        firstTurn: firstTurnKey,
-        secondTurn: secondTurnKey,
-        policy: agentLabelByActor,
-        winner,
+        firstTurn: "mySide",
+        secondTurn: "yourSide",
+        firstAgent: agentLabelByActor[firstTurnKey],
+        secondAgent: agentLabelByActor[secondTurnKey],
+        policy: {
+          mySide: agentLabelByActor[firstTurnKey],
+          yourSide: agentLabelByActor[secondTurnKey]
+        },
+        winner: winnerSide,
         score: {
-          human: state.result?.human?.total ?? null,
-          ai: state.result?.ai?.total ?? null
+          mySide: firstScore,
+          yourSide: secondScore
         },
         gold: {
-          human: humanGold,
-          ai: aiGold
+          mySide: mySideGold,
+          yourSide: yourSideGold
         },
         decision_trace: decisionTrace
       };
@@ -1230,6 +1265,7 @@ async function run() {
     const goSuccess = goEvents.filter((e) => winner !== "draw" && winner === e.playerKey).length;
 
     const loserKey = winner === "human" ? "ai" : winner === "ai" ? "human" : null;
+    const loserSide = loserKey ? (loserKey === firstTurnKey ? "mySide" : "yourSide") : null;
     const loserBak = loserKey ? state.result?.[loserKey]?.bak : null;
     const bakEscaped =
       loserBak && !loserBak.gwang && !loserBak.pi && !loserBak.mongBak ? 1 : 0;
@@ -1240,24 +1276,25 @@ async function run() {
       steps,
       completed: state.phase === "resolution",
       logMode,
-      firstTurn: firstTurnKey,
-      secondTurn: secondTurnKey,
-      policy: agentLabelByActor,
-      winner,
+      firstTurn: "mySide",
+      secondTurn: "yourSide",
+      firstAgent: agentLabelByActor[firstTurnKey],
+      secondAgent: agentLabelByActor[secondTurnKey],
+      policy: {
+        mySide: agentLabelByActor[firstTurnKey],
+        yourSide: agentLabelByActor[secondTurnKey]
+      },
+      winner: winnerSide,
       winnerTurnOrder,
       nagari: state.result?.nagari || false,
       nagariReasons: state.result?.nagariReasons || [],
       score: {
-        human: state.result?.human?.total ?? null,
-        ai: state.result?.ai?.total ?? null,
-        first: firstScore,
-        second: secondScore
+        mySide: firstScore,
+        yourSide: secondScore
       },
       gold: {
-        human: humanGold,
-        ai: aiGold,
-        first: firstGold,
-        second: secondGold
+        mySide: mySideGold,
+        yourSide: yourSideGold
       },
       goCalls,
       goStopEfficiency: goEfficiency,
@@ -1286,7 +1323,7 @@ async function run() {
         ssul: (allEvents.human.ssul || 0) + (allEvents.ai.ssul || 0),
         ttak: (allEvents.human.ttak || 0) + (allEvents.ai.ttak || 0)
       },
-      bakEscape: loserKey ? { loser: loserKey, escaped: !!bakEscaped } : null,
+      bakEscape: loserSide ? { loser: loserSide, escaped: !!bakEscaped } : null,
       catalogPath: sharedCatalogPath,
       initial: compactInitial(kibo.find((e) => e.type === "initial_deal")),
       decision_trace: decisionTrace

@@ -1,380 +1,186 @@
-﻿# 맞고 데모 룰북 (현재 구현 기준)
+# 맞고 데모 룰북 (현재 구현 기준)
 
-브라우저에서 실행되는 2인(플레이어 vs AI) 맞고 데모입니다.
-이 문서는 `src/state.js`, `src/cards.js` 실제 동작을 기준으로 작성되었습니다.
-- AI 의사결정(카드 선택, Go/Stop, 매치 선택, 대통령/국진 선택)은 랜덤으로 동작합니다.
+브라우저에서 실행되는 2인 맞고(플레이어/AI) 데모입니다.
+기준 코드: `src/state.js`, `src/engine/*`, `src/cards.js`.
 
-프레임워크:
-- React + Vite 기반으로 동작합니다.
-- `src/engineRunner.js` + `src/bot.js`로 UI와 엔진을 분리해 모드 확장이 가능하도록 구성했습니다.
+## 한게임 기본룰 별도 문서
+- 비교/원문 정리는 `docs/HANGAME_BASIC_RULE.md`
 
-## 용어 이중표기(동의어 정리)
-- 대통령/`phase: "president-choice"`, `pendingPresident` = 총통
-> 같은 월 4장을 손패에 보유한 상태(대통령 선택 단계 진입).
-
-- 폭탄/`events.bomb`, `declareBomb`, `type: "declare_bomb"` = 쿵(유사 호칭)
-> 손패 같은 월 3장 + 바닥 같은 월 1장일 때 4장 동시 획득 처리.
-
-- 쪽/`events.jjob` = 키스 = 귀신
-> 낸 패와 같은 월 카드가 뒤집기에서 매치 없이 떨어져 쪽 성립 시 피 강탈.
-
-- 따닥/`events.ddadak` = 쌍쓸
-> 손패 1장 + 바닥패 2장 같은 월인데, 덱에서 나온 카드도 같은 월일 때.
-
-- 뻑/`events.ppuk`, `ppukState` = 설사 = 뻐꾸기
-> 뒤집기/매치 과정에서 뻑 조건 성립 시 이벤트 발생(강탈/연계 규칙 적용).
-
-- 판쓸/`events.ssul` = 쓸
-> 캡처 후 바닥패가 0장이 된 상태(판쓸 성립)에서 피 강탈 예약.
-
-- 국진 쌍피/`gukjinMode: "junk"`, `gukjinLocked`, `gukjinTransformed` = 국진 피2 처리
-> 9월 열(국진)을 쌍피 모드로 확정해 피 2로 계산하는 상태.
-
-- 원칙: 내부 로그/상태명은 표준명으로 통일하고, UI 문구에서만 필요 시 병기합니다.
-
-## 레이아웃 디버그(임시)
-- 현재 레이아웃 확인을 위해 `styles.css`에 무지개색 디버그 테두리가 적용되어 있습니다.
-- 대상: `.board`, `.table-hud`, `.side-stack`, `.table-field`, `.lane-opponent`, `.center-field`, `.lane-player`, `.table-footer`, `.replay-dock`, `.panel`
-- 릴리즈 전 반드시 복구:
-- `styles.css`에서 `TEMP: layout debug rainbow borders` 주석 블록 전체를 삭제하면 원복됩니다.
-
-## 1. 카드 구성
-- 기본 화투 48장
-- 보너스 카드 2장
-- `Bonus Double` (쌍피, 보너스피)
-- `Bonus Triple` (삼피, 보너스피)
-
-## 2. 시작 배분
-- 플레이어 손패 10장
-- AI 손패 10장
-- 바닥패 8장
-- 나머지는 덱
-
-## 2-1. 선턴 결정 (밤일낮장)
-- 첫 판에서 각자 시작 손패의 첫 카드 월로 선턴을 정함
-- 밤(18:00~05:59): 더 낮은 월이 선
-- 낮(06:00~17:59): 더 높은 월이 선
-- 같은 월이면 랜덤
-- 다음 판부터는 직전 승자가 선턴
-- 나가리 판이면 직전 승자 선턴 유지
-
-## 3. 시작 보정
-- 손패에 보너스 카드가 있으면 즉시 획득 후 손패 10장으로 보충
-- 바닥에 보너스 카드(1장/2장)가 있으면 선턴 플레이어가 즉시 획득
-- 가져간 장수만큼 덱에서 보충해 바닥 8장을 유지
-
-## 4. 대통령 규칙
-### 4-1. 손패 대통령
-- 조건: 누구나 자기 첫턴 시작 시 손패에 같은 월 4장
-- 상태: `president-choice` 단계 진입
-- 선택지
-- `10점 종료`: 즉시 라운드 종료, 10점 승리 처리
-- `들고치기`: 일반 진행으로 계속
-- 규칙: 대통령이 있으면 자기 차례(첫 턴)가 왔을 때 즉시 선언/선택해야 함
-
-들고치기 보너스:
-- 들고치기를 선택한 플레이어가 최종 승리했고,
-- 해당 라운드에서 흔들기 또는 폭탄을 1회 이상 발생시켰다면,
-- 최종 점수에 x4 추가 배수 적용
-- 들고치기 연계 규칙:
-- 대통령 월 카드 4장을 들고치기한 뒤, 나중에 그 월 카드 1장을 내고(손에 3장 남긴 상태) 해당 수로 캡처에 성공하면
-- 남은 3장은 흔들기 연계로 간주됩니다.
-- 이후 폭탄은 조건 충족 시 별도 선언/처리됩니다. (자동 동시 처리 아님)
-
-### 4-2. 바닥 대통령
-- 조건: 시작 바닥패에 같은 월 4장
-- 처리: 현재 판 무효(재배분), 다음 판 배수 x2
-- 연속 발생 시 누적 배수 (x4, x8 ...)
-
-## 4-3. 나가리(무효판) 규칙
-- 아래 조건 중 하나라도 발생하면 나가리 판으로 처리
-- 무승부
-- 양측 무득점
-- Go 이후 점수 상승 실패(고 실패)
-- 나가리 발생 시 **다음 판 배수 x2**
-- 연속 나가리면 배수 누적 (`x2 -> x4 -> x8 ...`)
-- 대통령 나가리(바닥 4장)도 동일하게 누적
-
-## 5. 기본 턴 진행
-1. 손패 1장 낸다
-2. 월이 맞으면 캡처, 아니면 바닥에 놓는다
-3. 덱에서 1장 뒤집는다
-4. 뒤집은 카드도 동일 규칙으로 처리
-
-## 6. 매치 처리
-- 0매치: 바닥 배치
-- 1매치: 2장 캡처
-- 2매치
-- 카드 타입(광/열끗/띠/피)이 다르면 선택 UI
-- 타입이 같으면 자동 선택 캡처
-- 3매치 이상: 싹쓸이 캡처 (`ttak +1`)
-
-뒤집기 2매치도 동일한 선택/자동 규칙을 따릅니다.
-
-## 7. 이벤트/특수 규칙
-- 쪽(`jjob`): 뒤집은 카드가 매치 없이 바닥에 놓였고, 방금 낸 카드와 같은 월이면 `jjob` 이벤트 +1 (상대 피 1장 강탈)
-- 뻑(`ppuk`): 뒤집기에서 2매치 이상 처리 시 `ppuk` 이벤트 +1
-- 보너스피(쌍피/삼피): 획득/발생 시 상대 피 1장 강탈
-- 흔들기
-- 조건: 같은 월 손패 3장 + 바닥 0매치인 월
-- 사람 플레이는 카드 선택 시 `흔들기 할까요?` 확인 팝업(예/아니요)
-- `예`: 흔들기 선언 후 공개 오버레이(2초) -> 선택 카드 진행
-- `아니요`: 선언 없이 일반 카드로 진행
-- 효과: 흔들기 1회당 최종 배수 x2 누적
-- 폭탄
-- 조건: 같은 월 손패 3장 + 바닥 1장
-- 사람 플레이는 해당 월 카드 클릭 시 확인 없이 즉시 폭탄 선언/처리
-- 폭탄 카드 공개 오버레이(2초) 후 매치 캡처/강탈 로직으로 진행
-- 효과: 동월 패 다수 캡처 + 피 1장 강탈 + 폭탄 배수 x2 누적
-- 쪽/따닥/판쓸
-- 쪽, 따닥, 판쓸 발생 시 상대 피 1장 강탈(턴 종료 시 반영)
-- 자뻑/연뻑
-- 뻑 이후 다음 획득 턴에 자뻑 먹기 처리(상대 피 1장 강탈)
-- 첫뻑/연뻑 골드 정산
-- 각 플레이어 첫 턴 뻑은 `5점 x POINT_GOLD_UNIT` 골드 획득
-- 연뻑 시 `5점 x POINT_GOLD_UNIT` 골드 추가 획득
-- 게임 중 3뻑 달성 시 즉시 승리, 기본점수 7점 처리
-- 자금(골드) 시스템
-- 시작 자금: 플레이어별 `1,000,000골드`
-- 점당 골드 단위: `POINT_GOLD_UNIT` (기본 100)
-- 라운드 종료 시 승자에게 `최종점수 x POINT_GOLD_UNIT` 정산
-- 패자는 보유 골드 내에서만 지불(부족분 미지급, 음수 불가)
-- 보유골드가 `0`이 되면 즉시 `1,000,000골드`로 재시작
-- 마지막 손 1장 턴에서 미발동 항목: `뻑(ppuk)`, `판쓸(ssul)`, `쪽(jjob)`, `따닥(ddadak)`
-- 손패 소진 상태에서 턴 진행 필요 시 `Pass` 카드가 자동 생성되어 턴 패스 가능
-- 보너스카드 뻑 홀딩
-- 뒤집기 중 보너스가 연속(1장/2장 이상)으로 나와도 뻑이면 즉시 획득/강탈하지 않고 홀딩
-- 이후 자뻑(뻑 먹기) 성공 시 홀딩 보너스를 일괄 회수하고 보너스 강탈 효과도 일괄 발동
-- 국진(9월 열) 선택
-- 첫 소유 시 1회만 `열` 또는 `쌍피`를 선택(낙장불입)
-- `열` 선택 시: 열끗 장수/멍박 계산에 포함
-- `쌍피` 선택 시: 피 2장으로 계산(열끗 장수에서는 제외)
-- 상대가 국진(쌍피 상태)을 뺏으려 하면 강탈은 무효
-- 대신 국진은 원소유자 열 자리에서 즉시 `열`로 고정 전환(낙장불입)
-
-## 8. 점수 계산
-최종점수 = `(기본점수 + Go보너스) x 배수`
-
-### 8-1. 기본점수
-- 광
-- 3광: 3점
-- 3광(비광 포함): 2점
-- 4광: 4점
-- 5광: 15점
-- 열끗: 5장 이상이면 `(장수 - 4)`
-- 띠: 5장 이상이면 `(장수 - 4)`
-- 피: 피 합 10 이상이면 `(피합 - 9)`
-- 단/족보
-- 홍단(1/2/3월 띠): +3
-- 청단(6/9/10월 띠): +3
-- 초단(4/5/7월 띠): +3
-- 고도리(2/4/8월 열끗): +5
-- 이벤트(쪽/뻑/따닥/싹쓸이 등)는 점수 가산이 아니라 이벤트 처리/강탈 트리거로만 사용
-
-### 8-2. Go 보너스
-- Go 횟수(`goCount`)를 기본점수에 더함
-- 즉, Go를 할 때마다 기본점수 `+1` 누적
-
-### 8-3. 배수
-- 고 배수: `3고 x2, 4고 x3, 5고 x4, 6고 x5 ...` (공식: `goCount - 1`)
-- 흔들기: 회수만큼 x2 누적
-- 폭탄: 회수만큼 x2 누적
-- 고박: 상대가 Go 상태면 x2
-- 박 배수
-- 광박: 상대 광 0 + 내가 3광 이상
-- 피박: 상대 피 합 7 이하 + 내가 피로 득점
-- 멍박: 상대 열끗 0 + 내가 열끗 7장 이상
-
-각 박 배수는 룰셋 `bakMultipliers`를 사용합니다.
-
-## 9. Go / Stop
-- 단일룰 기준 최소 점수(7점) 이상일 때 Go/Stop 가능
-- 재질문 조건: 직전 Go 기준점(`lastGoBase`)보다 현재 점수가 올라야 함
-
-Go 선택:
-- `goCount +1`
-- `lastGoBase` 갱신
-
-Stop 선택:
-- 즉시 라운드 종료
-
-## 10. 라운드 종료
-- Stop 선언 또는 덱/손패 소진 시 종료
-- 양측 손패가 모두 0장이 되면 덱 잔량과 무관하게 즉시 라운드 종료
-- 기본 점수 비교로 승자 결정 후 배수 적용
-- 바닥 대통령 누적 배수(`carryOverMultiplier`)는 승자 점수에 적용
-- 들고치기 대통령 x4 조건 충족 시 승자 점수에 추가 적용
-- 나가리면 승패 없이 종료되고 다음 판 누적배수만 증가
-
-## 11. 단일룰 파라미터
-- `goMinScore=7`
-- `ttak/ppuk/jjob=1`
-- `bak(gwang/pi/mongBak)=2/2/2`
-
-## 12. 실행
+## 1. 빠른 실행
 - 개발 서버: `npm run dev`
 - 배포 빌드: `npm run build`
 - 빌드 미리보기: `npm run preview`
-- RAM 가드 실행(PowerShell): `.\scripts\run-with-ram-guard.ps1 -- -3 scripts/02_train_value.py --input "logs/2_selfplay_1M/train-100k-1.jsonl" "logs/2_selfplay_1M/train-100k-2.jsonl" --output models/value-guarded.json --dim 128 --epochs 1`
-- RAM 가드 옵션 예시: `.\scripts\run-with-ram-guard.ps1 -Threshold 92 -IntervalSec 30 -WindowSec 180 -- -3 scripts/02_train_value.py ...`
-- 챔피언 사이클(A/B 대결 자동): `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_champion_cycle.ps1 -Champion heuristic_v1 -Challenger random_v2 -GamesPerSide 100000 -PromoteThreshold 0.52 -Rounds 1 -Tag stage4`
-- 결과: `logs/champ-cycle-*-summary.json`에 승패/승격 여부/다음 챔피언이 기록됩니다.
-- 사이클 복구 실행: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_champion_cycle.ps1 -Tag stage4 -Resume`
-- 고정 fast 루프(병렬 self-play + fast 학습): `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-fast-loop.ps1 -TrainGames 200000 -Workers 4 -Tag fast`
-- 리그 fast 루프(과거 챔피언+휴리스틱 스파링): `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-fast-loop.ps1 -TrainGames 200000 -Workers 4 -Tag fast-league -LeagueConfig scripts/league_config.example.json`
-- 챔피언전 누적 점수표 갱신: `py -3 scripts/update_champion_scoreboard.py`
 
-모드:
+## 2. 게임 개요
+- 기본 화투 48장 + 보너스 카드 2장(`Bonus Double`, `Bonus Triple`)
+- 시작 배분: 플레이어 10장, AI 10장, 바닥 8장, 나머지 덱
+- AI 기본 봇 정책: `heuristic_v3` (모델 정책 선택 가능)
+
+### 2-1. 선턴 결정 (밤일낮장)
+- 첫 판: 각자 시작 손패 첫 카드 월 비교
+- 밤(18:00~05:59): 낮은 월 선
+- 낮(06:00~17:59): 높은 월 선
+- 동월이면 랜덤
+- 다음 판: 직전 승자 선, 나가리면 직전 승자 유지
+
+### 2-2. 시작 보정
+- 손패 보너스는 즉시 획득 후 손패 10장 보충
+- 바닥 보너스는 선턴이 즉시 획득
+- 가져간 수만큼 덱에서 보충해 바닥 8장 유지
+
+## 3. 대통령/나가리
+### 3-1. 손패 대통령
+- 조건: 자기 첫 턴 시작 시 같은 월 4장
+- 단계: `president-choice`
+- 선택: `10점 종료` 또는 `들고치기`
+
+들고치기 승리 보너스:
+- 해당 라운드에서 흔들기/폭탄 1회 이상 발생 후 승리 시 최종 배수 x4 추가
+
+### 3-2. 바닥 대통령
+- 조건: 시작 바닥패에 같은 월 4장
+- 처리: 선공 즉시 승리, 10점 종료
+
+### 3-3. 나가리
+- 무승부, 양측 무득점, Go 후 점수 상승 실패 시 나가리
+- 다음 판 배수 x2, 연속 나가리면 누적(`x2 -> x4 -> x8 ...`)
+
+## 4. 턴/매치 처리
+### 4-1. 기본 턴
+1. 손패 1장 낸다
+2. 월이 맞으면 캡처, 아니면 바닥에 둔다
+3. 덱 1장 뒤집는다
+4. 뒤집은 카드도 동일 규칙 처리
+
+### 4-2. 매치 규칙
+- 0매치: 바닥 배치
+- 1매치: 2장 캡처
+- 2매치: 타입(광/열/띠/피) 다르면 선택 UI, 같으면 자동 선택
+- 3매치 이상: 싹쓸이 캡처(`ttak +1`)
+- 뒤집기 2매치도 동일 규칙
+
+## 5. 이벤트/특수 규칙
+- 쪽(`jjob`): 상대 피 1장 강탈
+- 뻑(`ppuk`): 뻑 상태 발생 이벤트
+- 따닥/판쓸: 상대 피 1장 강탈(턴 종료 시 반영)
+
+### 5-1. 흔들기/폭탄
+- 흔들기: 손패 같은 월 3장 + 바닥 0매치 월
+- 폭탄: 손패 같은 월 3장 + 바닥 1장
+- 흔들기/폭탄 모두 1회당 최종 배수 x2 누적
+
+### 5-2. 뻑 먹기/연뻑
+- 자뻑/상대뻑 먹기 동일 처리: 강탈 +1
+- 뻑 보류 보너스도 자뻑/일반뻑 동일 회수/강탈
+- 첫뻑/연뻑 골드 보상:
+- 첫 턴 뻑: 7점
+- 1~2턴 연속 뻑: 14점
+- 1~3턴 연속 뻑: 21점
+- 누적 3뻑: 즉시 승리(7점 처리)
+
+### 5-3. 국진(9월 열) 선택
+- 처음 획득 시 기본은 `열`
+- 피 계산/점수 판정에서 `열`/`쌍피` 결과가 갈리는 시점에 1회 선택(낙장불입)
+- `열`: 열끗 장수/멍박 계산 포함
+- `쌍피`: 피 2로 계산
+- 쌍피 구성: `11월 쌍피`, `12월 쌍피`, `국진(쌍피 선택 시)`, `Bonus Double(2피)`, `Bonus Triple(3피)`
+- 피 강탈 우선순위: `1피 > 2피 > 국진 2피 > 3피`
+
+### 5-4. 기타
+- 마지막 손 1장 턴에서는 `뻑/판쓸/쪽/따닥` 미발동
+- 손패 소진 진행 필요 시 `Pass` 카드 자동 생성
+
+## 6. 점수 계산
+최종점수 = `(기본점수 + Go보너스) x 배수`
+
+### 6-1. 기본점수
+- 광: 3광 3점 / 비광포함3광 2점 / 4광 4점 / 5광 15점
+- 열끗: 5장 이상 `(장수 - 4)`
+- 띠: 5장 이상 `(장수 - 4)`
+- 피: 피 합 10 이상 `(피합 - 9)`
+- 단/족보:
+- 홍단(1/2/3월) +3
+- 청단(6/9/10월) +3
+- 초단(4/5/7월) +3
+- 고도리(2/4/8월 열끗) +5
+
+### 6-2. Go 보너스
+- Go 1회당 기본점수 +1 누적
+
+### 6-3. 배수
+- 고 배수: `3고 x2, 4고 x4, 5고 x8, 6고 x16 ...` (`goCount>=3`에서 `2^(goCount-2)`)
+- 흔들기/폭탄: 각각 1회당 x2 누적
+- 독박: STOP 승리 시 패자 `goCount > 0`이면 x2
+- 광박: 상대 광 0 + 내 광 3장 이상
+- 피박: 상대 피 합 1~7 + 내가 피로 득점 (`0`이면 면박으로 피박 면제)
+- 멍박: 상대 열끗 0 + 내 열끗 7장 이상
+
+## 7. Go/Stop 및 라운드 종료
+- 7점 이상 + 직전 Go 기준점(`lastGoBase`) 상승 시 Go/Stop
+- Go: `goCount +1`, `lastGoBase` 갱신
+- Stop: 즉시 종료
+- 종료 조건: Stop 또는 양측 손패 0
+- 들고치기 x4 조건 충족 시 추가 적용
+- 나가리는 승패 없이 종료, 다음 판 누적 배수만 증가
+
+## 8. 골드 정산
+- 시작 자금: 각 1,000,000골드
+- 점당 단위: `POINT_GOLD_UNIT`(기본 100)
+- 승자 정산: `최종점수 x POINT_GOLD_UNIT`
+- 패자는 보유 골드 한도 내 지급(음수 불가)
+- 지급 후 0골드면 해당 판은 0 유지, 다음 게임 시작 시 1,000,000골드 재시작
+
+## 9. 더미/강탈/피 규칙(최신)
+- 더미 패스 카드는 손패에서만 존재 가능(실카드 ID 중복 금지)
+- 더미 생성 기준:
+- `expectedHand = 10 - turnCount`
+- `dummyNeeded = expectedHand - realHandCount` (양수일 때만)
+- 더미 사용: 1장만 소모, 뒤집기/매치 판정은 일반 턴과 동일
+- 피 강탈 우선순위: `1피 -> 2피 -> 국진쌍피 -> 3피`
+- 같은 우선순위면 나중에 획득한 피부터 강탈
+
+## 10. 용어 이중표기(동의어)
+- 대통령/`phase: "president-choice"`, `pendingPresident` = 총통
+- 폭탄/`events.bomb`, `declareBomb`, `type: "declare_bomb"` = 쿵
+- 쪽/`events.jjob` = 키스 = 귀신
+- 따닥/`events.ddadak` = 쌍쓸
+- 뻑/`events.ppuk`, `ppukState` = 설사 = 뻐꾸기 = 싼다
+- 뻑 먹기/`events.jabbeok`
+- 판쓸/`events.ssul` = 쓸
+- 판쓰리(한게임 표현) = 판쓸
+- 국진 쌍피/`gukjinMode: "junk"`, `gukjinLocked`, `gukjinTransformed`
+- 수류탄(2장 폭탄): 현재 엔진 미구현
+
+## 11. 모드/기보/시뮬레이션
+### 11-1. 플레이 모드
 - 사람 vs AI
 - 사람 vs 사람
 - AI vs AI
 
-기보 로그:
-- 매 판 종료 시 브라우저 `localStorage`에 자동 저장 (`kflower_game_logs`)
-- UI의 `기보 내보내기` 버튼으로 JSON 파일 다운로드 가능
-- `kibo`에는 초기 손패/바닥/덱 순서, 턴번호(`turnNo`), 턴별 행동, 낸 카드/뒤집힌 카드(`action.flips`), 이벤트, 강탈량, 최종 정산이 기록됨
-- `kibo.turn_end.action.matchEvents`에 `source(hand/flip)` + `eventTag`가 기록되어 전략/운 이벤트를 구분 가능
-- `kibo.turn_end.action.captureBySource`에 `hand[]/flip[]` 캡처 카드가 분리 기록되어, 수순별 운/실력 가중 분석에 사용 가능
-- `kibo.turn_end.ppukState`로 뻑 연속 상태를 추적 가능
-- 사이드바 `턴 리플레이` 패널에서 턴 단위 재생 지원
-- 기능: `리플레이 시작/종료`, `이전 턴`, `다음 턴`, `자동재생`, `슬라이더 이동`, `재생속도 선택`
+### 11-2. 기보 로그
+- UI `기보 내보내기`로 JSON 다운로드
+- 주요 기록:
+- `kibo.turn_end.action.matchEvents` (`source(hand/flip)` + `eventTag`)
+- `kibo.turn_end.action.captureBySource` (`hand[]/flip[]`)
+- `kibo.turn_end.ppukState`
+- 턴 리플레이 지원: 이전/다음/자동재생/슬라이더/속도
 
-AI vs AI 시뮬레이션(UI 없이 서버 실행):
-- `node scripts/selfplay_simulator.mjs 1000`
-- 병렬 실행(권장): `py -3 scripts/run_parallel_selfplay.py 200000 --workers 4 --output logs/train-parallel-200k.jsonl -- --log-mode=train --policy-human=heuristic_v1 --policy-ai=heuristic_v2`
-- 리그 생성기(권장): `py -3 scripts/run_league_selfplay.py --config scripts/league_config.example.json --total-games 200000 --workers 4 --output logs/train-league-200k.jsonl`
-- 델타 모드: `node scripts/selfplay_simulator.mjs 1000 logs/run.jsonl --log-mode=delta`
-- 학습 전용 경량 모드: `node scripts/selfplay_simulator.mjs 1000 logs/train.jsonl --log-mode=train`
-- 정책 지정:
-- 양쪽 동일 정책: `node scripts/selfplay_simulator.mjs 1000 logs/run.jsonl --log-mode=train --policy=heuristic_v1`
-- 휴리스틱 v1 vs 랜덤: `node scripts/selfplay_simulator.mjs 100000 logs/heurv1-vs-random-100k.jsonl --log-mode=train --policy-human=heuristic_v1 --policy-ai=random`
-- 휴리스틱 v2 vs 휴리스틱 v1: `node scripts/selfplay_simulator.mjs 100000 logs/heurv2-vs-heurv1-100k.jsonl --log-mode=train --policy-human=heuristic_v2 --policy-ai=heuristic_v1`
-- `--policy-human/--policy-ai` 지원 정책: `random`, `random_v2`, `heuristic_v1`, `heuristic_v2`
-- 모델 전용 대결(fallback 금지): `node scripts/selfplay_simulator.mjs 100000 logs/model-vs-model-100k.jsonl --log-mode=train --model-only --policy-model-a=models/policy-randomplus.json --value-model-a=models/value-randomplus.json --policy-model-b=models/policy-dolbaram.json --value-model-b=models/value-dolbaram.json`
-- 모델 경로 옵션: `--policy-model-a/b`, `--value-model-a/b` (`a=human`, `b=ai`)
-- 결과는 `logs/ai-vs-ai-*.jsonl` 파일로 생성
-- 같은 이름의 `*-report.json`이 함께 생성되며 이벤트 빈도, Go 효율, Luck/Skill 지표를 포함
-- 카탈로그는 `logs/catalog/cards-catalog.json` 1회 생성 후 재사용합니다. (카드 ID -> 카드 정보 매핑)
-- JSONL은 대량 실험용 compact 포맷(짧은 키 + ID 중심)으로 기록됩니다.
-- `--log-mode=train`은 `decision_trace` 중심으로 기록되어 학습 파이프라인(01~03)에 권장됩니다.
-- `--log-mode=delta`는 분석용이며 현재 `01_train_policy.py` 학습 입력으로는 사용하지 않습니다.
-- Luck/Skill은 2종으로 제공:
-- 이벤트 프록시: `matchEvents`의 `hand/flip` 비율
-- 가중 캡처 프록시: `captureBySource` 카드 가중치(`광6/열4/띠2/피1`) 기준 `hand/flip` 비율
+## 12. 운영 스크립트
+- RAM 가드: `./scripts/run-with-ram-guard.ps1 -- -3 scripts/02_train_value.py ...`
+- 챔피언 사이클: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_champion_cycle.ps1 -Champion heuristic_v3 -Challenger heuristic_v3 -GamesPerSide 100000 -PromoteThreshold 0.52 -Rounds 1 -Tag stage4`
+- 챔피언 사이클 재개: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_champion_cycle.ps1 -Tag stage4 -Resume`
+- fast 루프: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-fast-loop.ps1 -TrainGames 200000 -Workers 4 -Tag fast`
+- 리그 fast 루프: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-fast-loop.ps1 -TrainGames 200000 -Workers 4 -Tag fast-league -LeagueConfig scripts/league_config.example.json`
+- 점수표 갱신: `py -3 scripts/update_champion_scoreboard.py`
 
-## 13. 빠진 규칙 / 부분구현 규칙 (현재 기준)
-아래 항목은 코드 기준으로 미구현이거나 단순화된 상태입니다.
+## 13. React 구조
+- UI 프레임워크: React + Vite
+- 엔진: `src/gameEngine.js`, `src/state.js`, `src/engine/*`
+- UI 컴포넌트:
+- `src/ui/components/GameBoard.jsx`
+- `src/ui/components/GameOverlays.jsx`
+- `src/ui/components/CardView.jsx`
 
-- 멍박 조건은 `상대 열끗 0 + 내 열끗 7장 이상`으로 고정
-- UI는 고정 레이아웃 + 섹션/오버레이 부분 갱신 구조로 최적화됨
-- 현재 엔진에 해당 전용 상태/행동이 없음
-
-주의:
-- 이 프로젝트는 지역/플랫폼 구분 없는 단일 룰 구조입니다.
-- 전통 맞고의 모든 변종 규칙을 1:1로 재현하는 목적은 아닙니다.
-
-## 14. 참조 소스
-아래 소스를 비교/참고해 현재 룰과 구현을 구성했습니다.
-
-- `https://github.com/KYHyeon/madgo`
-- `https://github.com/gromprops/Go-Stop-MVP`
-- `https://github.com/JJANGCUTE/matgo`
-- `https://github.com/sunduk/freegostop`
-- `https://blog.naver.com/kimju0406/223377157572`
-
-## 15. React 전환 완료
-- UI 프레임워크를 **React + Vite**로 전환 완료
-- 엔진 로직(`src/gameEngine.js` 진입점, 내부 구현 `src/state.js`)은 유지하고 UI만 React 컴포넌트로 교체
-- 엔진 모듈 분해:
-  - `src/engine/rules.js` (룰 상수)
-  - `src/engine/scoring.js` (점수/배수/박 계산)
-  - `src/engine/economy.js` (골드 정산/파산 리셋)
-- UI 컴포넌트 분해:
-  - `src/ui/components/GameBoard.jsx`
-  - `src/ui/components/SidebarPanels.jsx`
-  - `src/ui/components/GameOverlays.jsx`
-  - `src/ui/components/CardView.jsx`
-- 현재 React UI에서 지원:
-  - 사람 vs AI / 사람 vs 사람 / AI vs AI
-  - 선언/선택(흔들기, 폭탄, Go/Stop, 대통령, 국진)
-  - 결과 오버레이, 매치 선택 오버레이
-  - 기보 저장/내보내기
-  - 턴 리플레이(이전/다음/자동재생/슬라이더/속도)
-
-## 16. AI 학습 단계 파일 (01~04)
-- `scripts/01_train_policy.py`
-  - 행동 분류 정책 모델 학습
-  - 실행: `python scripts/01_train_policy.py --input logs/*.jsonl --output models/policy-v1.json`
-  - 속도 옵션: `--max-samples 100000 --skip-train-metrics`
-- `scripts/02_train_value.py`
-  - 골드 기대값 회귀 모델 학습
-  - 실행: `python scripts/02_train_value.py --input logs/*.jsonl --output models/value-v1.json`
-  - 디바이스 옵션: `--device cuda|cpu` (기본값: `cuda`)
-  - GPU 빠른 루프 예시: `python scripts/02_train_value.py --input logs/*.jsonl --output models/value-v1.json --device cuda --dim 128 --epochs 1 --batch-size 8192 --progress-every 0 --max-samples 200000`
-- `scripts/03_evaluate.py`
-  - 구모델 vs 신모델 비교 리포트 생성
-  - 실행:
-    - `python scripts/03_evaluate.py --input logs/*.jsonl --policy-old models/policy-v0.json --policy-new models/policy-v1.json --value-old models/value-v0.json --value-new models/value-v1.json --output logs/model-eval-v1.json`
-- `scripts/04_run_pipeline.py`
-  - 01 -> 02 -> 03 순차 실행 파이프라인
-  - 실행: `python scripts/04_run_pipeline.py --input logs/*.jsonl --tag v1`
-  - 빠른 루프 프리셋: `python scripts/04_run_pipeline.py --input logs/*.jsonl --tag fast-v1 --fast`
-- `scripts/run-fast-loop.ps1`
-  - 병렬 self-play 생성 + `04_run_pipeline.py --fast`를 한 번에 실행하는 고정 운영 스크립트
-  - `-LeagueConfig` 사용 시 리그 self-play 생성기를 통해 데이터 생성
-- `scripts/run_parallel_selfplay.py`
-  - `selfplay_simulator.mjs`를 병렬 실행하고 shard를 자동 병합하는 생성기
-- `scripts/run_league_selfplay.py`
-  - 과거 챔피언/휴리스틱/랜덤을 가중치로 섞어 리그 self-play 데이터를 생성
-- `scripts/league_config.example.json`
-  - 리그 데이터 생성 예시 설정 파일
-- `scripts/run_champion_cycle.ps1`
-  - 병렬 self-play 기반 챔피언/도전자 사이클
-  - 중단 복구: `-Resume` + state 파일(`logs/champ-cycle-<tag>-state.json`)
-- `scripts/update_champion_scoreboard.py`
-  - 챔피언전 summary(report 기반)에서 누적 점수표 JSON/Markdown/문서 섹션 자동 갱신
-- `scripts/TRAIN_DUAL_NET_DESIGN.md`
-  - 통합 PyTorch 모델(`train_dual_net.py`) 전환 설계 초안
-- `scripts/train_dual_net.py`
-  - Dual-Head 학습기 (EmbeddingBag+MLP, JSONL->.pt cache, AMP, early stopping, go/stop policy/value 가중 분리)
-  - numeric feature 확장: deck/hand/go/gold, 이벤트 카운트, steals, goDecision, (가능 시) 피/광/단 상태
-  - 실행 예시:
-    - `py -3 scripts/train_dual_net.py --input logs/train-*.jsonl --cache-pt logs/dual-cache.pt --rebuild-cache --output models/dual-v0.pt --device cuda --epochs 12 --patience 3 --batch-size 128 --emb-dim 256 --hidden-dim 1024 --go-stop-policy-weight 1.8 --go-stop-value-weight 1.3 --value-loss-weight 0.7 --value-scale 10`
-- `scripts/TRAINING_PIPELINE.md`
-  - 학습 순서/핵심내용/실행방법 문서
-
-## 17. 자가 대결 권장 판수
-- 0단계(로직 검증): `1만 판`
-  - 목적: 룰 버그, 나가리 처리, 로그 누락 확인
-- 1단계(초기 정책 학습): `50만 판`
-  - 목적: 첫 정책/가치 모델 생성
-- 2단계(모델1 self-play): `100만 판`
-  - 목적: 행동 분포 안정화, 골드 기대값 보정
-- 3단계(모델2 고도화): `500만 ~ 1000만 판`
-  - 목적: 승률/골드 지표 안정화
-- 4단계(운영급): `2000만 판+`
-  - 목적: 장기 편향(선공 유불리, 이벤트 과대학습) 점검
-
-평가 기준:
-- 학습과 별도로 고정 `10만 판` 평가 세트를 유지(시드 고정 권장)
-
-
-## 18. 더미/강탈/피 정렬 규칙(최신)
-
-- 더미 패스 카드는 손패에서만 존재 가능. 손/획득/바닥/덱의 실카드 ID 중복은 허용하지 않음.
-- 더미 생성:
-  - 기본은 턴당 손패 1장 소모.
-  - 폭탄/연계로 추가 소모가 생기면 부족분만큼 더미를 생성.
-  - 기준식: `expectedHand = 10 - turnCount`, `dummyNeeded = expectedHand - realHandCount(양수일 때만)`.
-- 더미 사용:
-  - 더미 1장만 소모되고, 이후 뒤집기 1회/매치 판정은 일반 턴과 동일.
-- 피 강탈 우선순위(단일 루트):
-  - `1피 -> 2피 -> 국진쌍피 -> 3피`
-  - 같은 레벨이면 `나중에 획득한 피`부터 강탈.
-- 피 정렬(획득패 표시):
-  - 피 값(`1/2/3`) 기준으로 `5피 한 줄`을 최대한 먼저 생성.
-  - 5피로 딱 못 맞는 잔여는 최상단 한 줄로 올림.
-  - 잔여 줄 내부는 `2피 -> 3피 -> 1피` 순으로 배치.
-- GO 뒤집기 표시:
-  - 획득 피 영역에서 아래줄 오른쪽부터 뒤집고, 소진 시 윗줄로 진행.
-
+## 14. 레이아웃 디버그(임시)
+- `styles.css`의 `TEMP: layout debug rainbow borders` 블록이 켜져 있으면 무지개 테두리 표시
+- 릴리즈 전 해당 블록 삭제

@@ -13,6 +13,9 @@ try:
 except Exception:
     torch = None
 
+SIDE_MY = "mySide"
+SIDE_YOUR = "yourSide"
+
 
 def expand_inputs(patterns):
     paths = []
@@ -92,7 +95,7 @@ def extract_tokens(trace, decision_type, action_label):
 def target_gold(line, actor, gold_per_point):
     score = line.get("score") or {}
     self_score = score.get(actor)
-    opp = "ai" if actor == "human" else "human"
+    opp = SIDE_YOUR if actor == SIDE_MY else SIDE_MY
     opp_score = score.get(opp)
     if self_score is None or opp_score is None:
         return None
@@ -111,7 +114,7 @@ def iter_samples(paths, gold_per_point, max_samples=None):
                 line = json.loads(line_raw)
                 for trace in line.get("decision_trace") or []:
                     actor = trace.get("a")
-                    if actor not in ("human", "ai"):
+                    if actor not in (SIDE_MY, SIDE_YOUR):
                         continue
                     action_label, decision_type = choose_label(trace)
                     if action_label is None:

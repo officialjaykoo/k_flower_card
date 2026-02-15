@@ -1,7 +1,7 @@
-﻿import { buildDeck, shuffle } from "./cards.js";
+import { buildDeck, shuffle } from "./cards.js";
 import { ruleSets } from "./engine/rules.js";
-import { calculateScore } from "./engine/scoring.js";
-import { POINT_GOLD_UNIT, settleRoundGold } from "./engine/economy.js";
+import { calculateScore, isGukjinCard } from "./engine/scoring.js";
+import { POINT_GOLD_UNIT, STARTING_GOLD, settleRoundGold } from "./engine/economy.js";
 import { resolveMatch } from "./engine/matching.js";
 import { resolveRound } from "./engine/resolution.js";
 import {
@@ -26,8 +26,7 @@ import {
 import {
   getDeclarableShakingMonths,
   getDeclarableBombMonths,
-  getShakingReveal as selectShakingReveal,
-  estimateRemaining as selectEstimateRemaining
+  getShakingReveal as selectShakingReveal
 } from "./engine/game/selectors.js";
 export { getDeclarableShakingMonths, getDeclarableBombMonths };
 export function createSeededRng(seedText = "") {
@@ -63,10 +62,20 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
       human: emptyPlayer("플레이어"),
       ai: emptyPlayer("AI")
     };
-    if (options.initialGold?.human != null) players.human.gold = options.initialGold.human;
-    if (options.initialGold?.ai != null) players.ai.gold = options.initialGold.ai;
-    if (options.initialMoney?.human != null) players.human.gold = options.initialMoney.human;
-    if (options.initialMoney?.ai != null) players.ai.gold = options.initialMoney.ai;
+    if (options.initialGold?.human != null) {
+      players.human.gold =
+        Number(options.initialGold.human) > 0 ? options.initialGold.human : STARTING_GOLD;
+    }
+    if (options.initialGold?.ai != null) {
+      players.ai.gold = Number(options.initialGold.ai) > 0 ? options.initialGold.ai : STARTING_GOLD;
+    }
+    if (options.initialMoney?.human != null) {
+      players.human.gold =
+        Number(options.initialMoney.human) > 0 ? options.initialMoney.human : STARTING_GOLD;
+    }
+    if (options.initialMoney?.ai != null) {
+      players.ai.gold = Number(options.initialMoney.ai) > 0 ? options.initialMoney.ai : STARTING_GOLD;
+    }
 
     players.human.hand = deck.slice(0, 10);
     players.ai.hand = deck.slice(10, 20);
@@ -90,14 +99,124 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
       initLog
     ));
 
-    // 바닥 대통령(같은 월 4장): 해당 판 무효, 다음 판 배수 x2.
+    // 바닥 대통령(같은 월 4장): 선공 즉시 승리(10점 종료).
     const boardPresident = findPresidentMonth(board);
     if (boardPresident !== null) {
-      carryOverMultiplier *= 2;
-      carryLogs.push(
-        `바닥 대통령(${boardPresident}월 4장): 판 무효, 다음 판 배수 x${carryOverMultiplier}`
+      const winnerKey = firstTurnInfo.winnerKey;
+      const winnerLabel = players[winnerKey].label;
+      const baseScore = 10;
+      const settled = settleRoundGold(players, winnerKey, baseScore);
+      const openLog = [`게임 시작 - 룰: ${ruleSets[ruleKey].name}`];
+      const log = [...openLog, ...carryLogs, ...initLog];
+      log.push(`바닥 대통령(${boardPresident}월 4장): ${winnerLabel} 선공 즉시 승리(10점 종료)`);
+      log.push(
+        `라운드 정산(골드): ${winnerLabel} 요구 ${settled.requested}골드 / 수령 ${settled.paid}골드`
       );
-      continue;
+      log.push(...settled.log);
+
+      const human =
+        winnerKey === "human"
+          ? {
+              base: baseScore,
+              multiplier: 1,
+              total: baseScore,
+              payoutTotal: baseScore,
+              bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
+              breakdown: { boardPresident: true, goBonus: 0 }
+            }
+          : {
+              base: 0,
+              multiplier: 1,
+              total: 0,
+              payoutTotal: 0,
+              bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
+              breakdown: { goBonus: 0 }
+            };
+      const ai =
+        winnerKey === "ai"
+          ? {
+              base: baseScore,
+              multiplier: 1,
+              total: baseScore,
+              payoutTotal: baseScore,
+              bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
+              breakdown: { boardPresident: true, goBonus: 0 }
+            }
+          : {
+              base: 0,
+              multiplier: 1,
+              total: 0,
+              payoutTotal: 0,
+              bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
+              breakdown: { goBonus: 0 }
+            };
+
+      return {
+        deck: remain,
+        board,
+        players: settled.updatedPlayers,
+        currentTurn: winnerKey === "human" ? "ai" : "human",
+        startingTurnKey: firstTurnInfo.winnerKey,
+        phase: "resolution",
+        pendingGoStop: null,
+        pendingMatch: null,
+        pendingShakingConfirm: null,
+        pendingGukjinChoice: null,
+        pendingPresident: null,
+        shakingReveal: null,
+        actionReveal: null,
+        carryOverMultiplier,
+        nextCarryOverMultiplier: 1,
+        log,
+        turnSeq: 0,
+        kiboSeq: 2,
+        passCardCounter: 0,
+        kiboDetail,
+        kibo: [
+          {
+            no: 1,
+            type: "initial_deal",
+            firstTurn: firstTurnInfo.winnerKey,
+            ...(kiboDetail === "full"
+              ? {
+                  hands: {
+                    human: players.human.hand.map(packCard),
+                    ai: players.ai.hand.map(packCard)
+                  },
+                  board: board.map(packCard),
+                  deck: remain.map(packCard)
+                }
+              : {
+                  handsCount: {
+                    human: players.human.hand.length,
+                    ai: players.ai.hand.length
+                  },
+                  boardCount: board.length,
+                  deckCount: remain.length
+                })
+          },
+          {
+            no: 2,
+            type: "board_president_stop",
+            winner: winnerKey,
+            month: boardPresident,
+            payout: baseScore
+          }
+        ],
+        ruleKey,
+        result: {
+          human,
+          ai,
+          winner: winnerKey,
+          nagari: false,
+          nagariReasons: [],
+          gold: {
+            requested: settled.requested,
+            paid: settled.paid,
+            unitPerPoint: POINT_GOLD_UNIT
+          }
+        }
+      };
     }
 
     let phase = "playing";
@@ -138,6 +257,7 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
       log: [...openLog, ...carryLogs, ...initLog],
       turnSeq: 0,
       kiboSeq: 1,
+      passCardCounter: 0,
       kiboDetail,
       kibo: [
         {
@@ -714,7 +834,7 @@ function runFlipPhase(context) {
       if (flipMatch.eventTag === "JJOB") {
         events.jjob += 1;
         pendingSteal += 1;
-        log.push(`쪽 발생 (+${ruleSets[state.ruleKey].jjobBonus}, 상대 피 1장 강탈 예약)`);
+        log.push("쪽 발생 (+1, 상대 피 1장 강탈 예약)");
       }
       return {
         board,
@@ -1261,9 +1381,45 @@ export function chooseGukjinMode(state, playerKey, mode) {
 
   const player = state.players[playerKey];
   if (player.gukjinLocked) return state;
+  const captured = {
+    ...player.captured,
+    kwang: (player.captured.kwang || []).slice(),
+    five: (player.captured.five || []).slice(),
+    ribbon: (player.captured.ribbon || []).slice(),
+    junk: (player.captured.junk || []).slice()
+  };
+  if (mode === "junk") {
+    const gukjinIdx = captured.five.findIndex(
+      (card) => isGukjinCard(card) && card.category === "five" && !card.gukjinTransformed
+    );
+    if (gukjinIdx >= 0) {
+      const [gukjinCard] = captured.five.splice(gukjinIdx, 1);
+      captured.junk.push({
+        ...gukjinCard,
+        category: "junk",
+        piValue: 2,
+        gukjinTransformed: true,
+        name: `${gukjinCard.name} (국진피)`
+      });
+    }
+  } else if (mode === "five") {
+    const gukjinJunkIdx = captured.junk.findIndex(
+      (card) => isGukjinCard(card) && card.category === "junk"
+    );
+    if (gukjinJunkIdx >= 0) {
+      const [gukjinCard] = captured.junk.splice(gukjinJunkIdx, 1);
+      captured.five.push({
+        ...gukjinCard,
+        category: "five",
+        piValue: undefined,
+        gukjinTransformed: false,
+        name: String(gukjinCard.name || "").replace(" (국진피)", "")
+      });
+    }
+  }
   const nextPlayers = {
     ...state.players,
-    [playerKey]: { ...player, gukjinMode: mode, gukjinLocked: true }
+    [playerKey]: { ...player, captured, gukjinMode: mode, gukjinLocked: true }
   };
   const label = mode === "junk" ? "쌍피" : "열";
   const log = state.log.concat(`${player.label}: 국진(9월 열) ${label} 처리 선택(낙장불입)`);
@@ -1286,10 +1442,6 @@ export function chooseGukjinMode(state, playerKey, mode) {
   return continueAfterTurnIfNeeded(nextState, playerKey);
 }
 
-
-export function estimateRemaining(state) {
-  return selectEstimateRemaining(state);
-}
 
 
 
