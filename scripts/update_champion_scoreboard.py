@@ -20,9 +20,17 @@ def load_summaries(pattern):
                 "challenger_before": obj.get("challenger_before"),
                 "champion_after": obj.get("champion_after"),
                 "challenger_after": obj.get("challenger_after"),
+                "challenger_bankrupt_inflicted": int(obj.get("challenger_bankrupt_inflicted", 0)),
+                "challenger_bankrupt_suffered": int(obj.get("challenger_bankrupt_suffered", 0)),
+                "bankrupt_diff": int(obj.get("bankrupt_diff", 0)),
                 "challenger_avg_gold_delta": float(obj.get("challenger_avg_gold_delta", 0.0)),
                 "challenger_cum_gold_1000": float(obj.get("challenger_cum_gold_1000", 0.0)),
                 "challenger_win_rate_decisive": float(obj.get("challenger_win_rate_decisive", 0.0)),
+                "gold_delta_epsilon": float(obj.get("gold_delta_epsilon", 0.0)),
+                "win_rate_epsilon": float(obj.get("win_rate_epsilon", 0.0)),
+                "challenger_worst_single_loss": float(obj.get("challenger_worst_single_loss", 0.0)),
+                "champion_worst_single_loss": float(obj.get("champion_worst_single_loss", 0.0)),
+                "decision_reason": obj.get("decision_reason"),
                 "draws": int(obj.get("draws", 0)),
                 "total_games": int(obj.get("total_games", 0)),
                 "promoted": bool(obj.get("promoted", False)),
@@ -38,13 +46,17 @@ def make_markdown(rows, limit):
     lines.append(f"- updated_at: {datetime.now(timezone.utc).isoformat()}")
     lines.append(f"- source: logs/champ-cycle-*-summary.json (report 기반 산출)")
     lines.append("")
-    lines.append("| tag | challenger_before | champion_before | avg_gold_delta | cum_gold_1000 | challenger_dec_win_rate | promoted | champion_after |")
-    lines.append("|---|---|---|---:|---:|---:|---:|---|")
+    lines.append("| tag | challenger_before | champion_before | bankrupt(i/s/d) | avg_gold_delta | dec_win_rate | worst_single_loss(ch/champ) | eps(gold/wr) | decision_reason | promoted | champion_after |")
+    lines.append("|---|---|---|---|---:|---:|---:|---|---|---:|---|")
     for r in rows:
         lines.append(
             f"| {r['tag']} | {r['challenger_before']} | {r['champion_before']} | "
-            f"{r['challenger_avg_gold_delta']:.4f} | {r['challenger_cum_gold_1000']:.2f} | "
-            f"{r['challenger_win_rate_decisive']*100:.4f}% | {str(r['promoted']).lower()} | {r['champion_after']} |"
+            f"{r['challenger_bankrupt_inflicted']}/{r['challenger_bankrupt_suffered']}/{r['bankrupt_diff']} | "
+            f"{r['challenger_avg_gold_delta']:.4f} | "
+            f"{r['challenger_win_rate_decisive']*100:.4f}% | "
+            f"{r['challenger_worst_single_loss']:.0f}/{r['champion_worst_single_loss']:.0f} | "
+            f"{r['gold_delta_epsilon']:.0f}/{r['win_rate_epsilon']*100:.2f}% | "
+            f"{r['decision_reason']} | {str(r['promoted']).lower()} | {r['champion_after']} |"
         )
     lines.append("")
     return "\n".join(lines) + "\n"

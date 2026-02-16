@@ -4,12 +4,12 @@ param(
   [string]$Tag = "",
   [string]$LeagueConfig = "",
   [int]$LeagueChunkGames = 20000,
-  [string]$PolicyHuman = "heuristic_v3",
-  [string]$PolicyAi = "heuristic_v3",
-  [string]$PolicyModelHuman = "",
-  [string]$ValueModelHuman = "",
-  [string]$PolicyModelAi = "",
-  [string]$ValueModelAi = "",
+  [string]$PolicyMySide = "heuristic_v3",
+  [string]$PolicyYourSide = "heuristic_v3",
+  [string]$PolicyModelMySide = "",
+  [string]$ValueModelMySide = "",
+  [string]$PolicyModelYourSide = "",
+  [string]$ValueModelYourSide = "",
   [switch]$ModelOnly,
   [switch]$SkipEval
 )
@@ -48,21 +48,21 @@ if (-not [string]::IsNullOrWhiteSpace($LeagueConfig)) {
     "--output", $trainLog,
     "--",
     "--log-mode=train",
-    "--policy-human=$PolicyHuman",
-    "--policy-ai=$PolicyAi"
+    "--policy-my-side=$PolicyMySide",
+    "--policy-your-side=$PolicyYourSide"
   )
 
-  if (-not [string]::IsNullOrWhiteSpace($PolicyModelHuman)) {
-    $genArgs += "--policy-model-human=$PolicyModelHuman"
+  if (-not [string]::IsNullOrWhiteSpace($PolicyModelMySide)) {
+    $genArgs += "--policy-model-my-side=$PolicyModelMySide"
   }
-  if (-not [string]::IsNullOrWhiteSpace($ValueModelHuman)) {
-    $genArgs += "--value-model-human=$ValueModelHuman"
+  if (-not [string]::IsNullOrWhiteSpace($ValueModelMySide)) {
+    $genArgs += "--value-model-my-side=$ValueModelMySide"
   }
-  if (-not [string]::IsNullOrWhiteSpace($PolicyModelAi)) {
-    $genArgs += "--policy-model-ai=$PolicyModelAi"
+  if (-not [string]::IsNullOrWhiteSpace($PolicyModelYourSide)) {
+    $genArgs += "--policy-model-your-side=$PolicyModelYourSide"
   }
-  if (-not [string]::IsNullOrWhiteSpace($ValueModelAi)) {
-    $genArgs += "--value-model-ai=$ValueModelAi"
+  if (-not [string]::IsNullOrWhiteSpace($ValueModelYourSide)) {
+    $genArgs += "--value-model-your-side=$ValueModelYourSide"
   }
   if ($ModelOnly) {
     $genArgs += "--model-only"

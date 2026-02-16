@@ -38,18 +38,44 @@ const HASH_CACHE_MAX = 500000;
 
 const decisionInferenceCache = new Map();
 const hashIndexCache = new Map();
+const SIDE_MY = "mySide";
+const SIDE_YOUR = "yourSide";
 
 function setBoundedCache(cache, key, value, maxEntries) {
   if (cache.size >= maxEntries) cache.clear();
   cache.set(key, value);
 }
 
-function normalizePolicyInput(raw) {
-  const p = String(raw || DEFAULT_POLICY).trim().toLowerCase();
-  if (p === "heuristic_v3") {
-    return "heuristic_v3";
+function actorToSide(actor, firstTurnKey) {
+  return actor === firstTurnKey ? SIDE_MY : SIDE_YOUR;
+}
+
+function sideToActor(side, firstTurnKey, secondTurnKey) {
+  if (side === SIDE_MY) return firstTurnKey;
+  if (side === SIDE_YOUR) return secondTurnKey;
+  return null;
+}
+
+function findOppActor(state, actor) {
+  const actorKeys = Object.keys(state?.players || {});
+  return actorKeys.find((k) => k !== actor) || null;
+}
+
+function secondActorFromFirst(state, firstTurnKey) {
+  return Object.keys(state?.players || {}).find((k) => k !== firstTurnKey) || null;
+}
+
+function actorPairFromState(state) {
+  const actorKeys = Object.keys(state?.players || {});
+  if (actorKeys.length !== 2) {
+    throw new Error(`expected exactly 2 actors in state.players, got ${actorKeys.length}`);
   }
-  return "heuristic_v3";
+  return actorKeys;
+}
+
+function normalizePolicyInput(raw) {
+  const p = String(raw ?? DEFAULT_POLICY).trim().toLowerCase();
+  return p || DEFAULT_POLICY;
 }
 
 function parseArgs(argv) {
@@ -57,13 +83,13 @@ function parseArgs(argv) {
   let games = 1000;
   let outArg = null;
   let logMode = DEFAULT_LOG_MODE;
-  let policyHuman = DEFAULT_POLICY;
-  let policyAi = DEFAULT_POLICY;
+  let policyMySide = DEFAULT_POLICY;
+  let policyYourSide = DEFAULT_POLICY;
   let modelOnly = false;
-  let policyModelHuman = null;
-  let policyModelAi = null;
-  let valueModelHuman = null;
-  let valueModelAi = null;
+  let policyModelMySide = null;
+  let policyModelYourSide = null;
+  let valueModelMySide = null;
+  let valueModelYourSide = null;
 
   if (args.length > 0 && /^\d+$/.test(args[0])) {
     games = Number(args.shift());
@@ -87,124 +113,85 @@ function parseArgs(argv) {
       logMode = arg;
       continue;
     }
-    if (arg === "--policy" && args.length > 0) {
-      const p = normalizePolicyInput(args.shift());
-      policyHuman = p;
-      policyAi = p;
+    if (arg === "--policy-my-side" && args.length > 0) {
+      policyMySide = normalizePolicyInput(args.shift());
       continue;
     }
-    if (arg.startsWith("--policy=")) {
-      const p = normalizePolicyInput(arg.split("=", 2)[1]);
-      policyHuman = p;
-      policyAi = p;
+    if (arg.startsWith("--policy-my-side=")) {
+      policyMySide = normalizePolicyInput(arg.split("=", 2)[1]);
       continue;
     }
-    if (arg === "--policy-human" && args.length > 0) {
-      policyHuman = normalizePolicyInput(args.shift());
+    if (arg === "--policy-your-side" && args.length > 0) {
+      policyYourSide = normalizePolicyInput(args.shift());
       continue;
     }
-    if (arg.startsWith("--policy-human=")) {
-      policyHuman = normalizePolicyInput(arg.split("=", 2)[1]);
+    if (arg.startsWith("--policy-your-side=")) {
+      policyYourSide = normalizePolicyInput(arg.split("=", 2)[1]);
       continue;
     }
-    if (arg === "--policy-ai" && args.length > 0) {
-      policyAi = normalizePolicyInput(args.shift());
+    if (arg === "--policy-model-my-side" && args.length > 0) {
+      policyModelMySide = String(args.shift()).trim();
       continue;
     }
-    if (arg.startsWith("--policy-ai=")) {
-      policyAi = normalizePolicyInput(arg.split("=", 2)[1]);
+    if (arg.startsWith("--policy-model-my-side=")) {
+      policyModelMySide = arg.split("=", 2)[1].trim();
       continue;
     }
-    if (arg === "--policy-model-human" && args.length > 0) {
-      policyModelHuman = String(args.shift()).trim();
+    if (arg === "--policy-model-your-side" && args.length > 0) {
+      policyModelYourSide = String(args.shift()).trim();
       continue;
     }
-    if (arg.startsWith("--policy-model-human=")) {
-      policyModelHuman = arg.split("=", 2)[1].trim();
+    if (arg.startsWith("--policy-model-your-side=")) {
+      policyModelYourSide = arg.split("=", 2)[1].trim();
       continue;
     }
-    if (arg === "--policy-model-ai" && args.length > 0) {
-      policyModelAi = String(args.shift()).trim();
+    if (arg === "--value-model-my-side" && args.length > 0) {
+      valueModelMySide = String(args.shift()).trim();
       continue;
     }
-    if (arg.startsWith("--policy-model-ai=")) {
-      policyModelAi = arg.split("=", 2)[1].trim();
+    if (arg.startsWith("--value-model-my-side=")) {
+      valueModelMySide = arg.split("=", 2)[1].trim();
       continue;
     }
-    if (arg === "--policy-model-a" && args.length > 0) {
-      policyModelHuman = String(args.shift()).trim();
+    if (arg === "--value-model-your-side" && args.length > 0) {
+      valueModelYourSide = String(args.shift()).trim();
       continue;
     }
-    if (arg.startsWith("--policy-model-a=")) {
-      policyModelHuman = arg.split("=", 2)[1].trim();
-      continue;
-    }
-    if (arg === "--policy-model-b" && args.length > 0) {
-      policyModelAi = String(args.shift()).trim();
-      continue;
-    }
-    if (arg.startsWith("--policy-model-b=")) {
-      policyModelAi = arg.split("=", 2)[1].trim();
-      continue;
-    }
-    if (arg === "--value-model-human" && args.length > 0) {
-      valueModelHuman = String(args.shift()).trim();
-      continue;
-    }
-    if (arg.startsWith("--value-model-human=")) {
-      valueModelHuman = arg.split("=", 2)[1].trim();
-      continue;
-    }
-    if (arg === "--value-model-ai" && args.length > 0) {
-      valueModelAi = String(args.shift()).trim();
-      continue;
-    }
-    if (arg.startsWith("--value-model-ai=")) {
-      valueModelAi = arg.split("=", 2)[1].trim();
-      continue;
-    }
-    if (arg === "--value-model-a" && args.length > 0) {
-      valueModelHuman = String(args.shift()).trim();
-      continue;
-    }
-    if (arg.startsWith("--value-model-a=")) {
-      valueModelHuman = arg.split("=", 2)[1].trim();
-      continue;
-    }
-    if (arg === "--value-model-b" && args.length > 0) {
-      valueModelAi = String(args.shift()).trim();
-      continue;
-    }
-    if (arg.startsWith("--value-model-b=")) {
-      valueModelAi = arg.split("=", 2)[1].trim();
+    if (arg.startsWith("--value-model-your-side=")) {
+      valueModelYourSide = arg.split("=", 2)[1].trim();
       continue;
     }
     if (arg === "--model-only" || arg === "--strict-model-only") {
       modelOnly = true;
       continue;
     }
+    throw new Error(`Unknown argument: ${arg}`);
   }
 
   if (!SUPPORTED_LOG_MODES.has(logMode)) {
     throw new Error(`Unsupported log mode: ${logMode}. Use one of: compact, delta, train, short`);
   }
-  if (!SUPPORTED_POLICIES.has(policyHuman)) {
-    throw new Error(`Unsupported policy-human: ${policyHuman}. Use one of: ${[...SUPPORTED_POLICIES].join(", ")}`);
+  if (!SUPPORTED_POLICIES.has(policyMySide)) {
+    throw new Error(
+      `Unsupported policy for mySide: ${policyMySide}. Use one of: ${[...SUPPORTED_POLICIES].join(", ")}`
+    );
   }
-  if (!SUPPORTED_POLICIES.has(policyAi)) {
-    throw new Error(`Unsupported policy-ai: ${policyAi}. Use one of: ${[...SUPPORTED_POLICIES].join(", ")}`);
+  if (!SUPPORTED_POLICIES.has(policyYourSide)) {
+    throw new Error(
+      `Unsupported policy for yourSide: ${policyYourSide}. Use one of: ${[...SUPPORTED_POLICIES].join(", ")}`
+    );
   }
 
   return {
     games,
     outArg,
     logMode,
-    policyHuman,
-    policyAi,
-    policyModelHuman,
-    policyModelAi,
-    valueModelHuman,
-    valueModelAi,
+    policyMySide,
+    policyYourSide,
+    policyModelMySide,
+    policyModelYourSide,
+    valueModelMySide,
+    valueModelYourSide,
     modelOnly
   };
 }
@@ -213,54 +200,74 @@ const parsed = parseArgs(process.argv.slice(2));
 const games = parsed.games;
 const outArg = parsed.outArg;
 const logMode = parsed.logMode;
-const policyHuman = parsed.policyHuman;
-const policyAi = parsed.policyAi;
-const policyModelHumanPath = parsed.policyModelHuman;
-const policyModelAiPath = parsed.policyModelAi;
-const valueModelHumanPath = parsed.valueModelHuman;
-const valueModelAiPath = parsed.valueModelAi;
+const policyMySide = parsed.policyMySide;
+const policyYourSide = parsed.policyYourSide;
+const policyModelMySidePath = parsed.policyModelMySide;
+const policyModelYourSidePath = parsed.policyModelYourSide;
+const valueModelMySidePath = parsed.valueModelMySide;
+const valueModelYourSidePath = parsed.valueModelYourSide;
 const modelOnly = !!parsed.modelOnly;
 const isTrainMode = logMode === "train";
 const isDeltaMode = logMode === "delta";
 const isShortMode = logMode === "short";
 const needsDecisionTrace = true;
 const useLeanKibo = isTrainMode || isDeltaMode;
-const actorConfig = {
-  human: {
-    fallbackPolicy: policyHuman,
-    policyModelPath: policyModelHumanPath,
-    valueModelPath: valueModelHumanPath
+const sideConfig = {
+  [SIDE_MY]: {
+    fallbackPolicy: policyMySide,
+    policyModelPath: policyModelMySidePath,
+    valueModelPath: valueModelMySidePath
   },
-  ai: {
-    fallbackPolicy: policyAi,
-    policyModelPath: policyModelAiPath,
-    valueModelPath: valueModelAiPath
+  [SIDE_YOUR]: {
+    fallbackPolicy: policyYourSide,
+    policyModelPath: policyModelYourSidePath,
+    valueModelPath: valueModelYourSidePath
   }
 };
-actorConfig.human.policyModel = loadJsonModel(actorConfig.human.policyModelPath, "policy-model-human");
-actorConfig.ai.policyModel = loadJsonModel(actorConfig.ai.policyModelPath, "policy-model-ai");
-actorConfig.human.valueModel = loadJsonModel(actorConfig.human.valueModelPath, "value-model-human");
-actorConfig.ai.valueModel = loadJsonModel(actorConfig.ai.valueModelPath, "value-model-ai");
+sideConfig[SIDE_MY].policyModel = loadJsonModel(
+  sideConfig[SIDE_MY].policyModelPath,
+  "policy-model-my-side"
+);
+sideConfig[SIDE_YOUR].policyModel = loadJsonModel(
+  sideConfig[SIDE_YOUR].policyModelPath,
+  "policy-model-your-side"
+);
+sideConfig[SIDE_MY].valueModel = loadJsonModel(
+  sideConfig[SIDE_MY].valueModelPath,
+  "value-model-my-side"
+);
+sideConfig[SIDE_YOUR].valueModel = loadJsonModel(
+  sideConfig[SIDE_YOUR].valueModelPath,
+  "value-model-your-side"
+);
 
 if (modelOnly) {
-  for (const actor of ["human", "ai"]) {
-    if (!actorConfig[actor].policyModel && !actorConfig[actor].valueModel) {
-      throw new Error(`model-only requires model for ${actor}. Provide --policy-model-${actor} and/or --value-model-${actor}`);
+  for (const side of [SIDE_MY, SIDE_YOUR]) {
+    if (!sideConfig[side].policyModel && !sideConfig[side].valueModel) {
+      throw new Error(
+        `model-only requires model for ${side}. Provide --policy-model-${side} and/or --value-model-${side}`
+      );
     }
   }
 }
 
-const agentLabelByActor = {
-  human: actorConfig.human.policyModel || actorConfig.human.valueModel
-    ? `model:${path.basename(actorConfig.human.policyModelPath || actorConfig.human.valueModelPath)}`
-    : actorConfig.human.fallbackPolicy,
-  ai: actorConfig.ai.policyModel || actorConfig.ai.valueModel
-    ? `model:${path.basename(actorConfig.ai.policyModelPath || actorConfig.ai.valueModelPath)}`
-    : actorConfig.ai.fallbackPolicy
+const agentLabelBySide = {
+  [SIDE_MY]:
+    sideConfig[SIDE_MY].policyModel || sideConfig[SIDE_MY].valueModel
+      ? `model:${path.basename(
+          sideConfig[SIDE_MY].policyModelPath || sideConfig[SIDE_MY].valueModelPath
+        )}`
+      : sideConfig[SIDE_MY].fallbackPolicy,
+  [SIDE_YOUR]:
+    sideConfig[SIDE_YOUR].policyModel || sideConfig[SIDE_YOUR].valueModel
+      ? `model:${path.basename(
+          sideConfig[SIDE_YOUR].policyModelPath || sideConfig[SIDE_YOUR].valueModelPath
+        )}`
+      : sideConfig[SIDE_YOUR].fallbackPolicy
 };
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-const outPath = outArg || path.resolve(__dirname, "..", "logs", `ai-vs-ai-${stamp}.jsonl`);
+const outPath = outArg || path.resolve(__dirname, "..", "logs", `side-vs-side-${stamp}.jsonl`);
 const reportPath = outPath.replace(/\.jsonl$/i, "-report.json");
 const sharedCatalogDir = path.resolve(__dirname, "..", "logs", "catalog");
 const sharedCatalogPath = path.join(sharedCatalogDir, "cards-catalog.json");
@@ -272,21 +279,17 @@ const aggregate = {
   games,
   completed: 0,
   winners: { mySide: 0, yourSide: 0, draw: 0, unknown: 0 },
-  byTurnOrder: {
-    firstWins: 0,
-    secondWins: 0,
+  bySide: {
+    mySideWins: 0,
+    yourSideWins: 0,
     draw: 0,
-    firstScoreSum: 0,
-    secondScoreSum: 0
+    mySideScoreSum: 0,
+    yourSideScoreSum: 0
   },
   economy: {
     mySideGoldSum: 0,
     yourSideGoldSum: 0,
     mySideDeltaSum: 0,
-    firstGoldSum: 0,
-    secondGoldSum: 0,
-    firstDeltaSum: 0,
-    secondDeltaSum: 0,
     first1000MySideDeltaSum: 0,
     first1000Games: 0
   },
@@ -319,7 +322,7 @@ const aggregate = {
   luckHandCaptureValue: 0
 };
 
-function createBalancedFirstTurnPlan(totalGames) {
+function createBalancedFirstTurnPlan(totalGames, actorA, actorB) {
   if (totalGames % 2 !== 0) {
     throw new Error(
       `games must be even for exact 50:50 first-turn split. Received: ${totalGames}`
@@ -327,8 +330,8 @@ function createBalancedFirstTurnPlan(totalGames) {
   }
   const half = totalGames / 2;
   const plan = [];
-  for (let i = 0; i < half; i += 1) plan.push("human");
-  for (let i = 0; i < half; i += 1) plan.push("ai");
+  for (let i = 0; i < half; i += 1) plan.push(actorA);
+  for (let i = 0; i < half; i += 1) plan.push(actorB);
   for (let i = plan.length - 1; i > 0; i -= 1) {
     const j = Math.floor(Math.random() * (i + 1));
     const tmp = plan[i];
@@ -426,7 +429,10 @@ function selectPool(state, actor, options = {}) {
 
 function decisionContext(state, actor, options = {}) {
   const includeCardLists = options.includeCardLists !== false;
-  const opp = actor === "human" ? "ai" : "human";
+  const opp = findOppActor(state, actor);
+  if (!opp) {
+    throw new Error(`failed to resolve opponent actor for actor=${actor}`);
+  }
   const capturedSelf = state.players?.[actor]?.captured || {};
   const capturedOpp = state.players?.[opp]?.captured || {};
   const flattenCaptured = (captured) =>
@@ -688,15 +694,14 @@ function loadJsonModel(modelPath, label) {
 function compactInitial(initialDeal) {
   if (!initialDeal) return null;
   const mySideKey = initialDeal.firstTurn;
-  const yourSideKey = mySideKey === "human" ? "ai" : "human";
+  const handKeys = Object.keys(initialDeal.hands || initialDeal.handsCount || {});
+  const yourSideKey = handKeys.find((k) => k !== mySideKey) || null;
   return {
-    firstTurn: "mySide",
-    secondTurn: "yourSide",
     hands:
       initialDeal.hands != null
         ? {
-            mySide: (initialDeal.hands?.[mySideKey] || []).map((c) => c.id),
-            yourSide: (initialDeal.hands?.[yourSideKey] || []).map((c) => c.id)
+            [SIDE_MY]: (initialDeal.hands?.[mySideKey] || []).map((c) => c.id),
+            [SIDE_YOUR]: (initialDeal.hands?.[yourSideKey] || []).map((c) => c.id)
           }
         : null,
     handsCount: initialDeal.handsCount || null,
@@ -763,11 +768,18 @@ function weightedImmediateReward(turn, jpCompletedNow, beforeDc, afterDc) {
   return reward;
 }
 
-function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, policyByActorRef) {
+function buildDecisionTrace(
+  kibo,
+  winner,
+  contextByTurnNo,
+  firstTurnKey,
+  secondTurnKey,
+  policyBySideRef
+) {
   const turns = (kibo || []).filter((e) => e.type === "turn_end");
   return turns.map((t) => {
     const actor = t.actor;
-    const actorSide = actor === firstTurnKey ? "mySide" : "yourSide";
+    const actorSide = actorToSide(actor, firstTurnKey);
     const action = t.action || {};
     const matchEvents = action.matchEvents || [];
     const captureBySource = action.captureBySource || { hand: [], flip: [] };
@@ -775,7 +787,7 @@ function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, policyB
     const turnCtx = contextByTurnNo.get(t.turnNo) || null;
     const before = turnCtx?.before || null;
     const after = turnCtx?.after || null;
-    const opp = actor === "human" ? "ai" : "human";
+    const opp = actor === firstTurnKey ? secondTurnKey : firstTurnKey;
     const jpPre = before?.decisionContext?.jokboProgressSelf || null;
     const jpPost = after?.decisionContext?.jokboProgressSelf || null;
     const jpCompletedNow = !!(jokboCompleted(jpPost) && !jokboCompleted(jpPre));
@@ -789,7 +801,7 @@ function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, policyB
     return {
       t: t.turnNo,
       a: actorSide,
-      o: actor === firstTurnKey ? "first" : "second",
+      o: actorSide === SIDE_MY ? "first" : "second",
       at: action.type || "unknown",
       c: action.card?.id || null,
       s: action.selectedBoardCard?.id || null,
@@ -798,7 +810,7 @@ function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, policyB
       dc: before?.decisionContext || null,
       sp: before?.selectionPool || null,
       reasoning: {
-        policy: policyByActorRef[actor] || DEFAULT_POLICY,
+        policy: policyBySideRef[actorSide] || DEFAULT_POLICY,
         candidatesCount: countCandidates(before?.selectionPool),
         evaluation: null
       },
@@ -823,11 +835,18 @@ function buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, policyB
   });
 }
 
-function buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, policyByActorRef) {
+function buildDecisionTraceTrain(
+  kibo,
+  winner,
+  firstTurnKey,
+  secondTurnKey,
+  contextByTurnNo,
+  policyBySideRef
+) {
   const turns = (kibo || []).filter((e) => e.type === "turn_end");
   return turns.map((t) => {
     const actor = t.actor;
-    const actorSide = actor === firstTurnKey ? "mySide" : "yourSide";
+    const actorSide = actorToSide(actor, firstTurnKey);
     const action = t.action || {};
     const terminalReward = winner === "draw" ? 0 : winner === actor ? 1 : -1;
     const turnCtx = contextByTurnNo.get(t.turnNo) || null;
@@ -845,7 +864,7 @@ function buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, po
     return {
       t: t.turnNo,
       a: actorSide,
-      o: actor === firstTurnKey ? "first" : "second",
+      o: actorSide === SIDE_MY ? "first" : "second",
       at: action.type || "unknown",
       c: action.card?.id || null,
       s: action.selectedBoardCard?.id || null,
@@ -853,7 +872,7 @@ function buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, po
       tr: terminalReward,
       dc: before?.decisionContext || null,
       sp: before?.selectionPool || null,
-      policy: policyByActorRef[actor] || DEFAULT_POLICY,
+      policy: policyBySideRef[actorSide] || DEFAULT_POLICY,
       jp: {
         pre: jpPre,
         post: jpPost,
@@ -863,18 +882,25 @@ function buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, po
   });
 }
 
-function buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, policyByActorRef) {
+function buildDecisionTraceDelta(
+  kibo,
+  winner,
+  firstTurnKey,
+  secondTurnKey,
+  contextByTurnNo,
+  policyBySideRef
+) {
   const turns = (kibo || []).filter((e) => e.type === "turn_end");
   let prevDeck = null;
-  let prevHand = { human: null, ai: null };
+  let prevHand = { [firstTurnKey]: null, [secondTurnKey]: null };
   return turns.map((t) => {
     const actor = t.actor;
-    const actorSide = actor === firstTurnKey ? "mySide" : "yourSide";
+    const actorSide = actorToSide(actor, firstTurnKey);
     const action = t.action || {};
     const terminalReward = winner === "draw" ? 0 : winner === actor ? 1 : -1;
     const deckAfter = t.deckCount ?? 0;
     const handSelfAfter = handCountFromTurn(t, actor);
-    const opp = actor === "human" ? "ai" : "human";
+    const opp = actor === firstTurnKey ? secondTurnKey : firstTurnKey;
     const handOppAfter = handCountFromTurn(t, opp);
     const deckDelta = prevDeck == null ? null : deckAfter - prevDeck;
     const handSelfDelta = prevHand[actor] == null ? null : handSelfAfter - prevHand[actor];
@@ -883,14 +909,14 @@ function buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, po
     const before = turnCtx?.before || null;
     prevDeck = deckAfter;
     prevHand = {
-      human: handCountFromTurn(t, "human"),
-      ai: handCountFromTurn(t, "ai")
+      [firstTurnKey]: handCountFromTurn(t, firstTurnKey),
+      [secondTurnKey]: handCountFromTurn(t, secondTurnKey)
     };
 
     return {
       t: t.turnNo,
       a: actorSide,
-      o: actor === firstTurnKey ? "first" : "second",
+      o: actorSide === SIDE_MY ? "first" : "second",
       at: action.type || "unknown",
       c: action.card?.id || null,
       s: action.selectedBoardCard?.id || null,
@@ -908,7 +934,7 @@ function buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, po
           .map((m) => `${m.source}:${m.eventTag}`)
       },
       reasoning: {
-        policy: policyByActorRef[actor] || DEFAULT_POLICY,
+        policy: policyBySideRef[actorSide] || DEFAULT_POLICY,
         candidatesCount: countCandidates(before?.selectionPool),
         evaluation: null
       }
@@ -916,25 +942,21 @@ function buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, po
   });
 }
 
-function baseSummary(line, winnerTurnOrder, firstScore, secondScore, firstGold, secondGold) {
+function baseSummary(line, mySideScore, yourSideScore) {
   aggregate.completed += line.completed ? 1 : 0;
   if (aggregate.winners[line.winner] != null) aggregate.winners[line.winner] += 1;
   else aggregate.winners.unknown += 1;
-  if (winnerTurnOrder === "first") aggregate.byTurnOrder.firstWins += 1;
-  else if (winnerTurnOrder === "second") aggregate.byTurnOrder.secondWins += 1;
-  else aggregate.byTurnOrder.draw += 1;
-  aggregate.byTurnOrder.firstScoreSum += firstScore;
-  aggregate.byTurnOrder.secondScoreSum += secondScore;
+  if (line.winner === SIDE_MY) aggregate.bySide.mySideWins += 1;
+  else if (line.winner === SIDE_YOUR) aggregate.bySide.yourSideWins += 1;
+  else aggregate.bySide.draw += 1;
+  aggregate.bySide.mySideScoreSum += mySideScore;
+  aggregate.bySide.yourSideScoreSum += yourSideScore;
   const mySideGold = Number(line?.gold?.mySide ?? 0);
   const yourSideGold = Number(line?.gold?.yourSide ?? 0);
   const mySideDelta = mySideGold - yourSideGold;
   aggregate.economy.mySideGoldSum += mySideGold;
   aggregate.economy.yourSideGoldSum += yourSideGold;
   aggregate.economy.mySideDeltaSum += mySideDelta;
-  aggregate.economy.firstGoldSum += Number(firstGold || 0);
-  aggregate.economy.secondGoldSum += Number(secondGold || 0);
-  aggregate.economy.firstDeltaSum += Number(firstGold || 0) - Number(secondGold || 0);
-  aggregate.economy.secondDeltaSum += Number(secondGold || 0) - Number(firstGold || 0);
   if (aggregate.economy.first1000Games < 1000) {
     aggregate.economy.first1000MySideDeltaSum += mySideDelta;
     aggregate.economy.first1000Games += 1;
@@ -943,9 +965,8 @@ function baseSummary(line, winnerTurnOrder, firstScore, secondScore, firstGold, 
 
 function fullSummary({
   line,
-  winnerTurnOrder,
-  firstScore,
-  secondScore,
+  mySideScore,
+  yourSideScore,
   goCalls,
   goEfficiency,
   totalPiSteals,
@@ -956,11 +977,9 @@ function fullSummary({
   flipEvents,
   handEvents,
   flipCaptureValue,
-  handCaptureValue,
-  firstGold,
-  secondGold
+  handCaptureValue
 }) {
-  baseSummary(line, winnerTurnOrder, firstScore, secondScore, firstGold, secondGold);
+  baseSummary(line, mySideScore, yourSideScore);
   if (line.nagari) aggregate.nagari += 1;
   aggregate.eventTotals.ppuk += line.eventFrequency.ppuk;
   aggregate.eventTotals.ddadak += line.eventFrequency.ddadak;
@@ -997,23 +1016,20 @@ function buildTrainReport() {
     games: aggregate.games,
     completed: aggregate.completed,
     winners: aggregate.winners,
-    turnOrder: {
-      firstWinRate: aggregate.byTurnOrder.firstWins / Math.max(1, aggregate.games),
-      secondWinRate: aggregate.byTurnOrder.secondWins / Math.max(1, aggregate.games),
-      drawRate: aggregate.byTurnOrder.draw / Math.max(1, aggregate.games),
-      averageScoreFirst: aggregate.byTurnOrder.firstScoreSum / Math.max(1, aggregate.games),
-      averageScoreSecond: aggregate.byTurnOrder.secondScoreSum / Math.max(1, aggregate.games)
+    sideStats: {
+      mySideWinRate: aggregate.bySide.mySideWins / Math.max(1, aggregate.games),
+      yourSideWinRate: aggregate.bySide.yourSideWins / Math.max(1, aggregate.games),
+      drawRate: aggregate.bySide.draw / Math.max(1, aggregate.games),
+      averageScoreMySide: aggregate.bySide.mySideScoreSum / Math.max(1, aggregate.games),
+      averageScoreYourSide: aggregate.bySide.yourSideScoreSum / Math.max(1, aggregate.games)
     },
     economy: {
       averageGoldMySide: aggregate.economy.mySideGoldSum / Math.max(1, aggregate.games),
       averageGoldYourSide: aggregate.economy.yourSideGoldSum / Math.max(1, aggregate.games),
       averageGoldDeltaMySide: aggregate.economy.mySideDeltaSum / Math.max(1, aggregate.games),
-      averageGoldFirst: aggregate.economy.firstGoldSum / Math.max(1, aggregate.games),
-      averageGoldSecond: aggregate.economy.secondGoldSum / Math.max(1, aggregate.games),
-      averageGoldDeltaFirst: aggregate.economy.firstDeltaSum / Math.max(1, aggregate.games),
       cumulativeGoldDeltaOver1000:
         (aggregate.economy.mySideDeltaSum / Math.max(1, aggregate.games)) * 1000,
-      cumulativeGoldDeltaFirst1000: aggregate.economy.first1000MySideDeltaSum
+      cumulativeGoldDeltaMySideFirst1000: aggregate.economy.first1000MySideDeltaSum
     },
     primaryMetric: "averageGoldDeltaMySide"
   };
@@ -1026,23 +1042,20 @@ function buildFullReport() {
     games: aggregate.games,
     completed: aggregate.completed,
     winners: aggregate.winners,
-    turnOrder: {
-      firstWinRate: aggregate.byTurnOrder.firstWins / Math.max(1, aggregate.games),
-      secondWinRate: aggregate.byTurnOrder.secondWins / Math.max(1, aggregate.games),
-      drawRate: aggregate.byTurnOrder.draw / Math.max(1, aggregate.games),
-      averageScoreFirst: aggregate.byTurnOrder.firstScoreSum / Math.max(1, aggregate.games),
-      averageScoreSecond: aggregate.byTurnOrder.secondScoreSum / Math.max(1, aggregate.games)
+    sideStats: {
+      mySideWinRate: aggregate.bySide.mySideWins / Math.max(1, aggregate.games),
+      yourSideWinRate: aggregate.bySide.yourSideWins / Math.max(1, aggregate.games),
+      drawRate: aggregate.bySide.draw / Math.max(1, aggregate.games),
+      averageScoreMySide: aggregate.bySide.mySideScoreSum / Math.max(1, aggregate.games),
+      averageScoreYourSide: aggregate.bySide.yourSideScoreSum / Math.max(1, aggregate.games)
     },
     economy: {
       averageGoldMySide: aggregate.economy.mySideGoldSum / Math.max(1, aggregate.games),
       averageGoldYourSide: aggregate.economy.yourSideGoldSum / Math.max(1, aggregate.games),
       averageGoldDeltaMySide: aggregate.economy.mySideDeltaSum / Math.max(1, aggregate.games),
-      averageGoldFirst: aggregate.economy.firstGoldSum / Math.max(1, aggregate.games),
-      averageGoldSecond: aggregate.economy.secondGoldSum / Math.max(1, aggregate.games),
-      averageGoldDeltaFirst: aggregate.economy.firstDeltaSum / Math.max(1, aggregate.games),
       cumulativeGoldDeltaOver1000:
         (aggregate.economy.mySideDeltaSum / Math.max(1, aggregate.games)) * 1000,
-      cumulativeGoldDeltaFirst1000: aggregate.economy.first1000MySideDeltaSum
+      cumulativeGoldDeltaMySideFirst1000: aggregate.economy.first1000MySideDeltaSum
     },
     primaryMetric: "averageGoldDeltaMySide",
     nagariRate: aggregate.nagari / Math.max(1, aggregate.games),
@@ -1099,8 +1112,7 @@ async function writeLine(writer, line) {
   await once(writer, "drain");
 }
 
-function executeActorTurn(state, actor) {
-  const cfg = actorConfig[actor];
+function executeActorTurn(state, actor, cfg) {
   const canUseModel = !!(cfg?.policyModel || cfg?.valueModel);
   if (canUseModel) {
     const picked = modelSelectCandidate(state, actor, cfg);
@@ -1120,7 +1132,12 @@ function executeActorTurn(state, actor) {
 
 async function run() {
   const outStream = fs.createWriteStream(outPath, { encoding: "utf8" });
-  const firstTurnPlan = createBalancedFirstTurnPlan(games);
+  const probeState = initGame("A", createSeededRng("side-probe-seed"), {
+    carryOverMultiplier: 1,
+    kiboDetail: "lean"
+  });
+  const [actorA, actorB] = actorPairFromState(probeState);
+  const firstTurnPlan = createBalancedFirstTurnPlan(games, actorA, actorB);
 
   for (let i = 0; i < games; i += 1) {
     const seed = `sim-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1130,10 +1147,13 @@ async function run() {
       kiboDetail: useLeanKibo ? "lean" : "full",
       firstTurnKey: forcedFirstTurnKey
     });
-    state.players.human.label = "AI-1";
-    state.players.ai.label = "AI-2";
     const firstTurnKey = state.startingTurnKey;
-    const secondTurnKey = firstTurnKey === "human" ? "ai" : "human";
+    const secondTurnKey = secondActorFromFirst(state, firstTurnKey);
+    if (!secondTurnKey) {
+      throw new Error("failed to resolve second actor key from state");
+    }
+    state.players[firstTurnKey].label = "MY-SIDE";
+    state.players[secondTurnKey].label = "YOUR-SIDE";
 
     const contextByTurnNo = needsDecisionTrace ? new Map() : null;
     let steps = 0;
@@ -1149,7 +1169,8 @@ async function run() {
           }
         : null;
       const prevTurnSeq = state.turnSeq || 0;
-      const next = executeActorTurn(state, actor);
+      const actorSide = actorToSide(actor, firstTurnKey);
+      const next = executeActorTurn(state, actor, sideConfig[actorSide]);
       if (next === state) break;
       const nextTurnSeq = next.turnSeq || 0;
       if (needsDecisionTrace && nextTurnSeq > prevTurnSeq) {
@@ -1170,27 +1191,40 @@ async function run() {
     const kibo = state.kibo || [];
     const decisionTrace = needsDecisionTrace
       ? isDeltaMode
-        ? buildDecisionTraceDelta(kibo, winner, firstTurnKey, contextByTurnNo, agentLabelByActor)
+        ? buildDecisionTraceDelta(
+            kibo,
+            winner,
+            firstTurnKey,
+            secondTurnKey,
+            contextByTurnNo,
+            agentLabelBySide
+          )
         : isTrainMode
-        ? buildDecisionTraceTrain(kibo, winner, firstTurnKey, contextByTurnNo, agentLabelByActor)
-        : buildDecisionTrace(kibo, winner, contextByTurnNo, firstTurnKey, agentLabelByActor)
+        ? buildDecisionTraceTrain(
+            kibo,
+            winner,
+            firstTurnKey,
+            secondTurnKey,
+            contextByTurnNo,
+            agentLabelBySide
+          )
+        : buildDecisionTrace(
+            kibo,
+            winner,
+            contextByTurnNo,
+            firstTurnKey,
+            secondTurnKey,
+            agentLabelBySide
+          )
       : null;
-    const firstScore = firstTurnKey === "human" ? state.result?.human?.total || 0 : state.result?.ai?.total || 0;
-    const secondScore = secondTurnKey === "human" ? state.result?.human?.total || 0 : state.result?.ai?.total || 0;
-    const winnerTurnOrder =
-      winner === "draw" || winner === "unknown"
-        ? "draw"
-        : winner === firstTurnKey
-        ? "first"
-        : "second";
-    const humanGold = Number(state.players?.human?.gold || 0);
-    const aiGold = Number(state.players?.ai?.gold || 0);
-    const firstGold = firstTurnKey === "human" ? humanGold : aiGold;
-    const secondGold = secondTurnKey === "human" ? humanGold : aiGold;
-    const mySideGold = firstGold;
-    const yourSideGold = secondGold;
+    const mySideActor = firstTurnKey;
+    const yourSideActor = secondTurnKey;
+    const mySideScore = Number(state.result?.[mySideActor]?.total || 0);
+    const yourSideScore = Number(state.result?.[yourSideActor]?.total || 0);
+    const mySideGold = Number(state.players?.[mySideActor]?.gold || 0);
+    const yourSideGold = Number(state.players?.[yourSideActor]?.gold || 0);
     const winnerSide =
-      winner === "draw" || winner === "unknown" ? winner : winner === firstTurnKey ? "mySide" : "yourSide";
+      winner === "draw" || winner === "unknown" ? winner : actorToSide(winner, firstTurnKey);
 
     if (isTrainMode) {
       const line = {
@@ -1199,33 +1233,39 @@ async function run() {
         steps,
         completed: state.phase === "resolution",
         logMode,
-        firstTurn: "mySide",
-        secondTurn: "yourSide",
-        firstAgent: agentLabelByActor[firstTurnKey],
-        secondAgent: agentLabelByActor[secondTurnKey],
         policy: {
-          mySide: agentLabelByActor[firstTurnKey],
-          yourSide: agentLabelByActor[secondTurnKey]
+          [SIDE_MY]: agentLabelBySide[SIDE_MY],
+          [SIDE_YOUR]: agentLabelBySide[SIDE_YOUR]
         },
         winner: winnerSide,
         score: {
-          mySide: firstScore,
-          yourSide: secondScore
+          [SIDE_MY]: mySideScore,
+          [SIDE_YOUR]: yourSideScore
         },
         gold: {
-          mySide: mySideGold,
-          yourSide: yourSideGold
+          [SIDE_MY]: mySideGold,
+          [SIDE_YOUR]: yourSideGold
         },
         decision_trace: decisionTrace
       };
-      baseSummary(line, winnerTurnOrder, firstScore, secondScore, firstGold, secondGold);
+      baseSummary(line, mySideScore, yourSideScore);
       await writeLine(outStream, line);
       continue;
     }
 
     const goCalls = kibo.filter((e) => e.type === "go").length;
-    const winnerTotal = winner === "human" ? state.result?.human?.total || 0 : winner === "ai" ? state.result?.ai?.total || 0 : 0;
-    const loserTotal = winner === "human" ? state.result?.ai?.total || 0 : winner === "ai" ? state.result?.human?.total || 0 : 0;
+    const winnerTotal =
+      winnerSide === SIDE_MY
+        ? mySideScore
+        : winnerSide === SIDE_YOUR
+        ? yourSideScore
+        : 0;
+    const loserTotal =
+      winnerSide === SIDE_MY
+        ? yourSideScore
+        : winnerSide === SIDE_YOUR
+        ? mySideScore
+        : 0;
     const goEfficiency = goCalls > 0 ? (winnerTotal - loserTotal) / goCalls : 0;
 
     let flipEvents = 0;
@@ -1256,17 +1296,18 @@ async function run() {
     });
 
     const allEvents = {
-      human: state.players.human.events,
-      ai: state.players.ai.events
+      [SIDE_MY]: state.players[mySideActor].events,
+      [SIDE_YOUR]: state.players[yourSideActor].events
     };
 
     const goEvents = kibo.filter((e) => e.type === "go");
     const goDeclared = goEvents.length;
     const goSuccess = goEvents.filter((e) => winner !== "draw" && winner === e.playerKey).length;
 
-    const loserKey = winner === "human" ? "ai" : winner === "ai" ? "human" : null;
-    const loserSide = loserKey ? (loserKey === firstTurnKey ? "mySide" : "yourSide") : null;
-    const loserBak = loserKey ? state.result?.[loserKey]?.bak : null;
+    const loserSide =
+      winnerSide === SIDE_MY ? SIDE_YOUR : winnerSide === SIDE_YOUR ? SIDE_MY : null;
+    const loserActor = loserSide ? sideToActor(loserSide, firstTurnKey, secondTurnKey) : null;
+    const loserBak = loserActor ? state.result?.[loserActor]?.bak : null;
     const bakEscaped =
       loserBak && !loserBak.gwang && !loserBak.pi && !loserBak.mongBak ? 1 : 0;
 
@@ -1276,25 +1317,20 @@ async function run() {
       steps,
       completed: state.phase === "resolution",
       logMode,
-      firstTurn: "mySide",
-      secondTurn: "yourSide",
-      firstAgent: agentLabelByActor[firstTurnKey],
-      secondAgent: agentLabelByActor[secondTurnKey],
       policy: {
-        mySide: agentLabelByActor[firstTurnKey],
-        yourSide: agentLabelByActor[secondTurnKey]
+        [SIDE_MY]: agentLabelBySide[SIDE_MY],
+        [SIDE_YOUR]: agentLabelBySide[SIDE_YOUR]
       },
       winner: winnerSide,
-      winnerTurnOrder,
       nagari: state.result?.nagari || false,
       nagariReasons: state.result?.nagariReasons || [],
       score: {
-        mySide: firstScore,
-        yourSide: secondScore
+        [SIDE_MY]: mySideScore,
+        [SIDE_YOUR]: yourSideScore
       },
       gold: {
-        mySide: mySideGold,
-        yourSide: yourSideGold
+        [SIDE_MY]: mySideGold,
+        [SIDE_YOUR]: yourSideGold
       },
       goCalls,
       goStopEfficiency: goEfficiency,
@@ -1317,11 +1353,11 @@ async function run() {
         }
       },
       eventFrequency: {
-        ppuk: (allEvents.human.ppuk || 0) + (allEvents.ai.ppuk || 0),
-        ddadak: (allEvents.human.ddadak || 0) + (allEvents.ai.ddadak || 0),
-        jjob: (allEvents.human.jjob || 0) + (allEvents.ai.jjob || 0),
-        ssul: (allEvents.human.ssul || 0) + (allEvents.ai.ssul || 0),
-        ttak: (allEvents.human.ttak || 0) + (allEvents.ai.ttak || 0)
+        ppuk: (allEvents[SIDE_MY].ppuk || 0) + (allEvents[SIDE_YOUR].ppuk || 0),
+        ddadak: (allEvents[SIDE_MY].ddadak || 0) + (allEvents[SIDE_YOUR].ddadak || 0),
+        jjob: (allEvents[SIDE_MY].jjob || 0) + (allEvents[SIDE_YOUR].jjob || 0),
+        ssul: (allEvents[SIDE_MY].ssul || 0) + (allEvents[SIDE_YOUR].ssul || 0),
+        ttak: (allEvents[SIDE_MY].ttak || 0) + (allEvents[SIDE_YOUR].ttak || 0)
       },
       bakEscape: loserSide ? { loser: loserSide, escaped: !!bakEscaped } : null,
       catalogPath: sharedCatalogPath,
@@ -1331,22 +1367,19 @@ async function run() {
 
     fullSummary({
       line,
-      winnerTurnOrder,
-      firstScore,
-      secondScore,
+      mySideScore,
+      yourSideScore,
       goCalls,
       goEfficiency,
       totalPiSteals,
       totalGoldSteals,
-      loserKey,
+      loserKey: loserSide,
       loserBak,
       bakEscaped,
       flipEvents,
       handEvents,
       flipCaptureValue,
-      handCaptureValue,
-      firstGold,
-      secondGold
+      handCaptureValue
     });
 
     await writeLine(outStream, line);

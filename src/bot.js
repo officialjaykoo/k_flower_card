@@ -14,9 +14,11 @@ import {
   scoringFiveCards
 } from "./gameEngine.js";
 import { COMBO_MONTHS, COMBO_MONTH_SETS, countComboTag, missingComboMonths } from "./engine/combos.js";
+import { STARTING_GOLD } from "./engine/economy.js";
 
 const POLICY_HEURISTIC_V3 = "heuristic_v3";
 const GWANG_MONTHS = Object.freeze([1, 3, 8, 11, 12]);
+const GOLD_RISK_THRESHOLD_RATIO = 0.1;
 const COMBO_REQUIRED_CATEGORY = Object.freeze({
   redRibbons: "ribbon",
   blueRibbons: "ribbon",
@@ -26,7 +28,7 @@ const COMBO_REQUIRED_CATEGORY = Object.freeze({
 
 export const BOT_POLICIES = [POLICY_HEURISTIC_V3];
 
-export function botChooseCard(state, playerKey, policy = POLICY_HEURISTIC_V3) {
+export function botChooseCard(state, playerKey) {
   const player = state.players[playerKey];
   if (!player || player.hand.length === 0) return null;
   const ranked = rankHandCards(state, playerKey);
@@ -37,15 +39,13 @@ export function botChooseCard(state, playerKey, policy = POLICY_HEURISTIC_V3) {
 }
 
 export function botPlay(state, playerKey, options = {}) {
-  const policy = normalizePolicy(options.policy);
-  return botPlaySmart(state, playerKey, policy);
+  return botPlaySmart(state, playerKey, options);
 }
 
-export function getHeuristicCardProbabilities(state, playerKey, policy = POLICY_HEURISTIC_V3) {
+export function getHeuristicCardProbabilities(state, playerKey) {
   if (state.phase !== "playing") return null;
   const ranked = rankHandCards(state, playerKey);
   if (!ranked.length) return null;
-  normalizePolicy(policy);
   const temp = 1.6;
   const maxScore = Math.max(...ranked.map((r) => Number(r.score || 0)));
   let z = 0;
@@ -60,13 +60,13 @@ export function getHeuristicCardProbabilities(state, playerKey, policy = POLICY_
   return probs;
 }
 
-function botPlaySmart(state, playerKey, policy) {
+function botPlaySmart(state, playerKey) {
   if (state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey === playerKey) {
-    return chooseGukjinMode(state, playerKey, chooseGukjinHeuristic(state, playerKey, policy));
+    return chooseGukjinMode(state, playerKey, chooseGukjinHeuristic(state, playerKey));
   }
 
   if (state.phase === "president-choice" && state.pendingPresident?.playerKey === playerKey) {
-    const shouldStop = shouldPresidentStop(state, playerKey, policy);
+    const shouldStop = shouldPresidentStop(state, playerKey);
     return shouldStop ? choosePresidentStop(state, playerKey) : choosePresidentHold(state, playerKey);
   }
 
@@ -76,39 +76,27 @@ function botPlaySmart(state, playerKey, policy) {
   }
 
   if (state.phase === "go-stop" && state.pendingGoStop === playerKey) {
-    return shouldGo(state, playerKey, policy) ? chooseGo(state, playerKey) : chooseStop(state, playerKey);
+    return shouldGo(state, playerKey) ? chooseGo(state, playerKey) : chooseStop(state, playerKey);
   }
 
   if (state.phase === "playing" && state.currentTurn === playerKey) {
     const bombMonths = getDeclarableBombMonths(state, playerKey);
-    if (bombMonths.length > 0 && shouldBomb(state, playerKey, bombMonths, policy)) {
+    if (bombMonths.length > 0 && shouldBomb(state, playerKey, bombMonths)) {
       return declareBomb(state, playerKey, selectBestMonth(state, bombMonths));
     }
     const shakingMonths = getDeclarableShakingMonths(state, playerKey);
     if (shakingMonths.length > 0) {
-      const shakeDecision = decideShaking(state, playerKey, shakingMonths, policy);
+      const shakeDecision = decideShaking(state, playerKey, shakingMonths);
       if (shakeDecision.allow && shakeDecision.month != null) {
         return declareShaking(state, playerKey, shakeDecision.month);
       }
     }
-    const cardId = botChooseCard(state, playerKey, policy);
+    const cardId = botChooseCard(state, playerKey);
     if (!cardId) return state;
     return playTurn(state, cardId);
   }
 
   return state;
-}
-
-function normalizePolicy(policy) {
-  const raw = String(policy || POLICY_HEURISTIC_V3).trim().toLowerCase();
-  if (raw === "heuristic_v3") {
-    return POLICY_HEURISTIC_V3;
-  }
-  return POLICY_HEURISTIC_V3;
-}
-
-function isHeuristicPolicy(policy) {
-  return normalizePolicy(policy) === POLICY_HEURISTIC_V3;
 }
 
 function capturedCountByCategory(player, category) {
@@ -159,6 +147,36 @@ function isSecondMover(state, playerKey) {
   const first = state?.startingTurnKey;
   if (first === "human" || first === "ai") return first !== playerKey;
   return false;
+}
+
+function resolveInitialGoldBase(state) {
+  const configured = Number(state?.initialGoldBase);
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return STARTING_GOLD;
+}
+
+function goldRiskProfile(state, playerKey) {
+  const opp = playerKey === "human" ? "ai" : "human";
+  const initialGold = resolveInitialGoldBase(state);
+  const threshold = initialGold * GOLD_RISK_THRESHOLD_RATIO;
+  const selfGold = Number(state?.players?.[playerKey]?.gold || 0);
+  const oppGold = Number(state?.players?.[opp]?.gold || 0);
+  return {
+    initialGold,
+    threshold,
+    selfGold,
+    oppGold,
+    selfLow: selfGold <= threshold,
+    oppLow: oppGold <= threshold
+  };
+}
+
+function canBankruptOpponentByStop(state, playerKey) {
+  if (state.phase !== "go-stop" || state.pendingGoStop !== playerKey) return false;
+  const opp = playerKey === "human" ? "ai" : "human";
+  const stopped = chooseStop(state, playerKey);
+  const oppGoldAfterStop = Number(stopped?.players?.[opp]?.gold || 0);
+  return oppGoldAfterStop <= 0;
 }
 
 function analyzeGameContext(state, playerKey) {
@@ -1082,21 +1100,16 @@ function chooseMatchHeuristic(state, playerKey) {
   return candidates[0].id;
 }
 
-function chooseGukjinHeuristic(state, playerKey, policy) {
-  const p = normalizePolicy(policy);
+function chooseGukjinHeuristic(state, playerKey) {
   const fiveCount = state.players?.[playerKey]?.captured?.five?.length || 0;
-  if (p === POLICY_HEURISTIC_V3) return fiveCount >= 3 ? "five" : "junk";
   return fiveCount >= 3 ? "five" : "junk";
 }
 
-function shouldPresidentStop(state, playerKey, policy) {
-  if (isHeuristicPolicy(policy)) return false;
-  const deckCount = state.deck?.length || 0;
-  return deckCount <= 8 && Math.random() < 0.6;
+function shouldPresidentStop() {
+  return false;
 }
 
-function shouldGo(state, playerKey, policy) {
-  const p = normalizePolicy(policy);
+function shouldGo(state, playerKey) {
   const player = state.players?.[playerKey];
   const opp = playerKey === "human" ? "ai" : "human";
   const ctx = analyzeGameContext(state, playerKey);
@@ -1119,17 +1132,34 @@ function shouldGo(state, playerKey, policy) {
   const mongDanger = ctx.mongDanger || 0;
   const isSecond = !!ctx.isSecond;
   const strongLead = myScore >= 10 && oppScore <= 4;
+  const goldRisk = goldRiskProfile(state, playerKey);
+  const desperateGo = goldRisk.selfLow && !goldRisk.oppLow;
+  const conservativeGo = goldRisk.oppLow;
+  if (canBankruptOpponentByStop(state, playerKey)) return false;
   // Hard stop layer
-  if (ctx.mode === "DESPERATE_DEFENSE") return false;
-  if (ctx.nagariDelayMode) return false;
+  if (ctx.mode === "DESPERATE_DEFENSE" && !desperateGo) return false;
+  if (ctx.nagariDelayMode && !desperateGo) return false;
   // Absolute bak-defense rule requested: no aggressive GO before pi safety.
-  if (selfPi < 9) return false;
-  if (selfFive === 0 && oppFive >= 7) return false;
-  if (selfFive === 0 && oppFive >= 6 && deckCount <= 10) return false;
-  if (isSecond && !strongLead && oppJokboEV.oneAwayCount >= 1) return false;
-  if (!strongLead && deckCount <= 10 && oppJokboEV.oneAwayCount >= 1 && selfJokboEV.oneAwayCount === 0) return false;
-  if (mongDanger >= 0.75 && !strongLead) return false;
-  if (mongDanger >= 0.6 && (oppThreat || oppProgThreat >= 0.45 || oppNextTurnThreat >= 0.3) && !strongLead) {
+  if (selfPi < (desperateGo ? 7 : 9)) return false;
+  if (selfFive === 0 && oppFive >= 7 && !desperateGo) return false;
+  if (selfFive === 0 && oppFive >= 6 && deckCount <= 10 && !desperateGo) return false;
+  if (isSecond && !strongLead && oppJokboEV.oneAwayCount >= 1 && !desperateGo) return false;
+  if (
+    !strongLead &&
+    deckCount <= 10 &&
+    oppJokboEV.oneAwayCount >= 1 &&
+    selfJokboEV.oneAwayCount === 0 &&
+    !desperateGo
+  ) {
+    return false;
+  }
+  if (mongDanger >= 0.75 && !strongLead && !desperateGo) return false;
+  if (
+    mongDanger >= 0.6 &&
+    (oppThreat || oppProgThreat >= 0.45 || oppNextTurnThreat >= 0.3) &&
+    !strongLead &&
+    !desperateGo
+  ) {
     return false;
   }
   if (carry >= 2) {
@@ -1142,47 +1172,60 @@ function shouldGo(state, playerKey, policy) {
       mongDanger < 0.45 &&
       !(selfFive === 0 && oppFive >= 6);
     const noImmediateCounter = oppNextMatchCount === 0 && deckCount >= 7;
-    if (!(strongLead && lowRisk && noImmediateCounter && selfPi >= 9 && oppPi <= 7)) {
+    if (!(strongLead && lowRisk && noImmediateCounter && selfPi >= 9 && oppPi <= 7) && !desperateGo) {
       return false;
     }
   }
   // Conservative default: avoid over-GO unless pi line is already stable.
-  if (!strongLead && selfPi < 9 && oppPi >= 6) return false;
-  if (!strongLead && deckCount <= 8 && selfPi < 10) return false;
-  if (myScore >= 7 && oppScore >= 5 && (oppThreat || oppProgThreat >= 0.55 || oppNextMatchCount > 0 || oppNextTurnThreat >= 0.38 || jokboThreat.threat >= 0.3)) {
+  if (!strongLead && selfPi < (desperateGo ? 8 : 9) && oppPi >= 6) return false;
+  if (!strongLead && deckCount <= (desperateGo ? 6 : 8) && selfPi < (desperateGo ? 9 : 10)) return false;
+  if (
+    myScore >= 7 &&
+    oppScore >= 5 &&
+    (oppThreat ||
+      oppProgThreat >= 0.55 ||
+      oppNextMatchCount > 0 ||
+      oppNextTurnThreat >= 0.38 ||
+      jokboThreat.threat >= 0.3) &&
+    !desperateGo
+  ) {
     return false;
   }
   if (goCount >= 3 && !isOppVulnerableForBigGo(state, playerKey)) return false;
-  if (p === POLICY_HEURISTIC_V3) {
-    if (goCount >= 3) return false;
-    if (goCount >= 2 && !strongLead) return false;
-    // Expected gain layer
-    const myGainPotential =
-      Math.max(0, myScore - 6) * 0.12 +
-      (10 - Math.min(10, ctx.deckCount)) * 0.02 +
-      (capturedCountByCategory(state.players?.[playerKey], "junk") >= 9 ? 0.2 : 0) +
-      selfJokboEV.total * 0.34 +
-      selfJokboEV.oneAwayCount * 0.12;
-    const oppGainPotential =
-      oppProgThreat * 0.65 +
-      oppNextTurnThreat * 0.55 +
-      jokboThreat.threat * 0.45 +
-      mongDanger * 0.55 +
-      oppJokboEV.total * 0.4 +
-      oppJokboEV.oneAwayCount * 0.14;
-    const goMargin = isSecond ? 0.28 : 0.12;
-    if (!strongLead && myGainPotential < oppGainPotential + goMargin) return false;
-    if (!strongLead && deckCount <= 8 && selfJokboEV.total < 0.45) return false;
-    if (isSecond && !strongLead && (oppProgThreat >= 0.35 || oppNextMatchCount > 0)) return false;
-    if (oppProgThreat >= 0.45 || oppNextTurnThreat >= 0.3) return false;
-    if (selfFive === 0 && oppFive >= 6) return false;
-    if (oppNextMatchCount > 0 && !strongLead) return false;
-    // Bak layer
-    if (capturedCountByCategory(state.players?.[opp], "junk") < 6) return true;
-    if (oppNextMatchCount === 0 && oppScore <= 4 && deckCount >= 5) return true; // safe aggressive go
-    return deckCount > 7;
+  if (goCount >= 2 && !strongLead && !desperateGo) return false;
+  // Expected gain layer
+  const myGainPotential =
+    Math.max(0, myScore - 6) * 0.12 +
+    (10 - Math.min(10, ctx.deckCount)) * 0.02 +
+    (capturedCountByCategory(state.players?.[playerKey], "junk") >= 9 ? 0.2 : 0) +
+    selfJokboEV.total * 0.34 +
+    selfJokboEV.oneAwayCount * 0.12;
+  const oppGainPotential =
+    oppProgThreat * 0.65 +
+    oppNextTurnThreat * 0.55 +
+    jokboThreat.threat * 0.45 +
+    mongDanger * 0.55 +
+    oppJokboEV.total * 0.4 +
+    oppJokboEV.oneAwayCount * 0.14;
+  let goMargin = isSecond ? 0.28 : 0.12;
+  if (desperateGo) goMargin -= 0.18;
+  if (conservativeGo) goMargin += 0.22;
+  goMargin = Math.max(-0.1, goMargin);
+  if (!strongLead && myGainPotential < oppGainPotential + goMargin) return false;
+  if (!strongLead && deckCount <= 8 && selfJokboEV.total < 0.45 && !desperateGo) return false;
+  if (isSecond && !strongLead && (oppProgThreat >= 0.35 || oppNextMatchCount > 0) && !desperateGo)
+    return false;
+  if ((oppProgThreat >= 0.45 || oppNextTurnThreat >= 0.3) && !desperateGo) return false;
+  if (selfFive === 0 && oppFive >= 6 && !desperateGo) return false;
+  if (oppNextMatchCount > 0 && !strongLead && !desperateGo) return false;
+  if (conservativeGo && !strongLead && myGainPotential <= oppGainPotential + goMargin + 0.08) {
+    return false;
   }
-  return false;
+  // Bak layer
+  if (capturedCountByCategory(state.players?.[opp], "junk") < 6) return !conservativeGo || desperateGo;
+  if (oppNextMatchCount === 0 && oppScore <= 4 && deckCount >= (desperateGo ? 4 : 5))
+    return !conservativeGo || desperateGo; // safe aggressive go
+  return deckCount > (desperateGo ? 5 : 7) && (!conservativeGo || strongLead);
 }
 
 function monthBoardGain(state, month) {
@@ -1204,26 +1247,22 @@ function selectBestMonth(state, months) {
   return best;
 }
 
-function shouldBomb(state, playerKey, bombMonths, policy) {
-  const p = normalizePolicy(policy);
+function shouldBomb(state, playerKey, bombMonths) {
   const ctx = analyzeGameContext(state, playerKey);
   const firstTurnPiPlan = getFirstTurnDoublePiPlan(state, playerKey);
-  if (p === POLICY_HEURISTIC_V3 && firstTurnPiPlan.active) {
+  if (firstTurnPiPlan.active) {
     const target = bombMonths.find((m) => firstTurnPiPlan.months.has(m));
     if (target != null) return true;
   }
   const bestMonth = selectBestMonth(state, bombMonths);
   const bestGain = monthBoardGain(state, bestMonth);
-  if (p === POLICY_HEURISTIC_V3) {
-    if (bestMonth == null) return false;
-    const impact = isHighImpactBomb(state, playerKey, bestMonth);
-    if (ctx.defenseOpening) {
-      // Requested: opening-second mode allows bomb only on high immediate impact.
-      return impact.highImpact;
-    }
-    if (ctx.nagariDelayMode && !impact.highImpact && impact.immediateGain < 6) return false;
-    return bestGain >= 1;
+  if (bestMonth == null) return false;
+  const impact = isHighImpactBomb(state, playerKey, bestMonth);
+  if (ctx.defenseOpening) {
+    // Requested: opening-second mode allows bomb only on high immediate impact.
+    return impact.highImpact;
   }
+  if (ctx.nagariDelayMode && !impact.highImpact && impact.immediateGain < 6) return false;
   return bestGain >= 1;
 }
 
@@ -1313,14 +1352,8 @@ function slowPlayPenalty(immediateGain, comboGain, tempoPressure, ctx) {
   return 0;
 }
 
-function decideShaking(state, playerKey, shakingMonths, policy) {
+function decideShaking(state, playerKey, shakingMonths) {
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
-  const p = normalizePolicy(policy);
-  if (p !== POLICY_HEURISTIC_V3) {
-    const bestMonth = selectBestMonth(state, shakingMonths);
-    const deckCount = state.deck?.length || 0;
-    return { allow: deckCount > 8, month: bestMonth, score: deckCount - 8 };
-  }
 
   const ctx = analyzeGameContext(state, playerKey);
   const firstTurnPiPlan = getFirstTurnDoublePiPlan(state, playerKey);
@@ -1396,8 +1429,8 @@ function decideShaking(state, playerKey, shakingMonths, policy) {
   return { ...best, allow: best.score >= threshold };
 }
 
-function shouldShaking(state, playerKey, shakingMonths, policy) {
-  return decideShaking(state, playerKey, shakingMonths, policy).allow;
+function shouldShaking(state, playerKey, shakingMonths) {
+  return decideShaking(state, playerKey, shakingMonths).allow;
 }
 
 function pickRandom(arr) {

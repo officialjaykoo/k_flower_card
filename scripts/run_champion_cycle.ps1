@@ -3,6 +3,8 @@ param(
   [string]$Challenger = "heuristic_v3",
   [int]$GamesPerSide = 100000,
   [double]$PromoteThreshold = 0.52,
+  [double]$GoldDeltaEpsilon = 50.0,
+  [double]$WinRateEpsilon = 0.005,
   [string]$Tag = "",
   [int]$Rounds = 1,
   [string]$LogMode = "train",
@@ -24,6 +26,14 @@ if ($Rounds -le 0) {
 }
 if ($PromoteThreshold -lt 0 -or $PromoteThreshold -gt 1) {
   Write-Error "PromoteThreshold must be between 0 and 1."
+  exit 2
+}
+if ($GoldDeltaEpsilon -lt 0) {
+  Write-Error "GoldDeltaEpsilon must be >= 0."
+  exit 2
+}
+if ($WinRateEpsilon -lt 0 -or $WinRateEpsilon -gt 1) {
+  Write-Error "WinRateEpsilon must be between 0 and 1."
   exit 2
 }
 if ($Workers -le 0) {
@@ -70,7 +80,11 @@ function Summarize-RunJsonl {
     challengerWins = 0
     championWins = 0
     draws = 0
+    challengerBankruptInflicted = 0
+    challengerBankruptSuffered = 0
     challengerGoldDeltaSum = 0.0
+    challengerWorstSingleLoss = 0.0
+    championWorstSingleLoss = 0.0
   }
   Get-Content -Path $Path | ForEach-Object {
     $line = $_
@@ -104,11 +118,23 @@ function Summarize-RunJsonl {
     }
 
     if ($challengerSide -eq "mySide") {
-      $s.challengerGoldDeltaSum += ($myGold - $yourGold)
+      $challengerDelta = $myGold - $yourGold
+      $championDelta = $yourGold - $myGold
+      $s.challengerGoldDeltaSum += $challengerDelta
+      if ($challengerDelta -lt $s.challengerWorstSingleLoss) { $s.challengerWorstSingleLoss = $challengerDelta }
+      if ($championDelta -lt $s.championWorstSingleLoss) { $s.championWorstSingleLoss = $championDelta }
+      if ($yourGold -le 0) { $s.challengerBankruptInflicted += 1 }
+      if ($myGold -le 0) { $s.challengerBankruptSuffered += 1 }
       if ($winner -eq "mySide") { $s.challengerWins += 1 }
       elseif ($winner -eq "yourSide") { $s.championWins += 1 }
     } elseif ($challengerSide -eq "yourSide") {
-      $s.challengerGoldDeltaSum += ($yourGold - $myGold)
+      $challengerDelta = $yourGold - $myGold
+      $championDelta = $myGold - $yourGold
+      $s.challengerGoldDeltaSum += $challengerDelta
+      if ($challengerDelta -lt $s.challengerWorstSingleLoss) { $s.challengerWorstSingleLoss = $challengerDelta }
+      if ($championDelta -lt $s.championWorstSingleLoss) { $s.championWorstSingleLoss = $championDelta }
+      if ($myGold -le 0) { $s.challengerBankruptInflicted += 1 }
+      if ($yourGold -le 0) { $s.challengerBankruptSuffered += 1 }
       if ($winner -eq "yourSide") { $s.challengerWins += 1 }
       elseif ($winner -eq "mySide") { $s.championWins += 1 }
     } elseif ($winner -eq "mySide" -or $winner -eq "yourSide") {
@@ -123,8 +149,8 @@ function Run-ParallelSim {
   param(
     [int]$Games,
     [string]$OutPath,
-    [string]$HumanPolicy,
-    [string]$AiPolicy,
+    [string]$MySidePolicy,
+    [string]$YourSidePolicy,
     [string]$Mode,
     [int]$WorkerCount
   )
@@ -135,8 +161,8 @@ function Run-ParallelSim {
     "--output", $OutPath,
     "--",
     "--log-mode=$Mode",
-    "--policy-human=$HumanPolicy",
-    "--policy-ai=$AiPolicy"
+    "--policy-my-side=$MySidePolicy",
+    "--policy-your-side=$YourSidePolicy"
   )
   Write-Host ">" "py $($args -join ' ')"
   & py @args
@@ -187,13 +213,13 @@ while ([int]$state.round -le [int]$state.rounds) {
   }
 
   if (-not $state.run_a_done) {
-    Run-ParallelSim -Games $GamesPerSide -OutPath $state.run_a -HumanPolicy $state.challenger -AiPolicy $state.champion -Mode $LogMode -WorkerCount $Workers
+    Run-ParallelSim -Games $GamesPerSide -OutPath $state.run_a -MySidePolicy $state.challenger -YourSidePolicy $state.champion -Mode $LogMode -WorkerCount $Workers
     $state.run_a_done = $true
     Save-State -Path $statePath -Obj $state
   }
 
   if (-not $state.run_b_done) {
-    Run-ParallelSim -Games $GamesPerSide -OutPath $state.run_b -HumanPolicy $state.champion -AiPolicy $state.challenger -Mode $LogMode -WorkerCount $Workers
+    Run-ParallelSim -Games $GamesPerSide -OutPath $state.run_b -MySidePolicy $state.champion -YourSidePolicy $state.challenger -Mode $LogMode -WorkerCount $Workers
     $state.run_b_done = $true
     Save-State -Path $statePath -Obj $state
   }
@@ -205,6 +231,9 @@ while ([int]$state.round -le [int]$state.rounds) {
     $challengerWins = [int]$sum1.challengerWins + [int]$sum2.challengerWins
     $championWins = [int]$sum1.championWins + [int]$sum2.championWins
     $draws = [int]$sum1.draws + [int]$sum2.draws
+    $challengerBankruptInflicted = [int]$sum1.challengerBankruptInflicted + [int]$sum2.challengerBankruptInflicted
+    $challengerBankruptSuffered = [int]$sum1.challengerBankruptSuffered + [int]$sum2.challengerBankruptSuffered
+    $bankruptDiff = $challengerBankruptInflicted - $challengerBankruptSuffered
     $total = [int]$sum1.total + [int]$sum2.total
     $decisive = $challengerWins + $championWins
 
@@ -219,15 +248,48 @@ while ([int]$state.round -le [int]$state.rounds) {
       $challengerAvgGoldDelta = 0.0
     }
     $challengerCumGold1000 = $challengerAvgGoldDelta * 1000.0
+    $challengerWorstA = NumOrZero($sum1.challengerWorstSingleLoss)
+    $challengerWorstB = NumOrZero($sum2.challengerWorstSingleLoss)
+    $challengerWorstSingleLoss = [Math]::Min($challengerWorstA, $challengerWorstB)
+    $championWorstA = NumOrZero($sum1.championWorstSingleLoss)
+    $championWorstB = NumOrZero($sum2.championWorstSingleLoss)
+    $championWorstSingleLoss = [Math]::Min($championWorstA, $championWorstB)
+    if ($decisive -gt 0) {
+      $winRateEdge = $challengerWinRateDecisive - 0.5
+    } else {
+      $winRateEdge = 0.0
+    }
 
     $championBefore = [string]$state.champion
     $challengerBefore = [string]$state.challenger
-    if ($challengerAvgGoldDelta -gt 0) {
+    $decisionReason = ""
+    if ($bankruptDiff -gt 0) {
       $promoted = $true
-    } elseif ($challengerAvgGoldDelta -lt 0) {
+      $decisionReason = "bankrupt_diff_positive"
+    } elseif ($bankruptDiff -lt 0) {
       $promoted = $false
+      $decisionReason = "bankrupt_diff_negative"
+    } elseif ($challengerAvgGoldDelta -ge $GoldDeltaEpsilon) {
+      $promoted = $true
+      $decisionReason = "gold_delta_above_epsilon"
+    } elseif ($challengerAvgGoldDelta -le (-1.0 * $GoldDeltaEpsilon)) {
+      $promoted = $false
+      $decisionReason = "gold_delta_below_negative_epsilon"
+    } elseif ($winRateEdge -ge $WinRateEpsilon) {
+      $promoted = $true
+      $decisionReason = "win_rate_above_epsilon"
+    } elseif ($winRateEdge -le (-1.0 * $WinRateEpsilon)) {
+      $promoted = $false
+      $decisionReason = "win_rate_below_negative_epsilon"
+    } elseif ($challengerWorstSingleLoss -gt $championWorstSingleLoss) {
+      $promoted = $true
+      $decisionReason = "tie_break_by_max_single_loss"
+    } elseif ($challengerWorstSingleLoss -lt $championWorstSingleLoss) {
+      $promoted = $false
+      $decisionReason = "tie_break_by_max_single_loss"
     } else {
       $promoted = $challengerWinRateDecisive -ge $PromoteThreshold
+      $decisionReason = "fallback_promote_threshold"
     }
     if ($promoted) {
       $oldChampion = $state.champion
@@ -245,11 +307,20 @@ while ([int]$state.round -le [int]$state.rounds) {
       challenger_wins = $challengerWins
       champion_wins = $championWins
       draws = $draws
+      challenger_bankrupt_inflicted = $challengerBankruptInflicted
+      challenger_bankrupt_suffered = $challengerBankruptSuffered
+      bankrupt_diff = $bankruptDiff
       challenger_avg_gold_delta = $challengerAvgGoldDelta
       challenger_cum_gold_1000 = $challengerCumGold1000
       challenger_win_rate_all = $challengerWinRateAll
       challenger_win_rate_decisive = $challengerWinRateDecisive
+      decisive_win_rate_edge = $winRateEdge
+      gold_delta_epsilon = $GoldDeltaEpsilon
+      win_rate_epsilon = $WinRateEpsilon
+      challenger_worst_single_loss = $challengerWorstSingleLoss
+      champion_worst_single_loss = $championWorstSingleLoss
       promote_threshold = $PromoteThreshold
+      decision_reason = $decisionReason
       promoted = $promoted
       champion_after = [string]$state.champion
       challenger_after = [string]$state.challenger
@@ -271,10 +342,17 @@ while ([int]$state.round -le [int]$state.rounds) {
     Write-Host "  challenger wins : $challengerWins"
     Write-Host "  champion wins   : $championWins"
     Write-Host "  draws           : $draws"
+    Write-Host "  bankrupt (inflicted/suffered/diff): $challengerBankruptInflicted / $challengerBankruptSuffered / $bankruptDiff"
     Write-Host ("  challenger avg_gold_delta : {0:N4}" -f $challengerAvgGoldDelta)
+    Write-Host ("  gold epsilon            : {0:N4}" -f $GoldDeltaEpsilon)
     Write-Host ("  challenger cum_gold_1000  : {0:N2}" -f $challengerCumGold1000)
     Write-Host ("  challenger WR (decisive): {0:P2}" -f $challengerWinRateDecisive)
+    Write-Host ("  challenger WR edge      : {0:P2}" -f $winRateEdge)
+    Write-Host ("  win-rate epsilon        : {0:P2}" -f $WinRateEpsilon)
+    Write-Host ("  challenger worst single loss : {0:N0}" -f $challengerWorstSingleLoss)
+    Write-Host ("  champion worst single loss   : {0:N0}" -f $championWorstSingleLoss)
     Write-Host ("  threshold             : {0:P2}" -f $PromoteThreshold)
+    Write-Host "  decision reason   : $decisionReason"
     Write-Host "  promoted         : $promoted"
     Write-Host "  champion after   : $($state.champion)"
     Write-Host "  challenger after : $($state.challenger)"

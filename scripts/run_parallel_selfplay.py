@@ -18,7 +18,7 @@ def split_games(total, workers):
 
 def build_default_out():
     stamp = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%SZ")
-    return os.path.join("logs", f"ai-vs-ai-parallel-{stamp}.jsonl")
+    return os.path.join("logs", f"side-vs-side-parallel-{stamp}.jsonl")
 
 
 def main():
@@ -68,16 +68,11 @@ def main():
 
     completed = 0
     winners = {"mySide": 0, "yourSide": 0, "draw": 0, "unknown": 0}
-    first_wins = 0
-    second_wins = 0
-    draws = 0
-    first_score_sum = 0.0
-    second_score_sum = 0.0
+    my_side_score_sum = 0.0
+    your_side_score_sum = 0.0
     my_side_gold_sum = 0.0
     your_side_gold_sum = 0.0
     my_side_gold_delta_sum = 0.0
-    first_gold_sum = 0.0
-    second_gold_sum = 0.0
     first1000_my_side_gold_delta_sum = 0.0
     first1000_count = 0
 
@@ -97,26 +92,15 @@ def main():
                         winners[winner] += 1
                     else:
                         winners["unknown"] += 1
-                    order = obj.get("winnerTurnOrder")
-                    if order == "first":
-                        first_wins += 1
-                    elif order == "second":
-                        second_wins += 1
-                    else:
-                        draws += 1
                     score = obj.get("score") or {}
-                    first_score_sum += float(score.get("mySide") or 0)
-                    second_score_sum += float(score.get("yourSide") or 0)
+                    my_side_score_sum += float(score.get("mySide") or 0)
+                    your_side_score_sum += float(score.get("yourSide") or 0)
                     gold = obj.get("gold") or {}
                     g_m = float(gold.get("mySide") or 0)
                     g_y = float(gold.get("yourSide") or 0)
-                    g_f = g_m
-                    g_s = g_y
                     my_side_gold_sum += g_m
                     your_side_gold_sum += g_y
                     my_side_gold_delta_sum += g_m - g_y
-                    first_gold_sum += g_f
-                    second_gold_sum += g_s
                     if first1000_count < 1000:
                         first1000_my_side_gold_delta_sum += g_m - g_y
                         first1000_count += 1
@@ -128,22 +112,19 @@ def main():
         "games": args.games,
         "completed": completed,
         "winners": winners,
-        "turnOrder": {
-            "firstWinRate": first_wins / games,
-            "secondWinRate": second_wins / games,
-            "drawRate": draws / games,
-            "averageScoreFirst": first_score_sum / games,
-            "averageScoreSecond": second_score_sum / games,
+        "sideStats": {
+            "mySideWinRate": winners["mySide"] / games,
+            "yourSideWinRate": winners["yourSide"] / games,
+            "drawRate": winners["draw"] / games,
+            "averageScoreMySide": my_side_score_sum / games,
+            "averageScoreYourSide": your_side_score_sum / games,
         },
         "economy": {
             "averageGoldMySide": my_side_gold_sum / games,
             "averageGoldYourSide": your_side_gold_sum / games,
             "averageGoldDeltaMySide": my_side_gold_delta_sum / games,
-            "averageGoldFirst": first_gold_sum / games,
-            "averageGoldSecond": second_gold_sum / games,
-            "averageGoldDeltaFirst": (first_gold_sum - second_gold_sum) / games,
             "cumulativeGoldDeltaOver1000": (my_side_gold_delta_sum / games) * 1000,
-            "cumulativeGoldDeltaFirst1000": first1000_my_side_gold_delta_sum,
+            "cumulativeGoldDeltaMySideFirst1000": first1000_my_side_gold_delta_sum,
         },
         "primaryMetric": "averageGoldDeltaMySide",
         "workers": args.workers,

@@ -50,6 +50,8 @@ export function createSeededRng(seedText = "") {
 export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
   let carryOverMultiplier = options.carryOverMultiplier ?? 1;
   const kiboDetail = options.kiboDetail === "lean" ? "lean" : "full";
+  const initialGoldBase =
+    Number(options.initialGoldBase) > 0 ? Number(options.initialGoldBase) : STARTING_GOLD;
   const fixedFirstTurnKey =
     options.firstTurnKey === "human" || options.firstTurnKey === "ai"
       ? options.firstTurnKey
@@ -157,6 +159,7 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
         players: settled.updatedPlayers,
         currentTurn: winnerKey === "human" ? "ai" : "human",
         startingTurnKey: firstTurnInfo.winnerKey,
+        initialGoldBase,
         phase: "resolution",
         pendingGoStop: null,
         pendingMatch: null,
@@ -244,6 +247,7 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
       players,
       currentTurn: firstTurnInfo.winnerKey,
       startingTurnKey: firstTurnInfo.winnerKey,
+      initialGoldBase,
       phase,
       pendingGoStop: null,
       pendingMatch: null,

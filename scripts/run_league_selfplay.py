@@ -106,8 +106,8 @@ def main():
         if g <= 0:
             g = 2
         opp = weighted_pick(opponents, rng)
-        human = focal if not side_flip else opp
-        ai = opp if not side_flip else focal
+        my_side = focal if not side_flip else opp
+        your_side = opp if not side_flip else focal
         side_flip = not side_flip
 
         chunk_out = os.path.join(chunk_dir, f"chunk-{i:03d}.jsonl")
@@ -122,9 +122,9 @@ def main():
             "--",
             f"--log-mode={log_mode}",
         ]
-        add_actor_args(cmd, "human", human)
-        add_actor_args(cmd, "ai", ai)
-        if model_only_when_possible and (human["policy_model"] or human["value_model"]) and (ai["policy_model"] or ai["value_model"]):
+        add_actor_args(cmd, "my-side", my_side)
+        add_actor_args(cmd, "your-side", your_side)
+        if model_only_when_possible and (my_side["policy_model"] or my_side["value_model"]) and (your_side["policy_model"] or your_side["value_model"]):
             cmd.append("--model-only")
         run(cmd)
 
@@ -136,10 +136,19 @@ def main():
         aggregate["completed"] += int(rep.get("completed", 0))
         for k in aggregate["winners"].keys():
             aggregate["winners"][k] += int((rep.get("winners") or {}).get(k, 0))
-        key = f"{human['name']}(H)_vs_{ai['name']}(A)"
+        key = f"{my_side['name']}(MY)_vs_{your_side['name']}(YOUR)"
         aggregate["matchups"][key] = aggregate["matchups"].get(key, 0) + int(rep.get("games", 0))
 
-        chunk_infos.append({"chunk": i, "games": g, "output": chunk_out, "report": rep_path, "human": human["name"], "ai": ai["name"]})
+        chunk_infos.append(
+            {
+                "chunk": i,
+                "games": g,
+                "output": chunk_out,
+                "report": rep_path,
+                "mySide": my_side["name"],
+                "yourSide": your_side["name"],
+            }
+        )
         remaining -= g
 
     with open(args.output, "w", encoding="utf-8") as fout:
