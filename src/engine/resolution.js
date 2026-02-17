@@ -1,4 +1,4 @@
-import { calculateScore } from "./scoring.js";
+import { calculateScore, isGukjinCard } from "./scoring.js";
 import { POINT_GOLD_UNIT, settleRoundGold } from "./economy.js";
 import { ruleSets } from "./rules.js";
 
@@ -6,14 +6,73 @@ function isFailedGo(player, currentBase) {
   return player.goCount > 0 && currentBase <= player.lastGoBase;
 }
 
+function hasTransformableGukjinFive(player) {
+  return (player?.captured?.five || []).some(
+    (card) => isGukjinCard(card) && card?.category === "five" && !card?.gukjinTransformed
+  );
+}
+
+function transformGukjinFiveToJunk(player) {
+  const captured = {
+    ...player.captured,
+    kwang: (player.captured?.kwang || []).slice(),
+    five: (player.captured?.five || []).slice(),
+    ribbon: (player.captured?.ribbon || []).slice(),
+    junk: (player.captured?.junk || []).slice()
+  };
+  const gukjinIdx = captured.five.findIndex(
+    (card) => isGukjinCard(card) && card?.category === "five" && !card?.gukjinTransformed
+  );
+  if (gukjinIdx < 0) return null;
+  const [gukjinCard] = captured.five.splice(gukjinIdx, 1);
+  captured.junk.push({
+    ...gukjinCard,
+    category: "junk",
+    piValue: 2,
+    gukjinTransformed: true,
+    name: `${gukjinCard.name} (국진피)`
+  });
+  return {
+    ...player,
+    captured,
+    gukjinMode: "junk",
+    gukjinLocked: true
+  };
+}
+
 export function resolveRound(state, stopperKey) {
   const rules = ruleSets[state.ruleKey];
   const hasStopper =
     (stopperKey === "human" || stopperKey === "ai") && !!state.players?.[stopperKey]?.declaredStop;
-  let humanScore = calculateScore(state.players.human, state.players.ai, state.ruleKey);
-  let aiScore = calculateScore(state.players.ai, state.players.human, state.ruleKey);
-  const humanPpukWin = (state.players.human.events.ppuk || 0) >= 3;
-  const aiPpukWin = (state.players.ai.events.ppuk || 0) >= 3;
+  let workingState = state;
+  const autoGukjinLogs = [];
+
+  if (hasStopper) {
+    const loserKey = stopperKey === "human" ? "ai" : "human";
+    const winnerPlayer = workingState.players?.[stopperKey];
+    const loserPlayer = workingState.players?.[loserKey];
+    if (winnerPlayer && loserPlayer && hasTransformableGukjinFive(loserPlayer)) {
+      const winnerScoreBefore = calculateScore(winnerPlayer, loserPlayer, workingState.ruleKey);
+      if (winnerScoreBefore?.bak?.pi) {
+        const switchedLoser = transformGukjinFiveToJunk(loserPlayer);
+        if (switchedLoser) {
+          workingState = {
+            ...workingState,
+            players: {
+              ...workingState.players,
+              [loserKey]: switchedLoser
+            }
+          };
+          autoGukjinLogs.push(`${loserPlayer.label}: STOP 피박 방어로 국진을 자동 쌍피 처리`);
+        }
+      }
+    }
+  }
+
+  let humanScore = calculateScore(workingState.players.human, workingState.players.ai, workingState.ruleKey);
+  let aiScore = calculateScore(workingState.players.ai, workingState.players.human, workingState.ruleKey);
+  const humanPpukWin = (workingState.players.human.events.ppuk || 0) >= 3;
+  const aiPpukWin = (workingState.players.ai.events.ppuk || 0) >= 3;
 
   if (humanPpukWin || aiPpukWin) {
     if (humanPpukWin && !aiPpukWin) {
@@ -41,8 +100,8 @@ export function resolveRound(state, stopperKey) {
     winner = stopperKey;
   }
 
-  const humanFailedGo = isFailedGo(state.players.human, humanScore.base);
-  const aiFailedGo = isFailedGo(state.players.ai, aiScore.base);
+  const humanFailedGo = isFailedGo(workingState.players.human, humanScore.base);
+  const aiFailedGo = isFailedGo(workingState.players.ai, aiScore.base);
 
   let unresolvedFailedGo = [];
   if (!humanPpukWin && !aiPpukWin) {
@@ -66,7 +125,7 @@ export function resolveRound(state, stopperKey) {
   if (humanPpukWin || aiPpukWin) nagariReasons.length = 0;
   const nagari = nagariReasons.length > 0;
 
-  const carry = state.carryOverMultiplier || 1;
+  const carry = workingState.carryOverMultiplier || 1;
   let nextCarryOverMultiplier = 1;
   let resolvedWinner = winner;
   let dokbakApplied = false;
@@ -92,7 +151,7 @@ export function resolveRound(state, stopperKey) {
     }
 
     if (resolvedWinner !== "draw") {
-      const winnerPlayer = state.players[resolvedWinner];
+      const winnerPlayer = workingState.players[resolvedWinner];
       const hasShakingBombWin = winnerPlayer.events.shaking > 0 || winnerPlayer.events.bomb > 0;
       if (winnerPlayer.presidentHold && hasShakingBombWin) {
         if (resolvedWinner === "human") {
@@ -114,7 +173,7 @@ export function resolveRound(state, stopperKey) {
     // 독박: 고한 플레이어가 다시 고/스톱 전에 상대 STOP으로 지면 2배 배상.
     if (resolvedWinner !== "draw" && hasStopper) {
       const loserKey = resolvedWinner === "human" ? "ai" : "human";
-      const loserPlayer = state.players[loserKey];
+      const loserPlayer = workingState.players[loserKey];
       if ((loserPlayer?.goCount || 0) > 0) {
         dokbakApplied = true;
         if (resolvedWinner === "human") {
@@ -139,21 +198,22 @@ export function resolveRound(state, stopperKey) {
   const settled =
     !nagari && (resolvedWinner === "human" || resolvedWinner === "ai")
       ? settleRoundGold(
-          state.players,
+          workingState.players,
           resolvedWinner,
           resolvedWinner === "human"
             ? humanScore.payoutTotal || humanScore.total
             : aiScore.payoutTotal || aiScore.total
         )
-      : { updatedPlayers: state.players, log: [], requested: 0, paid: 0 };
+      : { updatedPlayers: workingState.players, log: [], requested: 0, paid: 0 };
 
-  const log = state.log
+  const log = (workingState.log || [])
+    .concat(autoGukjinLogs)
     .concat(`라운드 정산: 플레이어 점수 ${humanScore.total} / AI 점수 ${aiScore.total} (승자: ${resolvedWinner})`)
     .concat(`정산 포인트: 플레이어 ${humanScore.payoutTotal || humanScore.total} / AI ${aiScore.payoutTotal || aiScore.total}`)
     .concat(
       !nagari && (resolvedWinner === "human" || resolvedWinner === "ai")
         ? [
-            `라운드 정산(골드): ${state.players[resolvedWinner].label} 요구 ${settled.requested}골드 / 수령 ${settled.paid}골드`
+            `라운드 정산(골드): ${workingState.players[resolvedWinner].label} 요구 ${settled.requested}골드 / 수령 ${settled.paid}골드`
           ]
         : []
     )
@@ -162,14 +222,14 @@ export function resolveRound(state, stopperKey) {
     .concat(nagari ? [`나가리(${nagariReasons.join(", ")}): 다음 판 배수 x${nextCarryOverMultiplier}`] : []);
 
   return {
-    ...state,
+    ...workingState,
     phase: "resolution",
     currentTurn: stopperKey === "human" ? "ai" : "human",
     nextCarryOverMultiplier,
     players: settled.updatedPlayers,
-    kiboSeq: (state.kiboSeq || 0) + 1,
-    kibo: (state.kibo || []).concat({
-      no: (state.kiboSeq || 0) + 1,
+    kiboSeq: (workingState.kiboSeq || 0) + 1,
+    kibo: (workingState.kibo || []).concat({
+      no: (workingState.kiboSeq || 0) + 1,
       type: "round_end",
       winner: resolvedWinner,
       nagari,

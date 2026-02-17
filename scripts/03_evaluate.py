@@ -31,8 +31,8 @@ def action_alias(action):
     aliases = {
         "choose_go": "go",
         "choose_stop": "stop",
-        "choose_kung_use": "kung_use",
-        "choose_kung_pass": "kung_pass",
+        "choose_shaking_yes": "shaking_yes",
+        "choose_shaking_no": "shaking_no",
         "choose_president_stop": "president_stop",
         "choose_president_hold": "president_hold",
     }
@@ -40,6 +40,28 @@ def action_alias(action):
 
 
 def extract_policy_sample(trace):
+    dt = trace.get("dt")
+    chosen_play = trace.get("c")
+    chosen_match = trace.get("s")
+    chosen_option = action_alias(trace.get("at"))
+    if dt == "play" and chosen_play:
+        return "play", [chosen_play], chosen_play
+    if dt == "match" and chosen_match:
+        return "match", [chosen_match], chosen_match
+    if dt == "option":
+        by_chosen = {
+            "go": ["go", "stop"],
+            "stop": ["go", "stop"],
+            "president_stop": ["president_stop", "president_hold"],
+            "president_hold": ["president_stop", "president_hold"],
+            "five": ["five", "junk"],
+            "junk": ["five", "junk"],
+            "shaking_yes": ["shaking_yes", "shaking_no"],
+            "shaking_no": ["shaking_yes", "shaking_no"],
+        }
+        if chosen_option in by_chosen:
+            return "option", by_chosen[chosen_option], chosen_option
+
     sp = trace.get("sp") or {}
     cards = sp.get("cards")
     if cards:
@@ -63,6 +85,9 @@ def extract_policy_sample(trace):
 
 
 def policy_context_key(trace, decision_type):
+    cached = trace.get("ck")
+    if isinstance(cached, str) and cached:
+        return cached
     dc = trace.get("dc") or {}
     sp = trace.get("sp") or {}
     deck_bucket = int((dc.get("deckCount") or 0) // 3)
@@ -70,22 +95,46 @@ def policy_context_key(trace, decision_type):
     hand_opp = dc.get("handCountOpp", 0)
     go_self = dc.get("goCountSelf", 0)
     go_opp = dc.get("goCountOpp", 0)
-    cands = len(
-        sp.get("cards")
-        or sp.get("boardCardIds")
-        or sp.get("options")
-        or []
-    )
+    carry = max(1, int(dc.get("carryOverMultiplier") or 1))
+    shake_self = min(3, int(dc.get("shakeCountSelf") or 0))
+    shake_opp = min(3, int(dc.get("shakeCountOpp") or 0))
+    phase = dc.get("phase")
+    if isinstance(phase, str):
+        phase = {
+            "playing": 1,
+            "select-match": 2,
+            "go-stop": 3,
+            "president-choice": 4,
+            "gukjin-choice": 5,
+            "shaking-confirm": 6,
+            "resolution": 7,
+        }.get(phase, 0)
+    else:
+        try:
+            phase = int(phase)
+        except Exception:
+            phase = 0
+    cands = int(trace.get("cc") or 0)
+    if cands <= 0:
+        cands = len(
+            sp.get("cards")
+            or sp.get("boardCardIds")
+            or sp.get("options")
+            or []
+        )
     return "|".join(
         [
             f"dt={decision_type}",
-            f"ph={dc.get('phase','?')}",
+            f"ph={phase}",
             f"o={trace.get('o','?')}",
             f"db={deck_bucket}",
             f"hs={hand_self}",
             f"ho={hand_opp}",
             f"gs={go_self}",
             f"go={go_opp}",
+            f"cm={carry}",
+            f"ss={shake_self}",
+            f"so={shake_opp}",
             f"cc={cands}",
         ]
     )
@@ -153,18 +202,54 @@ def stable_hash(token, dim):
     return int(digest[:8], 16) % dim
 
 
-def value_sample(trace, decision_type, chosen, score, gold_per_point):
-    actor = trace.get("a")
-    if actor not in (SIDE_MY, SIDE_YOUR):
+def _float_or_none(v):
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except Exception:
         return None
-    dc = trace.get("dc") or {}
-    sp = trace.get("sp") or {}
+
+
+def value_target(line, actor, gold_per_point, target_mode):
+    mode = str(target_mode or "score").strip().lower()
+    if mode == "gold":
+        if actor == SIDE_MY:
+            direct = _float_or_none(line.get("goldDeltaMy"))
+            if direct is not None:
+                return direct
+            final_gold = _float_or_none(line.get("finalGoldMy"))
+            initial_gold = _float_or_none(line.get("initialGoldMy"))
+        else:
+            direct = _float_or_none(line.get("goldDeltaYour"))
+            if direct is not None:
+                return direct
+            final_gold = _float_or_none(line.get("finalGoldYour"))
+            initial_gold = _float_or_none(line.get("initialGoldYour"))
+        if final_gold is not None and initial_gold is not None:
+            return final_gold - initial_gold
+        mirror_my = _float_or_none(line.get("goldDeltaMy"))
+        if mirror_my is not None:
+            return mirror_my if actor == SIDE_MY else -mirror_my
+
+    score = line.get("score") or {}
     self_score = score.get(actor)
     opp = SIDE_YOUR if actor == SIDE_MY else SIDE_MY
     opp_score = score.get(opp)
     if self_score is None or opp_score is None:
         return None
-    y = (float(self_score) - float(opp_score)) * float(gold_per_point)
+    return (float(self_score) - float(opp_score)) * float(gold_per_point)
+
+
+def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode):
+    actor = trace.get("a")
+    if actor not in (SIDE_MY, SIDE_YOUR):
+        return None
+    dc = trace.get("dc") or {}
+    sp = trace.get("sp") or {}
+    y = value_target(line, actor, gold_per_point, target_mode)
+    if y is None:
+        return None
     tokens = [
         f"phase={dc.get('phase','?')}",
         f"order={trace.get('o','?')}",
@@ -281,7 +366,8 @@ def main():
 
                     if value_old and value_new:
                         gold_per_point = value_new.get("gold_per_point", 100.0)
-                        vs = value_sample(trace, dt, chosen, score, gold_per_point)
+                        target_mode = value_new.get("target_mode", "score")
+                        vs = value_sample(trace, dt, chosen, line, gold_per_point, target_mode)
                         if vs:
                             y = vs["y"]
                             pred_old = value_predict(value_old, vs)

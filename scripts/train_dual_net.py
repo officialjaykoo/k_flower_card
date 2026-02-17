@@ -11,6 +11,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+try:
+    import lmdb  # type: ignore
+except Exception:
+    lmdb = None
+
 PAD_TOKEN = "<PAD>"
 UNK_TOKEN = "<UNK>"
 GO_STOP_ACTIONS = {"go": 0, "stop": 1}
@@ -26,10 +31,9 @@ NUMERIC_KEYS = [
     "gwang_bak_risk",
     "mong_bak_risk",
     "shake_multiplier_state",
-    "gold_self",
-    "gold_opp",
     "hand_self",
     "hand_opp",
+    "is_first_attacker",
 ]
 
 # Feature-priority weights for score-critical states.
@@ -46,6 +50,7 @@ NUMERIC_FEATURE_WEIGHTS = {
     "gwang_bak_risk": 2.2,
     "mong_bak_risk": 2.0,
     "shake_multiplier_state": 2.0,
+    "is_first_attacker": 1.2,
 }
 
 _CATALOG_CACHE = {}
@@ -71,14 +76,25 @@ def expand_inputs(patterns):
     return out
 
 
+def _ensure_lmdb_available():
+    if lmdb is None:
+        raise RuntimeError(
+            "cache-backend=lmdb requires python package 'lmdb'. Install with: pip install lmdb"
+        )
+
+
+def _sample_key(index):
+    return f"{index:09d}".encode("ascii")
+
+
 def action_alias(action):
     if not action:
         return None
     aliases = {
         "choose_go": "go",
         "choose_stop": "stop",
-        "choose_kung_use": "kung_use",
-        "choose_kung_pass": "kung_pass",
+        "choose_shaking_yes": "shaking_yes",
+        "choose_shaking_no": "shaking_no",
         "choose_president_stop": "president_stop",
         "choose_president_hold": "president_hold",
     }
@@ -106,6 +122,35 @@ def choose_label_and_candidates(trace):
         if chosen in cands:
             return str(chosen), "option", cands
         return None, None, None
+    if str(trace.get("dt") or "") == "option":
+        by_chosen = {
+            "go": ["go", "stop"],
+            "stop": ["go", "stop"],
+            "president_stop": ["president_stop", "president_hold"],
+            "president_hold": ["president_stop", "president_hold"],
+            "five": ["five", "junk"],
+            "junk": ["five", "junk"],
+            "shaking_yes": ["shaking_yes", "shaking_no"],
+            "shaking_no": ["shaking_yes", "shaking_no"],
+        }
+        chosen = action_alias(trace.get("at"))
+        if chosen in by_chosen:
+            return str(chosen), "option", [str(x) for x in by_chosen[chosen]]
+        phase = (trace.get("dc") or {}).get("phase")
+        by_phase = {
+            "go-stop": ["go", "stop"],
+            "president-choice": ["president_stop", "president_hold"],
+            "gukjin-choice": ["five", "junk"],
+            "shaking-confirm": ["shaking_yes", "shaking_no"],
+            3: ["go", "stop"],
+            4: ["president_stop", "president_hold"],
+            5: ["five", "junk"],
+            6: ["shaking_yes", "shaking_no"],
+        }
+        cands = by_phase.get(phase) or by_phase.get(str(phase))
+        chosen = action_alias(trace.get("at"))
+        if cands and chosen in cands:
+            return str(chosen), "option", [str(x) for x in cands]
     return None, None, None
 
 
@@ -125,6 +170,17 @@ def _to_float(v, default=0.0):
         return float(v)
     except Exception:
         return float(default)
+
+
+def _prob01(v):
+    out = _to_float(v, 0.0)
+    if out > 1.0:
+        out = out / 100.0
+    if out < 0.0:
+        return 0.0
+    if out > 1.0:
+        return 1.0
+    return out
 
 
 def _extract_actor_stat(line, actor, names):
@@ -274,13 +330,14 @@ def _category_alias(cat):
 def extract_numeric(line, trace, actor):
     dc = trace.get("dc") or {}
     sp = trace.get("sp") or {}
-    fv = trace.get("fv") or {}
-    ev = fv.get("eventCounts") or {}
-    opp = _opp_side(actor)
-
-    shake_events = _to_float(ev.get("shaking"), 0.0)
+    order = str(trace.get("o") or "").strip().lower()
+    if order in ("first", "second"):
+        is_first_attacker = 1.0 if order == "first" else 0.0
+    else:
+        is_first_attacker = float(1 if int(dc.get("isFirstAttacker") or 0) else 0)
+    shake_events = _to_float(dc.get("shakeCountSelf"), 0.0) + _to_float(dc.get("bombCountSelf"), 0.0)
     deck_count = float(dc.get("deckCount") or 0.0)
-    init_deck_count = _extract_first_number(line, ["deckCount", "boardDeckCount"], default=22.0)
+    init_deck_count = 22.0
     if init_deck_count <= 0:
         init_deck_count = 22.0
     deck_end_ratio = max(0.0, min(1.0, 1.0 - (deck_count / init_deck_count)))
@@ -320,53 +377,45 @@ def extract_numeric(line, trace, actor):
             high_value_match = 1.0
             break
 
-    pi_self = _extract_actor_stat(line, actor, ["pi", "piCount", "junk", "junkCount"])
-    gwang_self = _extract_actor_stat(line, actor, ["gwang", "gwangCount", "bright", "brightCount"])
-    ribbon_self = _extract_actor_stat(line, actor, ["dan", "danCount", "tti", "ribbon", "ribbonCount"])
-    hongdan_self = _extract_actor_stat(line, actor, ["hongdan", "hongDan", "redDan"])
-    cheongdan_self = _extract_actor_stat(line, actor, ["cheongdan", "cheongDan", "blueDan"])
-    chodan_self = _extract_actor_stat(line, actor, ["chodan", "choDan"])
-    godori_self = _extract_actor_stat(line, actor, ["godori", "goDori"])
-
     go_self = float(dc.get("goCountSelf") or 0.0)
     go_opp = float(dc.get("goCountOpp") or 0.0)
-    pi_opp = _extract_actor_stat(line, opp, ["pi", "piCount", "junk", "junkCount"])
-    gwang_opp = _extract_actor_stat(line, opp, ["gwang", "gwangCount", "bright", "brightCount"])
 
     score_self_now = _to_float(dc.get("currentScoreSelf"), 0.0)
     score_opp_now = _to_float(dc.get("currentScoreOpp"), 0.0)
+    opp_combo_threat = _prob01(dc.get("oppJokboThreatProb"))
+    opp_gwang_threat = _prob01(dc.get("oppGwangThreatProb"))
+    self_combo_threat = _prob01(dc.get("selfJokboThreatProb"))
+    self_gwang_threat = _prob01(dc.get("selfGwangThreatProb"))
+
     opp_danger_level = (
-        0.35 * min(1.0, go_opp / 3.0)
+        0.30 * min(1.0, go_opp / 3.0)
         + 0.25 * min(1.0, max(0.0, 1.0 - hand_opp))
-        + 0.20 * min(1.0, pi_opp / 10.0)
-        + 0.20 * min(1.0, gwang_opp / 3.0)
+        + 0.25 * min(1.0, opp_combo_threat)
+        + 0.20 * min(1.0, opp_gwang_threat)
     )
     opp_danger_level = max(opp_danger_level, min(1.0, score_opp_now / 7.0))
     opp_danger_level = max(0.0, min(1.0, opp_danger_level))
 
     my_win_progress = (
         0.30 * min(1.0, go_self / 3.0)
-        + 0.25 * min(1.0, pi_self / 10.0)
-        + 0.20 * min(1.0, gwang_self / 3.0)
+        + 0.25 * min(1.0, self_combo_threat)
+        + 0.20 * min(1.0, self_gwang_threat)
         + 0.15 * can_match
         + 0.10 * min(1.0, max(0.0, 1.0 - hand_self))
     )
     my_win_progress = max(my_win_progress, min(1.0, score_self_now / 7.0))
     my_win_progress = max(0.0, min(1.0, my_win_progress))
-    jp = trace.get("jp") or {}
-    if int(jp.get("completed_now") or 0) == 1:
-        jokbo_potential = 1.0
-    else:
-        jokbo_potential = max(
-            min(1.0, max(hongdan_self, cheongdan_self, chodan_self) / 3.0),
-            min(1.0, godori_self / 5.0),
-            min(1.0, ribbon_self / 7.0),
-        )
-    gold_self_raw = float(dc.get("goldSelf") or 0.0)
-    gold_opp_raw = float(dc.get("goldOpp") or 0.0)
-    gold_self = max(0.0, min(2.0, math.log1p(max(0.0, gold_self_raw)) / 10.0))
-    gold_opp = max(0.0, min(2.0, math.log1p(max(0.0, gold_opp_raw)) / 10.0))
-
+    jokbo_progress = dc.get("jokboProgressSelf") or {}
+    hongdan_self = _to_float(jokbo_progress.get("hongdan"), 0.0)
+    cheongdan_self = _to_float(jokbo_progress.get("cheongdan"), 0.0)
+    chodan_self = _to_float(jokbo_progress.get("chodan"), 0.0)
+    godori_self = _to_float(jokbo_progress.get("godori"), 0.0)
+    gwang_self = _to_float(jokbo_progress.get("gwang"), 0.0)
+    jokbo_potential = max(
+        min(1.0, max(hongdan_self, cheongdan_self, chodan_self) / 3.0),
+        min(1.0, godori_self / 3.0),
+        min(1.0, gwang_self / 5.0),
+    )
     return {
         "opp_danger_level": opp_danger_level,
         "my_win_progress": my_win_progress,
@@ -375,31 +424,32 @@ def extract_numeric(line, trace, actor):
         "jokbo_potential": jokbo_potential,
         "can_match": can_match,
         "immediate_reward": float(trace.get("ir") or 0.0),
-        "pi_bak_risk": _to_float(dc.get("piBakRisk"), _extract_actor_stat(line, actor, ["piBakRisk", "pibakRisk"])),
-        "gwang_bak_risk": _to_float(dc.get("gwangBakRisk"), _extract_actor_stat(line, actor, ["gwangBakRisk"])),
-        "mong_bak_risk": _to_float(dc.get("mongBakRisk"), _extract_actor_stat(line, actor, ["mongBakRisk", "meongBakRisk"])),
+        "pi_bak_risk": _to_float(dc.get("piBakRisk"), 0.0),
+        "gwang_bak_risk": _to_float(dc.get("gwangBakRisk"), 0.0),
+        "mong_bak_risk": _to_float(dc.get("mongBakRisk"), 0.0),
         "shake_multiplier_state": max(0.0, shake_events),
-        "gold_self": gold_self,
-        "gold_opp": gold_opp,
         "hand_self": hand_self,
         "hand_opp": hand_opp,
+        "is_first_attacker": is_first_attacker,
     }
 
 
 def extract_tokens(line, trace, decision_type, actor):
     dc = trace.get("dc") or {}
-    score = line.get("score") or {}
-    opp = _opp_side(actor)
-    self_score = float(score.get(actor) or 0.0)
-    opp_score = float(score.get(opp) or 0.0)
+    order = str(trace.get("o") or "").strip().lower()
+    if order not in ("first", "second"):
+        order = "first" if int(dc.get("isFirstAttacker") or 0) else "second"
+    self_score = float(dc.get("currentScoreSelf") or 0.0)
+    opp_score = float(dc.get("currentScoreOpp") or 0.0)
     score_diff = self_score - opp_score
-    bak_escape = line.get("bakEscape") or {}
-    loser = bak_escape.get("loser")
-    escaped = bak_escape.get("escaped")
-    actor_bak = _extract_actor_stat(line, actor, ["piBak", "pi", "gwangBak", "gwang", "mongBak"])
+    actor_bak = (
+        _to_float(dc.get("piBakRisk"), 0.0)
+        + _to_float(dc.get("gwangBakRisk"), 0.0)
+        + _to_float(dc.get("mongBakRisk"), 0.0)
+    )
     tokens = [
         f"phase={dc.get('phase','?')}",
-        f"order={trace.get('o','?')}",
+        f"order={order}",
         f"decision_type={decision_type}",
         f"deck_bucket={int((dc.get('deckCount') or 0)//3)}",
         f"self_hand={int(dc.get('handCountSelf') or 0)}",
@@ -410,8 +460,8 @@ def extract_tokens(line, trace, decision_type, actor):
         f"self_score_b={int(self_score // 2)}",
         f"opp_score_b={int(opp_score // 2)}",
         f"score_diff_b={int(score_diff // 2)}",
-        f"is_nagari={1 if bool(line.get('nagari', False)) else 0}",
-        f"is_bak_loser={1 if (loser == actor and escaped is False) else 0}",
+        f"is_first_attacker={1 if order == 'first' else 0}",
+        f"carry_mult_b={int(dc.get('carryOverMultiplier') or 1)}",
         f"bak_signal={int(actor_bak)}",
     ]
     hand_ids = _extract_card_ids((dc.get("handCards") or [])) or _extract_card_ids((trace.get("sp") or {}).get("cards") or [])
@@ -497,26 +547,11 @@ def target_value(line, actor, value_scale):
         if int(go_decision.get("success") or 0) > 0:
             mult *= 1.05
 
-    ef = line.get("eventFrequency") or {}
-    special_count = (
-        int(ef.get("ppuk") or 0)
-        + int(ef.get("ddadak") or 0)
-        + int(ef.get("jjob") or 0)
-        + int(ef.get("ssul") or 0)
-        + int(ef.get("ttak") or 0)
-    )
-    mult *= 1.0 + min(8, special_count) * 0.03
-
     return math.tanh((diff * mult) / max(1e-9, float(value_scale)))
 
 
-def build_cache(input_paths, cache_path, max_samples, value_scale):
-    token_counter = {}
-    action_set = set()
-    raw = []
-    go_stop_count = 0
-    decision_type_counts = {}
-
+def iter_raw_records(input_paths, max_samples, value_scale):
+    yielded = 0
     for path in input_paths:
         with open(path, "r", encoding="utf-8") as f:
             for line_raw in f:
@@ -534,33 +569,43 @@ def build_cache(input_paths, cache_path, max_samples, value_scale):
                     tv = target_value(line, actor, value_scale)
                     if tv is None:
                         continue
-                    tokens = extract_tokens(line, trace, decision_type, actor)
-                    numeric = extract_numeric(line, trace, actor)
-                    decision_type_counts[decision_type] = decision_type_counts.get(decision_type, 0) + 1
-                    if chosen in GO_STOP_ACTIONS:
-                        go_stop_count += 1
-                    raw.append(
-                        {
-                            "tokens": tokens,
-                            "numeric": numeric,
-                            "candidates": candidates,
-                            "chosen": chosen,
-                            "value_target": float(tv),
-                            "is_go_stop": int(chosen in GO_STOP_ACTIONS),
-                        }
-                    )
-                    for t in tokens:
-                        token_counter[t] = token_counter.get(t, 0) + 1
-                    action_set.update(candidates)
-                    action_set.add(chosen)
-                    if max_samples is not None and len(raw) >= max_samples:
-                        break
-                if max_samples is not None and len(raw) >= max_samples:
-                    break
-        if max_samples is not None and len(raw) >= max_samples:
-            break
+                    yield {
+                        "tokens": extract_tokens(line, trace, decision_type, actor),
+                        "numeric": extract_numeric(line, trace, actor),
+                        "candidates": candidates,
+                        "chosen": chosen,
+                        "value_target": float(tv),
+                        "is_go_stop": int(chosen in GO_STOP_ACTIONS),
+                        "decision_type": str(decision_type),
+                    }
+                    yielded += 1
+                    if max_samples is not None and yielded >= max_samples:
+                        return
 
-    if not raw:
+
+def scan_cache_schema(input_paths, max_samples, value_scale):
+    token_counter = {}
+    action_set = set()
+    numeric_absmax = {k: 1.0 for k in NUMERIC_KEYS}
+    go_stop_count = 0
+    decision_type_counts = {}
+    total = 0
+
+    for raw in iter_raw_records(input_paths, max_samples, value_scale):
+        total += 1
+        for tok in raw["tokens"]:
+            token_counter[tok] = token_counter.get(tok, 0) + 1
+        for c in raw["candidates"]:
+            action_set.add(str(c))
+        action_set.add(str(raw["chosen"]))
+        for k in NUMERIC_KEYS:
+            numeric_absmax[k] = max(numeric_absmax[k], abs(float(raw["numeric"].get(k, 0.0))))
+        if int(raw["is_go_stop"]) == 1:
+            go_stop_count += 1
+        dt = str(raw.get("decision_type") or "?")
+        decision_type_counts[dt] = decision_type_counts.get(dt, 0) + 1
+
+    if total <= 0:
         raise RuntimeError("No trainable samples found.")
 
     token_to_idx = {PAD_TOKEN: 0, UNK_TOKEN: 1}
@@ -568,35 +613,66 @@ def build_cache(input_paths, cache_path, max_samples, value_scale):
         token_to_idx[tok] = len(token_to_idx)
     idx_to_action = sorted(action_set)
     action_to_idx = {a: i for i, a in enumerate(idx_to_action)}
+    numeric_scale = {k: max(1.0, float(numeric_absmax.get(k, 1.0))) for k in NUMERIC_KEYS}
 
-    numeric_scale = {}
+    return {
+        "token_to_idx": token_to_idx,
+        "idx_to_action": idx_to_action,
+        "action_to_idx": action_to_idx,
+        "numeric_scale": numeric_scale,
+        "stats": {
+            "go_stop_samples": int(go_stop_count),
+            "decision_type_counts": decision_type_counts,
+            "action_has_go": bool("go" in action_to_idx),
+            "action_has_stop": bool("stop" in action_to_idx),
+            "raw_samples_total": int(total),
+        },
+    }
+
+
+def encode_sample(raw, token_to_idx, action_to_idx, numeric_scale):
+    token_ids = [token_to_idx.get(t, token_to_idx[UNK_TOKEN]) for t in raw["tokens"]]
+    cand_ids = [action_to_idx[c] for c in raw["candidates"] if c in action_to_idx]
+    target_id = action_to_idx.get(raw["chosen"])
+    if target_id is None or target_id not in cand_ids:
+        return None
+    numeric = []
     for k in NUMERIC_KEYS:
-        numeric_scale[k] = max(1.0, max(abs(r["numeric"].get(k, 0.0)) for r in raw))
+        base = float(raw["numeric"].get(k, 0.0)) / float(numeric_scale.get(k, 1.0) or 1.0)
+        w = float(NUMERIC_FEATURE_WEIGHTS.get(k, 1.0))
+        numeric.append(base * w)
+    go_stop_target = GO_STOP_ACTIONS.get(raw["chosen"], -1)
+    return {
+        "token_ids": token_ids,
+        "numeric": numeric,
+        "cand_ids": cand_ids,
+        "target_id": int(target_id),
+        "value_target": float(raw["value_target"]),
+        "is_go_stop": int(raw["is_go_stop"]),
+        "go_stop_target": int(go_stop_target),
+    }
+
+
+def build_cache_pt(input_paths, cache_path, max_samples, value_scale):
+    schema = scan_cache_schema(input_paths, max_samples, value_scale)
+    token_to_idx = schema["token_to_idx"]
+    idx_to_action = schema["idx_to_action"]
+    action_to_idx = schema["action_to_idx"]
+    numeric_scale = schema["numeric_scale"]
 
     samples = []
-    for r in raw:
-        token_ids = [token_to_idx.get(t, token_to_idx[UNK_TOKEN]) for t in r["tokens"]]
-        cand_ids = [action_to_idx[c] for c in r["candidates"] if c in action_to_idx]
-        target_id = action_to_idx.get(r["chosen"])
-        if target_id is None or target_id not in cand_ids:
+    go_stop_final = 0
+    for raw in iter_raw_records(input_paths, max_samples, value_scale):
+        sample = encode_sample(raw, token_to_idx, action_to_idx, numeric_scale)
+        if sample is None:
             continue
-        numeric = []
-        for k in NUMERIC_KEYS:
-            base = float(r["numeric"].get(k, 0.0)) / numeric_scale[k]
-            w = float(NUMERIC_FEATURE_WEIGHTS.get(k, 1.0))
-            numeric.append(base * w)
-        go_stop_target = GO_STOP_ACTIONS.get(r["chosen"], -1)
-        samples.append(
-            {
-                "token_ids": token_ids,
-                "numeric": numeric,
-                "cand_ids": cand_ids,
-                "target_id": target_id,
-                "value_target": float(r["value_target"]),
-                "is_go_stop": int(r["is_go_stop"]),
-                "go_stop_target": int(go_stop_target),
-            }
-        )
+        samples.append(sample)
+        go_stop_final += int(sample["is_go_stop"])
+    if not samples:
+        raise RuntimeError("No trainable samples found after encoding.")
+
+    stats = dict(schema["stats"])
+    stats["go_stop_samples"] = int(go_stop_final)
 
     payload = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -608,23 +684,154 @@ def build_cache(input_paths, cache_path, max_samples, value_scale):
         "numeric_feature_weights": NUMERIC_FEATURE_WEIGHTS,
         "numeric_scale": numeric_scale,
         "samples": samples,
-        "stats": {
-            "go_stop_samples": int(go_stop_count),
-            "decision_type_counts": decision_type_counts,
-            "action_has_go": bool("go" in action_to_idx),
-            "action_has_stop": bool("stop" in action_to_idx),
-        },
+        "stats": stats,
     }
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     torch.save(payload, cache_path)
     return payload
 
 
+def build_cache_lmdb(input_paths, cache_path, max_samples, value_scale, map_size_bytes):
+    _ensure_lmdb_available()
+    schema = scan_cache_schema(input_paths, max_samples, value_scale)
+    token_to_idx = schema["token_to_idx"]
+    idx_to_action = schema["idx_to_action"]
+    action_to_idx = schema["action_to_idx"]
+    numeric_scale = schema["numeric_scale"]
+
+    os.makedirs(cache_path, exist_ok=True)
+    env = lmdb.open(
+        cache_path,
+        map_size=max(1024 * 1024, int(map_size_bytes)),
+        subdir=True,
+        create=True,
+        lock=True,
+        readahead=False,
+        metasync=False,
+        sync=False,
+        map_async=True,
+    )
+    written = 0
+    go_stop_final = 0
+    txn = env.begin(write=True)
+    try:
+        for raw in iter_raw_records(input_paths, max_samples, value_scale):
+            sample = encode_sample(raw, token_to_idx, action_to_idx, numeric_scale)
+            if sample is None:
+                continue
+            blob = json.dumps(sample, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            txn.put(_sample_key(written), blob)
+            written += 1
+            go_stop_final += int(sample["is_go_stop"])
+            if written % 2000 == 0:
+                txn.commit()
+                txn = env.begin(write=True)
+        if written <= 0:
+            raise RuntimeError("No trainable samples found after encoding.")
+        stats = dict(schema["stats"])
+        stats["go_stop_samples"] = int(go_stop_final)
+        meta = {
+            "format_version": "dual_lmdb_cache_v1",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "input_files": input_paths,
+            "value_scale": value_scale,
+            "token_to_idx": token_to_idx,
+            "idx_to_action": idx_to_action,
+            "numeric_keys": NUMERIC_KEYS,
+            "numeric_feature_weights": NUMERIC_FEATURE_WEIGHTS,
+            "numeric_scale": numeric_scale,
+            "stats": stats,
+            "samples_total": int(written),
+        }
+        txn.put(b"__count__", str(int(written)).encode("ascii"))
+        txn.put(b"__meta__", json.dumps(meta, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        txn.commit()
+        env.sync()
+    finally:
+        env.close()
+    return meta
+
+
+def build_cache(cache_backend, input_paths, cache_path, max_samples, value_scale, lmdb_map_size_bytes):
+    if cache_backend == "lmdb":
+        meta = build_cache_lmdb(input_paths, cache_path, max_samples, value_scale, lmdb_map_size_bytes)
+        cache = dict(meta)
+        cache["samples"] = LMDBSampleStore(cache_path)
+        return cache
+    return build_cache_pt(input_paths, cache_path, max_samples, value_scale)
+
+
+class LMDBSampleStore:
+    def __init__(self, path):
+        _ensure_lmdb_available()
+        self.path = path
+        self.env = lmdb.open(
+            path,
+            readonly=True,
+            lock=False,
+            readahead=False,
+            max_readers=512,
+            subdir=True,
+        )
+        self.txn = self.env.begin(write=False)
+        meta_blob = self.txn.get(b"__meta__")
+        if not meta_blob:
+            self.close()
+            raise RuntimeError(f"Invalid LMDB cache (missing __meta__): {path}")
+        self.meta = json.loads(bytes(meta_blob).decode("utf-8"))
+        raw_count = self.txn.get(b"__count__")
+        if raw_count:
+            self.count = int(raw_count.decode("ascii"))
+        else:
+            self.count = int(self.meta.get("samples_total") or 0)
+
+    def __len__(self):
+        return int(self.count)
+
+    def get(self, index):
+        idx = int(index)
+        if idx < 0 or idx >= int(self.count):
+            raise IndexError(f"Sample index out of range: {idx}")
+        blob = self.txn.get(_sample_key(idx))
+        if blob is None:
+            raise IndexError(f"Missing sample in cache at index {idx}")
+        return json.loads(bytes(blob).decode("utf-8"))
+
+    def close(self):
+        try:
+            if hasattr(self, "txn") and self.txn is not None:
+                self.txn.abort()
+                self.txn = None
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "env") and self.env is not None:
+                self.env.close()
+                self.env = None
+        except Exception:
+            pass
+
+
 def load_or_build_cache(args):
-    cache_path = args.cache_pt or os.path.join("logs", "dual-cache.pt")
-    if args.rebuild_cache or not os.path.exists(cache_path):
+    backend = str(args.cache_backend or "pt").strip().lower()
+    if backend == "lmdb":
+        cache_path = args.cache_lmdb or os.path.join("logs", "dual-cache.lmdb")
+        cache_exists = os.path.isdir(cache_path)
+    else:
+        cache_path = args.cache_pt or os.path.join("logs", "dual-cache.pt")
+        cache_exists = os.path.exists(cache_path)
+
+    if args.rebuild_cache or (not cache_exists):
         paths = expand_inputs(args.input)
-        return build_cache(paths, cache_path, args.max_samples, args.value_scale), cache_path
+        lmdb_map_size_bytes = int(float(args.lmdb_map_size_gb) * (1024**3))
+        return build_cache(backend, paths, cache_path, args.max_samples, args.value_scale, lmdb_map_size_bytes), cache_path
+
+    if backend == "lmdb":
+        store = LMDBSampleStore(cache_path)
+        cache = dict(store.meta)
+        cache["samples"] = store
+        return cache, cache_path
+
     data = torch.load(cache_path, map_location="cpu")
     return data, cache_path
 
@@ -665,6 +872,12 @@ class KFlowerDualNet(nn.Module):
         return policy_logits, go_stop_logits, value
 
 
+def _sample_at(samples, sid):
+    if isinstance(samples, list):
+        return samples[sid]
+    return samples.get(sid)
+
+
 def build_batch(samples, batch_ids, action_size, device, go_stop_policy_weight, go_stop_value_weight):
     bsz = len(batch_ids)
     flat_tokens = []
@@ -678,7 +891,7 @@ def build_batch(samples, batch_ids, action_size, device, go_stop_policy_weight, 
     gs_value_weight = torch.ones((bsz,), dtype=torch.float32, device=device)
 
     for r, sid in enumerate(batch_ids):
-        s = samples[sid]
+        s = _sample_at(samples, sid)
         tids = s["token_ids"] if s["token_ids"] else [1]
         flat_tokens.extend(tids)
         offsets.append(offsets[-1] + len(tids))
@@ -706,7 +919,7 @@ def build_batch(samples, batch_ids, action_size, device, go_stop_policy_weight, 
     )
 
 
-def evaluate(model, samples, action_size, batch_size, device):
+def evaluate(model, samples, sample_ids, action_size, batch_size, device):
     model.eval()
     total = 0
     acc_n = 0
@@ -715,8 +928,8 @@ def evaluate(model, samples, action_size, batch_size, device):
     se = 0.0
     ae = 0.0
     with torch.no_grad():
-        for st in range(0, len(samples), batch_size):
-            ids = list(range(st, min(len(samples), st + batch_size)))
+        for st in range(0, len(sample_ids), batch_size):
+            ids = sample_ids[st : st + batch_size]
             token_ids_flat, offsets, numeric, cand_mask, target, value_t, gs_target, _, _ = build_batch(
                 samples,
                 ids,
@@ -759,7 +972,15 @@ def evaluate(model, samples, action_size, batch_size, device):
 def main():
     parser = argparse.ArgumentParser(description="Train DualNet with vocab+embedding, cache .pt, AMP, and early stopping.")
     parser.add_argument("--input", nargs="+", default=["logs/*.jsonl"])
+    parser.add_argument("--cache-backend", choices=["pt", "lmdb"], default="pt")
     parser.add_argument("--cache-pt", default="logs/dual-cache.pt")
+    parser.add_argument("--cache-lmdb", default="logs/dual-cache.lmdb")
+    parser.add_argument(
+        "--lmdb-map-size-gb",
+        type=float,
+        default=8.0,
+        help="LMDB map size in GB (used only when --cache-backend lmdb).",
+    )
     parser.add_argument("--rebuild-cache", action="store_true")
     parser.add_argument("--output", default="models/dual-model.pt")
     parser.add_argument("--meta-output", default=None)
@@ -786,6 +1007,10 @@ def main():
 
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but not available.")
+    if float(args.lmdb_map_size_gb) <= 0:
+        raise RuntimeError("--lmdb-map-size-gb must be > 0.")
+    if str(args.cache_backend or "pt").strip().lower() == "lmdb":
+        _ensure_lmdb_available()
     device = args.device
     use_amp = (device == "cuda") and (not args.no_amp)
 
@@ -796,32 +1021,36 @@ def main():
 
     cache, cache_path = load_or_build_cache(args)
     samples = cache["samples"]
-    if not samples:
+    sample_count = len(samples)
+    if sample_count <= 0:
         raise RuntimeError("No samples in cache.")
+    cached_numeric_keys = list(cache.get("numeric_keys") or [])
+    if cached_numeric_keys and cached_numeric_keys != NUMERIC_KEYS:
+        raise RuntimeError(
+            "Cache numeric_keys mismatch with current trainer. Rebuild cache with --rebuild-cache."
+        )
     action_size = len(cache["idx_to_action"])
     vocab_size = len(cache["token_to_idx"])
     cache_stats = cache.get("stats") or {}
 
-    order = list(range(len(samples)))
+    order = list(range(sample_count))
     random.Random(args.seed).shuffle(order)
     split = int(len(order) * 0.9)
     train_ids = order[:split]
     valid_ids = order[split:] if split < len(order) else []
-    train_samples = [samples[i] for i in train_ids]
-    valid_samples = [samples[i] for i in valid_ids]
 
     print(
         json.dumps(
             {
                 "dataset_stats": {
-                    "samples_total": len(samples),
+                    "samples_total": sample_count,
                     "go_stop_samples": int(cache_stats.get("go_stop_samples", 0)),
-                    "go_stop_ratio": float(cache_stats.get("go_stop_samples", 0)) / max(1, len(samples)),
+                    "go_stop_ratio": float(cache_stats.get("go_stop_samples", 0)) / max(1, sample_count),
                     "action_has_go": bool(cache_stats.get("action_has_go", False)),
                     "action_has_stop": bool(cache_stats.get("action_has_stop", False)),
                     "decision_type_counts": cache_stats.get("decision_type_counts", {}),
-                    "split_train": len(train_samples),
-                    "split_valid": len(valid_samples),
+                    "split_train": len(train_ids),
+                    "split_valid": len(valid_ids),
                 }
             },
             ensure_ascii=False,
@@ -849,12 +1078,12 @@ def main():
         phase = 0.0 if args.epochs <= 1 else (ep / (args.epochs - 1))
         value_w = args.value_loss_weight_start + (value_w_end - args.value_loss_weight_start) * phase
         model.train()
-        perm = list(range(len(train_samples)))
+        perm = list(train_ids)
         rng.shuffle(perm)
         for st in range(0, len(perm), args.batch_size):
             ids = perm[st : st + args.batch_size]
             token_ids_flat, offsets, numeric, cand_mask, target, value_t, gs_target, gs_policy_weight, gs_value_weight = build_batch(
-                train_samples,
+                samples,
                 ids,
                 action_size,
                 device,
@@ -881,7 +1110,7 @@ def main():
             scaler.update()
         scheduler.step()
 
-        metrics = evaluate(model, valid_samples, action_size, args.batch_size, device) if valid_samples else {
+        metrics = evaluate(model, samples, valid_ids, action_size, args.batch_size, device) if valid_ids else {
             "policy_acc": 0.0,
             "go_stop_acc": 0.0,
             "value_rmse": 0.0,
@@ -911,8 +1140,8 @@ def main():
     if best["state"] is not None:
         model.load_state_dict(best["state"])
 
-    train_metrics = evaluate(model, train_samples, action_size, args.batch_size, device)
-    valid_metrics = evaluate(model, valid_samples, action_size, args.batch_size, device)
+    train_metrics = evaluate(model, samples, train_ids, action_size, args.batch_size, device)
+    valid_metrics = evaluate(model, samples, valid_ids, action_size, args.batch_size, device)
 
     payload = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -934,9 +1163,10 @@ def main():
 
     summary = {
         "cache_path": cache_path,
-        "samples_total": len(samples),
-        "samples_train": len(train_samples),
-        "samples_valid": len(valid_samples),
+        "cache_backend": str(args.cache_backend or "pt").strip().lower(),
+        "samples_total": sample_count,
+        "samples_train": len(train_ids),
+        "samples_valid": len(valid_ids),
         "actions": action_size,
         "vocab_size": vocab_size,
         "epochs_requested": args.epochs,
@@ -951,7 +1181,7 @@ def main():
         "lr_min": args.lr_min,
         "dataset_stats": {
             "go_stop_samples": int(cache_stats.get("go_stop_samples", 0)),
-            "go_stop_ratio": float(cache_stats.get("go_stop_samples", 0)) / max(1, len(samples)),
+            "go_stop_ratio": float(cache_stats.get("go_stop_samples", 0)) / max(1, sample_count),
             "action_has_go": bool(cache_stats.get("action_has_go", False)),
             "action_has_stop": bool(cache_stats.get("action_has_stop", False)),
             "decision_type_counts": cache_stats.get("decision_type_counts", {}),
@@ -962,6 +1192,9 @@ def main():
     meta_out = args.meta_output or (args.output + ".json")
     with open(meta_out, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    if isinstance(samples, LMDBSampleStore):
+        samples.close()
 
     print(f"trained dual net -> {args.output}")
     print(json.dumps(summary, ensure_ascii=False))

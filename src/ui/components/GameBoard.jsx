@@ -4,7 +4,7 @@ import GameBoardControlsPanel from "./GameBoardControlsPanel.jsx";
 import { openCardGuidePopup, openGameLogPopup, openRulesPopup } from "./gameBoardPopups.js";
 import { POINT_GOLD_UNIT } from "../../engine/economy.js";
 import { isGukjinCard } from "../../engine/scoring.js";
-import { buildDeck } from "../../cards.js";
+import { buildDeck, buildCardUiAssetPath, DEFAULT_CARD_THEME } from "../../cards.js";
 
 const FIXED_HAND_SLOT_COUNT = 10;
 
@@ -84,7 +84,8 @@ export default function GameBoard({
   supportedLanguages = ["ko", "en"]
 }) {
   const language = ui.language || "ko";
-  const allCards = buildDeck();
+  const cardTheme = ui.cardTheme || DEFAULT_CARD_THEME;
+  const allCards = buildDeck(cardTheme);
   const order = { kwang: 0, five: 1, ribbon: 2, junk: 3 };
   const monthCards = allCards
     .filter((c) => c.month >= 1 && c.month <= 12)
@@ -163,13 +164,14 @@ export default function GameBoard({
         return (
           <div key={playerKey + "-slot-" + idx} className={"hand-card-wrap" + (monthMatched ? " month-matched" : "")}>
             {hideAiCards ? (
-              cardBackView()
+              cardBackView(cardTheme)
             ) : (
               <CardView
                 card={card}
                 interactive={canSelect}
                 onClick={() => canSelect && onPlayCard(card.id)}
                 t={t}
+                theme={cardTheme}
               />
             )}
             {playerKey === "ai" && typeof aiPlayProbMap?.[card.id] === "number" ? (
@@ -186,7 +188,7 @@ export default function GameBoard({
     const orderedCards = normalCards.concat(dummyCards);
 
     if (hideAiCards) {
-      return orderedCards.map((_, i) => <div key={"b-" + i}>{cardBackView()}</div>);
+      return orderedCards.map((_, i) => <div key={"b-" + i}>{cardBackView(cardTheme)}</div>);
     }
 
     return orderedCards.map((card) => {
@@ -199,6 +201,7 @@ export default function GameBoard({
             interactive={canSelect}
             onClick={() => canSelect && onPlayCard(card.id)}
             t={t}
+            theme={cardTheme}
           />
           {playerKey === "ai" && typeof aiPlayProbMap?.[card.id] === "number" ? (
             <span className="hand-prob-badge">{(aiPlayProbMap[card.id] * 100).toFixed(1) + "%"}</span>
@@ -287,7 +290,7 @@ export default function GameBoard({
               >
                 {lineCards.map((c) => (
                   <div key={`${playerKey}-${key}-${c.id}`} className="stack-item">
-                    <CardView card={c} t={t} />
+                    <CardView card={c} t={t} theme={cardTheme} />
                   </div>
                 ))}
               </div>
@@ -360,6 +363,7 @@ export default function GameBoard({
                       interactive={selectable}
                       onClick={() => selectable && onChooseMatch(card.id)}
                       t={t}
+                      theme={cardTheme}
                     />
                   </div>
                 );
@@ -467,12 +471,12 @@ export default function GameBoard({
                         >
                           {reveal ? (
                             <>
-                              <CardView card={card} t={t} />
+                              <CardView card={card} t={t} theme={cardTheme} />
                               {selectedByHuman ? <span className="opening-owner-tag">{t("board.opening.myPick")}</span> : null}
                               {selectedByAi ? <span className="opening-owner-tag">{t("board.opening.opponentPick")}</span> : null}
                             </>
                           ) : (
-                            <div className="opening-back">{cardBackView()}</div>
+                            <div className="opening-back">{cardBackView(cardTheme)}</div>
                           )}
                         </button>
                       );
@@ -506,7 +510,7 @@ export default function GameBoard({
                   <div className="center-orbit-field">
                     {renderBoardOrbit()}
                     <div className="deck-stack deck-stack-center">
-                      <img src="/cards/deck-stack.svg" alt="deck stack" />
+                      <img src={buildCardUiAssetPath("deck-stack.svg", cardTheme)} alt="deck stack" />
                     </div>
                   </div>
                   <div className="center-opponent-hand">

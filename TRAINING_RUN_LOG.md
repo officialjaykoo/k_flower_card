@@ -1,62 +1,148 @@
-# TRAINING RUN LOG
+﻿# TRAINING RUN LOG
 
-## 목적
-- 이 문서는 `scripts/` 폴더의 파일 역할만 기록한다.
+## 2026-02-17 문서 동기화
 
-## scripts 역할
+- `TRAINING_RUN_LOG.md` 중요턴 트리거를 10개 그룹 기준으로 갱신
+- `turn_end + option 의사결정 시점` 동시 기록 방식 반영
+- 중요턴 기반 컨텍스트 보존/중복 제거 규칙 반영
+
+## 1) `decision_trace` 기록 시점(핵심)
+
+`decision_trace`는 턴마다 무조건 저장하지 않고, 아래 기준을 통과한 턴만 기록한다.
+
+- 수집 기준 턴:
+  - `kibo.type === "turn_end"`
+  - 시뮬레이션 루프에서 `selectionPool.decisionType === "option"`인 별도 의사결정 이벤트
+- 턴 확정 조건:
+  - 루프에서 `nextTurnSeq > prevTurnSeq`일 때 before/after context 확정
+- 사이드 필터:
+  - 기본: 양쪽 턴 기록
+  - `--trace-my-turn-only`: `mySide` 턴만 기록
+- 후보 수 필터:
+  - `train`: `candidateCount >= 1`
+  - `delta`: `candidateCount >= 2`
+- 중요턴 필터:
+  - 기본 ON(`--trace-important-only`)
+  - OFF 시 후보 수 조건만 통과하면 모두 기록
+
+## 2) 중요턴 10개 트리거 상세
+
+아래 10개 그룹으로 관리한다. (내부 구현상 세부 트리거로 분기될 수 있음)
+
+1. `earlyTurnForced`
+- 조건: 각 사이드 턴 카운트 `<= 1`
+- 저장: `T`
+
+2. `goStopOption`
+- 조건: `decisionType === "option"` + `go/stop`
+- 저장(기본): `T-1, T, T+1`
+- 저장(옵션): `go` 선택 시 `--trace-go-stop-plus2` 활성화면 `T+2` 추가
+
+3. `shakingYesOption`
+- 조건: `actionType === "choose_shaking_yes"`
+- 저장: `T, T+1`
+
+4. `optionTurnOther`
+- 조건: `president_stop/president_hold/five/junk/shaking_no` 등 기타 옵션
+- 저장: `T, T+1`
+
+5. `deckEmpty`
+- 조건: `beforeDc.deckCount <= 0`
+- 저장: `T-1, T`
+
+6. `specialEvent`
+- 조건: `matchEvents` 중 `eventTag !== "NORMAL"`
+- `PPUK`: `T-1, T, T+1`
+- `JJOB/DDADAK/PANSSEUL` 등 핵심 이벤트: `T-1, T`
+
+7. `bombEvent`
+- 조건: 폭탄 선언 또는 폭탄 카운트 변화
+- 폭탄 선언(`declare_bomb`): `T-1, T, T+1`
+- 카운트 변화만: `T, T+1`
+
+8. `riskShift`
+- 조건: `piBakRisk/gwangBakRisk/mongBakRisk` 변화
+- 증가(0->1): `T-1, T`
+- 감소(1->0): `T, T+1`
+- 혼합 변화: `T`
+
+9. `comboThreatEnter`
+- 조건: 상대 족보 위협 상태 진입(`false -> true`)
+- 조건(홍/청/초/고도리): 상대 진행 `>=2` && 내 블로킹 카드 `==0`
+- 조건(광 1차): 상대 광 `==2` && 내 블로킹 광 `<=2`
+- 조건(광 2차): 상대 광 `>=3` && 내 블로킹 광 `<=1`
+- 저장: `T`
+
+10. `terminalContext`
+- 조건: 게임 종료 컨텍스트 보존
+- 저장: 종료 기준 `2턴 전` 레코드 위치에 `terminalContext` 태그 부여 (`T`)
+
+공통 규칙:
+- 트리거별로 뽑힌 턴 인덱스는 게임 단위 `Set`으로 중복 제거 후 저장
+- 중요턴이 하나도 없으면, 후보 조건을 통과한 턴을 그대로 반환
+- `--trace-context-radius`는 기본 `0`이며 필요 시 전역 반경으로 추가 보존
+
+## 3) `decision_trace` 턴 레코드 구조
+
+`train` 모드 기본 레코드:
+
+- `t`: 턴 번호
+- `a`: 액터 사이드(`mySide`/`yourSide`)
+- `o`: 순서(`first`/`second`)
+- `dt`: 의사결정 타입(`play`/`match`/`option`)
+- `cc`: 후보 수
+- `at`: 실제 액션 타입
+- `c`: 선택 카드 id
+- `s`: 선택 바닥 카드 id
+- `ir`: 중간보상(immediate reward)
+- `dc`: 압축 decision context
+- `tg`: 트리거 태그 배열(해당 시)
+
+`dc` 필드:
+
+- `phase`
+- `deckCount`
+- `handCountSelf`, `handCountOpp`
+- `goCountSelf`, `goCountOpp`
+- `carryOverMultiplier`
+- `piBakRisk`, `gwangBakRisk`, `mongBakRisk`
+- `oppJokboThreatProb`, `oppJokboOneAwayProb`, `oppGwangThreatProb`
+- `currentScoreSelf`, `currentScoreOpp`
+
+## 4) 게임 루트(1게임 1레코드)
+
+- `game`, `seed`, `steps`, `completed`, `logMode`
+- `firstAttackerSide`, `firstAttackerActor`
+- `policy`
+- `winner`, `score`
+- `initialGoldMy`, `initialGoldYour`
+- `finalGoldMy`, `finalGoldYour`
+- `goldDeltaMy`, `goldDeltaYour`, `goldDeltaMyRatio`, `goldDeltaMyNorm`
+- `gold`
+- `decision_trace`
+
+## 5) 검증 기록
+
+문법 체크:
+
+- `node --check scripts/selfplay_simulator.mjs` 통과
+- `python -m py_compile scripts/run_parallel_selfplay.py scripts/01_train_policy.py scripts/02_train_value.py scripts/03_evaluate.py scripts/train_dual_net.py` 통과
+
+100판 샘플 확인:
+
+- 실행: `node scripts/selfplay_simulator.mjs 100 logs/_tmp_sync_100.jsonl --policy-my-side heuristic_v3 --policy-your-side heuristic_v3 --log-mode train --trace-all-turns`
+- 결과: `terminalContext` 태그가 게임 수와 동일하게 기록됨
+  - games: `100`
+  - terminal hits: `100`
+  - missing games: `0`
+
+## 6) 관련 파일
+
 - `scripts/selfplay_simulator.mjs`
-  - AI vs AI self-play 본체.
-  - `compact`, `delta`, `train` 로그 모드 지원.
-  - 리포트(`*-report.json`) 생성.
-
 - `scripts/run_parallel_selfplay.py`
-  - self-play를 멀티 프로세스로 병렬 실행.
-  - shard를 자동 병합해 하나의 JSONL/리포트로 생성.
-
-- `scripts/run_league_selfplay.py`
-  - 리그 설정(`league_config.example.json`) 기반 데이터 생성기.
-  - 상대 풀 가중치 샘플링으로 self-play 데이터를 만든다.
-
 - `scripts/01_train_policy.py`
-  - 정책 모델 학습.
-  - 빈도 기반 정책 JSON 출력.
-
 - `scripts/02_train_value.py`
-  - 가치 모델 학습.
-  - 점수/골드 기대값 기반 회귀 모델 JSON 출력.
-  - CPU/CUDA 옵션 지원.
-
 - `scripts/03_evaluate.py`
-  - old/new 정책-가치 모델 비교 평가.
-  - 리포트 JSON 생성.
-
-- `scripts/04_run_pipeline.py`
-  - `01 -> 02 -> 03` 순차 실행 파이프라인.
-  - `--fast` 프리셋 지원.
-
-- `scripts/run-fast-loop.ps1`
-  - 데이터 생성 + fast 파이프라인을 한 번에 실행.
-  - 병렬 self-play/리그 self-play 둘 다 지원.
-
-- `scripts/run_champion_cycle.ps1`
-  - 챔피언/도전자 A-B 사이클 자동 실행.
-  - 승격 판정, 요약 저장, Resume 지원.
-
-- `scripts/update_champion_scoreboard.py`
-  - 챔피언 사이클 summary를 모아 점수표(JSON/Markdown) 갱신.
-
 - `scripts/train_dual_net.py`
-  - Dual-head 학습기(EmbeddingBag + MLP).
-  - `.pt` 캐시, AMP, early stopping, go/stop 가중치 지원.
-
-- `scripts/TRAIN_DUAL_NET_DESIGN.md`
-  - `train_dual_net.py` 설계/운영 메모.
-
-- `scripts/league_config.example.json`
-  - 리그 self-play 예시 설정 파일.
-
-- `scripts/run-with-ram-guard.ps1`
-  - 메모리 사용량 가드 실행 스크립트.
-
-- `scripts/slice-month-webp-to-svg.mjs`
-  - 이미지 자산 처리 유틸리티.
+- `src/bot.js`
+- `src/modelPolicyBot.js`

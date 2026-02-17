@@ -140,6 +140,14 @@ export default function GameBoardControlsPanel({
         </div>
         <div className="control-row">
           <button onClick={onStartRandomGame}>{t("controls.button.startRandom")}</button>
+          <select
+            aria-label={t("controls.cardTheme")}
+            value={ui.cardTheme || "original"}
+            onChange={(e) => setUi((u) => ({ ...u, cardTheme: e.target.value }))}
+          >
+            <option value="original">{t("controls.cardTheme.original")}</option>
+            <option value="k-flower">{t("controls.cardTheme.kFlower")}</option>
+          </select>
         </div>
       </div>
       <div className="controls-section">

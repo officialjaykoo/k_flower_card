@@ -41,7 +41,7 @@ export function resolveMatch({ card, board, source, isLastHandTurn = false, play
   }
 
   result.type = "THREE_PLUS";
-  if (source === "hand") result.eventTag = "TTAK";
+  if (source === "hand") result.eventTag = "PANSSEUL";
   if (source === "flip" && !isLastHandTurn) result.eventTag = "PPUK";
   return result;
 }

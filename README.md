@@ -56,7 +56,7 @@
 - 0매치: 바닥 배치
 - 1매치: 2장 캡처
 - 2매치: 타입(광/열/띠/피) 다르면 선택 UI, 같으면 자동 선택
-- 3매치 이상: 싹쓸이 캡처(`ttak +1`)
+- 3매치 이상: 싹쓸이 캡처(`pansseul +1`)
 - 뒤집기 2매치도 동일 규칙
 
 ## 5. 이벤트/특수 규칙
@@ -146,7 +146,7 @@
 - 따닥/`events.ddadak` = 쌍쓸
 - 뻑/`events.ppuk`, `ppukState` = 설사 = 뻐꾸기 = 싼다
 - 뻑 먹기/`events.jabbeok`
-- 판쓸/`events.ssul` = 쓸
+- 판쓸/`events.pansseul` = 싹쓸이
 - 판쓰리(한게임 표현) = 판쓸
 - 국진 쌍피/`gukjinMode: "junk"`, `gukjinLocked`, `gukjinTransformed`
 - 수류탄(2장 폭탄): 현재 엔진 미구현

@@ -23,6 +23,7 @@ import { getModelCandidateProbabilities, modelPolicyPlay } from "./modelPolicyBo
 import { advanceAutoTurns, getActionPlayerKey } from "./engineRunner.js";
 import { buildReplayFrames, formatActionText, formatEventsText } from "./ui/utils/replay.js";
 import { isBotPlayer, participantType, randomSeed, sortCards } from "./ui/utils/common.js";
+import { DEFAULT_CARD_THEME } from "./cards.js";
 import { DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, makeTranslator, translate } from "./ui/i18n/index.js";
 import GameBoard from "./ui/components/GameBoard.jsx";
 import GameOverlays from "./ui/components/GameOverlays.jsx";
@@ -62,6 +63,7 @@ export default function App() {
       lastRecordedRoundKey: null,
       speedMode: "fast",
       visualDelayMs: 400,
+      cardTheme: DEFAULT_CARD_THEME,
       replay: { enabled: false, turnIndex: 0, autoPlay: false, intervalMs: 900 }
     };
   });
@@ -287,7 +289,8 @@ export default function App() {
     let next = initGame(state.ruleKey, createSeededRng(seed), {
       carryOverMultiplier,
       firstTurnKey,
-      initialGold
+      initialGold,
+      cardTheme: ui.cardTheme || DEFAULT_CARD_THEME
     });
     const nextUi = {
       ...ui,

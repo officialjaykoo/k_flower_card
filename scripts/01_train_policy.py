@@ -7,6 +7,11 @@ import os
 from collections import defaultdict
 from datetime import datetime, timezone
 
+try:
+    import lmdb  # type: ignore
+except Exception:
+    lmdb = None
+
 
 def expand_inputs(patterns):
     paths = []
@@ -22,14 +27,31 @@ def expand_inputs(patterns):
     return out
 
 
+def input_manifest(paths):
+    manifest = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+            manifest.append(
+                {
+                    "path": os.path.abspath(p),
+                    "size": int(st.st_size),
+                    "mtime_ns": int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
+                }
+            )
+        except Exception:
+            manifest.append({"path": os.path.abspath(p), "size": -1, "mtime_ns": -1})
+    return manifest
+
+
 def action_alias(action):
     if not action:
         return None
     aliases = {
         "choose_go": "go",
         "choose_stop": "stop",
-        "choose_kung_use": "kung_use",
-        "choose_kung_pass": "kung_pass",
+        "choose_shaking_yes": "shaking_yes",
+        "choose_shaking_no": "shaking_no",
         "choose_president_stop": "president_stop",
         "choose_president_hold": "president_hold",
     }
@@ -37,6 +59,9 @@ def action_alias(action):
 
 
 def context_key(trace, decision_type):
+    cached = trace.get("ck")
+    if isinstance(cached, str) and cached:
+        return cached
     dc = trace.get("dc") or {}
     sp = trace.get("sp") or {}
     deck_bucket = int((dc.get("deckCount") or 0) // 3)
@@ -44,28 +69,87 @@ def context_key(trace, decision_type):
     hand_opp = dc.get("handCountOpp", 0)
     go_self = dc.get("goCountSelf", 0)
     go_opp = dc.get("goCountOpp", 0)
-    cands = len(
-        sp.get("cards")
-        or sp.get("boardCardIds")
-        or sp.get("options")
-        or []
-    )
+    carry = max(1, int(dc.get("carryOverMultiplier") or 1))
+    shake_self = min(3, int(dc.get("shakeCountSelf") or 0))
+    shake_opp = min(3, int(dc.get("shakeCountOpp") or 0))
+    phase = dc.get("phase")
+    if isinstance(phase, str):
+        phase = {
+            "playing": 1,
+            "select-match": 2,
+            "go-stop": 3,
+            "president-choice": 4,
+            "gukjin-choice": 5,
+            "shaking-confirm": 6,
+            "resolution": 7,
+        }.get(phase, 0)
+    else:
+        try:
+            phase = int(phase)
+        except Exception:
+            phase = 0
+    cands = int(trace.get("cc") or 0)
+    if cands <= 0:
+        cands = len(sp.get("cards") or sp.get("boardCardIds") or sp.get("options") or [])
     return "|".join(
         [
             f"dt={decision_type}",
-            f"ph={dc.get('phase','?')}",
+            f"ph={phase}",
             f"o={trace.get('o','?')}",
             f"db={deck_bucket}",
             f"hs={hand_self}",
             f"ho={hand_opp}",
             f"gs={go_self}",
             f"go={go_opp}",
+            f"cm={carry}",
+            f"ss={shake_self}",
+            f"so={shake_opp}",
             f"cc={cands}",
         ]
     )
 
 
 def extract_sample(trace):
+    dt = trace.get("dt")
+    chosen_play = trace.get("c")
+    chosen_match = trace.get("s")
+    chosen_option = action_alias(trace.get("at"))
+    if dt == "play" and chosen_play:
+        return "play", [chosen_play], chosen_play
+    if dt == "match" and chosen_match:
+        return "match", [chosen_match], chosen_match
+    dc = trace.get("dc") or {}
+    if dt == "option":
+        by_chosen = {
+            "go": ["go", "stop"],
+            "stop": ["go", "stop"],
+            "president_stop": ["president_stop", "president_hold"],
+            "president_hold": ["president_stop", "president_hold"],
+            "five": ["five", "junk"],
+            "junk": ["five", "junk"],
+            "shaking_yes": ["shaking_yes", "shaking_no"],
+            "shaking_no": ["shaking_yes", "shaking_no"],
+        }
+        if chosen_option in by_chosen:
+            return "option", by_chosen[chosen_option], chosen_option
+        phase = dc.get("phase")
+        by_phase = {
+            "go-stop": ["go", "stop"],
+            "president-choice": ["president_stop", "president_hold"],
+            "gukjin-choice": ["five", "junk"],
+            "shaking-confirm": ["shaking_yes", "shaking_no"],
+            3: ["go", "stop"],
+            4: ["president_stop", "president_hold"],
+            5: ["five", "junk"],
+            6: ["shaking_yes", "shaking_no"],
+        }
+        candidates = by_phase.get(phase) or by_phase.get(str(phase))
+        chosen = chosen_option
+        if candidates and chosen in candidates:
+            return "option", candidates, chosen
+        if chosen:
+            return "option", [chosen], chosen
+
     sp = trace.get("sp") or {}
     candidates = sp.get("cards")
     if candidates:
@@ -98,6 +182,12 @@ def iter_samples(paths, max_samples=None):
                     continue
                 game = json.loads(line)
                 for trace in game.get("decision_trace") or []:
+                    cc = trace.get("cc")
+                    try:
+                        if cc is not None and int(cc) <= 1:
+                            continue
+                    except Exception:
+                        pass
                     sample = extract_sample(trace)
                     if sample is None:
                         continue
@@ -111,6 +201,130 @@ def iter_samples(paths, max_samples=None):
                     yielded += 1
                     if max_samples is not None and yielded >= max_samples:
                         return
+
+
+def _ensure_lmdb_available():
+    if lmdb is None:
+        raise RuntimeError(
+            "cache-backend=lmdb requires python package 'lmdb'. Install with: pip install lmdb"
+        )
+
+
+def _cache_meta_path(cache_path):
+    return f"{cache_path}.meta.json"
+
+
+def _cache_data_exists(cache_path, backend):
+    if backend == "lmdb":
+        return os.path.isdir(cache_path)
+    return os.path.exists(cache_path)
+
+
+def _cache_matches(meta, config, manifest):
+    if not isinstance(meta, dict):
+        return False
+    if meta.get("format_version") != config.get("format_version"):
+        return False
+    if meta.get("config") != config:
+        return False
+    if meta.get("input_manifest") != manifest:
+        return False
+    counts = meta.get("counts") or {}
+    return int(counts.get("samples_total") or 0) > 0
+
+
+def _sample_key(index):
+    return f"{index:09d}".encode("ascii")
+
+
+def build_sample_cache_jsonl(cache_path, input_paths, max_samples):
+    os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+    total = 0
+    with open(cache_path, "w", encoding="utf-8") as out:
+        for sample in iter_samples(input_paths, max_samples):
+            out.write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
+            total += 1
+    if total <= 0:
+        raise RuntimeError("No trainable decision samples found.")
+    return {"samples_total": int(total)}
+
+
+def build_sample_cache_lmdb(cache_path, input_paths, max_samples, map_size_bytes):
+    _ensure_lmdb_available()
+    os.makedirs(cache_path, exist_ok=True)
+    env = lmdb.open(
+        cache_path,
+        map_size=max(1024 * 1024, int(map_size_bytes)),
+        subdir=True,
+        create=True,
+        lock=True,
+        readahead=False,
+        metasync=False,
+        sync=False,
+        map_async=True,
+    )
+    total = 0
+    txn = env.begin(write=True)
+    try:
+        for sample in iter_samples(input_paths, max_samples):
+            blob = json.dumps(sample, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            txn.put(_sample_key(total), blob)
+            total += 1
+            if total % 2000 == 0:
+                txn.commit()
+                txn = env.begin(write=True)
+        txn.put(b"__count__", str(int(total)).encode("ascii"))
+        txn.commit()
+        env.sync()
+    finally:
+        env.close()
+    if total <= 0:
+        raise RuntimeError("No trainable decision samples found.")
+    return {"samples_total": int(total)}
+
+
+def build_sample_cache(cache_backend, cache_path, input_paths, max_samples, lmdb_map_size_bytes):
+    if cache_backend == "lmdb":
+        return build_sample_cache_lmdb(cache_path, input_paths, max_samples, lmdb_map_size_bytes)
+    return build_sample_cache_jsonl(cache_path, input_paths, max_samples)
+
+
+def iter_cached_samples_jsonl(cache_path):
+    with open(cache_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+
+
+def iter_cached_samples_lmdb(cache_path):
+    _ensure_lmdb_available()
+    env = lmdb.open(
+        cache_path,
+        readonly=True,
+        lock=False,
+        readahead=False,
+        max_readers=256,
+        subdir=True,
+    )
+    try:
+        with env.begin(write=False) as txn:
+            raw_count = txn.get(b"__count__")
+            count = int(raw_count.decode("ascii")) if raw_count else 0
+            for i in range(count):
+                blob = txn.get(_sample_key(i))
+                if not blob:
+                    continue
+                yield json.loads(bytes(blob).decode("utf-8"))
+    finally:
+        env.close()
+
+
+def iter_cached_samples(cache_backend, cache_path):
+    if cache_backend == "lmdb":
+        return iter_cached_samples_lmdb(cache_path)
+    return iter_cached_samples_jsonl(cache_path)
 
 
 def train_model(samples, alpha):
@@ -131,13 +345,8 @@ def train_model(samples, alpha):
         "created_at": datetime.now(timezone.utc).isoformat(),
         "alpha": alpha,
         "global_counts": {k: dict(v) for k, v in global_counts.items()},
-        "context_counts": {
-            dt: {ck: dict(cc) for ck, cc in cks.items()}
-            for dt, cks in context_counts.items()
-        },
-        "context_totals": {
-            dt: dict(v) for dt, v in context_totals.items()
-        },
+        "context_counts": {dt: {ck: dict(cc) for ck, cc in cks.items()} for dt, cks in context_counts.items()},
+        "context_totals": {dt: dict(v) for dt, v in context_totals.items()},
     }
     return model
 
@@ -172,6 +381,18 @@ def predict_top1(model, sample):
     return best_choice, best_prob
 
 
+def _resolve_sample_cache_path(output_path, sample_cache_arg, backend):
+    cache_arg = str(sample_cache_arg or "").strip()
+    if cache_arg.lower() in ("", "none", "off", "no", "0"):
+        return None
+    if cache_arg.lower() == "auto":
+        base, _ = os.path.splitext(output_path)
+        if backend == "lmdb":
+            return f"{base}.samples.cache.lmdb"
+        return f"{base}.samples.cache.jsonl"
+    return cache_arg
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train policy classifier from kibo JSONL.")
     parser.add_argument(
@@ -188,22 +409,94 @@ def main():
     parser.add_argument("--alpha", type=float, default=1.0, help="Laplace smoothing.")
     parser.add_argument("--seed", type=int, default=7, help="Unused compatibility option.")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit number of training samples.")
-    parser.add_argument("--skip-train-metrics", action="store_true", help="Skip train-set accuracy/NLL pass for faster training.")
+    parser.add_argument(
+        "--skip-train-metrics",
+        action="store_true",
+        help="Skip train-set accuracy/NLL pass for faster training.",
+    )
+    parser.add_argument(
+        "--sample-cache",
+        default="none",
+        help="Policy sample cache path. Use 'auto' to place near output model, or 'none' to disable cache.",
+    )
+    parser.add_argument(
+        "--cache-backend",
+        choices=["jsonl", "lmdb"],
+        default="jsonl",
+        help="Sample cache backend: jsonl (default) or lmdb.",
+    )
+    parser.add_argument("--rebuild-cache", action="store_true", help="Force rebuilding sample cache.")
+    parser.add_argument(
+        "--lmdb-map-size-gb",
+        type=float,
+        default=2.0,
+        help="LMDB map size in GB (used only when --cache-backend lmdb).",
+    )
     args = parser.parse_args()
 
+    if float(args.lmdb_map_size_gb) <= 0:
+        raise RuntimeError("--lmdb-map-size-gb must be > 0.")
+    if args.cache_backend == "lmdb":
+        _ensure_lmdb_available()
+
     input_paths = expand_inputs(args.input)
-    model = train_model(iter_samples(input_paths, args.max_samples), alpha=args.alpha)
+    manifest = input_manifest(input_paths)
+    cache_path = _resolve_sample_cache_path(args.output, args.sample_cache, args.cache_backend)
+    cache_config = {
+        "format_version": "policy_sample_cache_v1",
+        "cache_backend": args.cache_backend,
+        "max_samples": args.max_samples,
+    }
+
+    cache_ready = False
+    counts = None
+    if cache_path and (not args.rebuild_cache):
+        meta_path = _cache_meta_path(cache_path)
+        if _cache_data_exists(cache_path, args.cache_backend) and os.path.exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if _cache_matches(meta, cache_config, manifest):
+                counts = meta.get("counts") or {}
+                cache_ready = True
+                print(f"cache: reusing {cache_path}")
+
+    lmdb_map_size_bytes = int(float(args.lmdb_map_size_gb) * (1024**3))
+    if cache_path and (not cache_ready):
+        print(f"cache: building {cache_path}")
+        counts = build_sample_cache(
+            args.cache_backend,
+            cache_path,
+            input_paths,
+            args.max_samples,
+            lmdb_map_size_bytes,
+        )
+        meta = {
+            "format_version": "policy_sample_cache_v1",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "config": cache_config,
+            "input_manifest": manifest,
+            "counts": counts,
+        }
+        with open(_cache_meta_path(cache_path), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        cache_ready = True
+
+    def sample_iter_factory():
+        if cache_ready and cache_path:
+            return iter_cached_samples(args.cache_backend, cache_path)
+        return iter_samples(input_paths, args.max_samples)
+
+    model = train_model(sample_iter_factory(), alpha=args.alpha)
 
     total = 0
     correct = 0
     nll = 0.0
     if args.skip_train_metrics:
-        # Keep training single-pass fast when metrics are not needed for the current loop.
         total = sum(sum(v.values()) for v in (model.get("global_counts") or {}).values())
         if total <= 0:
             raise RuntimeError("No trainable decision samples found.")
     else:
-        for s in iter_samples(input_paths, args.max_samples):
+        for s in sample_iter_factory():
             total += 1
             pred, _ = predict_top1(model, s)
             if pred == s["chosen"]:
@@ -220,6 +513,10 @@ def main():
         "input_files": input_paths,
         "max_samples": args.max_samples,
         "skip_train_metrics": bool(args.skip_train_metrics),
+        "cache_path": cache_path,
+        "cache_enabled": bool(cache_path),
+        "cache_used": bool(cache_ready and cache_path),
+        "cache_backend": args.cache_backend,
     }
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)

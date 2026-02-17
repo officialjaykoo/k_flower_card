@@ -2,6 +2,8 @@ import {
   playTurn,
   chooseGo,
   chooseStop,
+  chooseShakingYes,
+  chooseShakingNo,
   choosePresidentStop,
   choosePresidentHold,
   chooseGukjinMode,
@@ -25,6 +27,9 @@ function selectPool(state, actor, options = {}) {
   if (state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey === actor) {
     return { options: ["five", "junk"] };
   }
+  if (state.phase === "shaking-confirm" && state.pendingShakingConfirm?.playerKey === actor) {
+    return { options: ["shaking_yes", "shaking_no"] };
+  }
   return {};
 }
 
@@ -37,28 +42,55 @@ function decisionContext(state, actor) {
     handCountSelf: state.players[actor].hand.length,
     handCountOpp: state.players[opp].hand.length,
     goCountSelf: state.players[actor].goCount || 0,
-    goCountOpp: state.players[opp].goCount || 0
+    goCountOpp: state.players[opp].goCount || 0,
+    shakeCountSelf: state.players?.[actor]?.events?.shaking || 0,
+    shakeCountOpp: state.players?.[opp]?.events?.shaking || 0,
+    carryOverMultiplier: Number(state.carryOverMultiplier || 1),
+    isFirstAttacker: state.startingTurnKey === actor ? 1 : 0
   };
+}
+
+function tracePhaseCode(phase) {
+  const map = {
+    playing: 1,
+    "select-match": 2,
+    "go-stop": 3,
+    "president-choice": 4,
+    "gukjin-choice": 5,
+    "shaking-confirm": 6,
+    resolution: 7
+  };
+  return Number(map[phase] || 0);
 }
 
 function policyContextKey(trace, decisionType) {
   const dc = trace.dc || {};
   const sp = trace.sp || {};
   const deckBucket = Math.floor((dc.deckCount || 0) / 3);
+  const rawPhase = dc.phase;
+  const phaseCode = Number.isFinite(Number(rawPhase))
+    ? Math.floor(Number(rawPhase))
+    : tracePhaseCode(rawPhase);
   const handSelf = dc.handCountSelf || 0;
   const handOpp = dc.handCountOpp || 0;
   const goSelf = dc.goCountSelf || 0;
   const goOpp = dc.goCountOpp || 0;
+  const carry = Math.max(1, Math.floor(Number(dc.carryOverMultiplier || 1)));
+  const shakeSelf = Math.min(3, Math.floor(Number(dc.shakeCountSelf || 0)));
+  const shakeOpp = Math.min(3, Math.floor(Number(dc.shakeCountOpp || 0)));
   const cands = (sp.cards || sp.boardCardIds || sp.options || []).length;
   return [
     `dt=${decisionType}`,
-    `ph=${dc.phase || "?"}`,
+    `ph=${phaseCode}`,
     `o=${trace.o || "?"}`,
     `db=${deckBucket}`,
     `hs=${handSelf}`,
     `ho=${handOpp}`,
     `gs=${goSelf}`,
     `go=${goOpp}`,
+    `cm=${carry}`,
+    `ss=${shakeSelf}`,
+    `so=${shakeOpp}`,
     `cc=${cands}`
   ].join("|");
 }
@@ -132,6 +164,8 @@ export function modelPolicyPlay(state, actor, policyModel) {
   if (picked.decisionType !== "option") return state;
   if (c === "go") return chooseGo(state, actor);
   if (c === "stop") return chooseStop(state, actor);
+  if (c === "shaking_yes") return chooseShakingYes(state, actor);
+  if (c === "shaking_no") return chooseShakingNo(state, actor);
   if (c === "president_stop") return choosePresidentStop(state, actor);
   if (c === "president_hold") return choosePresidentHold(state, actor);
   if (c === "five" || c === "junk") return chooseGukjinMode(state, actor, c);

@@ -1,4 +1,4 @@
-import { buildDeck, shuffle } from "./cards.js";
+import { buildDeck, normalizeCardTheme, DEFAULT_CARD_THEME, shuffle } from "./cards.js";
 import { ruleSets } from "./engine/rules.js";
 import { calculateScore, isGukjinCard } from "./engine/scoring.js";
 import { POINT_GOLD_UNIT, STARTING_GOLD, settleRoundGold } from "./engine/economy.js";
@@ -49,6 +49,7 @@ export function createSeededRng(seedText = "") {
 
 export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
   let carryOverMultiplier = options.carryOverMultiplier ?? 1;
+  const cardTheme = normalizeCardTheme(options.cardTheme || DEFAULT_CARD_THEME);
   const kiboDetail = options.kiboDetail === "lean" ? "lean" : "full";
   const initialGoldBase =
     Number(options.initialGoldBase) > 0 ? Number(options.initialGoldBase) : STARTING_GOLD;
@@ -59,7 +60,7 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
   const carryLogs = [];
 
   while (true) {
-    const deck = shuffle(buildDeck(), seedRng);
+    const deck = shuffle(buildDeck(cardTheme), seedRng);
     const players = {
       human: emptyPlayer("플레이어"),
       ai: emptyPlayer("AI")
@@ -159,6 +160,7 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
         players: settled.updatedPlayers,
         currentTurn: winnerKey === "human" ? "ai" : "human",
         startingTurnKey: firstTurnInfo.winnerKey,
+        cardTheme,
         initialGoldBase,
         phase: "resolution",
         pendingGoStop: null,
@@ -247,6 +249,7 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
       players,
       currentTurn: firstTurnInfo.winnerKey,
       startingTurnKey: firstTurnInfo.winnerKey,
+      cardTheme,
       initialGoldBase,
       phase,
       pendingGoStop: null,
@@ -729,7 +732,7 @@ export function playTurn(state, cardId) {
     pushCaptured(captured, playedCard);
     newlyCaptured.push(playedCard);
     capturedFromHand.push(playedCard);
-    if (handMatch.eventTag === "TTAK") events.ttak += 1;
+    if (handMatch.eventTag === "PANSSEUL") events.pansseul = (events.pansseul || 0) + 1;
     log.push(`${player.label}: ${playedCard.month}월 싹쓸이 캡처`);
     if (!isLastHandTurn) {
       pendingSteal += 1;

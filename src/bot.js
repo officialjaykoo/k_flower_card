@@ -11,7 +11,8 @@ import {
   chooseGukjinMode,
   chooseMatch,
   calculateScore,
-  scoringFiveCards
+  scoringFiveCards,
+  scoringPiCount
 } from "./gameEngine.js";
 import { COMBO_MONTHS, COMBO_MONTH_SETS, countComboTag, missingComboMonths } from "./engine/combos.js";
 import { STARTING_GOLD } from "./engine/economy.js";
@@ -19,6 +20,8 @@ import { STARTING_GOLD } from "./engine/economy.js";
 const POLICY_HEURISTIC_V3 = "heuristic_v3";
 const GWANG_MONTHS = Object.freeze([1, 3, 8, 11, 12]);
 const GOLD_RISK_THRESHOLD_RATIO = 0.1;
+const GUKJIN_CARD_ID = "I0";
+const GUKJIN_ANALYSIS_BOARD_WEIGHT = 0.5;
 const COMBO_REQUIRED_CATEGORY = Object.freeze({
   redRibbons: "ribbon",
   blueRibbons: "ribbon",
@@ -102,13 +105,152 @@ function botPlaySmart(state, playerKey) {
 function capturedCountByCategory(player, category) {
   if (!player?.captured) return 0;
   if (category === "junk") {
-    return (player.captured.junk || []).reduce((sum, card) => sum + junkPiValue(card), 0);
+    return scoringPiCount(player);
   }
   return (player.captured[category] || []).length;
 }
 
 function scoringFiveCount(player) {
   return scoringFiveCards(player).length;
+}
+
+function otherPlayerKey(playerKey) {
+  return playerKey === "human" ? "ai" : "human";
+}
+
+function hasCardId(cards, cardId) {
+  return (cards || []).some((c) => c?.id === cardId);
+}
+
+function hasGukjinInCaptured(captured) {
+  if (!captured) return false;
+  for (const cat of ["kwang", "five", "ribbon", "junk"]) {
+    if (hasCardId(captured[cat] || [], GUKJIN_CARD_ID)) return true;
+  }
+  return false;
+}
+
+function gatherGukjinZoneFlags(state, playerKey) {
+  const opp = otherPlayerKey(playerKey);
+  const selfPlayer = state.players?.[playerKey];
+  const oppPlayer = state.players?.[opp];
+  return {
+    selfHand: hasCardId(selfPlayer?.hand || [], GUKJIN_CARD_ID),
+    selfCaptured: hasGukjinInCaptured(selfPlayer?.captured),
+    oppCaptured: hasGukjinInCaptured(oppPlayer?.captured),
+    board: hasCardId(state.board || [], GUKJIN_CARD_ID)
+  };
+}
+
+function hasAnyGukjinFlag(flags) {
+  return !!flags && Object.values(flags).some(Boolean);
+}
+
+function forceGukjinModeState(state, modeByPlayer = {}) {
+  const keys = Object.keys(modeByPlayer || {});
+  if (!keys.length) return state;
+  let changed = false;
+  const nextPlayers = { ...state.players };
+  for (const key of keys) {
+    const mode = modeByPlayer[key];
+    if (mode !== "five" && mode !== "junk") continue;
+    const player = state.players?.[key];
+    if (!player) continue;
+    if (player.gukjinMode === mode) continue;
+    nextPlayers[key] = { ...player, gukjinMode: mode };
+    changed = true;
+  }
+  if (!changed) return state;
+  return { ...state, players: nextPlayers };
+}
+
+function buildGukjinScenario(state, playerKey, selfMode, oppMode, zoneFlags) {
+  const opp = otherPlayerKey(playerKey);
+  const scenarioState = forceGukjinModeState(state, { [playerKey]: selfMode, [opp]: oppMode });
+  const selfPlayer = scenarioState.players?.[playerKey];
+  const oppPlayer = scenarioState.players?.[opp];
+  if (!selfPlayer || !oppPlayer) return null;
+
+  let selfPi = capturedCountByCategory(selfPlayer, "junk");
+  let selfFive = scoringFiveCount(selfPlayer);
+  let oppPi = capturedCountByCategory(oppPlayer, "junk");
+  let oppFive = scoringFiveCount(oppPlayer);
+
+  // If gukjin is still in hand/board, include both-mode projected value in analysis.
+  if (zoneFlags?.selfHand) {
+    if (selfMode === "junk") selfPi += 2;
+    else selfFive += 1;
+  }
+  if (zoneFlags?.board) {
+    if (selfMode === "junk") selfPi += 2 * GUKJIN_ANALYSIS_BOARD_WEIGHT;
+    else selfFive += 1 * GUKJIN_ANALYSIS_BOARD_WEIGHT;
+  }
+
+  const selfScoreInfo = calculateScore(selfPlayer, oppPlayer, scenarioState.ruleKey);
+  const oppScoreInfo = calculateScore(oppPlayer, selfPlayer, scenarioState.ruleKey);
+
+  return {
+    selfMode,
+    oppMode,
+    selfPi,
+    selfFive,
+    oppPi,
+    oppFive,
+    myScore: Number(selfScoreInfo?.total || 0),
+    oppScore: Number(oppScoreInfo?.total || 0),
+    mongRiskSelf: selfFive <= 0 && oppFive >= 6,
+    canMongBakSelf: selfFive >= 7 && oppFive <= 0
+  };
+}
+
+function summarizeScenarioRange(scenarios, field) {
+  if (!scenarios.length) return { min: 0, max: 0, avg: 0 };
+  const vals = scenarios.map((s) => Number(s?.[field] || 0));
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  const avg = vals.reduce((sum, v) => sum + v, 0) / vals.length;
+  return { min, max, avg };
+}
+
+function analyzeGukjinBranches(state, playerKey) {
+  const zoneFlags = gatherGukjinZoneFlags(state, playerKey);
+  const enabled = hasAnyGukjinFlag(zoneFlags);
+  if (!enabled) {
+    return {
+      enabled: false,
+      zoneFlags,
+      scenarios: []
+    };
+  }
+
+  const scenarios = [];
+  for (const selfMode of ["five", "junk"]) {
+    for (const oppMode of ["five", "junk"]) {
+      const s = buildGukjinScenario(state, playerKey, selfMode, oppMode, zoneFlags);
+      if (s) scenarios.push(s);
+    }
+  }
+  if (!scenarios.length) {
+    return {
+      enabled: false,
+      zoneFlags,
+      scenarios: []
+    };
+  }
+
+  return {
+    enabled: true,
+    zoneFlags,
+    scenarios,
+    selfPi: summarizeScenarioRange(scenarios, "selfPi"),
+    selfFive: summarizeScenarioRange(scenarios, "selfFive"),
+    oppPi: summarizeScenarioRange(scenarios, "oppPi"),
+    oppFive: summarizeScenarioRange(scenarios, "oppFive"),
+    myScore: summarizeScenarioRange(scenarios, "myScore"),
+    oppScore: summarizeScenarioRange(scenarios, "oppScore"),
+    mongRiskAny: scenarios.some((s) => s.mongRiskSelf),
+    mongBakAny: scenarios.some((s) => s.canMongBakSelf)
+  };
 }
 
 function currentScoreTotal(state, playerKey) {
@@ -180,21 +322,49 @@ function canBankruptOpponentByStop(state, playerKey) {
 }
 
 function analyzeGameContext(state, playerKey) {
-  const opp = playerKey === "human" ? "ai" : "human";
-  const myScore = currentScoreTotal(state, playerKey);
-  const oppScore = currentScoreTotal(state, opp);
+  const opp = otherPlayerKey(playerKey);
+  let myScore = currentScoreTotal(state, playerKey);
+  let oppScore = currentScoreTotal(state, opp);
   const deckCount = state.deck?.length || 0;
   const carryOverMultiplier = state.carryOverMultiplier || 1;
   const oppGoCount = state.players?.[opp]?.goCount || 0;
-  const selfPi = capturedCountByCategory(state.players?.[playerKey], "junk");
-  const oppPi = capturedCountByCategory(state.players?.[opp], "junk");
-  const mong = computeMongRiskProfile(state, playerKey);
+  let selfPi = capturedCountByCategory(state.players?.[playerKey], "junk");
+  let oppPi = capturedCountByCategory(state.players?.[opp], "junk");
+  let mong = computeMongRiskProfile(state, playerKey);
+  let selfFive = mong.selfFive;
+  let oppFive = mong.oppFive;
+  const gukjinBranch = analyzeGukjinBranches(state, playerKey);
+  if (gukjinBranch.enabled) {
+    myScore = gukjinBranch.myScore.avg;
+    oppScore = gukjinBranch.oppScore.avg;
+    selfPi = gukjinBranch.selfPi.avg;
+    oppPi = gukjinBranch.oppPi.avg;
+    // Defensive baseline: assume lower self five / higher opponent five.
+    selfFive = gukjinBranch.selfFive.min;
+    oppFive = gukjinBranch.oppFive.max;
+    const criticalMongRisk = selfFive <= 0 && oppFive >= 6;
+    mong = {
+      ...mong,
+      selfFive,
+      oppFive,
+      danger: Math.max(mong.danger, criticalMongRisk ? 0.85 : 0),
+      stage: criticalMongRisk
+        ? "CRITICAL"
+        : selfFive <= 0 && oppFive >= 5
+        ? "ELEVATED"
+        : mong.stage
+    };
+  } else {
+    mong = { ...mong, selfFive, oppFive };
+  }
   const oppCombo = comboProgress(state.players?.[opp]);
   const oppGwang = capturedCountByCategory(state.players?.[opp], "kwang");
   const isSecond = isSecondMover(state, playerKey);
   const turnSeq = state.turnSeq || 0;
   const defenseOpening = isSecond && turnSeq <= 6;
-  const trailing = myScore < oppScore;
+  const scoreDiff = myScore - oppScore;
+  const trailing = scoreDiff < 0;
+  const volatilityComeback = isSecond && scoreDiff <= -5;
   const opponentNearSeven = oppScore >= 6;
   const opponentNearCombo =
     oppCombo.redRibbons >= 2 ||
@@ -211,7 +381,9 @@ function analyzeGameContext(state, playerKey) {
   else if (oppScore >= 5 && myScore <= 2) mode = "DESPERATE_DEFENSE";
   else if (myScore >= 7 && oppScore <= 3 && deckCount >= 8) mode = "AGGRESSIVE";
   else if (deckCount <= 8) mode = "ENDGAME";
-  if (!defenseOpening && mong.stage === "CRITICAL" && myScore <= oppScore + 2) mode = "DESPERATE_DEFENSE";
+  if (!defenseOpening && (mong.stage === "CRITICAL" || gukjinBranch.mongRiskAny) && myScore <= oppScore + 2) {
+    mode = "DESPERATE_DEFENSE";
+  }
   let blockWeight = 1.0;
   let piWeight = 1.0;
   let pukPenalty = 1.0;
@@ -254,15 +426,18 @@ function analyzeGameContext(state, playerKey) {
     opponentNearSeven,
     myScore,
     oppScore,
+    scoreDiff,
     deckCount,
     selfPi,
     oppPi,
-    selfFive: mong.selfFive,
-    oppFive: mong.oppFive,
+    selfFive,
+    oppFive,
     mongDanger: mong.danger,
     mongStage: mong.stage,
+    gukjinBranch,
     oppGoCount,
     carryOverMultiplier,
+    volatilityComeback,
     survivalMode,
     endgameSprint,
     blockWeight,
@@ -869,9 +1044,9 @@ function rankHandCards(state, playerKey) {
   const jokboThreat = checkOpponentJokboProgress(state, playerKey);
   const blockMonths = blockingMonthsAgainst(oppPlayer, player);
   const blockUrgency = blockingUrgencyByMonth(oppPlayer, player);
-  const oppPi = capturedCountByCategory(oppPlayer, "junk");
+  const oppPi = Number(ctx.oppPi ?? capturedCountByCategory(oppPlayer, "junk"));
   const nextThreat = nextTurnThreatScore(state, playerKey);
-  const selfPi = capturedCountByCategory(player, "junk");
+  const selfPi = Number(ctx.selfPi ?? capturedCountByCategory(player, "junk"));
   const deckCount = state.deck?.length || 0;
   const lateGame = deckCount <= 10;
   const mongDanger = ctx.mongDanger || 0;
@@ -997,8 +1172,14 @@ function rankHandCards(state, playerKey) {
     // Jokbo interceptor: hard-holding for near-certain punish lines.
     const releasePunishProb = estimateReleasePunishProb(state, playerKey, card.month, jokboThreat, ctx);
     const hardHold = matches.length === 0 && releasePunishProb >= 0.8;
-    if (hardHold) score -= 80 * dyn.hold;
-    else if (matches.length === 0 && releasePunishProb >= 0.65) score -= 8.5 * dyn.hold;
+    if (hardHold) {
+      const hardHoldPenalty =
+        releasePunishProb >= 0.92 ? 120 : releasePunishProb >= 0.86 ? 95 : 80;
+      score -= hardHoldPenalty * dyn.hold;
+    } else if (matches.length === 0 && releasePunishProb >= 0.65) {
+      const softHoldPenalty = 50 + Math.max(0, releasePunishProb - 0.65) * 70;
+      score -= softHoldPenalty * dyn.hold;
+    }
 
     if (ctx.oppGoCount > 0 && matches.length === 0) score -= 2.2;
 
@@ -1069,8 +1250,8 @@ function chooseMatchHeuristic(state, playerKey) {
   const mongDanger = ctx.mongDanger || 0;
   const midgameBlockFocus = !!ctx.midgameBlockFocus;
   const defenseOpening = !!ctx.defenseOpening;
-  const oppPi = capturedCountByCategory(state.players?.[opp], "junk");
-  const selfPi = capturedCountByCategory(state.players?.[playerKey], "junk");
+  const oppPi = Number(ctx.oppPi ?? capturedCountByCategory(state.players?.[opp], "junk"));
+  const selfPi = Number(ctx.selfPi ?? capturedCountByCategory(state.players?.[playerKey], "junk"));
   const nextThreat = nextTurnThreatScore(state, playerKey);
   const candidates = (state.board || []).filter((c) => ids.includes(c.id));
   if (!candidates.length) return null;
@@ -1101,8 +1282,22 @@ function chooseMatchHeuristic(state, playerKey) {
 }
 
 function chooseGukjinHeuristic(state, playerKey) {
-  const fiveCount = state.players?.[playerKey]?.captured?.five?.length || 0;
-  return fiveCount >= 3 ? "five" : "junk";
+  const branch = analyzeGukjinBranches(state, playerKey);
+  if (!branch.enabled || !branch.scenarios.length) return "junk";
+
+  const asFive = branch.scenarios.filter((s) => s.selfMode === "five");
+  const asJunk = branch.scenarios.filter((s) => s.selfMode === "junk");
+
+  const mongBakOpportunityAsFive = asFive.some((s) => s.canMongBakSelf);
+  const mongBakRiskAsFive = asFive.some((s) => s.mongRiskSelf);
+  const mongBakRiskIfJunk = asJunk.some((s) => s.mongRiskSelf);
+
+  // Requested rule:
+  // 1) choose five when mong-bak risk exists
+  // 2) choose five when mong-bak attack chance exists
+  // 3) otherwise choose junk (double-pi value)
+  if (mongBakOpportunityAsFive || mongBakRiskAsFive || mongBakRiskIfJunk) return "five";
+  return "junk";
 }
 
 function shouldPresidentStop() {
@@ -1123,8 +1318,8 @@ function shouldGo(state, playerKey) {
   const oppNextMatchCount = matchableMonthCountForPlayer(state, opp);
   const oppNextTurnThreat = nextTurnThreatScore(state, playerKey);
   const carry = state.carryOverMultiplier || 1;
-  const selfPi = capturedCountByCategory(player, "junk");
-  const oppPi = capturedCountByCategory(state.players?.[opp], "junk");
+  const selfPi = Number(ctx.selfPi ?? capturedCountByCategory(player, "junk"));
+  const oppPi = Number(ctx.oppPi ?? capturedCountByCategory(state.players?.[opp], "junk"));
   const selfJokboEV = estimateJokboExpectedPotential(state, playerKey, opp);
   const oppJokboEV = estimateJokboExpectedPotential(state, opp, playerKey);
   const selfFive = ctx.selfFive || 0;
@@ -1197,7 +1392,7 @@ function shouldGo(state, playerKey) {
   const myGainPotential =
     Math.max(0, myScore - 6) * 0.12 +
     (10 - Math.min(10, ctx.deckCount)) * 0.02 +
-    (capturedCountByCategory(state.players?.[playerKey], "junk") >= 9 ? 0.2 : 0) +
+    (selfPi >= 9 ? 0.2 : 0) +
     selfJokboEV.total * 0.34 +
     selfJokboEV.oneAwayCount * 0.12;
   const oppGainPotential =
@@ -1210,6 +1405,7 @@ function shouldGo(state, playerKey) {
   let goMargin = isSecond ? 0.28 : 0.12;
   if (desperateGo) goMargin -= 0.18;
   if (conservativeGo) goMargin += 0.22;
+  if (carry >= 2) goMargin *= 2;
   goMargin = Math.max(-0.1, goMargin);
   if (!strongLead && myGainPotential < oppGainPotential + goMargin) return false;
   if (!strongLead && deckCount <= 8 && selfJokboEV.total < 0.45 && !desperateGo) return false;
@@ -1261,6 +1457,11 @@ function shouldBomb(state, playerKey, bombMonths) {
   if (ctx.defenseOpening) {
     // Requested: opening-second mode allows bomb only on high immediate impact.
     return impact.highImpact;
+  }
+  if (ctx.volatilityComeback) {
+    if (impact.highImpact) return true;
+    if (impact.immediateGain >= 4) return true;
+    return bestGain >= 0;
   }
   if (ctx.nagariDelayMode && !impact.highImpact && impact.immediateGain < 6) return false;
   return bestGain >= 1;
@@ -1382,6 +1583,10 @@ function decideShaking(state, playerKey, shakingMonths) {
     const monthTieBreak = monthStrategicPriority(month) * 0.25;
     let score = immediateGain * 1.3 + comboGain * 1.15 + tempoPressure - riskPenalty - slowPenalty + monthTieBreak;
     if (trailingBy >= 3) score += 0.35;
+    if (ctx.volatilityComeback) {
+      score += 0.45;
+      if (impact.highImpact) score += 0.22;
+    }
     if (score > best.score) {
       best = {
         allow: false,
@@ -1404,6 +1609,7 @@ function decideShaking(state, playerKey, shakingMonths) {
   if (piPressureWindow && aheadOrEven) threshold += 0.2;
   if (piFinishWindow && aheadOrEven) threshold += 0.35;
   if (oppPi <= 5 && aheadOrEven) threshold += 0.15;
+  if (ctx.volatilityComeback) threshold -= 0.3;
   if (best.month != null && firstTurnPiPlan.active && firstTurnPiPlan.months.has(best.month)) threshold -= 0.15;
 
   // Keep shaking possible, but strongly suppress it while pi closing is the top priority.
@@ -1425,6 +1631,10 @@ function decideShaking(state, playerKey, shakingMonths) {
   }
   if (ctx.nagariDelayMode && !best.highImpact && best.score < threshold + 0.35) {
     return { ...best, allow: false };
+  }
+  if (ctx.volatilityComeback && best.month != null) {
+    const comebackThreshold = threshold - (best.highImpact ? 0.18 : 0.08);
+    return { ...best, allow: best.score >= comebackThreshold };
   }
   return { ...best, allow: best.score >= threshold };
 }

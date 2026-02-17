@@ -77,11 +77,27 @@ const cardCatalog = [
   }
 ];
 
-export function buildDeck() {
+export const DEFAULT_CARD_THEME = "original";
+export const CARD_THEMES = Object.freeze(["original", "k-flower"]);
+
+export function normalizeCardTheme(theme) {
+  return CARD_THEMES.includes(theme) ? theme : DEFAULT_CARD_THEME;
+}
+
+export function buildCardAssetPath(cardId, theme = DEFAULT_CARD_THEME) {
+  return `/cards/${normalizeCardTheme(theme)}/${cardId}.svg`;
+}
+
+export function buildCardUiAssetPath(filename, theme = DEFAULT_CARD_THEME) {
+  return `/cards/${normalizeCardTheme(theme)}/${filename}`;
+}
+
+export function buildDeck(theme = DEFAULT_CARD_THEME) {
+  const cardTheme = normalizeCardTheme(theme);
   return cardCatalog.map((card) => ({
     ...card,
     id: card.cardID,
-    asset: `/cards/${card.cardID}.svg`
+    asset: buildCardAssetPath(card.cardID, cardTheme)
   }));
 }
 

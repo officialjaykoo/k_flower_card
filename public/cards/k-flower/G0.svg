@@ -1,0 +1,36 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="28mm" height="42.4mm"
+     viewBox="0 0 28 42.4">
+
+  <defs>
+    <style>
+      .label { font-family: "Noto Sans KR", sans-serif; font-weight: 700; font-size:5pt; fill:#FAF9F6; }
+      .month { font-family: "Noto Sans KR", sans-serif; font-weight: 700; font-size:6pt; fill:#FAF9F6; }
+    </style>
+
+    <clipPath id="clip">
+      <rect x="0" y="0" width="28" height="42.4" rx="1.6"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#clip)">
+    <rect width="28" height="42.4" rx="1.6" fill="#FFFFFF"/>
+
+    <rect x="0" y="35.2" width="28" height="7.2" fill="#002366"/>
+    <text x="14" y="38.45" text-anchor="middle"
+          dominant-baseline="middle" class="label">Animal</text>
+
+    <circle cx="23" cy="5" r="4" fill="#C40000"/>
+    <text x="23" y="5" text-anchor="middle" dominant-baseline="middle" class="month">7</text>
+  </g>
+
+  <rect x="0.6" y="0.6" width="26.8" height="41.2"
+        rx="1.4" fill="none"
+        stroke="#002366" stroke-width="1.2"/>
+
+  <rect x="2" y="2" width="24" height="38.4"
+        rx="0.8" fill="none"
+        stroke="#000" stroke-opacity="0.15"
+        stroke-dasharray="0.6 0.6" stroke-width="0.2"/>
+</svg>

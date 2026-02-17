@@ -51,7 +51,7 @@ export function emptyPlayer(label) {
     declaredStop: false,
     score: 0,
     events: {
-      ttak: 0,
+      pansseul: 0,
       ppuk: 0,
       jjob: 0,
       shaking: 0,

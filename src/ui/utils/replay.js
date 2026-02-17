@@ -66,7 +66,7 @@ export function formatActionText(action, t = null) {
 export function formatEventsText(events) {
   if (!events) return "-";
   return [
-    `ttak:${events.ttak || 0}`,
+    `pansseul:${events.pansseul || 0}`,
     `ppuk:${events.ppuk || 0}`,
     `jjob:${events.jjob || 0}`,
     `ddadak:${events.ddadak || 0}`,

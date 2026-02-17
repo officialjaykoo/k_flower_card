@@ -101,7 +101,7 @@ export default function GameOverlays({
       {state.phase === "select-match" &&
         state.pendingMatch?.playerKey &&
         participantType(ui, state.pendingMatch.playerKey) === "human" && (
-          <div className="result-overlay">
+          <div className="result-overlay result-overlay-match-top">
             <div className="panel result-panel">
               <div className="section-title">{t("overlay.selectCard.title")}</div>
               <div className="meta">{state.pendingMatch?.message || t("overlay.selectCard.defaultMessage")}</div>
@@ -202,4 +202,3 @@ export default function GameOverlays({
     </>
   );
 }
-
