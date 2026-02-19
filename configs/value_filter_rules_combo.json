@@ -1,0 +1,22 @@
+{
+  "min_candidate_count": 2,
+  "keep_if_action_type_in": [
+    "declare_bomb"
+  ],
+  "keep_if_trigger_prefixes": [
+    "specialEvent",
+    "bomb",
+    "riskShift",
+    "combo"
+  ],
+  "keep_if_trigger_names": [
+    "gwangThreatShift",
+    "comboProgressStep",
+    "comboComplete",
+    "comboThreatCleared",
+    "comboHoldGain",
+    "terminalContext",
+    "goStopOption",
+    "shakingYesOption"
+  ]
+}

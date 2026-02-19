@@ -23,6 +23,53 @@ except Exception:
 
 SIDE_MY = "mySide"
 SIDE_YOUR = "yourSide"
+DEFAULT_VALUE_FILTER_RULES_PATH = "configs/value_filter_rules.json"
+DEFAULT_VALUE_FILTER_RULES = {
+    "min_candidate_count": 2,
+    "keep_if_action_type_in": ["declare_bomb"],
+    "keep_if_trigger_prefixes": ["specialEvent", "bomb", "riskShift"],
+    "keep_if_trigger_names": ["comboThreatEnter", "terminalContext", "goStopOption", "shakingYesOption"],
+}
+DEFAULT_VALUE_FILTER_BRANCH = "default"
+VALUE_FILTER_BRANCH_RULES = {
+    "default": {},
+    "bak": {
+        "min_candidate_count": 2,
+        "keep_if_action_type_in": ["declare_bomb"],
+        "keep_if_trigger_prefixes": ["specialEvent", "bomb", "riskShift"],
+        "keep_if_trigger_names": ["comboThreatEnter", "terminalContext", "goStopOption", "shakingYesOption"],
+    },
+    "combo": {
+        "min_candidate_count": 2,
+        "keep_if_action_type_in": ["declare_bomb"],
+        "keep_if_trigger_prefixes": ["specialEvent", "bomb", "riskShift", "combo"],
+        "keep_if_trigger_names": [
+            "gwangThreatShift",
+            "comboProgressStep",
+            "comboComplete",
+            "comboThreatCleared",
+            "comboHoldGain",
+            "terminalContext",
+            "goStopOption",
+            "shakingYesOption",
+        ],
+    },
+    "meta": {
+        "min_candidate_count": 2,
+        "keep_if_action_type_in": ["declare_bomb"],
+        "keep_if_trigger_prefixes": ["specialEvent", "bomb", "riskShift", "meta"],
+        "keep_if_trigger_names": [
+            "terminalContext",
+            "goStopOption",
+            "shakingYesOption",
+            "comboThreatEnter",
+            "metaHighMultiplierGoStop",
+            "metaTerminalGoStop",
+            "metaHighMultiplierWindow",
+            "metaTerminalWindow",
+        ],
+    },
+}
 
 
 def expand_inputs(patterns):
@@ -58,6 +105,113 @@ def action_alias(action):
     return aliases.get(action, action)
 
 
+def _to_int_or_none(value):
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _as_str_list(value):
+    if not isinstance(value, list):
+        return []
+    out = []
+    for v in value:
+        s = str(v or "").strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def _dedup_keep_order(items):
+    seen = set()
+    out = []
+    for v in items:
+        s = str(v or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _normalize_filter_branch_name(name):
+    raw = str(name or DEFAULT_VALUE_FILTER_BRANCH).strip().lower()
+    if raw in ("", "base"):
+        return "default"
+    if raw not in ("default", "bak", "combo", "meta", "auto"):
+        raise RuntimeError(f"Unsupported --filter-branch: {name}")
+    return raw
+
+
+def _merge_filter_rules(base_rules, branch_rules):
+    base = _normalize_value_filter_rules(base_rules)
+    if not isinstance(branch_rules, dict) or not branch_rules:
+        return base
+    branch = _normalize_value_filter_rules(branch_rules)
+    merged = dict(base)
+    if "min_candidate_count" in branch:
+        try:
+            merged["min_candidate_count"] = max(1, int(branch.get("min_candidate_count") or merged["min_candidate_count"]))
+        except Exception:
+            pass
+    merged["keep_if_action_type_in"] = _dedup_keep_order(
+        _as_str_list(base.get("keep_if_action_type_in")) + _as_str_list(branch.get("keep_if_action_type_in"))
+    )
+    merged["keep_if_trigger_prefixes"] = _dedup_keep_order(
+        _as_str_list(base.get("keep_if_trigger_prefixes")) + _as_str_list(branch.get("keep_if_trigger_prefixes"))
+    )
+    merged["keep_if_trigger_names"] = _dedup_keep_order(
+        _as_str_list(base.get("keep_if_trigger_names")) + _as_str_list(branch.get("keep_if_trigger_names"))
+    )
+    return _normalize_value_filter_rules(merged)
+
+
+def _branch_for_line(line, requested_branch):
+    branch = _normalize_filter_branch_name(requested_branch)
+    if branch != "auto":
+        return branch
+    sim = str((line or {}).get("simulator") or "").strip().lower()
+    if "bak_bundle" in sim:
+        return "bak"
+    if "combo_bundle" in sim:
+        return "combo"
+    if "meta_bundle" in sim:
+        return "meta"
+    return "default"
+
+
+def _normalize_value_filter_rules(raw):
+    rules = dict(DEFAULT_VALUE_FILTER_RULES)
+    if isinstance(raw, dict):
+        min_cc = _to_int_or_none(raw.get("min_candidate_count"))
+        if min_cc is not None:
+            rules["min_candidate_count"] = max(1, min_cc)
+        keep_actions = _as_str_list(raw.get("keep_if_action_type_in"))
+        if keep_actions:
+            rules["keep_if_action_type_in"] = keep_actions
+        keep_prefixes = _as_str_list(raw.get("keep_if_trigger_prefixes"))
+        if keep_prefixes:
+            rules["keep_if_trigger_prefixes"] = keep_prefixes
+        keep_names = _as_str_list(raw.get("keep_if_trigger_names"))
+        if keep_names:
+            rules["keep_if_trigger_names"] = keep_names
+    return rules
+
+
+def load_value_filter_rules(path):
+    p = str(path or "").strip()
+    if not p:
+        return dict(DEFAULT_VALUE_FILTER_RULES), None
+    if not os.path.exists(p):
+        return dict(DEFAULT_VALUE_FILTER_RULES), None
+    with open(p, "r", encoding="utf-8-sig") as f:
+        raw = json.load(f)
+    return _normalize_value_filter_rules(raw), os.path.abspath(p)
+
+
 def choose_label(trace):
     dt = trace.get("dt")
     if dt == "play":
@@ -77,11 +231,16 @@ def choose_label(trace):
     return None, None
 
 
-def is_value_exception_trace(trace):
+def is_value_exception_trace(trace, filter_rules):
     if not isinstance(trace, dict):
         return False
+    rules = _normalize_value_filter_rules(filter_rules)
+    action_set = set(_as_str_list(rules.get("keep_if_action_type_in")))
+    prefix_list = _as_str_list(rules.get("keep_if_trigger_prefixes"))
+    name_set = set(_as_str_list(rules.get("keep_if_trigger_names")))
+
     action_type = str(trace.get("at") or "")
-    if action_type == "declare_bomb":
+    if action_type in action_set:
         return True
     tg = trace.get("tg")
     if not isinstance(tg, list):
@@ -90,21 +249,22 @@ def is_value_exception_trace(trace):
         name = str(raw or "")
         if not name:
             continue
-        if name.startswith("specialEvent"):
+        if name in name_set:
             return True
-        if name.startswith("bomb"):
-            return True
-        if name.startswith("riskShift"):
-            return True
-        if name == "comboThreatEnter":
-            return True
-        if name == "terminalContext":
-            return True
-        if name == "goStopOption":
-            return True
-        if name == "shakingYesOption":
+        if any(name.startswith(prefix) for prefix in prefix_list):
             return True
     return False
+
+
+def trace_passes_value_filter(trace, filter_rules):
+    rules = _normalize_value_filter_rules(filter_rules)
+    min_cc = int(rules.get("min_candidate_count") or 1)
+    cc = _to_int_or_none((trace or {}).get("cc"))
+    if cc is None:
+        return True
+    if cc >= min_cc:
+        return True
+    return is_value_exception_trace(trace, rules)
 
 
 def extract_numeric(trace):
@@ -193,8 +353,17 @@ def target_gold(line, actor, gold_per_point, target_mode="gold"):
     return point_diff * float(gold_per_point)
 
 
-def iter_samples(paths, gold_per_point, target_mode="gold", max_samples=None):
+def iter_samples(
+    paths,
+    gold_per_point,
+    target_mode="gold",
+    max_samples=None,
+    filter_rules=None,
+    filter_branch=DEFAULT_VALUE_FILTER_BRANCH,
+):
     yielded = 0
+    base_rules = _normalize_value_filter_rules(filter_rules)
+    branch_rule_cache = {}
     for path in paths:
         with open(path, "r", encoding="utf-8") as f:
             for line_raw in f:
@@ -202,13 +371,15 @@ def iter_samples(paths, gold_per_point, target_mode="gold", max_samples=None):
                 if not line_raw:
                     continue
                 line = json.loads(line_raw)
+                line_branch = _branch_for_line(line, filter_branch)
+                active_rules = branch_rule_cache.get(line_branch)
+                if active_rules is None:
+                    branch_rules = VALUE_FILTER_BRANCH_RULES.get(line_branch, {})
+                    active_rules = _merge_filter_rules(base_rules, branch_rules)
+                    branch_rule_cache[line_branch] = active_rules
                 for trace in line.get("decision_trace") or []:
-                    cc = trace.get("cc")
-                    try:
-                        if cc is not None and int(cc) <= 1 and not is_value_exception_trace(trace):
-                            continue
-                    except Exception:
-                        pass
+                    if not trace_passes_value_filter(trace, active_rules):
+                        continue
                     actor = trace.get("a")
                     if actor not in (SIDE_MY, SIDE_YOUR):
                         continue
@@ -262,12 +433,24 @@ def input_manifest(paths):
     return out
 
 
-def scan_dataset_stats(paths, gold_per_point, target_mode, max_samples, valid_ratio, seed, numeric_keys):
+def scan_dataset_stats(
+    paths,
+    gold_per_point,
+    target_mode,
+    max_samples,
+    valid_ratio,
+    seed,
+    numeric_keys,
+    filter_rules,
+    filter_branch,
+):
     numeric_max_abs = {k: 1.0 for k in numeric_keys}
     total = 0
     train_count = 0
     valid_count = 0
-    for s in iter_samples(paths, gold_per_point, target_mode, max_samples):
+    for s in iter_samples(
+        paths, gold_per_point, target_mode, max_samples, filter_rules, filter_branch
+    ):
         is_valid = split_is_valid(total, valid_ratio, seed)
         if is_valid:
             valid_count += 1
@@ -296,8 +479,12 @@ def iter_sparse_source_samples(
     valid_ratio,
     seed,
     subset,
+    filter_rules,
+    filter_branch,
 ):
-    for idx, sample in enumerate(iter_samples(paths, gold_per_point, target_mode, max_samples)):
+    for idx, sample in enumerate(
+        iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules, filter_branch)
+    ):
         is_valid = split_is_valid(idx, valid_ratio, seed)
         split = "valid" if is_valid else "train"
         if subset is not None and split != subset:
@@ -391,11 +578,15 @@ def build_feature_cache_jsonl(
     numeric_scale,
     valid_ratio,
     seed,
+    filter_rules,
+    filter_branch,
 ):
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     counts = {"samples_total": 0, "samples_train": 0, "samples_valid": 0}
     with open(cache_path, "w", encoding="utf-8") as f:
-        for idx, sample in enumerate(iter_samples(paths, gold_per_point, target_mode, max_samples)):
+        for idx, sample in enumerate(
+            iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules, filter_branch)
+        ):
             is_valid = split_is_valid(idx, valid_ratio, seed)
             split_code = "v" if is_valid else "t"
             idxs, vals = sparse_features(sample, dim, numeric_scale)
@@ -425,6 +616,8 @@ def build_feature_cache_lmdb(
     valid_ratio,
     seed,
     map_size_bytes,
+    filter_rules,
+    filter_branch,
 ):
     _ensure_lmdb_available()
     os.makedirs(cache_path, exist_ok=True)
@@ -442,7 +635,9 @@ def build_feature_cache_lmdb(
     try:
         txn = env.begin(write=True)
         try:
-            for idx, sample in enumerate(iter_samples(paths, gold_per_point, target_mode, max_samples)):
+            for idx, sample in enumerate(
+                iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules, filter_branch)
+            ):
                 is_valid = split_is_valid(idx, valid_ratio, seed)
                 split_code = "v" if is_valid else "t"
                 idxs, vals = sparse_features(sample, dim, numeric_scale)
@@ -481,6 +676,8 @@ def build_feature_cache(
     valid_ratio,
     seed,
     lmdb_map_size_bytes,
+    filter_rules,
+    filter_branch,
 ):
     if cache_backend == "lmdb":
         return build_feature_cache_lmdb(
@@ -494,6 +691,8 @@ def build_feature_cache(
             valid_ratio,
             seed,
             lmdb_map_size_bytes,
+            filter_rules,
+            filter_branch,
         )
     return build_feature_cache_jsonl(
         cache_path,
@@ -505,6 +704,8 @@ def build_feature_cache(
         numeric_scale,
         valid_ratio,
         seed,
+        filter_rules,
+        filter_branch,
     )
 
 
@@ -840,6 +1041,17 @@ def main():
         default=4096,
         help="Shuffle buffer size for streaming training (0/1 disables shuffle).",
     )
+    parser.add_argument(
+        "--filter-rules",
+        default=DEFAULT_VALUE_FILTER_RULES_PATH,
+        help=f"Value filter rules JSON path (default: {DEFAULT_VALUE_FILTER_RULES_PATH}).",
+    )
+    parser.add_argument(
+        "--filter-branch",
+        choices=["default", "bak", "combo", "meta", "auto"],
+        default=DEFAULT_VALUE_FILTER_BRANCH,
+        help="Value filter branch profile for cc<2 exception handling.",
+    )
     args = parser.parse_args()
 
     if not (0.0 <= float(args.valid_ratio) <= 1.0):
@@ -850,6 +1062,8 @@ def main():
         _ensure_lmdb_available()
 
     input_paths = expand_inputs(args.input)
+    filter_rules, filter_rules_path = load_value_filter_rules(args.filter_rules)
+    filter_branch = _normalize_filter_branch_name(args.filter_branch)
     keys = [
         "deck_count",
         "hand_self",
@@ -886,6 +1100,9 @@ def main():
         "valid_ratio": float(args.valid_ratio),
         "seed": int(args.seed),
         "lmdb_map_size_bytes": lmdb_map_size_bytes if args.cache_backend == "lmdb" else None,
+        "filter_rules": filter_rules,
+        "filter_branch": filter_branch,
+        "filter_branch_rules": VALUE_FILTER_BRANCH_RULES if filter_branch == "auto" else VALUE_FILTER_BRANCH_RULES.get(filter_branch, {}),
     }
     numeric_scale = None
     counts = None
@@ -909,6 +1126,8 @@ def main():
             args.valid_ratio,
             args.seed,
             keys,
+            filter_rules,
+            filter_branch,
         )
         if int(stats["samples_total"]) <= 0:
             raise RuntimeError("No trainable value samples found.")
@@ -932,6 +1151,8 @@ def main():
                 args.valid_ratio,
                 args.seed,
                 lmdb_map_size_bytes,
+                filter_rules,
+                filter_branch,
             )
             counts = {
                 "samples_total": int(built_counts["samples_total"]),
@@ -973,6 +1194,8 @@ def main():
                 args.valid_ratio,
                 args.seed,
                 "train",
+                filter_rules,
+                filter_branch,
             )
         return iter_with_shuffle_buffer(base, shuffle_buf, shuffle_seed)
 
@@ -989,6 +1212,8 @@ def main():
             args.valid_ratio,
             args.seed,
             "train",
+            filter_rules,
+            filter_branch,
         )
 
     def make_valid_eval_iter():
@@ -1004,6 +1229,8 @@ def main():
             args.valid_ratio,
             args.seed,
             "valid",
+            filter_rules,
+            filter_branch,
         )
 
     if args.device == "cpu":
@@ -1093,6 +1320,10 @@ def main():
             "cache_used": bool(cache_ready and cache_path),
             "cache_backend": args.cache_backend,
             "lmdb_map_size_gb": args.lmdb_map_size_gb if args.cache_backend == "lmdb" else None,
+            "filter_rules": filter_rules,
+            "filter_rules_path": filter_rules_path,
+            "filter_branch": filter_branch,
+            "filter_branch_rules": VALUE_FILTER_BRANCH_RULES if filter_branch == "auto" else VALUE_FILTER_BRANCH_RULES.get(filter_branch, {}),
         },
     }
 

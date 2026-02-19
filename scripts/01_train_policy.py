@@ -12,6 +12,11 @@ try:
 except Exception:
     lmdb = None
 
+DEFAULT_POLICY_FILTER_RULES_PATH = "configs/policy_filter_rules.json"
+DEFAULT_POLICY_FILTER_RULES = {
+    "min_candidate_count": 2,
+}
+
 
 def expand_inputs(patterns):
     paths = []
@@ -56,6 +61,43 @@ def action_alias(action):
         "choose_president_hold": "president_hold",
     }
     return aliases.get(action, action)
+
+
+def _to_int_or_none(value):
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _normalize_policy_filter_rules(raw):
+    rules = dict(DEFAULT_POLICY_FILTER_RULES)
+    if isinstance(raw, dict):
+        min_cc = _to_int_or_none(raw.get("min_candidate_count"))
+        if min_cc is not None:
+            rules["min_candidate_count"] = max(1, min_cc)
+    return rules
+
+
+def load_policy_filter_rules(path):
+    p = str(path or "").strip()
+    if not p:
+        return dict(DEFAULT_POLICY_FILTER_RULES), None
+    if not os.path.exists(p):
+        return dict(DEFAULT_POLICY_FILTER_RULES), None
+    with open(p, "r", encoding="utf-8-sig") as f:
+        raw = json.load(f)
+    return _normalize_policy_filter_rules(raw), os.path.abspath(p)
+
+
+def trace_passes_policy_filter(trace, filter_rules):
+    min_cc = int((filter_rules or {}).get("min_candidate_count") or 1)
+    cc = _to_int_or_none((trace or {}).get("cc"))
+    if cc is None:
+        return True
+    return cc >= min_cc
 
 
 def context_key(trace, decision_type):
@@ -172,8 +214,9 @@ def extract_sample(trace):
     return None
 
 
-def iter_samples(paths, max_samples=None):
+def iter_samples(paths, max_samples=None, filter_rules=None):
     yielded = 0
+    active_rules = _normalize_policy_filter_rules(filter_rules)
     for path in paths:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -182,12 +225,8 @@ def iter_samples(paths, max_samples=None):
                     continue
                 game = json.loads(line)
                 for trace in game.get("decision_trace") or []:
-                    cc = trace.get("cc")
-                    try:
-                        if cc is not None and int(cc) <= 1:
-                            continue
-                    except Exception:
-                        pass
+                    if not trace_passes_policy_filter(trace, active_rules):
+                        continue
                     sample = extract_sample(trace)
                     if sample is None:
                         continue
@@ -237,11 +276,11 @@ def _sample_key(index):
     return f"{index:09d}".encode("ascii")
 
 
-def build_sample_cache_jsonl(cache_path, input_paths, max_samples):
+def build_sample_cache_jsonl(cache_path, input_paths, max_samples, filter_rules):
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     total = 0
     with open(cache_path, "w", encoding="utf-8") as out:
-        for sample in iter_samples(input_paths, max_samples):
+        for sample in iter_samples(input_paths, max_samples, filter_rules):
             out.write(json.dumps(sample, ensure_ascii=False, separators=(",", ":")) + "\n")
             total += 1
     if total <= 0:
@@ -249,7 +288,7 @@ def build_sample_cache_jsonl(cache_path, input_paths, max_samples):
     return {"samples_total": int(total)}
 
 
-def build_sample_cache_lmdb(cache_path, input_paths, max_samples, map_size_bytes):
+def build_sample_cache_lmdb(cache_path, input_paths, max_samples, map_size_bytes, filter_rules):
     _ensure_lmdb_available()
     os.makedirs(cache_path, exist_ok=True)
     env = lmdb.open(
@@ -266,7 +305,7 @@ def build_sample_cache_lmdb(cache_path, input_paths, max_samples, map_size_bytes
     total = 0
     txn = env.begin(write=True)
     try:
-        for sample in iter_samples(input_paths, max_samples):
+        for sample in iter_samples(input_paths, max_samples, filter_rules):
             blob = json.dumps(sample, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             txn.put(_sample_key(total), blob)
             total += 1
@@ -283,10 +322,23 @@ def build_sample_cache_lmdb(cache_path, input_paths, max_samples, map_size_bytes
     return {"samples_total": int(total)}
 
 
-def build_sample_cache(cache_backend, cache_path, input_paths, max_samples, lmdb_map_size_bytes):
+def build_sample_cache(
+    cache_backend,
+    cache_path,
+    input_paths,
+    max_samples,
+    lmdb_map_size_bytes,
+    filter_rules,
+):
     if cache_backend == "lmdb":
-        return build_sample_cache_lmdb(cache_path, input_paths, max_samples, lmdb_map_size_bytes)
-    return build_sample_cache_jsonl(cache_path, input_paths, max_samples)
+        return build_sample_cache_lmdb(
+            cache_path,
+            input_paths,
+            max_samples,
+            lmdb_map_size_bytes,
+            filter_rules,
+        )
+    return build_sample_cache_jsonl(cache_path, input_paths, max_samples, filter_rules)
 
 
 def iter_cached_samples_jsonl(cache_path):
@@ -432,6 +484,11 @@ def main():
         default=2.0,
         help="LMDB map size in GB (used only when --cache-backend lmdb).",
     )
+    parser.add_argument(
+        "--filter-rules",
+        default=DEFAULT_POLICY_FILTER_RULES_PATH,
+        help=f"Policy filter rules JSON path (default: {DEFAULT_POLICY_FILTER_RULES_PATH}).",
+    )
     args = parser.parse_args()
 
     if float(args.lmdb_map_size_gb) <= 0:
@@ -441,11 +498,13 @@ def main():
 
     input_paths = expand_inputs(args.input)
     manifest = input_manifest(input_paths)
+    filter_rules, filter_rules_path = load_policy_filter_rules(args.filter_rules)
     cache_path = _resolve_sample_cache_path(args.output, args.sample_cache, args.cache_backend)
     cache_config = {
         "format_version": "policy_sample_cache_v1",
         "cache_backend": args.cache_backend,
         "max_samples": args.max_samples,
+        "filter_rules": filter_rules,
     }
 
     cache_ready = False
@@ -469,6 +528,7 @@ def main():
             input_paths,
             args.max_samples,
             lmdb_map_size_bytes,
+            filter_rules,
         )
         meta = {
             "format_version": "policy_sample_cache_v1",
@@ -484,7 +544,7 @@ def main():
     def sample_iter_factory():
         if cache_ready and cache_path:
             return iter_cached_samples(args.cache_backend, cache_path)
-        return iter_samples(input_paths, args.max_samples)
+        return iter_samples(input_paths, args.max_samples, filter_rules)
 
     model = train_model(sample_iter_factory(), alpha=args.alpha)
 
@@ -517,6 +577,8 @@ def main():
         "cache_enabled": bool(cache_path),
         "cache_used": bool(cache_ready and cache_path),
         "cache_backend": args.cache_backend,
+        "filter_rules": filter_rules,
+        "filter_rules_path": filter_rules_path,
     }
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)

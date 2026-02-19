@@ -159,6 +159,11 @@ def main():
     my_side_gold_sum = 0.0
     your_side_gold_sum = 0.0
     my_side_gold_delta_sum = 0.0
+    my_side_bankrupt_inflicted = 0
+    my_side_bankrupt_suffered = 0
+    your_side_bankrupt_inflicted = 0
+    your_side_bankrupt_suffered = 0
+    bankrupt_resets = 0
     first1000_my_side_gold_delta_sum = 0.0
     first1000_count = 0
     train_policy_shards = []
@@ -203,6 +208,14 @@ def main():
                         my_side_gold_sum += g_m
                         your_side_gold_sum += g_y
                         my_side_gold_delta_sum += g_m - g_y
+                        my_bankrupt = 1 if g_m <= 0 else 0
+                        your_bankrupt = 1 if g_y <= 0 else 0
+                        my_side_bankrupt_inflicted += your_bankrupt
+                        my_side_bankrupt_suffered += my_bankrupt
+                        your_side_bankrupt_inflicted += my_bankrupt
+                        your_side_bankrupt_suffered += your_bankrupt
+                        if my_bankrupt or your_bankrupt:
+                            bankrupt_resets += 1
                         if first1000_count < 1000:
                             first1000_my_side_gold_delta_sum += g_m - g_y
                             first1000_count += 1
@@ -262,6 +275,19 @@ def main():
             "averageGoldDeltaMySide": my_side_gold_delta_sum / games,
             "cumulativeGoldDeltaOver1000": (my_side_gold_delta_sum / games) * 1000,
             "cumulativeGoldDeltaMySideFirst1000": first1000_my_side_gold_delta_sum,
+        },
+        "bankrupt": {
+            "mySideInflicted": int(my_side_bankrupt_inflicted),
+            "mySideSuffered": int(my_side_bankrupt_suffered),
+            "mySideDiff": int(my_side_bankrupt_inflicted - my_side_bankrupt_suffered),
+            "yourSideInflicted": int(your_side_bankrupt_inflicted),
+            "yourSideSuffered": int(your_side_bankrupt_suffered),
+            "yourSideDiff": int(your_side_bankrupt_inflicted - your_side_bankrupt_suffered),
+            "resets": int(bankrupt_resets),
+            "mySideInflictedRate": my_side_bankrupt_inflicted / games,
+            "mySideSufferedRate": my_side_bankrupt_suffered / games,
+            "yourSideInflictedRate": your_side_bankrupt_inflicted / games,
+            "yourSideSufferedRate": your_side_bankrupt_suffered / games,
         },
         "primaryMetric": "averageGoldDeltaMySide",
         "workers": args.workers,

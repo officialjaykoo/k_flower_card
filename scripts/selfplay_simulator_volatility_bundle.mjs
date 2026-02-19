@@ -43,6 +43,8 @@ const TRAIN_EXPLORE_RATE_COMEBACK_DEFAULT = 0.012;
 const IR_TURN_CLIP = 0.3;
 const IR_EPISODE_CLIP = 1.0;
 const FULL_DECK = buildDeck();
+const SIMULATOR_NAME = "volatility_bundle_v1";
+const VOLATILITY_EVENT_KEYS = Object.freeze(["ppuk", "jjob", "ddadak", "pansseul", "ssul", "other"]);
 const RIBBON_COMBO_MONTH_SETS = Object.freeze({
   hongdan: Object.freeze([1, 2, 3]),
   cheongdan: Object.freeze([6, 9, 10]),
@@ -372,7 +374,8 @@ const agentLabelBySide = {
 };
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-const outPath = outArg || path.resolve(__dirname, "..", "logs", `side-vs-side-${stamp}.jsonl`);
+const outPath =
+  outArg || path.resolve(__dirname, "..", "logs", `volatility-bundle-side-vs-side-${stamp}.jsonl`);
 const reportPath = outPath.replace(/\.jsonl$/i, "-report.json");
 const sharedCatalogDir = path.resolve(__dirname, "..", "logs", "catalog");
 const sharedCatalogPath = path.join(sharedCatalogDir, "cards-catalog.json");
@@ -431,7 +434,13 @@ const aggregate = {
   luckFlipEvents: 0,
   luckHandEvents: 0,
   luckFlipCaptureValue: 0,
-  luckHandCaptureValue: 0
+  luckHandCaptureValue: 0,
+  volatilityBundle: {
+    bySide: {
+      [SIDE_MY]: createVolatilityAggregateSideStats(),
+      [SIDE_YOUR]: createVolatilityAggregateSideStats()
+    }
+  }
 };
 
 function createBalancedFirstTurnPlan(totalGames, actorA, actorB) {
@@ -1125,6 +1134,35 @@ function specialEventTags(turn) {
   return [...tags];
 }
 
+function normalizeVolatilityEventTag(tag) {
+  const t = String(tag || "").trim().toUpperCase();
+  if (!t || t === "NORMAL") return "";
+  if (t === "PPUK" || t === "JJOB" || t === "DDADAK" || t === "PANSSEUL" || t === "SSUL") {
+    return t;
+  }
+  return t;
+}
+
+function volatilityEventKey(tag) {
+  const t = normalizeVolatilityEventTag(tag);
+  if (!t) return "";
+  if (t === "PPUK") return "ppuk";
+  if (t === "JJOB") return "jjob";
+  if (t === "DDADAK") return "ddadak";
+  if (t === "PANSSEUL") return "pansseul";
+  if (t === "SSUL") return "ssul";
+  return "other";
+}
+
+function normalizedSpecialEventKeys(turn) {
+  const out = new Set();
+  for (const tag of specialEventTags(turn)) {
+    const key = volatilityEventKey(tag);
+    if (key) out.add(key);
+  }
+  return [...out];
+}
+
 function hasBakRiskShift(beforeDc, afterDc) {
   const keys = ["piBakRisk", "gwangBakRisk", "mongBakRisk"];
   return keys.some((k) => Number(beforeDc?.[k] || 0) !== Number(afterDc?.[k] || 0));
@@ -1151,6 +1189,21 @@ function bakRiskShiftDirection(beforeDc, afterDc) {
   if (afterSum > beforeSum) return "up";
   if (afterSum < beforeSum) return "down";
   return null;
+}
+
+function scoreSwingFromDecisionContext(beforeDc, afterDc) {
+  const beforeDiff = Number(beforeDc?.currentScoreSelf || 0) - Number(beforeDc?.currentScoreOpp || 0);
+  const afterDiff = Number(afterDc?.currentScoreSelf || 0) - Number(afterDc?.currentScoreOpp || 0);
+  return afterDiff - beforeDiff;
+}
+
+function isVolatilityTurnSignal(actionType, eventKeys, bombShifted) {
+  return (
+    actionType === "choose_shaking_yes" ||
+    actionType === "declare_bomb" ||
+    !!bombShifted ||
+    (Array.isArray(eventKeys) && eventKeys.length > 0)
+  );
 }
 
 function comboThreatMask(dc) {
@@ -1217,6 +1270,7 @@ function classifyImportantTurnTriggers({
   const out = [];
   const actionType = String(turn?.action?.type || "");
   const phase = String(beforeDc?.phase || "");
+  const scoreSwing = scoreSwingFromDecisionContext(beforeDc, afterDc);
 
   if (earlyTurnForced) {
     out.push({ name: "earlyTurnForced", back: 0, forward: 0 });
@@ -1239,14 +1293,15 @@ function classifyImportantTurnTriggers({
     pushTrigger(out, "deckEmpty", 1, 0);
   }
 
-  const eventTags = specialEventTags(turn);
-  if (eventTags.length) {
-    if (eventTags.includes("PPUK")) {
-      pushTrigger(out, "specialEventPpuk", 1, 1);
-    }
-    if (eventTags.some((tag) => tag !== "PPUK")) {
-      pushTrigger(out, "specialEventCore", 1, 0);
-    }
+  const eventKeys = normalizedSpecialEventKeys(turn);
+  if (eventKeys.length) {
+    if (eventKeys.includes("ppuk")) pushTrigger(out, "specialEventPpuk", 1, 1);
+    if (eventKeys.includes("jjob")) pushTrigger(out, "specialEventJjob", 1, 0);
+    if (eventKeys.includes("ddadak")) pushTrigger(out, "specialEventDdadak", 1, 0);
+    if (eventKeys.includes("pansseul")) pushTrigger(out, "specialEventPansseul", 1, 0);
+    if (eventKeys.includes("ssul")) pushTrigger(out, "specialEventSsul", 1, 0);
+    if (eventKeys.some((k) => k !== "ppuk")) pushTrigger(out, "specialEventCore", 1, 0);
+    if (eventKeys.includes("other")) pushTrigger(out, "specialEventOther", 1, 0);
   }
 
   const bombDeclared = actionType === "declare_bomb";
@@ -1268,6 +1323,17 @@ function classifyImportantTurnTriggers({
 
   if (comboThreatEntered(beforeDc, afterDc)) {
     pushTrigger(out, "comboThreatEnter", 0, 0);
+  }
+
+  const volatilityTurn = isVolatilityTurnSignal(actionType, eventKeys, bombShifted);
+  if (volatilityTurn) {
+    pushTrigger(out, "volatilityTurn", 0, 0);
+    if (scoreSwing >= 1 && !eventKeys.includes("ppuk")) {
+      pushTrigger(out, "volatilityExploit", 1, 1);
+    }
+    if (eventKeys.includes("ppuk") || scoreSwing <= -1 || riskDirection === "up") {
+      pushTrigger(out, "volatilitySelfHarm", 1, 1);
+    }
   }
 
   return out;
@@ -1316,6 +1382,153 @@ function triggerNames(triggers) {
     names.add(name);
   }
   return [...names];
+}
+
+function createVolatilityGameSideStats() {
+  return {
+    volatilityTurnCount: 0,
+    shakingYesCount: 0,
+    bombDeclareCount: 0,
+    bombCountShiftCount: 0,
+    specialEventTurnCount: 0,
+    scoreGainCount: 0,
+    scoreLossCount: 0,
+    scoreFlatCount: 0,
+    scoreSwingSum: 0,
+    riskUpCount: 0,
+    selfHarmCount: 0,
+    eventByTag: Object.fromEntries(VOLATILITY_EVENT_KEYS.map((k) => [k, 0]))
+  };
+}
+
+function createVolatilityAggregateSideStats() {
+  return createVolatilityGameSideStats();
+}
+
+function analyzeVolatilityBundleFromContext(contextByTurnNo, kibo, firstTurnKey, secondTurnKey) {
+  const out = {
+    bySide: {
+      [SIDE_MY]: createVolatilityGameSideStats(),
+      [SIDE_YOUR]: createVolatilityGameSideStats()
+    }
+  };
+  const turns = Array.isArray(kibo) ? kibo.filter((e) => e?.type === "turn_end") : [];
+  for (const turn of turns) {
+    const actor = turn?.actor;
+    if (!actor) continue;
+    const side = actorToSide(actor, firstTurnKey);
+    const sideStats = out.bySide[side];
+    if (!sideStats) continue;
+
+    const turnNo = Number(turn?.turnNo || 0);
+    const rec = contextByTurnNo instanceof Map ? contextByTurnNo.get(turnNo) : null;
+    const beforeDc = rec?.before?.decisionContext || null;
+    const afterDc = rec?.after?.decisionContext || null;
+    const actionType = String(turn?.action?.type || "");
+    const eventKeys = normalizedSpecialEventKeys(turn);
+    const bombShifted = beforeDc && afterDc ? hasBombShift(beforeDc, afterDc) : false;
+    if (!isVolatilityTurnSignal(actionType, eventKeys, bombShifted)) continue;
+
+    sideStats.volatilityTurnCount += 1;
+    if (actionType === "choose_shaking_yes") sideStats.shakingYesCount += 1;
+    if (actionType === "declare_bomb") sideStats.bombDeclareCount += 1;
+    if (bombShifted) sideStats.bombCountShiftCount += 1;
+    if (eventKeys.length) sideStats.specialEventTurnCount += 1;
+
+    for (const key of eventKeys) {
+      if (sideStats.eventByTag[key] == null) sideStats.eventByTag[key] = 0;
+      sideStats.eventByTag[key] += 1;
+    }
+
+    let scoreSwing = 0;
+    if (beforeDc && afterDc) {
+      scoreSwing = scoreSwingFromDecisionContext(beforeDc, afterDc);
+      sideStats.scoreSwingSum += scoreSwing;
+      if (scoreSwing > 0) sideStats.scoreGainCount += 1;
+      else if (scoreSwing < 0) sideStats.scoreLossCount += 1;
+      else sideStats.scoreFlatCount += 1;
+      if (bakRiskShiftDirection(beforeDc, afterDc) === "up") {
+        sideStats.riskUpCount += 1;
+      }
+    }
+
+    const ppukEvent = eventKeys.includes("ppuk");
+    const selfHarmBySwing = beforeDc && afterDc ? scoreSwing <= -1 : false;
+    const selfHarmByRisk = beforeDc && afterDc ? bakRiskShiftDirection(beforeDc, afterDc) === "up" : false;
+    if (ppukEvent || selfHarmBySwing || selfHarmByRisk) {
+      sideStats.selfHarmCount += 1;
+    }
+  }
+  return out;
+}
+
+function accumulateVolatilityBundleSummary(aggregateRef, volatilityStats) {
+  if (!aggregateRef?.volatilityBundle || !volatilityStats?.bySide) return;
+  for (const side of [SIDE_MY, SIDE_YOUR]) {
+    const src = volatilityStats.bySide[side];
+    const dst = aggregateRef.volatilityBundle.bySide[side];
+    if (!src || !dst) continue;
+    dst.volatilityTurnCount += Number(src.volatilityTurnCount || 0);
+    dst.shakingYesCount += Number(src.shakingYesCount || 0);
+    dst.bombDeclareCount += Number(src.bombDeclareCount || 0);
+    dst.bombCountShiftCount += Number(src.bombCountShiftCount || 0);
+    dst.specialEventTurnCount += Number(src.specialEventTurnCount || 0);
+    dst.scoreGainCount += Number(src.scoreGainCount || 0);
+    dst.scoreLossCount += Number(src.scoreLossCount || 0);
+    dst.scoreFlatCount += Number(src.scoreFlatCount || 0);
+    dst.scoreSwingSum += Number(src.scoreSwingSum || 0);
+    dst.riskUpCount += Number(src.riskUpCount || 0);
+    dst.selfHarmCount += Number(src.selfHarmCount || 0);
+    for (const key of VOLATILITY_EVENT_KEYS) {
+      dst.eventByTag[key] += Number(src.eventByTag?.[key] || 0);
+    }
+  }
+}
+
+function volatilityBundleReportBySide(bundleSide, games) {
+  const volTurns = Number(bundleSide?.volatilityTurnCount || 0);
+  const scoreGain = Number(bundleSide?.scoreGainCount || 0);
+  const scoreLoss = Number(bundleSide?.scoreLossCount || 0);
+  const scoreFlat = Number(bundleSide?.scoreFlatCount || 0);
+  const selfHarm = Number(bundleSide?.selfHarmCount || 0);
+  const riskUp = Number(bundleSide?.riskUpCount || 0);
+  const eventByTagPerGame = {};
+  const eventByTagCount = {};
+  for (const key of VOLATILITY_EVENT_KEYS) {
+    const cnt = Number(bundleSide?.eventByTag?.[key] || 0);
+    eventByTagCount[key] = cnt;
+    eventByTagPerGame[key] = cnt / Math.max(1, games);
+  }
+  const exploitRate = scoreGain / Math.max(1, volTurns);
+  const selfHarmRate = selfHarm / Math.max(1, volTurns);
+  return {
+    volatilityTurnsPerGame: volTurns / Math.max(1, games),
+    shakingYesPerGame: Number(bundleSide?.shakingYesCount || 0) / Math.max(1, games),
+    bombDeclarePerGame: Number(bundleSide?.bombDeclareCount || 0) / Math.max(1, games),
+    bombShiftPerGame: Number(bundleSide?.bombCountShiftCount || 0) / Math.max(1, games),
+    specialEventTurnPerGame: Number(bundleSide?.specialEventTurnCount || 0) / Math.max(1, games),
+    eventByTagPerGame,
+    positiveOutcomeRate: exploitRate,
+    negativeOutcomeRate: scoreLoss / Math.max(1, volTurns),
+    flatOutcomeRate: scoreFlat / Math.max(1, volTurns),
+    selfHarmRate,
+    riskUpAfterVolatilityRate: riskUp / Math.max(1, volTurns),
+    exploitMinusSelfHarm: exploitRate - selfHarmRate,
+    averageScoreSwingPerVolatilityTurn: volTurns > 0 ? Number(bundleSide?.scoreSwingSum || 0) / volTurns : null,
+    counts: {
+      volatilityTurnCount: volTurns,
+      shakingYesCount: Number(bundleSide?.shakingYesCount || 0),
+      bombDeclareCount: Number(bundleSide?.bombDeclareCount || 0),
+      bombCountShiftCount: Number(bundleSide?.bombCountShiftCount || 0),
+      specialEventTurnCount: Number(bundleSide?.specialEventTurnCount || 0),
+      scoreGainCount: scoreGain,
+      scoreLossCount: scoreLoss,
+      scoreFlatCount: scoreFlat,
+      selfHarmCount: selfHarm,
+      riskUpCount: riskUp,
+      eventByTagCount
+    }
+  };
 }
 
 function handCountFromTurn(turn, key) {
@@ -1394,10 +1607,40 @@ function weightedImmediateReward(turn, jpCompletedNow, beforeDc, afterDc) {
   const bakShiftMong = bakRiskShiftReward(b, a, "mongBakRisk", 0.11);
   strategic += bakShiftPi + bakShiftGwang + bakShiftMong;
 
-  const matchEvents = action.matchEvents || [];
-  if (matchEvents.some((m) => m?.eventTag === "PPUK")) {
-    strategic -= 0.22;
+  const actionType = String(action.type || "");
+  const scoreSwing = scoreSwingFromDecisionContext(b, a);
+  const riskDirection = bakRiskShiftDirection(b, a);
+  const eventKeys = normalizedSpecialEventKeys(t);
+  const bombShifted = hasBombShift(b, a);
+  let volatility = 0;
+
+  if (actionType === "choose_shaking_yes") {
+    if (scoreSwing > 0) volatility += 0.1;
+    else if (scoreSwing < 0) volatility -= 0.1;
+    else volatility += 0.015;
   }
+  if (actionType === "declare_bomb") {
+    if (scoreSwing > 0) volatility += 0.14;
+    else if (scoreSwing < 0) volatility -= 0.14;
+  }
+  if (bombShifted && actionType !== "declare_bomb") {
+    if (scoreSwing > 0) volatility += 0.05;
+    else if (scoreSwing < 0) volatility -= 0.05;
+  }
+
+  for (const key of eventKeys) {
+    if (key === "ppuk") volatility -= 0.24;
+    else if (key === "jjob") volatility += 0.08;
+    else if (key === "ddadak") volatility += 0.1;
+    else if (key === "pansseul") volatility += 0.12;
+    else if (key === "ssul") volatility += 0.07;
+    else volatility += 0.03;
+  }
+  if (riskDirection === "up") volatility -= 0.08;
+  if (riskDirection === "down") volatility += 0.05;
+  if (scoreSwing <= -2) volatility -= 0.1;
+  if (scoreSwing >= 2) volatility += 0.06;
+  strategic += volatility;
 
   const raw = shortTerm + strategic;
   const clipped = clampRange(raw, -IR_TURN_CLIP, IR_TURN_CLIP);
@@ -1412,6 +1655,14 @@ function weightedImmediateReward(turn, jpCompletedNow, beforeDc, afterDc) {
         pi: bakShiftPi,
         gwang: bakShiftGwang,
         mong: bakShiftMong
+      },
+      volatility: {
+        actionType,
+        scoreSwing,
+        riskDirection: riskDirection || "flat",
+        eventKeys,
+        bombShifted: !!bombShifted,
+        reward: volatility
       }
     }
   };
@@ -1865,6 +2116,7 @@ function fullSummary({
 
 function buildTrainReport() {
   return {
+    simulator: SIMULATOR_NAME,
     logMode,
     games: aggregate.games,
     completed: aggregate.completed,
@@ -1897,12 +2149,20 @@ function buildTrainReport() {
       yourSideInflictedRate: aggregate.bankrupt.yourSideInflicted / Math.max(1, aggregate.games),
       yourSideSufferedRate: aggregate.bankrupt.yourSideSuffered / Math.max(1, aggregate.games)
     },
+    volatilityBundle: {
+      [SIDE_MY]: volatilityBundleReportBySide(aggregate.volatilityBundle.bySide[SIDE_MY], aggregate.games),
+      [SIDE_YOUR]: volatilityBundleReportBySide(
+        aggregate.volatilityBundle.bySide[SIDE_YOUR],
+        aggregate.games
+      )
+    },
     primaryMetric: "averageGoldDeltaMySide"
   };
 }
 
 function buildFullReport() {
   return {
+    simulator: SIMULATOR_NAME,
     logMode,
     catalogPath: sharedCatalogPath,
     games: aggregate.games,
@@ -1935,6 +2195,13 @@ function buildFullReport() {
       mySideSufferedRate: aggregate.bankrupt.mySideSuffered / Math.max(1, aggregate.games),
       yourSideInflictedRate: aggregate.bankrupt.yourSideInflicted / Math.max(1, aggregate.games),
       yourSideSufferedRate: aggregate.bankrupt.yourSideSuffered / Math.max(1, aggregate.games)
+    },
+    volatilityBundle: {
+      [SIDE_MY]: volatilityBundleReportBySide(aggregate.volatilityBundle.bySide[SIDE_MY], aggregate.games),
+      [SIDE_YOUR]: volatilityBundleReportBySide(
+        aggregate.volatilityBundle.bySide[SIDE_YOUR],
+        aggregate.games
+      )
     },
     primaryMetric: "averageGoldDeltaMySide",
     nagariRate: aggregate.nagari / Math.max(1, aggregate.games),
@@ -2159,6 +2426,15 @@ async function run() {
             }
           )
       : null;
+    const volatilityBundleGame =
+      needsDecisionTrace && contextByTurnNo
+        ? analyzeVolatilityBundleFromContext(contextByTurnNo, kibo, firstTurnKey, secondTurnKey)
+        : {
+            bySide: {
+              [SIDE_MY]: createVolatilityGameSideStats(),
+              [SIDE_YOUR]: createVolatilityGameSideStats()
+            }
+          };
     const mySideActor = firstTurnKey;
     const yourSideActor = secondTurnKey;
     const mySideScore = Number(state.result?.[mySideActor]?.total || 0);
@@ -2186,6 +2462,7 @@ async function run() {
 
     if (isTrainMode) {
       const line = {
+        simulator: SIMULATOR_NAME,
         game: i + 1,
         seed,
         steps,
@@ -2219,6 +2496,7 @@ async function run() {
           [SIDE_YOUR]: yourSideBankrupt
         },
         sessionReset,
+        volatilityBundle: volatilityBundleGame,
         decision_trace: decisionTrace
       };
       baseSummary({
@@ -2229,6 +2507,7 @@ async function run() {
         mySideGold,
         yourSideGold
       });
+      accumulateVolatilityBundleSummary(aggregate, volatilityBundleGame);
       await writeLine(outStream, line);
       continue;
     }
@@ -2328,8 +2607,10 @@ async function run() {
       flipCaptureValue,
       handCaptureValue
     });
+    accumulateVolatilityBundleSummary(aggregate, volatilityBundleGame);
 
     const persistedLine = {
+      simulator: SIMULATOR_NAME,
       game: i + 1,
       seed,
       steps,
@@ -2360,6 +2641,7 @@ async function run() {
         [SIDE_YOUR]: yourSideBankrupt
       },
       sessionReset,
+      volatilityBundle: volatilityBundleGame,
       decision_trace: decisionTrace
     };
 

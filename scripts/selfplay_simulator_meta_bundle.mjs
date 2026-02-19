@@ -43,6 +43,9 @@ const TRAIN_EXPLORE_RATE_COMEBACK_DEFAULT = 0.012;
 const IR_TURN_CLIP = 0.3;
 const IR_EPISODE_CLIP = 1.0;
 const FULL_DECK = buildDeck();
+const SIMULATOR_NAME = "meta_bundle_v1";
+const META_TERMINAL_DECK_THRESHOLD = 4;
+const META_HIGH_MULTIPLIER_THRESHOLD = 2;
 const RIBBON_COMBO_MONTH_SETS = Object.freeze({
   hongdan: Object.freeze([1, 2, 3]),
   cheongdan: Object.freeze([6, 9, 10]),
@@ -372,7 +375,8 @@ const agentLabelBySide = {
 };
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-const outPath = outArg || path.resolve(__dirname, "..", "logs", `side-vs-side-${stamp}.jsonl`);
+const outPath =
+  outArg || path.resolve(__dirname, "..", "logs", `meta-bundle-side-vs-side-${stamp}.jsonl`);
 const reportPath = outPath.replace(/\.jsonl$/i, "-report.json");
 const sharedCatalogDir = path.resolve(__dirname, "..", "logs", "catalog");
 const sharedCatalogPath = path.join(sharedCatalogDir, "cards-catalog.json");
@@ -431,7 +435,13 @@ const aggregate = {
   luckFlipEvents: 0,
   luckHandEvents: 0,
   luckFlipCaptureValue: 0,
-  luckHandCaptureValue: 0
+  luckHandCaptureValue: 0,
+  metaBundle: {
+    bySide: {
+      [SIDE_MY]: createMetaAggregateSideStats(),
+      [SIDE_YOUR]: createMetaAggregateSideStats()
+    }
+  }
 };
 
 function createBalancedFirstTurnPlan(totalGames, actorA, actorB) {
@@ -1228,11 +1238,24 @@ function classifyImportantTurnTriggers({
     if (isGoStop) {
       const isGo = actionType === "choose_go";
       pushTrigger(out, "goStopOption", 1, isGo && goStopPlus2 ? 2 : 1);
+      if (isMetaHighMultiplier(beforeDc)) {
+        pushTrigger(out, "metaHighMultiplierGoStop", 1, 1);
+      }
+      if (isMetaTerminalWindow(beforeDc)) {
+        pushTrigger(out, "metaTerminalGoStop", 1, 1);
+      }
     } else if (actionType === "choose_shaking_yes") {
       pushTrigger(out, "shakingYesOption", 0, 1);
     } else {
       pushTrigger(out, "optionTurnOther", 0, 1);
     }
+  }
+
+  if (isMetaHighMultiplier(beforeDc)) {
+    pushTrigger(out, "metaHighMultiplierWindow", 0, 0);
+  }
+  if (isMetaTerminalWindow(beforeDc)) {
+    pushTrigger(out, "metaTerminalWindow", 0, 0);
   }
 
   if (Number(beforeDc?.deckCount || 0) <= 0) {
@@ -1318,6 +1341,222 @@ function triggerNames(triggers) {
   return [...names];
 }
 
+function scoreSwingFromDecisionContext(beforeDc, afterDc) {
+  const beforeDiff = Number(beforeDc?.currentScoreSelf || 0) - Number(beforeDc?.currentScoreOpp || 0);
+  const afterDiff = Number(afterDc?.currentScoreSelf || 0) - Number(afterDc?.currentScoreOpp || 0);
+  return afterDiff - beforeDiff;
+}
+
+function isGoStopAction(actionType) {
+  return actionType === "choose_go" || actionType === "choose_stop";
+}
+
+function isMetaHighMultiplier(dc) {
+  return Number(dc?.carryOverMultiplier || 1) >= META_HIGH_MULTIPLIER_THRESHOLD;
+}
+
+function isMetaTerminalWindow(dc) {
+  return Number(dc?.deckCount || 0) <= META_TERMINAL_DECK_THRESHOLD;
+}
+
+function createMetaGameSideStats() {
+  return {
+    goStopDecisionCount: 0,
+    goCount: 0,
+    stopCount: 0,
+    goSuccessCount: 0,
+    goFailCount: 0,
+    stopLockInCount: 0,
+    stopMissCount: 0,
+    highMultiplierWindowCount: 0,
+    highMultiplierGoCount: 0,
+    highMultiplierStopCount: 0,
+    terminalWindowCount: 0,
+    terminalGoCount: 0,
+    terminalStopCount: 0,
+    terminalPositiveCount: 0,
+    terminalNegativeCount: 0,
+    scoreSwingSumAtGoStop: 0
+  };
+}
+
+function createMetaAggregateSideStats() {
+  return createMetaGameSideStats();
+}
+
+function analyzeMetaBundleFromContext(
+  contextByTurnNo,
+  kibo,
+  firstTurnKey,
+  secondTurnKey,
+  optionEvents = []
+) {
+  const out = {
+    bySide: {
+      [SIDE_MY]: createMetaGameSideStats(),
+      [SIDE_YOUR]: createMetaGameSideStats()
+    }
+  };
+  const turns = Array.isArray(kibo) ? kibo.filter((e) => e?.type === "turn_end") : [];
+  for (const turn of turns) {
+    const actor = turn?.actor;
+    if (!actor) continue;
+    const side = actorToSide(actor, firstTurnKey);
+    const sideStats = out.bySide[side];
+    if (!sideStats) continue;
+    const turnNo = Number(turn?.turnNo || 0);
+    const rec = contextByTurnNo instanceof Map ? contextByTurnNo.get(turnNo) : null;
+    const beforeDc = rec?.before?.decisionContext || null;
+    const afterDc = rec?.after?.decisionContext || null;
+    const actionType = String(turn?.action?.type || "");
+
+    if (isMetaHighMultiplier(beforeDc)) {
+      sideStats.highMultiplierWindowCount += 1;
+    }
+    if (isMetaTerminalWindow(beforeDc)) {
+      sideStats.terminalWindowCount += 1;
+    }
+
+    if (!isGoStopAction(actionType) || !beforeDc || !afterDc) continue;
+
+    sideStats.goStopDecisionCount += 1;
+    const scoreSwing = scoreSwingFromDecisionContext(beforeDc, afterDc);
+    sideStats.scoreSwingSumAtGoStop += scoreSwing;
+    const beforeDiff = Number(beforeDc.currentScoreSelf || 0) - Number(beforeDc.currentScoreOpp || 0);
+
+    if (actionType === "choose_go") {
+      sideStats.goCount += 1;
+      if (scoreSwing > 0) sideStats.goSuccessCount += 1;
+      else if (scoreSwing < 0) sideStats.goFailCount += 1;
+      if (isMetaHighMultiplier(beforeDc)) sideStats.highMultiplierGoCount += 1;
+      if (isMetaTerminalWindow(beforeDc)) sideStats.terminalGoCount += 1;
+    } else if (actionType === "choose_stop") {
+      sideStats.stopCount += 1;
+      if (beforeDiff >= 0) sideStats.stopLockInCount += 1;
+      else sideStats.stopMissCount += 1;
+      if (isMetaHighMultiplier(beforeDc)) sideStats.highMultiplierStopCount += 1;
+      if (isMetaTerminalWindow(beforeDc)) sideStats.terminalStopCount += 1;
+    }
+
+    if (isMetaTerminalWindow(beforeDc)) {
+      if (scoreSwing > 0) sideStats.terminalPositiveCount += 1;
+      else if (scoreSwing < 0) sideStats.terminalNegativeCount += 1;
+    }
+  }
+
+  for (const ev of Array.isArray(optionEvents) ? optionEvents : []) {
+    const actionType = String(ev?.actionType || "");
+    if (!isGoStopAction(actionType)) continue;
+    const actor = ev?.actor;
+    if (!actor) continue;
+    const side = actorToSide(actor, firstTurnKey);
+    const sideStats = out.bySide[side];
+    if (!sideStats) continue;
+    const beforeDc = ev?.beforeDc || null;
+    const afterDc = ev?.afterDc || null;
+    if (!beforeDc || !afterDc) continue;
+
+    sideStats.goStopDecisionCount += 1;
+    const scoreSwing = scoreSwingFromDecisionContext(beforeDc, afterDc);
+    sideStats.scoreSwingSumAtGoStop += scoreSwing;
+    const beforeDiff = Number(beforeDc.currentScoreSelf || 0) - Number(beforeDc.currentScoreOpp || 0);
+
+    if (actionType === "choose_go") {
+      sideStats.goCount += 1;
+      if (scoreSwing > 0) sideStats.goSuccessCount += 1;
+      else if (scoreSwing < 0) sideStats.goFailCount += 1;
+      if (isMetaHighMultiplier(beforeDc)) sideStats.highMultiplierGoCount += 1;
+      if (isMetaTerminalWindow(beforeDc)) sideStats.terminalGoCount += 1;
+    } else {
+      sideStats.stopCount += 1;
+      if (beforeDiff >= 0) sideStats.stopLockInCount += 1;
+      else sideStats.stopMissCount += 1;
+      if (isMetaHighMultiplier(beforeDc)) sideStats.highMultiplierStopCount += 1;
+      if (isMetaTerminalWindow(beforeDc)) sideStats.terminalStopCount += 1;
+    }
+  }
+  return out;
+}
+
+function accumulateMetaBundleSummary(aggregateRef, metaStats) {
+  if (!aggregateRef?.metaBundle || !metaStats?.bySide) return;
+  for (const side of [SIDE_MY, SIDE_YOUR]) {
+    const src = metaStats.bySide[side];
+    const dst = aggregateRef.metaBundle.bySide[side];
+    if (!src || !dst) continue;
+    dst.goStopDecisionCount += Number(src.goStopDecisionCount || 0);
+    dst.goCount += Number(src.goCount || 0);
+    dst.stopCount += Number(src.stopCount || 0);
+    dst.goSuccessCount += Number(src.goSuccessCount || 0);
+    dst.goFailCount += Number(src.goFailCount || 0);
+    dst.stopLockInCount += Number(src.stopLockInCount || 0);
+    dst.stopMissCount += Number(src.stopMissCount || 0);
+    dst.highMultiplierWindowCount += Number(src.highMultiplierWindowCount || 0);
+    dst.highMultiplierGoCount += Number(src.highMultiplierGoCount || 0);
+    dst.highMultiplierStopCount += Number(src.highMultiplierStopCount || 0);
+    dst.terminalWindowCount += Number(src.terminalWindowCount || 0);
+    dst.terminalGoCount += Number(src.terminalGoCount || 0);
+    dst.terminalStopCount += Number(src.terminalStopCount || 0);
+    dst.terminalPositiveCount += Number(src.terminalPositiveCount || 0);
+    dst.terminalNegativeCount += Number(src.terminalNegativeCount || 0);
+    dst.scoreSwingSumAtGoStop += Number(src.scoreSwingSumAtGoStop || 0);
+  }
+}
+
+function metaBundleReportBySide(bundleSide, games) {
+  const goStop = Number(bundleSide?.goStopDecisionCount || 0);
+  const go = Number(bundleSide?.goCount || 0);
+  const stop = Number(bundleSide?.stopCount || 0);
+  const goSuccess = Number(bundleSide?.goSuccessCount || 0);
+  const goFail = Number(bundleSide?.goFailCount || 0);
+  const stopLockIn = Number(bundleSide?.stopLockInCount || 0);
+  const stopMiss = Number(bundleSide?.stopMissCount || 0);
+  const hmWindow = Number(bundleSide?.highMultiplierWindowCount || 0);
+  const hmGo = Number(bundleSide?.highMultiplierGoCount || 0);
+  const hmStop = Number(bundleSide?.highMultiplierStopCount || 0);
+  const terminalWindow = Number(bundleSide?.terminalWindowCount || 0);
+  const terminalGo = Number(bundleSide?.terminalGoCount || 0);
+  const terminalStop = Number(bundleSide?.terminalStopCount || 0);
+  const terminalPos = Number(bundleSide?.terminalPositiveCount || 0);
+  const terminalNeg = Number(bundleSide?.terminalNegativeCount || 0);
+  return {
+    goStopDecisionPerGame: goStop / Math.max(1, games),
+    goRate: go / Math.max(1, goStop),
+    stopRate: stop / Math.max(1, goStop),
+    goSuccessRate: goSuccess / Math.max(1, go),
+    goFailRate: goFail / Math.max(1, go),
+    stopLockInRate: stopLockIn / Math.max(1, stop),
+    stopMissRate: stopMiss / Math.max(1, stop),
+    highMultiplierWindowPerGame: hmWindow / Math.max(1, games),
+    highMultiplierGoRate: hmGo / Math.max(1, hmGo + hmStop),
+    highMultiplierStopRate: hmStop / Math.max(1, hmGo + hmStop),
+    terminalWindowPerGame: terminalWindow / Math.max(1, games),
+    terminalGoRate: terminalGo / Math.max(1, terminalGo + terminalStop),
+    terminalStopRate: terminalStop / Math.max(1, terminalGo + terminalStop),
+    terminalPositiveRate: terminalPos / Math.max(1, terminalPos + terminalNeg),
+    terminalNegativeRate: terminalNeg / Math.max(1, terminalPos + terminalNeg),
+    averageScoreSwingAtGoStop:
+      goStop > 0 ? Number(bundleSide?.scoreSwingSumAtGoStop || 0) / goStop : null,
+    counts: {
+      goStopDecisionCount: goStop,
+      goCount: go,
+      stopCount: stop,
+      goSuccessCount: goSuccess,
+      goFailCount: goFail,
+      stopLockInCount: stopLockIn,
+      stopMissCount: stopMiss,
+      highMultiplierWindowCount: hmWindow,
+      highMultiplierGoCount: hmGo,
+      highMultiplierStopCount: hmStop,
+      terminalWindowCount: terminalWindow,
+      terminalGoCount: terminalGo,
+      terminalStopCount: terminalStop,
+      terminalPositiveCount: terminalPos,
+      terminalNegativeCount: terminalNeg
+    }
+  };
+}
+
 function handCountFromTurn(turn, key) {
   if (turn.handsCount?.[key] != null) return turn.handsCount[key];
   if (Array.isArray(turn.hands?.[key])) return turn.hands[key].length;
@@ -1394,6 +1633,35 @@ function weightedImmediateReward(turn, jpCompletedNow, beforeDc, afterDc) {
   const bakShiftMong = bakRiskShiftReward(b, a, "mongBakRisk", 0.11);
   strategic += bakShiftPi + bakShiftGwang + bakShiftMong;
 
+  const actionType = String(action.type || "");
+  const deckCount = Number(b.deckCount || 0);
+  const carryOverMultiplier = Math.max(1, Number(b.carryOverMultiplier || 1));
+  const scoreDiffBefore = Number(b.currentScoreSelf || 0) - Number(b.currentScoreOpp || 0);
+  const scoreSwing = scoreSwingFromDecisionContext(b, a);
+  const riskDirection = bakRiskShiftDirection(b, a);
+  let meta = 0;
+  if (actionType === "choose_stop") {
+    if (carryOverMultiplier >= META_HIGH_MULTIPLIER_THRESHOLD) {
+      meta += 0.08;
+    }
+    if (deckCount <= META_TERMINAL_DECK_THRESHOLD) {
+      meta += scoreDiffBefore >= 0 ? 0.07 : -0.03;
+    }
+  } else if (actionType === "choose_go") {
+    if (carryOverMultiplier >= META_HIGH_MULTIPLIER_THRESHOLD) {
+      meta += scoreDiffBefore >= 3 ? 0.04 : -0.09;
+    }
+    if (deckCount <= META_TERMINAL_DECK_THRESHOLD) {
+      meta += scoreDiffBefore < 0 ? 0.04 : -0.06;
+    }
+    if (scoreSwing > 0) meta += 0.03;
+    else if (scoreSwing < 0) meta -= 0.03;
+  }
+  if (carryOverMultiplier >= 3 && riskDirection === "up") {
+    meta -= 0.08;
+  }
+  strategic += meta;
+
   const matchEvents = action.matchEvents || [];
   if (matchEvents.some((m) => m?.eventTag === "PPUK")) {
     strategic -= 0.22;
@@ -1412,6 +1680,15 @@ function weightedImmediateReward(turn, jpCompletedNow, beforeDc, afterDc) {
         pi: bakShiftPi,
         gwang: bakShiftGwang,
         mong: bakShiftMong
+      },
+      meta: {
+        actionType,
+        deckCount,
+        carryOverMultiplier,
+        scoreDiffBefore,
+        scoreSwing,
+        riskDirection: riskDirection || "flat",
+        reward: meta
       }
     }
   };
@@ -1865,6 +2142,7 @@ function fullSummary({
 
 function buildTrainReport() {
   return {
+    simulator: SIMULATOR_NAME,
     logMode,
     games: aggregate.games,
     completed: aggregate.completed,
@@ -1897,12 +2175,17 @@ function buildTrainReport() {
       yourSideInflictedRate: aggregate.bankrupt.yourSideInflicted / Math.max(1, aggregate.games),
       yourSideSufferedRate: aggregate.bankrupt.yourSideSuffered / Math.max(1, aggregate.games)
     },
+    metaBundle: {
+      [SIDE_MY]: metaBundleReportBySide(aggregate.metaBundle.bySide[SIDE_MY], aggregate.games),
+      [SIDE_YOUR]: metaBundleReportBySide(aggregate.metaBundle.bySide[SIDE_YOUR], aggregate.games)
+    },
     primaryMetric: "averageGoldDeltaMySide"
   };
 }
 
 function buildFullReport() {
   return {
+    simulator: SIMULATOR_NAME,
     logMode,
     catalogPath: sharedCatalogPath,
     games: aggregate.games,
@@ -1935,6 +2218,10 @@ function buildFullReport() {
       mySideSufferedRate: aggregate.bankrupt.mySideSuffered / Math.max(1, aggregate.games),
       yourSideInflictedRate: aggregate.bankrupt.yourSideInflicted / Math.max(1, aggregate.games),
       yourSideSufferedRate: aggregate.bankrupt.yourSideSuffered / Math.max(1, aggregate.games)
+    },
+    metaBundle: {
+      [SIDE_MY]: metaBundleReportBySide(aggregate.metaBundle.bySide[SIDE_MY], aggregate.games),
+      [SIDE_YOUR]: metaBundleReportBySide(aggregate.metaBundle.bySide[SIDE_YOUR], aggregate.games)
     },
     primaryMetric: "averageGoldDeltaMySide",
     nagariRate: aggregate.nagari / Math.max(1, aggregate.games),
@@ -2159,6 +2446,21 @@ async function run() {
             }
           )
       : null;
+    const metaBundleGame =
+      needsDecisionTrace && contextByTurnNo
+        ? analyzeMetaBundleFromContext(
+            contextByTurnNo,
+            kibo,
+            firstTurnKey,
+            secondTurnKey,
+            optionTraceEvents
+          )
+        : {
+            bySide: {
+              [SIDE_MY]: createMetaGameSideStats(),
+              [SIDE_YOUR]: createMetaGameSideStats()
+            }
+          };
     const mySideActor = firstTurnKey;
     const yourSideActor = secondTurnKey;
     const mySideScore = Number(state.result?.[mySideActor]?.total || 0);
@@ -2186,6 +2488,7 @@ async function run() {
 
     if (isTrainMode) {
       const line = {
+        simulator: SIMULATOR_NAME,
         game: i + 1,
         seed,
         steps,
@@ -2219,6 +2522,7 @@ async function run() {
           [SIDE_YOUR]: yourSideBankrupt
         },
         sessionReset,
+        metaBundle: metaBundleGame,
         decision_trace: decisionTrace
       };
       baseSummary({
@@ -2229,6 +2533,7 @@ async function run() {
         mySideGold,
         yourSideGold
       });
+      accumulateMetaBundleSummary(aggregate, metaBundleGame);
       await writeLine(outStream, line);
       continue;
     }
@@ -2328,8 +2633,10 @@ async function run() {
       flipCaptureValue,
       handCaptureValue
     });
+    accumulateMetaBundleSummary(aggregate, metaBundleGame);
 
     const persistedLine = {
+      simulator: SIMULATOR_NAME,
       game: i + 1,
       seed,
       steps,
@@ -2360,6 +2667,7 @@ async function run() {
         [SIDE_YOUR]: yourSideBankrupt
       },
       sessionReset,
+      metaBundle: metaBundleGame,
       decision_trace: decisionTrace
     };
 

@@ -43,6 +43,7 @@ const TRAIN_EXPLORE_RATE_COMEBACK_DEFAULT = 0.012;
 const IR_TURN_CLIP = 0.3;
 const IR_EPISODE_CLIP = 1.0;
 const FULL_DECK = buildDeck();
+const SIMULATOR_NAME = "combo_bundle_v1";
 const RIBBON_COMBO_MONTH_SETS = Object.freeze({
   hongdan: Object.freeze([1, 2, 3]),
   cheongdan: Object.freeze([6, 9, 10]),
@@ -50,6 +51,7 @@ const RIBBON_COMBO_MONTH_SETS = Object.freeze({
 });
 const GODORI_MONTHS = Object.freeze([2, 4, 8]);
 const GWANG_MONTHS = Object.freeze([1, 3, 8, 11, 12]);
+const COMBO_TAGS = Object.freeze(["hongdan", "cheongdan", "chodan", "godori", "gwang"]);
 
 const decisionInferenceCache = new Map();
 const hashIndexCache = new Map();
@@ -372,7 +374,8 @@ const agentLabelBySide = {
 };
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-const outPath = outArg || path.resolve(__dirname, "..", "logs", `side-vs-side-${stamp}.jsonl`);
+const outPath =
+  outArg || path.resolve(__dirname, "..", "logs", `combo-bundle-side-vs-side-${stamp}.jsonl`);
 const reportPath = outPath.replace(/\.jsonl$/i, "-report.json");
 const sharedCatalogDir = path.resolve(__dirname, "..", "logs", "catalog");
 const sharedCatalogPath = path.join(sharedCatalogDir, "cards-catalog.json");
@@ -431,7 +434,13 @@ const aggregate = {
   luckFlipEvents: 0,
   luckHandEvents: 0,
   luckFlipCaptureValue: 0,
-  luckHandCaptureValue: 0
+  luckHandCaptureValue: 0,
+  comboBundle: {
+    bySide: {
+      [SIDE_MY]: createComboAggregateSideStats(),
+      [SIDE_YOUR]: createComboAggregateSideStats()
+    }
+  }
 };
 
 function createBalancedFirstTurnPlan(totalGames, actorA, actorB) {
@@ -1270,6 +1279,31 @@ function classifyImportantTurnTriggers({
     pushTrigger(out, "comboThreatEnter", 0, 0);
   }
 
+  const beforeSelfProg = jokboProgressMagnitude(beforeDc?.jokboProgressSelf);
+  const afterSelfProg = jokboProgressMagnitude(afterDc?.jokboProgressSelf);
+  if (afterSelfProg > beforeSelfProg) {
+    pushTrigger(out, "comboProgressStep", 0, 1);
+  }
+  if (jokboCompleted(afterDc?.jokboProgressSelf) && !jokboCompleted(beforeDc?.jokboProgressSelf)) {
+    pushTrigger(out, "comboComplete", 1, 1);
+  }
+
+  const threatBefore = hasAnyComboThreat(beforeDc);
+  const threatAfter = hasAnyComboThreat(afterDc);
+  if (threatBefore && !threatAfter) {
+    pushTrigger(out, "comboThreatCleared", 0, 1);
+  }
+
+  const blockBefore = comboBlockMagnitude(beforeDc?.comboBlockSelf);
+  const blockAfter = comboBlockMagnitude(afterDc?.comboBlockSelf);
+  if ((threatBefore || threatAfter) && blockAfter > blockBefore) {
+    pushTrigger(out, "comboHoldGain", 0, 1);
+  }
+
+  if (gwangThreatLevel(beforeDc) !== gwangThreatLevel(afterDc)) {
+    pushTrigger(out, "gwangThreatShift", 0, 0);
+  }
+
   return out;
 }
 
@@ -1339,6 +1373,166 @@ function jokboProgressMagnitude(progress) {
     Number(progress.godori || 0) +
     Number(progress.gwang || 0)
   );
+}
+
+function comboBlockMagnitude(block) {
+  if (!block) return 0;
+  return (
+    Number(block.hongdan || 0) +
+    Number(block.cheongdan || 0) +
+    Number(block.chodan || 0) +
+    Number(block.godori || 0) +
+    Number(block.gwang || 0)
+  );
+}
+
+function comboCompletedAtTag(progress, tag) {
+  if (!progress) return false;
+  if (tag === "gwang") return Number(progress.gwang || 0) >= 3;
+  return Number(progress[tag] || 0) >= 3;
+}
+
+function hasAnyComboThreat(dc) {
+  if (!dc) return false;
+  return comboThreatMask(dc) !== 0 || gwangThreatLevel(dc) > 0;
+}
+
+function createComboGameSideStats() {
+  const firstCompletionTurnByTag = {};
+  for (const tag of COMBO_TAGS) firstCompletionTurnByTag[tag] = null;
+  return {
+    firstAnyCompletionTurn: null,
+    completionByTag: Object.fromEntries(COMBO_TAGS.map((tag) => [tag, 0])),
+    firstCompletionTurnByTag,
+    threatEnterCount: 0,
+    threatClearedCount: 0,
+    threatWindowCount: 0,
+    holdGainCount: 0
+  };
+}
+
+function createComboAggregateSideStats() {
+  return {
+    gamesWithAnyCompletion: 0,
+    firstAnyCompletionTurnSum: 0,
+    completionByTagCount: Object.fromEntries(COMBO_TAGS.map((tag) => [tag, 0])),
+    completionTurnSumByTag: Object.fromEntries(COMBO_TAGS.map((tag) => [tag, 0])),
+    threatEnterCount: 0,
+    threatClearedCount: 0,
+    threatWindowCount: 0,
+    holdGainCount: 0
+  };
+}
+
+function analyzeComboBundleFromContext(contextByTurnNo, firstTurnKey, secondTurnKey) {
+  const out = {
+    bySide: {
+      [SIDE_MY]: createComboGameSideStats(),
+      [SIDE_YOUR]: createComboGameSideStats()
+    }
+  };
+  if (!(contextByTurnNo instanceof Map) || contextByTurnNo.size <= 0) return out;
+
+  const turnNos = [...contextByTurnNo.keys()].sort((a, b) => Number(a || 0) - Number(b || 0));
+  for (const turnNo of turnNos) {
+    const rec = contextByTurnNo.get(turnNo) || {};
+    const actor =
+      rec?.before?.actor || rec?.after?.actor || rec?.beforeDcActor || rec?.afterDcActor || null;
+    if (!actor) continue;
+    const side = actorToSide(actor, firstTurnKey);
+    const sideStats = out.bySide[side];
+    if (!sideStats) continue;
+
+    const beforeDc = rec?.before?.decisionContext || null;
+    const afterDc = rec?.after?.decisionContext || null;
+    if (!beforeDc || !afterDc) continue;
+
+    const threatBefore = hasAnyComboThreat(beforeDc);
+    const threatAfter = hasAnyComboThreat(afterDc);
+    if (comboThreatEntered(beforeDc, afterDc)) sideStats.threatEnterCount += 1;
+    if (threatBefore) sideStats.threatWindowCount += 1;
+    if (threatBefore && !threatAfter) sideStats.threatClearedCount += 1;
+
+    const blockBefore = comboBlockMagnitude(beforeDc.comboBlockSelf);
+    const blockAfter = comboBlockMagnitude(afterDc.comboBlockSelf);
+    if ((threatBefore || threatAfter) && blockAfter > blockBefore) {
+      sideStats.holdGainCount += 1;
+    }
+
+    for (const tag of COMBO_TAGS) {
+      if (sideStats.firstCompletionTurnByTag[tag] != null) continue;
+      if (!comboCompletedAtTag(afterDc.jokboProgressSelf, tag)) continue;
+      const resolvedTurnNo = Math.max(0, Math.floor(Number(turnNo || 0)));
+      sideStats.firstCompletionTurnByTag[tag] = resolvedTurnNo;
+      sideStats.completionByTag[tag] = 1;
+      if (
+        sideStats.firstAnyCompletionTurn == null ||
+        resolvedTurnNo < Number(sideStats.firstAnyCompletionTurn)
+      ) {
+        sideStats.firstAnyCompletionTurn = resolvedTurnNo;
+      }
+    }
+  }
+  return out;
+}
+
+function accumulateComboBundleSummary(aggregate, comboStats) {
+  if (!aggregate?.comboBundle || !comboStats?.bySide) return;
+  for (const side of [SIDE_MY, SIDE_YOUR]) {
+    const src = comboStats.bySide[side];
+    const dst = aggregate.comboBundle.bySide[side];
+    if (!src || !dst) continue;
+
+    if (src.firstAnyCompletionTurn != null) {
+      dst.gamesWithAnyCompletion += 1;
+      dst.firstAnyCompletionTurnSum += Number(src.firstAnyCompletionTurn || 0);
+    }
+
+    for (const tag of COMBO_TAGS) {
+      const completed = Number(src.completionByTag?.[tag] || 0) > 0;
+      if (!completed) continue;
+      dst.completionByTagCount[tag] += 1;
+      dst.completionTurnSumByTag[tag] += Number(src.firstCompletionTurnByTag?.[tag] || 0);
+    }
+
+    dst.threatEnterCount += Number(src.threatEnterCount || 0);
+    dst.threatClearedCount += Number(src.threatClearedCount || 0);
+    dst.threatWindowCount += Number(src.threatWindowCount || 0);
+    dst.holdGainCount += Number(src.holdGainCount || 0);
+  }
+}
+
+function comboBundleReportBySide(bundleSide, games) {
+  const completionRateByTag = {};
+  const avgCompletionTurnByTag = {};
+  for (const tag of COMBO_TAGS) {
+    const cnt = Number(bundleSide?.completionByTagCount?.[tag] || 0);
+    const sumTurn = Number(bundleSide?.completionTurnSumByTag?.[tag] || 0);
+    completionRateByTag[tag] = cnt / Math.max(1, games);
+    avgCompletionTurnByTag[tag] = cnt > 0 ? sumTurn / cnt : null;
+  }
+  const threatEnter = Number(bundleSide?.threatEnterCount || 0);
+  const threatCleared = Number(bundleSide?.threatClearedCount || 0);
+  const threatWindows = Number(bundleSide?.threatWindowCount || 0);
+  const holdGain = Number(bundleSide?.holdGainCount || 0);
+  const anyCompleteGames = Number(bundleSide?.gamesWithAnyCompletion || 0);
+  return {
+    anyCompletionRate: anyCompleteGames / Math.max(1, games),
+    avgFirstAnyCompletionTurn:
+      anyCompleteGames > 0 ? Number(bundleSide?.firstAnyCompletionTurnSum || 0) / anyCompleteGames : null,
+    completionRateByTag,
+    avgCompletionTurnByTag,
+    threatEnterPerGame: threatEnter / Math.max(1, games),
+    blockSuccessRate: threatCleared / Math.max(1, threatEnter),
+    holdGainPerThreatWindow: holdGain / Math.max(1, threatWindows),
+    counts: {
+      gamesWithAnyCompletion: anyCompleteGames,
+      threatEnterCount: threatEnter,
+      threatClearedCount: threatCleared,
+      threatWindowCount: threatWindows,
+      holdGainCount: holdGain
+    }
+  };
 }
 
 function bakRiskShiftReward(beforeDc, afterDc, key, weight) {
@@ -1429,6 +1623,9 @@ function applyEpisodeIrBudget(irValue, actor, totalsByActor, limit = IR_EPISODE_
 
 function compactDecisionContextForTrace(dc) {
   if (!dc) return null;
+  const jpSelf = dc.jokboProgressSelf || {};
+  const jpOpp = dc.jokboProgressOpp || {};
+  const cbSelf = dc.comboBlockSelf || {};
   return {
     phase: tracePhaseCode(dc.phase),
     deckCount: Math.max(0, Math.floor(Number(dc.deckCount || 0))),
@@ -1440,6 +1637,30 @@ function compactDecisionContextForTrace(dc) {
     piBakRisk: Number(dc.piBakRisk || 0) ? 1 : 0,
     gwangBakRisk: Number(dc.gwangBakRisk || 0) ? 1 : 0,
     mongBakRisk: Number(dc.mongBakRisk || 0) ? 1 : 0,
+    jokboProgressSelf: {
+      hongdan: Math.max(0, Math.floor(Number(jpSelf.hongdan || 0))),
+      cheongdan: Math.max(0, Math.floor(Number(jpSelf.cheongdan || 0))),
+      chodan: Math.max(0, Math.floor(Number(jpSelf.chodan || 0))),
+      godori: Math.max(0, Math.floor(Number(jpSelf.godori || 0))),
+      gwang: Math.max(0, Math.floor(Number(jpSelf.gwang || 0)))
+    },
+    jokboProgressOpp: {
+      hongdan: Math.max(0, Math.floor(Number(jpOpp.hongdan || 0))),
+      cheongdan: Math.max(0, Math.floor(Number(jpOpp.cheongdan || 0))),
+      chodan: Math.max(0, Math.floor(Number(jpOpp.chodan || 0))),
+      godori: Math.max(0, Math.floor(Number(jpOpp.godori || 0))),
+      gwang: Math.max(0, Math.floor(Number(jpOpp.gwang || 0)))
+    },
+    comboBlockSelf: {
+      hongdan: Math.max(0, Math.floor(Number(cbSelf.hongdan || 0))),
+      cheongdan: Math.max(0, Math.floor(Number(cbSelf.cheongdan || 0))),
+      chodan: Math.max(0, Math.floor(Number(cbSelf.chodan || 0))),
+      godori: Math.max(0, Math.floor(Number(cbSelf.godori || 0))),
+      gwang: Math.max(0, Math.floor(Number(cbSelf.gwang || 0)))
+    },
+    selfJokboThreatProb: toPercentInt(dc.selfJokboThreatProb),
+    selfJokboOneAwayProb: toPercentInt(dc.selfJokboOneAwayProb),
+    selfGwangThreatProb: toPercentInt(dc.selfGwangThreatProb),
     oppJokboThreatProb: toPercentInt(dc.oppJokboThreatProb),
     oppJokboOneAwayProb: toPercentInt(dc.oppJokboOneAwayProb),
     oppGwangThreatProb: toPercentInt(dc.oppGwangThreatProb),
@@ -1865,6 +2086,7 @@ function fullSummary({
 
 function buildTrainReport() {
   return {
+    simulator: SIMULATOR_NAME,
     logMode,
     games: aggregate.games,
     completed: aggregate.completed,
@@ -1897,12 +2119,17 @@ function buildTrainReport() {
       yourSideInflictedRate: aggregate.bankrupt.yourSideInflicted / Math.max(1, aggregate.games),
       yourSideSufferedRate: aggregate.bankrupt.yourSideSuffered / Math.max(1, aggregate.games)
     },
+    comboBundle: {
+      [SIDE_MY]: comboBundleReportBySide(aggregate.comboBundle.bySide[SIDE_MY], aggregate.games),
+      [SIDE_YOUR]: comboBundleReportBySide(aggregate.comboBundle.bySide[SIDE_YOUR], aggregate.games)
+    },
     primaryMetric: "averageGoldDeltaMySide"
   };
 }
 
 function buildFullReport() {
   return {
+    simulator: SIMULATOR_NAME,
     logMode,
     catalogPath: sharedCatalogPath,
     games: aggregate.games,
@@ -1935,6 +2162,10 @@ function buildFullReport() {
       mySideSufferedRate: aggregate.bankrupt.mySideSuffered / Math.max(1, aggregate.games),
       yourSideInflictedRate: aggregate.bankrupt.yourSideInflicted / Math.max(1, aggregate.games),
       yourSideSufferedRate: aggregate.bankrupt.yourSideSuffered / Math.max(1, aggregate.games)
+    },
+    comboBundle: {
+      [SIDE_MY]: comboBundleReportBySide(aggregate.comboBundle.bySide[SIDE_MY], aggregate.games),
+      [SIDE_YOUR]: comboBundleReportBySide(aggregate.comboBundle.bySide[SIDE_YOUR], aggregate.games)
     },
     primaryMetric: "averageGoldDeltaMySide",
     nagariRate: aggregate.nagari / Math.max(1, aggregate.games),
@@ -2159,6 +2390,15 @@ async function run() {
             }
           )
       : null;
+    const comboBundleGame =
+      needsDecisionTrace && contextByTurnNo
+        ? analyzeComboBundleFromContext(contextByTurnNo, firstTurnKey, secondTurnKey)
+        : {
+            bySide: {
+              [SIDE_MY]: createComboGameSideStats(),
+              [SIDE_YOUR]: createComboGameSideStats()
+            }
+          };
     const mySideActor = firstTurnKey;
     const yourSideActor = secondTurnKey;
     const mySideScore = Number(state.result?.[mySideActor]?.total || 0);
@@ -2186,6 +2426,7 @@ async function run() {
 
     if (isTrainMode) {
       const line = {
+        simulator: SIMULATOR_NAME,
         game: i + 1,
         seed,
         steps,
@@ -2219,6 +2460,7 @@ async function run() {
           [SIDE_YOUR]: yourSideBankrupt
         },
         sessionReset,
+        comboBundle: comboBundleGame,
         decision_trace: decisionTrace
       };
       baseSummary({
@@ -2229,6 +2471,7 @@ async function run() {
         mySideGold,
         yourSideGold
       });
+      accumulateComboBundleSummary(aggregate, comboBundleGame);
       await writeLine(outStream, line);
       continue;
     }
@@ -2330,6 +2573,7 @@ async function run() {
     });
 
     const persistedLine = {
+      simulator: SIMULATOR_NAME,
       game: i + 1,
       seed,
       steps,
@@ -2360,9 +2604,11 @@ async function run() {
         [SIDE_YOUR]: yourSideBankrupt
       },
       sessionReset,
+      comboBundle: comboBundleGame,
       decision_trace: decisionTrace
     };
 
+    accumulateComboBundleSummary(aggregate, comboBundleGame);
     await writeLine(outStream, persistedLine);
   }
 
