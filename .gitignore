@@ -3,6 +3,7 @@ dist/
 logs/
 *.zip
 .tmp_*/
-models/
+models/*
+!models/*.json
 __pycache__/
 *.pyc
