@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 import argparse
 import array
 import glob
@@ -87,6 +87,20 @@ def trace_order(trace):
     if a == SIDE_YOUR:
         return "second"
     return "?"
+
+
+def _dc_hand_opp(dc):
+    if (dc or {}).get("handCountOpp") is not None:
+        return int((dc or {}).get("handCountOpp") or 0)
+    hand_self = int((dc or {}).get("handCountSelf") or 0)
+    hand_diff = int((dc or {}).get("handCountDiff") or 0)
+    return hand_self - hand_diff
+
+
+def _dc_score_diff(dc):
+    if (dc or {}).get("scoreDiff") is not None:
+        return float((dc or {}).get("scoreDiff") or 0)
+    return float((dc or {}).get("currentScoreSelf") or 0) - float((dc or {}).get("currentScoreOpp") or 0)
 
 
 def trigger_names(trace):
@@ -251,11 +265,12 @@ def extract_numeric(trace):
         + float(1 if dc.get("gwangBakRisk") else 0)
         + float(1 if dc.get("mongBakRisk") else 0)
     )
-    score_diff = float(dc.get("currentScoreSelf") or 0) - float(dc.get("currentScoreOpp") or 0)
+    score_diff = _dc_score_diff(dc)
+    hand_opp = _dc_hand_opp(dc)
     return {
         "deck_count": float(dc.get("deckCount") or 0),
         "hand_self": float(dc.get("handCountSelf") or 0),
-        "hand_opp": float(dc.get("handCountOpp") or 0),
+        "hand_opp": float(hand_opp),
         "go_self": float(dc.get("goCountSelf") or 0),
         "go_opp": float(dc.get("goCountOpp") or 0),
         "score_diff": score_diff,
@@ -299,7 +314,8 @@ def extract_tokens(trace, decision_type, action_label):
         + float(1 if dc.get("gwangBakRisk") else 0)
         + float(1 if dc.get("mongBakRisk") else 0)
     )
-    score_diff = float(dc.get("currentScoreSelf") or 0) - float(dc.get("currentScoreOpp") or 0)
+    score_diff = _dc_score_diff(dc)
+    hand_opp = _dc_hand_opp(dc)
     out = [
         f"phase={dc.get('phase','?')}",
         f"order={order}",
@@ -307,7 +323,7 @@ def extract_tokens(trace, decision_type, action_label):
         f"action={action_label or '?'}",
         f"deck_bucket={int((dc.get('deckCount') or 0)//3)}",
         f"self_hand={int(dc.get('handCountSelf') or 0)}",
-        f"opp_hand={int(dc.get('handCountOpp') or 0)}",
+        f"opp_hand={int(hand_opp)}",
         f"self_go={int(dc.get('goCountSelf') or 0)}",
         f"opp_go={int(dc.get('goCountOpp') or 0)}",
         f"is_first_attacker={1 if order == 'first' else 0}",

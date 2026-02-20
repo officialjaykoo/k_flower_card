@@ -1,4 +1,4 @@
-import fs from "node:fs";
+﻿import fs from "node:fs";
 import path from "node:path";
 import { once } from "node:events";
 import crypto from "node:crypto";
@@ -43,6 +43,9 @@ const TRAIN_EXPLORE_RATE_COMEBACK_DEFAULT = 0.012;
 const TRAIN_EXPLORE_DECAY_K_DEFAULT = 0;
 const TRAIN_EXPLORE_MIN_DEFAULT = 0;
 const TRAIN_EXPLORE_COMEBACK_MIN_DEFAULT = 0;
+const GO_STOP_THRESHOLD_BASE_PERMILLE = 1200;
+const GO_STOP_THRESHOLD_AHEAD_PERMILLE = 2000;
+const GO_STOP_THRESHOLD_BEHIND_PERMILLE = 500;
 const MOE_DEFENSE_SCORE_THRESHOLD_DEFAULT = -2;
 const MOE_ATTACK_SCORE_THRESHOLD_DEFAULT = 3;
 const MOE_RISK_THRESHOLD_DEFAULT = 1;
@@ -1051,10 +1054,12 @@ function policyContextKey(trace, decisionType) {
     ? Math.floor(Number(rawPhase))
     : tracePhaseCode(rawPhase);
   const handSelf = dc.handCountSelf || 0;
-  const handOpp = dc.handCountOpp || 0;
+  const handDiff =
+    dc.handCountDiff != null
+      ? Number(dc.handCountDiff || 0)
+      : Number(handSelf || 0) - Number(dc.handCountOpp || 0);
   const goSelf = dc.goCountSelf || 0;
   const goOpp = dc.goCountOpp || 0;
-  const carry = Math.max(1, Math.floor(Number(dc.carryOverMultiplier || 1)));
   const shakeSelf = Math.min(3, Math.floor(Number(dc.shakeCountSelf || 0)));
   const shakeOpp = Math.min(3, Math.floor(Number(dc.shakeCountOpp || 0)));
   let cands = Number(trace.cc ?? sp.candidateCount ?? 0);
@@ -1068,10 +1073,9 @@ function policyContextKey(trace, decisionType) {
     `o=${trace.o || "?"}`,
     `db=${deckBucket}`,
     `hs=${handSelf}`,
-    `ho=${handOpp}`,
+    `hd=${handDiff}`,
     `gs=${goSelf}`,
     `go=${goOpp}`,
-    `cm=${carry}`,
     `ss=${shakeSelf}`,
     `so=${shakeOpp}`,
     `cc=${cands}`
@@ -1101,7 +1105,15 @@ function policyProb(model, sample, choice) {
 
 function valueTokens(dc, order, decisionType, actionLabel) {
   const isFirst = order === "first" ? 1 : 0;
-  const scoreDiff = Math.floor(Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0));
+  const scoreDiff =
+    dc.scoreDiff != null
+      ? Math.floor(Number(dc.scoreDiff || 0))
+      : Math.floor(Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0));
+  const handSelf = Math.floor(Number(dc.handCountSelf || 0));
+  const handOpp =
+    dc.handCountOpp != null
+      ? Math.floor(Number(dc.handCountOpp || 0))
+      : Math.floor(handSelf - Number(dc.handCountDiff || 0));
   const bakRiskTotal =
     Number(dc.piBakRisk || 0) + Number(dc.gwangBakRisk || 0) + Number(dc.mongBakRisk || 0);
   const goStopDeltaBucket = Math.floor(Number(dc.goStopDeltaProxy || 0) * 2);
@@ -1111,8 +1123,8 @@ function valueTokens(dc, order, decisionType, actionLabel) {
     `decision_type=${decisionType}`,
     `action=${actionLabel || "?"}`,
     `deck_bucket=${Math.floor((dc.deckCount || 0) / 3)}`,
-    `self_hand=${Math.floor(dc.handCountSelf || 0)}`,
-    `opp_hand=${Math.floor(dc.handCountOpp || 0)}`,
+    `self_hand=${handSelf}`,
+    `opp_hand=${handOpp}`,
     `self_go=${Math.floor(dc.goCountSelf || 0)}`,
     `opp_go=${Math.floor(dc.goCountOpp || 0)}`,
     `is_first_attacker=${isFirst}`,
@@ -1126,15 +1138,21 @@ function valueTokens(dc, order, decisionType, actionLabel) {
 
 function valueNumeric(dc, candidateCount, order) {
   const isFirst = order === "first" ? 1 : 0;
+  const handSelf = Number(dc.handCountSelf || 0);
+  const handOpp = dc.handCountOpp != null ? Number(dc.handCountOpp || 0) : handSelf - Number(dc.handCountDiff || 0);
+  const scoreDiff =
+    dc.scoreDiff != null
+      ? Number(dc.scoreDiff || 0)
+      : Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0);
   const bakRiskTotal =
     Number(dc.piBakRisk || 0) + Number(dc.gwangBakRisk || 0) + Number(dc.mongBakRisk || 0);
   return {
     deck_count: Number(dc.deckCount || 0),
-    hand_self: Number(dc.handCountSelf || 0),
-    hand_opp: Number(dc.handCountOpp || 0),
+    hand_self: handSelf,
+    hand_opp: handOpp,
     go_self: Number(dc.goCountSelf || 0),
     go_opp: Number(dc.goCountOpp || 0),
-    score_diff: Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0),
+    score_diff: scoreDiff,
     is_first_attacker: isFirst,
     cand_count: Number(candidateCount || 0),
     bak_risk_total: bakRiskTotal,
@@ -1292,6 +1310,20 @@ function modelSelectCandidate(state, actor, cfg) {
       bestCandidate = candidate;
       bestValue = vs;
       bestPolicy = pp;
+    }
+  }
+  if (decisionType === "option") {
+    const hasGo = candidates.includes("go");
+    const hasStop = candidates.includes("stop");
+    if (hasGo && hasStop && bestCandidate === "go") {
+      const scoreDiff = Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0);
+      let threshold = GO_STOP_THRESHOLD_BASE_PERMILLE;
+      if (scoreDiff > 0) threshold = GO_STOP_THRESHOLD_AHEAD_PERMILLE;
+      else if (scoreDiff < 0) threshold = GO_STOP_THRESHOLD_BEHIND_PERMILLE;
+      const goStopPermille = Math.round(Number(dc.goStopDeltaProxy || 0) * 1000);
+      if (goStopPermille < threshold) {
+        bestCandidate = "stop";
+      }
     }
   }
   setBoundedCache(decisionInferenceCache, cacheKey, bestCandidate, DECISION_CACHE_MAX);
@@ -1794,30 +1826,27 @@ function applyEpisodeIrBudget(irValue, actor, totalsByActor, limit = IR_EPISODE_
 
 function compactDecisionContextForTrace(dc) {
   if (!dc) return null;
+  const handCountSelf = Math.max(0, Math.floor(Number(dc.handCountSelf || 0)));
+  const handCountOpp = Math.max(0, Math.floor(Number(dc.handCountOpp || 0)));
+  const scoreDiff = Math.floor(Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0));
   return {
     phase: tracePhaseCode(dc.phase),
     deckCount: Math.max(0, Math.floor(Number(dc.deckCount || 0))),
-    handCountSelf: Math.max(0, Math.floor(Number(dc.handCountSelf || 0))),
-    handCountOpp: Math.max(0, Math.floor(Number(dc.handCountOpp || 0))),
+    handCountSelf,
+    handCountDiff: handCountSelf - handCountOpp,
     goCountSelf: Math.max(0, Math.floor(Number(dc.goCountSelf || 0))),
     goCountOpp: Math.max(0, Math.floor(Number(dc.goCountOpp || 0))),
-    carryOverMultiplier: Math.max(1, Math.floor(Number(dc.carryOverMultiplier || 1))),
     piBakRisk: Number(dc.piBakRisk || 0) ? 1 : 0,
     gwangBakRisk: Number(dc.gwangBakRisk || 0) ? 1 : 0,
     mongBakRisk: Number(dc.mongBakRisk || 0) ? 1 : 0,
-    jokboProgressSelfSum: Math.max(0, Math.floor(Number(dc.jokboProgressSelfSum || 0))),
     jokboProgressOppSum: Math.max(0, Math.floor(Number(dc.jokboProgressOppSum || 0))),
     jokboOneAwaySelfCount: Math.max(0, Math.floor(Number(dc.jokboOneAwaySelfCount || 0))),
     jokboOneAwayOppCount: Math.max(0, Math.floor(Number(dc.jokboOneAwayOppCount || 0))),
-    selfJokboThreatProb: toPercentInt(dc.selfJokboThreatProb),
-    selfJokboOneAwayProb: toPercentInt(dc.selfJokboOneAwayProb),
-    selfGwangThreatProb: toPercentInt(dc.selfGwangThreatProb),
     oppJokboThreatProb: toPercentInt(dc.oppJokboThreatProb),
     oppJokboOneAwayProb: toPercentInt(dc.oppJokboOneAwayProb),
     oppGwangThreatProb: toPercentInt(dc.oppGwangThreatProb),
     goStopDeltaProxy: toSignedPermille(dc.goStopDeltaProxy, 3),
-    currentScoreSelf: Math.floor(Number(dc.currentScoreSelf || 0)),
-    currentScoreOpp: Math.floor(Number(dc.currentScoreOpp || 0))
+    scoreDiff
   };
 }
 
@@ -1861,7 +1890,7 @@ function buildDecisionTrace(
     const after = turnCtx?.after || null;
     const decisionType = traceDecisionType(before?.selectionPool || null, action.type);
     const candidateCount = traceCandidateCount(before?.selectionPool || null);
-    if (candidateCount < 1) continue;
+    if (candidateCount < 2) continue;
     const compactDc = compactDecisionContextForTrace(before?.decisionContext || null);
     const jpPre = before?.decisionContext?.jokboProgressSelf || null;
     const jpPost = after?.decisionContext?.jokboProgressSelf || null;
@@ -1911,7 +1940,7 @@ function buildDecisionTrace(
     const actorSide = actorToSide(actor, firstTurnKey);
     if (myTurnOnly && actorSide !== SIDE_MY) continue;
     const candidateCount = Math.max(0, Math.floor(Number(ev?.candidateCount || 0)));
-    if (candidateCount < 1) continue;
+    if (candidateCount < 2) continue;
     const actionType = String(ev?.actionType || "option");
     const beforeDc = ev?.beforeDc || null;
     const afterDc = ev?.afterDc || null;
@@ -1983,7 +2012,7 @@ function buildDecisionTraceTrain(
     const after = turnCtx?.after || null;
     const decisionType = traceDecisionType(before?.selectionPool || null, action.type);
     const candidateCount = traceCandidateCount(before?.selectionPool || null);
-    if (candidateCount < 1) continue;
+    if (candidateCount < 2) continue;
     const compactDc = compactDecisionContextForTrace(before?.decisionContext || null);
     const jpPre = before?.decisionContext?.jokboProgressSelf || null;
     const jpPost = after?.decisionContext?.jokboProgressSelf || null;
@@ -2033,7 +2062,7 @@ function buildDecisionTraceTrain(
     const actorSide = actorToSide(actor, firstTurnKey);
     if (myTurnOnly && actorSide !== SIDE_MY) continue;
     const candidateCount = Math.max(0, Math.floor(Number(ev?.candidateCount || 0)));
-    if (candidateCount < 1) continue;
+    if (candidateCount < 2) continue;
     const actionType = String(ev?.actionType || "option");
     const beforeDc = ev?.beforeDc || null;
     const afterDc = ev?.afterDc || null;

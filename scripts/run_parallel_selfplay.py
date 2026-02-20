@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 import argparse
 import json
 import os
@@ -88,10 +88,12 @@ def _policy_context_key(trace):
     order = _trace_order(trace)
     deck_bucket = int((dc.get("deckCount") or 0) // 3)
     hand_self = int(dc.get("handCountSelf") or 0)
-    hand_opp = int(dc.get("handCountOpp") or 0)
+    if dc.get("handCountDiff") is not None:
+        hand_diff = int(dc.get("handCountDiff") or 0)
+    else:
+        hand_diff = hand_self - int(dc.get("handCountOpp") or 0)
     go_self = int(dc.get("goCountSelf") or 0)
     go_opp = int(dc.get("goCountOpp") or 0)
-    carry = max(1, int(dc.get("carryOverMultiplier") or 1))
     shake_self = min(3, int(dc.get("shakeCountSelf") or 0))
     shake_opp = min(3, int(dc.get("shakeCountOpp") or 0))
     cands = int(trace.get("cc") or 0)
@@ -103,10 +105,9 @@ def _policy_context_key(trace):
             f"o={order}",
             f"db={deck_bucket}",
             f"hs={hand_self}",
-            f"ho={hand_opp}",
+            f"hd={hand_diff}",
             f"gs={go_self}",
             f"go={go_opp}",
-            f"cm={carry}",
             f"ss={shake_self}",
             f"so={shake_opp}",
             f"cc={cands}",

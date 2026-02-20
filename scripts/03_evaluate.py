@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 import argparse
 import glob
 import hashlib
@@ -104,11 +104,10 @@ def policy_context_key(trace, decision_type):
     dc = trace.get("dc") or {}
     sp = trace.get("sp") or {}
     deck_bucket = int((dc.get("deckCount") or 0) // 3)
-    hand_self = dc.get("handCountSelf", 0)
-    hand_opp = dc.get("handCountOpp", 0)
+    hand_self = int(dc.get("handCountSelf") or 0)
+    hand_diff = int(dc.get("handCountDiff") or 0) if dc.get("handCountDiff") is not None else hand_self - int(dc.get("handCountOpp") or 0)
     go_self = dc.get("goCountSelf", 0)
     go_opp = dc.get("goCountOpp", 0)
-    carry = max(1, int(dc.get("carryOverMultiplier") or 1))
     shake_self = min(3, int(dc.get("shakeCountSelf") or 0))
     shake_opp = min(3, int(dc.get("shakeCountOpp") or 0))
     phase = dc.get("phase")
@@ -142,10 +141,9 @@ def policy_context_key(trace, decision_type):
             f"o={trace_order(trace)}",
             f"db={deck_bucket}",
             f"hs={hand_self}",
-            f"ho={hand_opp}",
+            f"hd={hand_diff}",
             f"gs={go_self}",
             f"go={go_opp}",
-            f"cm={carry}",
             f"ss={shake_self}",
             f"so={shake_opp}",
             f"cc={cands}",
@@ -224,6 +222,20 @@ def _float_or_none(v):
         return None
 
 
+def _dc_hand_opp(dc):
+    if (dc or {}).get("handCountOpp") is not None:
+        return int((dc or {}).get("handCountOpp") or 0)
+    hand_self = int((dc or {}).get("handCountSelf") or 0)
+    hand_diff = int((dc or {}).get("handCountDiff") or 0)
+    return hand_self - hand_diff
+
+
+def _dc_score_diff(dc):
+    if (dc or {}).get("scoreDiff") is not None:
+        return float((dc or {}).get("scoreDiff") or 0)
+    return float((dc or {}).get("currentScoreSelf") or 0) - float((dc or {}).get("currentScoreOpp") or 0)
+
+
 def value_target(line, actor, gold_per_point, target_mode):
     mode = str(target_mode or "score").strip().lower()
     if mode == "gold":
@@ -290,7 +302,8 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
         + float(1 if dc.get("gwangBakRisk") else 0)
         + float(1 if dc.get("mongBakRisk") else 0)
     )
-    score_diff = float(dc.get("currentScoreSelf") or 0) - float(dc.get("currentScoreOpp") or 0)
+    score_diff = _dc_score_diff(dc)
+    hand_opp = _dc_hand_opp(dc)
     tokens = [
         f"phase={dc.get('phase','?')}",
         f"order={trace_order(trace)}",
@@ -298,7 +311,7 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
         f"action={chosen or '?'}",
         f"deck_bucket={int((dc.get('deckCount') or 0)//3)}",
         f"self_hand={int(dc.get('handCountSelf') or 0)}",
-        f"opp_hand={int(dc.get('handCountOpp') or 0)}",
+        f"opp_hand={int(hand_opp)}",
         f"self_go={int(dc.get('goCountSelf') or 0)}",
         f"opp_go={int(dc.get('goCountOpp') or 0)}",
         f"score_diff={int(score_diff)}",
@@ -310,7 +323,7 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
     numeric = {
         "deck_count": float(dc.get("deckCount") or 0),
         "hand_self": float(dc.get("handCountSelf") or 0),
-        "hand_opp": float(dc.get("handCountOpp") or 0),
+        "hand_opp": float(hand_opp),
         "go_self": float(dc.get("goCountSelf") or 0),
         "go_opp": float(dc.get("goCountOpp") or 0),
         "score_diff": score_diff,
@@ -372,14 +385,19 @@ def main():
     with open(args.policy_new, "r", encoding="utf-8") as f:
         policy_new = json.load(f)
 
-    value_old = None
-    value_new = None
-    if args.value_old and os.path.isfile(args.value_old):
-        with open(args.value_old, "r", encoding="utf-8") as f:
-            value_old = json.load(f)
-    if args.value_new and os.path.isfile(args.value_new):
-        with open(args.value_new, "r", encoding="utf-8") as f:
-            value_new = json.load(f)
+    if not args.value_old or not args.value_new:
+        parser.error(
+            "3-axis gate requires value old/new comparison. "
+            "Provide both --value-old and --value-new so value_not_worse is computed."
+        )
+    if not os.path.isfile(args.value_old):
+        parser.error(f"--value-old file not found: {args.value_old}")
+    if not os.path.isfile(args.value_new):
+        parser.error(f"--value-new file not found: {args.value_new}")
+    with open(args.value_old, "r", encoding="utf-8") as f:
+        value_old = json.load(f)
+    with open(args.value_new, "r", encoding="utf-8") as f:
+        value_new = json.load(f)
 
     total = 0
     old_correct = 0
@@ -463,27 +481,26 @@ def main():
                     else:
                         duel_tie += 1
 
-                    if value_old and value_new:
-                        gold_per_point = value_new.get("gold_per_point", 100.0)
-                        target_mode = value_new.get("target_mode", "score")
-                        vs = value_sample(trace, dt, chosen, line, gold_per_point, target_mode)
-                        if vs:
-                            y = vs["y"]
-                            pred_old = value_predict(value_old, vs)
-                            pred_new = value_predict(value_new, vs)
-                            e_old = abs(pred_old - y)
-                            e_new = abs(pred_new - y)
-                            v_total += 1
-                            v_old_abs += e_old
-                            v_new_abs += e_new
-                            v_old_sq += (pred_old - y) ** 2
-                            v_new_sq += (pred_new - y) ** 2
-                            if e_new < e_old:
-                                v_duel_new += 1
-                            elif e_old < e_new:
-                                v_duel_old += 1
-                            else:
-                                v_duel_tie += 1
+                    gold_per_point = value_new.get("gold_per_point", 100.0)
+                    target_mode = value_new.get("target_mode", "score")
+                    vs = value_sample(trace, dt, chosen, line, gold_per_point, target_mode)
+                    if vs:
+                        y = vs["y"]
+                        pred_old = value_predict(value_old, vs)
+                        pred_new = value_predict(value_new, vs)
+                        e_old = abs(pred_old - y)
+                        e_new = abs(pred_new - y)
+                        v_total += 1
+                        v_old_abs += e_old
+                        v_new_abs += e_new
+                        v_old_sq += (pred_old - y) ** 2
+                        v_new_sq += (pred_new - y) ** 2
+                        if e_new < e_old:
+                            v_duel_new += 1
+                        elif e_old < e_new:
+                            v_duel_old += 1
+                        else:
+                            v_duel_tie += 1
 
     gold_delta_avg = avg_gold_delta_sum / max(1, games)
     if games > 1:
@@ -502,9 +519,7 @@ def main():
 
     gold_gate = gold_delta_ci95_low > 0
     risk_gate = go_fail_rate_total <= 0.08
-    value_gate = True
-    if value_old and value_new and v_total > 0:
-        value_gate = (v_new_abs / max(1, v_total)) <= (v_old_abs / max(1, v_total))
+    value_gate = (v_new_abs / max(1, v_total)) <= (v_old_abs / max(1, v_total))
     promotion_recommended = bool(gold_gate and risk_gate and value_gate)
 
     report = {
@@ -544,11 +559,7 @@ def main():
                 "new_win_rate": duel_new / max(1, duel_new + duel_old + duel_tie),
             },
         },
-        "value": None,
-    }
-
-    if value_old and value_new:
-        report["value"] = {
+        "value": {
             "samples": v_total,
             "old_mae": v_old_abs / max(1, v_total),
             "new_mae": v_new_abs / max(1, v_total),
@@ -560,7 +571,8 @@ def main():
                 "ties": v_duel_tie,
                 "new_win_rate": v_duel_new / max(1, v_duel_new + v_duel_old + v_duel_tie),
             },
-        }
+        },
+    }
 
     out = args.output
     if out is None:
@@ -572,8 +584,7 @@ def main():
 
     print(f"evaluation report -> {out}")
     print(json.dumps(report["policy"], ensure_ascii=False))
-    if report["value"] is not None:
-        print(json.dumps(report["value"], ensure_ascii=False))
+    print(json.dumps(report["value"], ensure_ascii=False))
 
 
 if __name__ == "__main__":

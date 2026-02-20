@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 import argparse
 import glob
 import json
@@ -209,11 +209,10 @@ def policy_context_key(trace, decision_type):
     dc = trace.get("dc") or {}
     sp = trace.get("sp") or {}
     deck_bucket = int((dc.get("deckCount") or 0) // 3)
-    hand_self = dc.get("handCountSelf", 0)
-    hand_opp = dc.get("handCountOpp", 0)
+    hand_self = int(dc.get("handCountSelf") or 0)
+    hand_diff = int(dc.get("handCountDiff") or 0) if dc.get("handCountDiff") is not None else hand_self - int(dc.get("handCountOpp") or 0)
     go_self = dc.get("goCountSelf", 0)
     go_opp = dc.get("goCountOpp", 0)
-    carry = max(1, int(dc.get("carryOverMultiplier") or 1))
     shake_self = min(3, int(dc.get("shakeCountSelf") or 0))
     shake_opp = min(3, int(dc.get("shakeCountOpp") or 0))
     phase = dc.get("phase")
@@ -242,10 +241,9 @@ def policy_context_key(trace, decision_type):
             f"o={trace_order(trace)}",
             f"db={deck_bucket}",
             f"hs={hand_self}",
-            f"ho={hand_opp}",
+            f"hd={hand_diff}",
             f"gs={go_self}",
             f"go={go_opp}",
-            f"cm={carry}",
             f"ss={shake_self}",
             f"so={shake_opp}",
             f"cc={cands}",
@@ -283,6 +281,20 @@ def _float_or_none(v):
         return float(v)
     except Exception:
         return None
+
+
+def _dc_hand_opp(dc):
+    if (dc or {}).get("handCountOpp") is not None:
+        return int((dc or {}).get("handCountOpp") or 0)
+    hand_self = int((dc or {}).get("handCountSelf") or 0)
+    hand_diff = int((dc or {}).get("handCountDiff") or 0)
+    return hand_self - hand_diff
+
+
+def _dc_score_diff(dc):
+    if (dc or {}).get("scoreDiff") is not None:
+        return float((dc or {}).get("scoreDiff") or 0)
+    return float((dc or {}).get("currentScoreSelf") or 0) - float((dc or {}).get("currentScoreOpp") or 0)
 
 
 def target_gold(line, actor, gold_per_point, target_mode="gold"):
@@ -374,7 +386,8 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
         + float(1 if dc.get("gwangBakRisk") else 0)
         + float(1 if dc.get("mongBakRisk") else 0)
     )
-    score_diff = float(dc.get("currentScoreSelf") or 0) - float(dc.get("currentScoreOpp") or 0)
+    score_diff = _dc_score_diff(dc)
+    hand_opp = _dc_hand_opp(dc)
     tokens = [
         f"phase={dc.get('phase', '?')}",
         f"order={trace_order(trace)}",
@@ -382,7 +395,7 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
         f"action={chosen or '?'}",
         f"deck_bucket={int((dc.get('deckCount') or 0)//3)}",
         f"self_hand={int(dc.get('handCountSelf') or 0)}",
-        f"opp_hand={int(dc.get('handCountOpp') or 0)}",
+        f"opp_hand={int(hand_opp)}",
         f"self_go={int(dc.get('goCountSelf') or 0)}",
         f"opp_go={int(dc.get('goCountOpp') or 0)}",
         f"is_first_attacker={1 if trace_order(trace) == 'first' else 0}",
@@ -395,7 +408,7 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
     numeric = {
         "deck_count": float(dc.get("deckCount") or 0),
         "hand_self": float(dc.get("handCountSelf") or 0),
-        "hand_opp": float(dc.get("handCountOpp") or 0),
+        "hand_opp": float(hand_opp),
         "go_self": float(dc.get("goCountSelf") or 0),
         "go_opp": float(dc.get("goCountOpp") or 0),
         "score_diff": score_diff,
