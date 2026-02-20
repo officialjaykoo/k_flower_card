@@ -2,6 +2,11 @@
   "log_mode": "train",
   "model_only_when_possible": true,
   "chunk_games": 20000,
+  "explore_base": 0.006,
+  "explore_comeback_base": 0.012,
+  "explore_min": 0.001,
+  "explore_comeback_min": 0.002,
+  "explore_decay_k": 2.0,
   "focal": {
     "name": "dolbaram",
     "fallback_policy": "heuristic_v3",

@@ -6,6 +6,7 @@ import random
 import shutil
 import subprocess
 import sys
+import math
 from datetime import datetime, timezone
 
 
@@ -56,6 +57,18 @@ def add_actor_args(cmd, role, actor):
     if actor["value_model"]:
         cmd.append(f"--value-model-{role}={actor['value_model']}")
 
+def scheduled_rate(base_rate, min_rate, decay_k, progress):
+    b = max(0.0, min(1.0, float(base_rate)))
+    m = max(0.0, min(1.0, float(min_rate)))
+    if m > b:
+        m = b
+    k = max(0.0, float(decay_k))
+    if k <= 0:
+        return b
+    p = max(0.0, min(1.0, float(progress)))
+    decay = math.exp(-k * p)
+    return m + (b - m) * decay
+
 
 def main():
     if os.environ.get("NO_SIMULATION") == "1":
@@ -69,6 +82,26 @@ def main():
     parser.add_argument("--chunk-games", type=int, default=None, help="Games per matchup chunk (even).")
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--keep-chunks", action="store_true")
+    parser.add_argument("--explore-base", type=float, default=None, help="Base --train-explore-rate.")
+    parser.add_argument(
+        "--explore-comeback-base",
+        type=float,
+        default=None,
+        help="Base --train-explore-rate-comeback.",
+    )
+    parser.add_argument("--explore-min", type=float, default=None, help="Floor for train explore rate.")
+    parser.add_argument(
+        "--explore-comeback-min",
+        type=float,
+        default=None,
+        help="Floor for train comeback explore rate.",
+    )
+    parser.add_argument(
+        "--explore-decay-k",
+        type=float,
+        default=None,
+        help="Exponential decay coefficient for chunk-wise exploration scheduling.",
+    )
     args = parser.parse_args()
 
     if args.total_games <= 0 or args.total_games % 2 != 0:
@@ -82,6 +115,41 @@ def main():
     log_mode = cfg.get("log_mode", "train")
     model_only_when_possible = bool(cfg.get("model_only_when_possible", True))
     chunk_games = args.chunk_games or int(cfg.get("chunk_games", 20000))
+    explore_base = (
+        float(args.explore_base)
+        if args.explore_base is not None
+        else float(cfg.get("explore_base", 0.006))
+    )
+    explore_comeback_base = (
+        float(args.explore_comeback_base)
+        if args.explore_comeback_base is not None
+        else float(cfg.get("explore_comeback_base", 0.012))
+    )
+    explore_min = (
+        float(args.explore_min)
+        if args.explore_min is not None
+        else float(cfg.get("explore_min", 0.0))
+    )
+    explore_comeback_min = (
+        float(args.explore_comeback_min)
+        if args.explore_comeback_min is not None
+        else float(cfg.get("explore_comeback_min", 0.0))
+    )
+    explore_decay_k = (
+        float(args.explore_decay_k)
+        if args.explore_decay_k is not None
+        else float(cfg.get("explore_decay_k", 0.0))
+    )
+    if explore_base < 0 or explore_base > 1:
+        raise RuntimeError("explore-base must be in [0,1].")
+    if explore_comeback_base < 0 or explore_comeback_base > 1:
+        raise RuntimeError("explore-comeback-base must be in [0,1].")
+    if explore_min < 0 or explore_min > 1:
+        raise RuntimeError("explore-min must be in [0,1].")
+    if explore_comeback_min < 0 or explore_comeback_min > 1:
+        raise RuntimeError("explore-comeback-min must be in [0,1].")
+    if explore_decay_k < 0:
+        raise RuntimeError("explore-decay-k must be >= 0.")
     if chunk_games <= 0 or chunk_games % 2 != 0:
         raise RuntimeError("chunk-games must be positive even number.")
 
@@ -94,6 +162,7 @@ def main():
     rng = random.Random(args.seed)
     remaining = args.total_games
     side_flip = False
+    total_chunks = max(1, int(math.ceil(args.total_games / float(chunk_games))))
     chunk_infos = []
     aggregate = {"games": 0, "completed": 0, "winners": {"mySide": 0, "yourSide": 0, "draw": 0, "unknown": 0}, "matchups": {}}
 
@@ -110,6 +179,12 @@ def main():
         your_side = opp if not side_flip else focal
         side_flip = not side_flip
 
+        progress = (i - 1) / max(1, total_chunks - 1)
+        chunk_explore = scheduled_rate(explore_base, explore_min, explore_decay_k, progress)
+        chunk_explore_comeback = scheduled_rate(
+            explore_comeback_base, explore_comeback_min, explore_decay_k, progress
+        )
+
         chunk_out = os.path.join(chunk_dir, f"chunk-{i:03d}.jsonl")
         cmd = [
             sys.executable,
@@ -121,6 +196,10 @@ def main():
             chunk_out,
             "--",
             f"--log-mode={log_mode}",
+            f"--train-explore-rate={chunk_explore:.8f}",
+            f"--train-explore-rate-comeback={chunk_explore_comeback:.8f}",
+            "--train-explore-min=0",
+            "--train-explore-comeback-min=0",
         ]
         add_actor_args(cmd, "my-side", my_side)
         add_actor_args(cmd, "your-side", your_side)
@@ -147,6 +226,9 @@ def main():
                 "report": rep_path,
                 "mySide": my_side["name"],
                 "yourSide": your_side["name"],
+                "exploreRate": chunk_explore,
+                "exploreRateComeback": chunk_explore_comeback,
+                "exploreProgress": progress,
             }
         )
         remaining -= g
@@ -167,6 +249,13 @@ def main():
         "workers": args.workers,
         "chunks": chunk_infos,
         "matchups": aggregate["matchups"],
+        "explore": {
+            "base": explore_base,
+            "comebackBase": explore_comeback_base,
+            "min": explore_min,
+            "comebackMin": explore_comeback_min,
+            "decayK": explore_decay_k,
+        },
     }
     with open(report_out, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
@@ -188,4 +277,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -19,6 +19,18 @@ DEFAULT_VALUE_FILTER_RULES = {
     "keep_if_trigger_prefixes": ["specialEvent", "bomb", "riskShift"],
     "keep_if_trigger_names": ["comboThreatEnter", "terminalContext", "goStopOption", "shakingYesOption"],
 }
+TRIGGER_BIT = {
+    "earlyTurnForced": 1 << 0,
+    "goStopOption": 1 << 1,
+    "shakingYesOption": 1 << 2,
+    "optionTurnOther": 1 << 3,
+    "deckEmpty": 1 << 4,
+    "specialEvent": 1 << 5,
+    "bombEvent": 1 << 6,
+    "riskShift": 1 << 7,
+    "comboThreatEnter": 1 << 8,
+    "terminalContext": 1 << 9,
+}
 
 
 def expand_inputs(patterns):
@@ -115,11 +127,42 @@ def action_alias(action):
     return aliases.get(action, action)
 
 
+def trace_order(trace):
+    o = str(trace.get("o") or "").strip().lower()
+    if o in ("first", "second"):
+        return o
+    a = str(trace.get("a") or "").strip()
+    if a == SIDE_MY:
+        return "first"
+    if a == SIDE_YOUR:
+        return "second"
+    return "?"
+
+
+def trigger_names(trace):
+    tg = trace.get("tg")
+    if isinstance(tg, list):
+        return [str(x or "") for x in tg if str(x or "").strip()]
+    tm = trace.get("tm")
+    try:
+        mask = int(tm or 0)
+    except Exception:
+        mask = 0
+    if mask <= 0:
+        return []
+    out = []
+    for name, bit in TRIGGER_BIT.items():
+        if mask & int(bit):
+            out.append(name)
+    return out
+
+
 def extract_policy_sample(trace):
     dt = trace.get("dt")
-    chosen_play = trace.get("c")
-    chosen_match = trace.get("s")
-    chosen_option = action_alias(trace.get("at"))
+    compact = trace.get("ch")
+    chosen_play = compact if dt == "play" else trace.get("c")
+    chosen_match = compact if dt == "match" else trace.get("s")
+    chosen_option = action_alias(compact if dt == "option" else trace.get("at"))
     if dt == "play" and chosen_play:
         return "play", [chosen_play], chosen_play
     if dt == "match" and chosen_match:
@@ -140,19 +183,19 @@ def extract_policy_sample(trace):
     sp = trace.get("sp") or {}
     cards = sp.get("cards")
     if cards:
-        chosen = trace.get("c")
+        chosen = compact if compact is not None else trace.get("c")
         if chosen in cards:
             return "play", cards, chosen
         return None
     board = sp.get("boardCardIds")
     if board:
-        chosen = trace.get("s")
+        chosen = compact if compact is not None else trace.get("s")
         if chosen in board:
             return "match", board, chosen
         return None
     options = sp.get("options")
     if options:
-        chosen = action_alias(trace.get("at"))
+        chosen = action_alias(compact if compact is not None else trace.get("at"))
         if chosen in options:
             return "option", options, chosen
         return None
@@ -196,7 +239,7 @@ def policy_context_key(trace, decision_type):
         [
             f"dt={decision_type}",
             f"ph={phase}",
-            f"o={trace.get('o', '?')}",
+            f"o={trace_order(trace)}",
             f"db={deck_bucket}",
             f"hs={hand_self}",
             f"ho={hand_opp}",
@@ -278,20 +321,21 @@ def target_gold(line, actor, gold_per_point, target_mode="gold"):
 
 def choose_label(trace):
     dt = trace.get("dt")
+    compact = trace.get("ch")
     if dt == "play":
-        return trace.get("c"), "play"
+        return (compact if compact is not None else trace.get("c")), "play"
     if dt == "match":
-        return trace.get("s"), "match"
+        return (compact if compact is not None else trace.get("s")), "match"
     if dt == "option":
-        return action_alias(trace.get("at")), "option"
+        return action_alias(compact if compact is not None else trace.get("at")), "option"
 
     sp = trace.get("sp") or {}
     if sp.get("cards"):
-        return trace.get("c"), "play"
+        return (compact if compact is not None else trace.get("c")), "play"
     if sp.get("boardCardIds"):
-        return trace.get("s"), "match"
+        return (compact if compact is not None else trace.get("s")), "match"
     if sp.get("options"):
-        return action_alias(trace.get("at")), "option"
+        return action_alias(compact if compact is not None else trace.get("at")), "option"
     return None, None
 
 
@@ -303,9 +347,37 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
     y = target_gold(line, actor, gold_per_point, target_mode)
     if y is None:
         return None
+    def _prob01(v):
+        try:
+            x = float(v or 0.0)
+        except Exception:
+            return 0.0
+        if x > 1.0:
+            x = x / 100.0
+        return max(0.0, min(1.0, x))
+
+    def _signed_proxy(v, abs_max=3.0):
+        try:
+            x = float(v or 0.0)
+        except Exception:
+            return 0.0
+        if abs(x) > abs_max:
+            x = x / 1000.0
+        if x > abs_max:
+            x = abs_max
+        if x < -abs_max:
+            x = -abs_max
+        return x
+
+    bak_risk_total = (
+        float(1 if dc.get("piBakRisk") else 0)
+        + float(1 if dc.get("gwangBakRisk") else 0)
+        + float(1 if dc.get("mongBakRisk") else 0)
+    )
+    score_diff = float(dc.get("currentScoreSelf") or 0) - float(dc.get("currentScoreOpp") or 0)
     tokens = [
         f"phase={dc.get('phase', '?')}",
-        f"order={trace.get('o', '?')}",
+        f"order={trace_order(trace)}",
         f"decision_type={decision_type}",
         f"action={chosen or '?'}",
         f"deck_bucket={int((dc.get('deckCount') or 0)//3)}",
@@ -313,7 +385,12 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
         f"opp_hand={int(dc.get('handCountOpp') or 0)}",
         f"self_go={int(dc.get('goCountSelf') or 0)}",
         f"opp_go={int(dc.get('goCountOpp') or 0)}",
-        f"is_first_attacker={1 if str(trace.get('o') or '') == 'first' else 0}",
+        f"is_first_attacker={1 if trace_order(trace) == 'first' else 0}",
+        f"score_diff={int(score_diff)}",
+        f"bak_risk={int(bak_risk_total)}",
+        f"jp_self_sum={int(dc.get('jokboProgressSelfSum') or 0)}",
+        f"jp_opp_sum={int(dc.get('jokboProgressOppSum') or 0)}",
+        f"go_stop_delta_bucket={int(_signed_proxy(dc.get('goStopDeltaProxy')) * 2)}",
     ]
     numeric = {
         "deck_count": float(dc.get("deckCount") or 0),
@@ -321,7 +398,20 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
         "hand_opp": float(dc.get("handCountOpp") or 0),
         "go_self": float(dc.get("goCountSelf") or 0),
         "go_opp": float(dc.get("goCountOpp") or 0),
-        "is_first_attacker": float(1 if str(trace.get("o") or "") == "first" else 0),
+        "score_diff": score_diff,
+        "is_first_attacker": float(1 if trace_order(trace) == "first" else 0),
+        "bak_risk_total": bak_risk_total,
+        "jokbo_progress_self_sum": float(dc.get("jokboProgressSelfSum") or 0),
+        "jokbo_progress_opp_sum": float(dc.get("jokboProgressOppSum") or 0),
+        "jokbo_one_away_self_count": float(dc.get("jokboOneAwaySelfCount") or 0),
+        "jokbo_one_away_opp_count": float(dc.get("jokboOneAwayOppCount") or 0),
+        "self_jokbo_threat_prob": _prob01(dc.get("selfJokboThreatProb")),
+        "self_jokbo_one_away_prob": _prob01(dc.get("selfJokboOneAwayProb")),
+        "self_gwang_threat_prob": _prob01(dc.get("selfGwangThreatProb")),
+        "opp_jokbo_threat_prob": _prob01(dc.get("oppJokboThreatProb")),
+        "opp_jokbo_one_away_prob": _prob01(dc.get("oppJokboOneAwayProb")),
+        "opp_gwang_threat_prob": _prob01(dc.get("oppGwangThreatProb")),
+        "go_stop_delta_proxy": _signed_proxy(dc.get("goStopDeltaProxy")),
         "cand_count": float(trace.get("cc") or 0),
         "immediate_reward": float(trace.get("ir") or 0),
     }
@@ -357,12 +447,13 @@ def value_exception_trace(trace, rules):
     name_set = set(_as_str_list((rules or {}).get("keep_if_trigger_names")))
 
     action_type = str(trace.get("at") or "")
+    if not action_type:
+        chosen = action_alias(trace.get("ch"))
+        if chosen in ("go", "stop"):
+            action_type = f"choose_{chosen}"
     if action_type in action_set:
         return True
-    tg = trace.get("tg")
-    if not isinstance(tg, list):
-        return False
-    for raw in tg:
+    for raw in trigger_names(trace):
         name = str(raw or "")
         if not name:
             continue
@@ -402,20 +493,19 @@ def percentile(values, q):
 
 def compact_game_line(game, traces):
     keys = [
+        "ver",
+        "run",
         "game",
         "seed",
         "winner",
         "score",
+        "firstAttackerActor",
         "initialGoldMy",
         "initialGoldYour",
         "finalGoldMy",
         "finalGoldYour",
         "goldDeltaMy",
-        "goldDeltaYour",
-        "goldDeltaMyRatio",
-        "goldDeltaMyNorm",
         "policy",
-        "firstAttackerSide",
     ]
     out = {}
     for k in keys:

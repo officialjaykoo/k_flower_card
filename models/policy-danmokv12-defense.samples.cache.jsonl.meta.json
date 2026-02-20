@@ -1,0 +1,22 @@
+{
+  "format_version": "policy_sample_cache_v1",
+  "created_at": "2026-02-19T12:49:30.381092+00:00",
+  "config": {
+    "format_version": "policy_sample_cache_v1",
+    "cache_backend": "jsonl",
+    "max_samples": null,
+    "filter_rules": {
+      "min_candidate_count": 2
+    }
+  },
+  "input_manifest": [
+    {
+      "path": "C:\\k_flower_card\\logs\\policy_defense_goldDeltaMy_lt_m20k_1m.jsonl",
+      "size": 18109695,
+      "mtime_ns": 1771505358013983100
+    }
+  ],
+  "counts": {
+    "samples_total": 29630
+  }
+}

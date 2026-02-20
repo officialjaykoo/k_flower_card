@@ -30,45 +30,17 @@ DEFAULT_VALUE_FILTER_RULES = {
     "keep_if_trigger_prefixes": ["specialEvent", "bomb", "riskShift"],
     "keep_if_trigger_names": ["comboThreatEnter", "terminalContext", "goStopOption", "shakingYesOption"],
 }
-DEFAULT_VALUE_FILTER_BRANCH = "default"
-VALUE_FILTER_BRANCH_RULES = {
-    "default": {},
-    "bak": {
-        "min_candidate_count": 2,
-        "keep_if_action_type_in": ["declare_bomb"],
-        "keep_if_trigger_prefixes": ["specialEvent", "bomb", "riskShift"],
-        "keep_if_trigger_names": ["comboThreatEnter", "terminalContext", "goStopOption", "shakingYesOption"],
-    },
-    "combo": {
-        "min_candidate_count": 2,
-        "keep_if_action_type_in": ["declare_bomb"],
-        "keep_if_trigger_prefixes": ["specialEvent", "bomb", "riskShift", "combo"],
-        "keep_if_trigger_names": [
-            "gwangThreatShift",
-            "comboProgressStep",
-            "comboComplete",
-            "comboThreatCleared",
-            "comboHoldGain",
-            "terminalContext",
-            "goStopOption",
-            "shakingYesOption",
-        ],
-    },
-    "meta": {
-        "min_candidate_count": 2,
-        "keep_if_action_type_in": ["declare_bomb"],
-        "keep_if_trigger_prefixes": ["specialEvent", "bomb", "riskShift", "meta"],
-        "keep_if_trigger_names": [
-            "terminalContext",
-            "goStopOption",
-            "shakingYesOption",
-            "comboThreatEnter",
-            "metaHighMultiplierGoStop",
-            "metaTerminalGoStop",
-            "metaHighMultiplierWindow",
-            "metaTerminalWindow",
-        ],
-    },
+TRIGGER_BIT = {
+    "earlyTurnForced": 1 << 0,
+    "goStopOption": 1 << 1,
+    "shakingYesOption": 1 << 2,
+    "optionTurnOther": 1 << 3,
+    "deckEmpty": 1 << 4,
+    "specialEvent": 1 << 5,
+    "bombEvent": 1 << 6,
+    "riskShift": 1 << 7,
+    "comboThreatEnter": 1 << 8,
+    "terminalContext": 1 << 9,
 }
 
 
@@ -105,6 +77,36 @@ def action_alias(action):
     return aliases.get(action, action)
 
 
+def trace_order(trace):
+    o = str(trace.get("o") or "").strip().lower()
+    if o in ("first", "second"):
+        return o
+    a = str(trace.get("a") or "").strip()
+    if a == SIDE_MY:
+        return "first"
+    if a == SIDE_YOUR:
+        return "second"
+    return "?"
+
+
+def trigger_names(trace):
+    tg = trace.get("tg")
+    if isinstance(tg, list):
+        return [str(x or "") for x in tg if str(x or "").strip()]
+    tm = trace.get("tm")
+    try:
+        mask = int(tm or 0)
+    except Exception:
+        mask = 0
+    if mask <= 0:
+        return []
+    out = []
+    for name, bit in TRIGGER_BIT.items():
+        if mask & int(bit):
+            out.append(name)
+    return out
+
+
 def _to_int_or_none(value):
     try:
         if value is None:
@@ -123,64 +125,6 @@ def _as_str_list(value):
         if s:
             out.append(s)
     return out
-
-
-def _dedup_keep_order(items):
-    seen = set()
-    out = []
-    for v in items:
-        s = str(v or "").strip()
-        if not s or s in seen:
-            continue
-        seen.add(s)
-        out.append(s)
-    return out
-
-
-def _normalize_filter_branch_name(name):
-    raw = str(name or DEFAULT_VALUE_FILTER_BRANCH).strip().lower()
-    if raw in ("", "base"):
-        return "default"
-    if raw not in ("default", "bak", "combo", "meta", "auto"):
-        raise RuntimeError(f"Unsupported --filter-branch: {name}")
-    return raw
-
-
-def _merge_filter_rules(base_rules, branch_rules):
-    base = _normalize_value_filter_rules(base_rules)
-    if not isinstance(branch_rules, dict) or not branch_rules:
-        return base
-    branch = _normalize_value_filter_rules(branch_rules)
-    merged = dict(base)
-    if "min_candidate_count" in branch:
-        try:
-            merged["min_candidate_count"] = max(1, int(branch.get("min_candidate_count") or merged["min_candidate_count"]))
-        except Exception:
-            pass
-    merged["keep_if_action_type_in"] = _dedup_keep_order(
-        _as_str_list(base.get("keep_if_action_type_in")) + _as_str_list(branch.get("keep_if_action_type_in"))
-    )
-    merged["keep_if_trigger_prefixes"] = _dedup_keep_order(
-        _as_str_list(base.get("keep_if_trigger_prefixes")) + _as_str_list(branch.get("keep_if_trigger_prefixes"))
-    )
-    merged["keep_if_trigger_names"] = _dedup_keep_order(
-        _as_str_list(base.get("keep_if_trigger_names")) + _as_str_list(branch.get("keep_if_trigger_names"))
-    )
-    return _normalize_value_filter_rules(merged)
-
-
-def _branch_for_line(line, requested_branch):
-    branch = _normalize_filter_branch_name(requested_branch)
-    if branch != "auto":
-        return branch
-    sim = str((line or {}).get("simulator") or "").strip().lower()
-    if "bak_bundle" in sim:
-        return "bak"
-    if "combo_bundle" in sim:
-        return "combo"
-    if "meta_bundle" in sim:
-        return "meta"
-    return "default"
 
 
 def _normalize_value_filter_rules(raw):
@@ -214,20 +158,21 @@ def load_value_filter_rules(path):
 
 def choose_label(trace):
     dt = trace.get("dt")
+    compact = trace.get("ch")
     if dt == "play":
-        return trace.get("c"), "play"
+        return (compact if compact is not None else trace.get("c")), "play"
     if dt == "match":
-        return trace.get("s"), "match"
+        return (compact if compact is not None else trace.get("s")), "match"
     if dt == "option":
-        return action_alias(trace.get("at")), "option"
+        return action_alias(compact if compact is not None else trace.get("at")), "option"
 
     sp = trace.get("sp") or {}
     if sp.get("cards"):
-        return trace.get("c"), "play"
+        return (compact if compact is not None else trace.get("c")), "play"
     if sp.get("boardCardIds"):
-        return trace.get("s"), "match"
+        return (compact if compact is not None else trace.get("s")), "match"
     if sp.get("options"):
-        return action_alias(trace.get("at")), "option"
+        return action_alias(compact if compact is not None else trace.get("at")), "option"
     return None, None
 
 
@@ -240,12 +185,13 @@ def is_value_exception_trace(trace, filter_rules):
     name_set = set(_as_str_list(rules.get("keep_if_trigger_names")))
 
     action_type = str(trace.get("at") or "")
+    if not action_type:
+        chosen = action_alias(trace.get("ch"))
+        if chosen in ("go", "stop"):
+            action_type = f"choose_{chosen}"
     if action_type in action_set:
         return True
-    tg = trace.get("tg")
-    if not isinstance(tg, list):
-        return False
-    for raw in tg:
+    for raw in trigger_names(trace):
         name = str(raw or "")
         if not name:
             continue
@@ -268,33 +214,92 @@ def trace_passes_value_filter(trace, filter_rules):
 
 
 def extract_numeric(trace):
+    def _prob01(v):
+        try:
+            x = float(v or 0.0)
+        except Exception:
+            return 0.0
+        if x > 1.0:
+            x = x / 100.0
+        return max(0.0, min(1.0, x))
+
+    def _signed_proxy(v, abs_max=3.0):
+        try:
+            x = float(v or 0.0)
+        except Exception:
+            return 0.0
+        if abs(x) > abs_max:
+            x = x / 1000.0
+        if x > abs_max:
+            x = abs_max
+        if x < -abs_max:
+            x = -abs_max
+        return x
+
     dc = trace.get("dc") or {}
     sp = trace.get("sp") or {}
     cands = int(trace.get("cc") or 0)
     if cands <= 0:
         cands = len(sp.get("cards") or sp.get("boardCardIds") or sp.get("options") or [])
-    order = str(trace.get("o") or "").strip().lower()
+    order = trace_order(trace)
     if order in ("first", "second"):
         is_first = 1.0 if order == "first" else 0.0
     else:
         is_first = float(1 if int(dc.get("isFirstAttacker") or 0) else 0)
+    bak_risk_total = (
+        float(1 if dc.get("piBakRisk") else 0)
+        + float(1 if dc.get("gwangBakRisk") else 0)
+        + float(1 if dc.get("mongBakRisk") else 0)
+    )
+    score_diff = float(dc.get("currentScoreSelf") or 0) - float(dc.get("currentScoreOpp") or 0)
     return {
         "deck_count": float(dc.get("deckCount") or 0),
         "hand_self": float(dc.get("handCountSelf") or 0),
         "hand_opp": float(dc.get("handCountOpp") or 0),
         "go_self": float(dc.get("goCountSelf") or 0),
         "go_opp": float(dc.get("goCountOpp") or 0),
+        "score_diff": score_diff,
         "is_first_attacker": is_first,
         "cand_count": float(cands),
+        "bak_risk_total": bak_risk_total,
+        "jokbo_progress_self_sum": float(dc.get("jokboProgressSelfSum") or 0),
+        "jokbo_progress_opp_sum": float(dc.get("jokboProgressOppSum") or 0),
+        "jokbo_one_away_self_count": float(dc.get("jokboOneAwaySelfCount") or 0),
+        "jokbo_one_away_opp_count": float(dc.get("jokboOneAwayOppCount") or 0),
+        "self_jokbo_threat_prob": _prob01(dc.get("selfJokboThreatProb")),
+        "self_jokbo_one_away_prob": _prob01(dc.get("selfJokboOneAwayProb")),
+        "self_gwang_threat_prob": _prob01(dc.get("selfGwangThreatProb")),
+        "opp_jokbo_threat_prob": _prob01(dc.get("oppJokboThreatProb")),
+        "opp_jokbo_one_away_prob": _prob01(dc.get("oppJokboOneAwayProb")),
+        "opp_gwang_threat_prob": _prob01(dc.get("oppGwangThreatProb")),
+        "go_stop_delta_proxy": _signed_proxy(dc.get("goStopDeltaProxy")),
         "immediate_reward": float(trace.get("ir") or 0),
     }
 
 
 def extract_tokens(trace, decision_type, action_label):
     dc = trace.get("dc") or {}
-    order = str(trace.get("o") or "").strip().lower()
+    order = trace_order(trace)
     if order not in ("first", "second"):
         order = "first" if int(dc.get("isFirstAttacker") or 0) else "second"
+    def _signed_proxy(v, abs_max=3.0):
+        try:
+            x = float(v or 0.0)
+        except Exception:
+            return 0.0
+        if abs(x) > abs_max:
+            x = x / 1000.0
+        if x > abs_max:
+            x = abs_max
+        if x < -abs_max:
+            x = -abs_max
+        return x
+    bak_risk_total = (
+        float(1 if dc.get("piBakRisk") else 0)
+        + float(1 if dc.get("gwangBakRisk") else 0)
+        + float(1 if dc.get("mongBakRisk") else 0)
+    )
+    score_diff = float(dc.get("currentScoreSelf") or 0) - float(dc.get("currentScoreOpp") or 0)
     out = [
         f"phase={dc.get('phase','?')}",
         f"order={order}",
@@ -306,6 +311,11 @@ def extract_tokens(trace, decision_type, action_label):
         f"self_go={int(dc.get('goCountSelf') or 0)}",
         f"opp_go={int(dc.get('goCountOpp') or 0)}",
         f"is_first_attacker={1 if order == 'first' else 0}",
+        f"score_diff={int(score_diff)}",
+        f"bak_risk={int(bak_risk_total)}",
+        f"jp_self_sum={int(dc.get('jokboProgressSelfSum') or 0)}",
+        f"jp_opp_sum={int(dc.get('jokboProgressOppSum') or 0)}",
+        f"go_stop_delta_bucket={int(_signed_proxy(dc.get('goStopDeltaProxy')) * 2)}",
     ]
     return out
 
@@ -359,11 +369,9 @@ def iter_samples(
     target_mode="gold",
     max_samples=None,
     filter_rules=None,
-    filter_branch=DEFAULT_VALUE_FILTER_BRANCH,
 ):
     yielded = 0
-    base_rules = _normalize_value_filter_rules(filter_rules)
-    branch_rule_cache = {}
+    active_rules = _normalize_value_filter_rules(filter_rules)
     for path in paths:
         with open(path, "r", encoding="utf-8") as f:
             for line_raw in f:
@@ -371,12 +379,6 @@ def iter_samples(
                 if not line_raw:
                     continue
                 line = json.loads(line_raw)
-                line_branch = _branch_for_line(line, filter_branch)
-                active_rules = branch_rule_cache.get(line_branch)
-                if active_rules is None:
-                    branch_rules = VALUE_FILTER_BRANCH_RULES.get(line_branch, {})
-                    active_rules = _merge_filter_rules(base_rules, branch_rules)
-                    branch_rule_cache[line_branch] = active_rules
                 for trace in line.get("decision_trace") or []:
                     if not trace_passes_value_filter(trace, active_rules):
                         continue
@@ -442,14 +444,13 @@ def scan_dataset_stats(
     seed,
     numeric_keys,
     filter_rules,
-    filter_branch,
 ):
     numeric_max_abs = {k: 1.0 for k in numeric_keys}
     total = 0
     train_count = 0
     valid_count = 0
     for s in iter_samples(
-        paths, gold_per_point, target_mode, max_samples, filter_rules, filter_branch
+        paths, gold_per_point, target_mode, max_samples, filter_rules
     ):
         is_valid = split_is_valid(total, valid_ratio, seed)
         if is_valid:
@@ -480,10 +481,9 @@ def iter_sparse_source_samples(
     seed,
     subset,
     filter_rules,
-    filter_branch,
 ):
     for idx, sample in enumerate(
-        iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules, filter_branch)
+        iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules)
     ):
         is_valid = split_is_valid(idx, valid_ratio, seed)
         split = "valid" if is_valid else "train"
@@ -579,13 +579,12 @@ def build_feature_cache_jsonl(
     valid_ratio,
     seed,
     filter_rules,
-    filter_branch,
 ):
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     counts = {"samples_total": 0, "samples_train": 0, "samples_valid": 0}
     with open(cache_path, "w", encoding="utf-8") as f:
         for idx, sample in enumerate(
-            iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules, filter_branch)
+            iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules)
         ):
             is_valid = split_is_valid(idx, valid_ratio, seed)
             split_code = "v" if is_valid else "t"
@@ -617,7 +616,6 @@ def build_feature_cache_lmdb(
     seed,
     map_size_bytes,
     filter_rules,
-    filter_branch,
 ):
     _ensure_lmdb_available()
     os.makedirs(cache_path, exist_ok=True)
@@ -636,7 +634,7 @@ def build_feature_cache_lmdb(
         txn = env.begin(write=True)
         try:
             for idx, sample in enumerate(
-                iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules, filter_branch)
+                iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules)
             ):
                 is_valid = split_is_valid(idx, valid_ratio, seed)
                 split_code = "v" if is_valid else "t"
@@ -677,7 +675,6 @@ def build_feature_cache(
     seed,
     lmdb_map_size_bytes,
     filter_rules,
-    filter_branch,
 ):
     if cache_backend == "lmdb":
         return build_feature_cache_lmdb(
@@ -692,7 +689,6 @@ def build_feature_cache(
             seed,
             lmdb_map_size_bytes,
             filter_rules,
-            filter_branch,
         )
     return build_feature_cache_jsonl(
         cache_path,
@@ -705,7 +701,6 @@ def build_feature_cache(
         valid_ratio,
         seed,
         filter_rules,
-        filter_branch,
     )
 
 
@@ -800,16 +795,28 @@ def evaluate_cpu_streaming(weight, bias, sample_iter):
     n = 0
     se = 0.0
     ae = 0.0
+    sum_p = 0.0
+    sum_y = 0.0
+    sum_pp = 0.0
+    sum_yy = 0.0
+    sum_py = 0.0
     for idxs, vals, y in sample_iter:
         p = predict_sparse_cpu(weight, bias, idxs, vals)
         e = p - y
         se += e * e
         ae += abs(e)
+        sum_p += p
+        sum_y += y
+        sum_pp += p * p
+        sum_yy += y * y
+        sum_py += p * y
         n += 1
     if n == 0:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
     mse = se / n
-    return mse, math.sqrt(mse), ae / n
+    den = math.sqrt(max(0.0, n * sum_pp - sum_p * sum_p) * max(0.0, n * sum_yy - sum_y * sum_y))
+    corr = ((n * sum_py - sum_p * sum_y) / den) if den > 1e-12 else 0.0
+    return mse, math.sqrt(mse), ae / n, corr
 
 
 def train_cpu_streaming(
@@ -832,9 +839,9 @@ def train_cpu_streaming(
                 grad = err * xv + l2 * w[i]
                 w[i] -= lr * grad
 
-    train_mse, train_rmse, train_mae = evaluate_cpu_streaming(w, b, train_eval_iter_factory())
-    valid_mse, valid_rmse, valid_mae = evaluate_cpu_streaming(w, b, valid_iter_factory())
-    return w, b, train_mse, train_rmse, train_mae, valid_mse, valid_rmse, valid_mae
+    train_mse, train_rmse, train_mae, train_corr = evaluate_cpu_streaming(w, b, train_eval_iter_factory())
+    valid_mse, valid_rmse, valid_mae, valid_corr = evaluate_cpu_streaming(w, b, valid_iter_factory())
+    return w, b, train_mse, train_rmse, train_mae, train_corr, valid_mse, valid_rmse, valid_mae, valid_corr
 
 
 def resolve_cuda_device():
@@ -879,6 +886,11 @@ def evaluate_torch_streaming(sample_iter, w, b, batch_size, device):
     se = 0.0
     ae = 0.0
     n = 0
+    sum_p = 0.0
+    sum_y = 0.0
+    sum_pp = 0.0
+    sum_yy = 0.0
+    sum_py = 0.0
     batch_features = []
     batch_y = []
     with torch.no_grad():
@@ -892,6 +904,11 @@ def evaluate_torch_streaming(sample_iter, w, b, batch_size, device):
             err = pred - y_t
             se += float(torch.sum(err * err).item())
             ae += float(torch.sum(torch.abs(err)).item())
+            sum_p += float(torch.sum(pred).item())
+            sum_y += float(torch.sum(y_t).item())
+            sum_pp += float(torch.sum(pred * pred).item())
+            sum_yy += float(torch.sum(y_t * y_t).item())
+            sum_py += float(torch.sum(pred * y_t).item())
             n += len(batch_features)
             batch_features.clear()
             batch_y.clear()
@@ -901,11 +918,18 @@ def evaluate_torch_streaming(sample_iter, w, b, batch_size, device):
             err = pred - y_t
             se += float(torch.sum(err * err).item())
             ae += float(torch.sum(torch.abs(err)).item())
+            sum_p += float(torch.sum(pred).item())
+            sum_y += float(torch.sum(y_t).item())
+            sum_pp += float(torch.sum(pred * pred).item())
+            sum_yy += float(torch.sum(y_t * y_t).item())
+            sum_py += float(torch.sum(pred * y_t).item())
             n += len(batch_features)
     if n <= 0:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
     mse = se / n
-    return mse, math.sqrt(mse), ae / n
+    den = math.sqrt(max(0.0, n * sum_pp - sum_p * sum_p) * max(0.0, n * sum_yy - sum_y * sum_y))
+    corr = ((n * sum_py - sum_p * sum_y) / den) if den > 1e-12 else 0.0
+    return mse, math.sqrt(mse), ae / n, corr
 
 
 def train_torch_streaming(
@@ -979,16 +1003,16 @@ def train_torch_streaming(
                 )
 
     with torch.no_grad():
-        train_mse, train_rmse, train_mae = evaluate_torch_streaming(
+        train_mse, train_rmse, train_mae, train_corr = evaluate_torch_streaming(
             train_eval_iter_factory(), w, b, batch_size, device
         )
-        valid_mse, valid_rmse, valid_mae = evaluate_torch_streaming(
+        valid_mse, valid_rmse, valid_mae, valid_corr = evaluate_torch_streaming(
             valid_iter_factory(), w, b, batch_size, device
         )
         w_out = w.detach().cpu().tolist()
         b_out = float(b.detach().cpu().item())
 
-    return w_out, b_out, train_mse, train_rmse, train_mae, valid_mse, valid_rmse, valid_mae
+    return w_out, b_out, train_mse, train_rmse, train_mae, train_corr, valid_mse, valid_rmse, valid_mae, valid_corr
 
 
 def main():
@@ -1046,12 +1070,6 @@ def main():
         default=DEFAULT_VALUE_FILTER_RULES_PATH,
         help=f"Value filter rules JSON path (default: {DEFAULT_VALUE_FILTER_RULES_PATH}).",
     )
-    parser.add_argument(
-        "--filter-branch",
-        choices=["default", "bak", "combo", "meta", "auto"],
-        default=DEFAULT_VALUE_FILTER_BRANCH,
-        help="Value filter branch profile for cc<2 exception handling.",
-    )
     args = parser.parse_args()
 
     if not (0.0 <= float(args.valid_ratio) <= 1.0):
@@ -1063,15 +1081,27 @@ def main():
 
     input_paths = expand_inputs(args.input)
     filter_rules, filter_rules_path = load_value_filter_rules(args.filter_rules)
-    filter_branch = _normalize_filter_branch_name(args.filter_branch)
     keys = [
         "deck_count",
         "hand_self",
         "hand_opp",
         "go_self",
         "go_opp",
+        "score_diff",
         "is_first_attacker",
         "cand_count",
+        "bak_risk_total",
+        "jokbo_progress_self_sum",
+        "jokbo_progress_opp_sum",
+        "jokbo_one_away_self_count",
+        "jokbo_one_away_opp_count",
+        "self_jokbo_threat_prob",
+        "self_jokbo_one_away_prob",
+        "self_gwang_threat_prob",
+        "opp_jokbo_threat_prob",
+        "opp_jokbo_one_away_prob",
+        "opp_gwang_threat_prob",
+        "go_stop_delta_proxy",
         "immediate_reward",
     ]
 
@@ -1101,8 +1131,6 @@ def main():
         "seed": int(args.seed),
         "lmdb_map_size_bytes": lmdb_map_size_bytes if args.cache_backend == "lmdb" else None,
         "filter_rules": filter_rules,
-        "filter_branch": filter_branch,
-        "filter_branch_rules": VALUE_FILTER_BRANCH_RULES if filter_branch == "auto" else VALUE_FILTER_BRANCH_RULES.get(filter_branch, {}),
     }
     numeric_scale = None
     counts = None
@@ -1127,7 +1155,6 @@ def main():
             args.seed,
             keys,
             filter_rules,
-            filter_branch,
         )
         if int(stats["samples_total"]) <= 0:
             raise RuntimeError("No trainable value samples found.")
@@ -1152,7 +1179,6 @@ def main():
                 args.seed,
                 lmdb_map_size_bytes,
                 filter_rules,
-                filter_branch,
             )
             counts = {
                 "samples_total": int(built_counts["samples_total"]),
@@ -1195,7 +1221,6 @@ def main():
                 args.seed,
                 "train",
                 filter_rules,
-                filter_branch,
             )
         return iter_with_shuffle_buffer(base, shuffle_buf, shuffle_seed)
 
@@ -1213,7 +1238,6 @@ def main():
             args.seed,
             "train",
             filter_rules,
-            filter_branch,
         )
 
     def make_valid_eval_iter():
@@ -1230,14 +1254,13 @@ def main():
             args.seed,
             "valid",
             filter_rules,
-            filter_branch,
         )
 
     if args.device == "cpu":
         backend_used = "cpu"
         actual_device = "cpu"
         print(f"training backend=cpu device=cpu samples={train_count}/{valid_count} (train/valid)")
-        w, b, train_mse, train_rmse, train_mae, valid_mse, valid_rmse, valid_mae = train_cpu_streaming(
+        w, b, train_mse, train_rmse, train_mae, train_corr, valid_mse, valid_rmse, valid_mae, valid_corr = train_cpu_streaming(
             make_train_iter_for_epoch,
             make_train_eval_iter,
             make_valid_eval_iter,
@@ -1254,7 +1277,7 @@ def main():
             f"training backend=torch device={dev} batch_size={args.batch_size} "
             f"samples={train_count}/{valid_count} (train/valid)"
         )
-        w, b, train_mse, train_rmse, train_mae, valid_mse, valid_rmse, valid_mae = train_torch_streaming(
+        w, b, train_mse, train_rmse, train_mae, train_corr, valid_mse, valid_rmse, valid_mae, valid_corr = train_torch_streaming(
             make_train_iter_for_epoch,
             make_train_eval_iter,
             make_valid_eval_iter,
@@ -1290,6 +1313,11 @@ def main():
                 "self_go",
                 "opp_go",
                 "is_first_attacker",
+                "score_diff",
+                "bak_risk",
+                "jp_self_sum",
+                "jp_opp_sum",
+                "go_stop_delta_bucket",
             ],
             "numeric_keys": keys,
             "hash_dim": args.dim,
@@ -1301,9 +1329,11 @@ def main():
             "train_mse": train_mse,
             "train_rmse": train_rmse,
             "train_mae": train_mae,
+            "train_pearson": train_corr,
             "valid_mse": valid_mse,
             "valid_rmse": valid_rmse,
             "valid_mae": valid_mae,
+            "valid_pearson": valid_corr,
             "input_files": input_paths,
             "epochs": args.epochs,
             "lr": args.lr,
@@ -1322,8 +1352,6 @@ def main():
             "lmdb_map_size_gb": args.lmdb_map_size_gb if args.cache_backend == "lmdb" else None,
             "filter_rules": filter_rules,
             "filter_rules_path": filter_rules_path,
-            "filter_branch": filter_branch,
-            "filter_branch_rules": VALUE_FILTER_BRANCH_RULES if filter_branch == "auto" else VALUE_FILTER_BRANCH_RULES.get(filter_branch, {}),
         },
     }
 

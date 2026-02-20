@@ -39,11 +39,24 @@ def action_alias(action):
     return aliases.get(action, action)
 
 
+def trace_order(trace):
+    o = str(trace.get("o") or "").strip().lower()
+    if o in ("first", "second"):
+        return o
+    a = str(trace.get("a") or "").strip()
+    if a == SIDE_MY:
+        return "first"
+    if a == SIDE_YOUR:
+        return "second"
+    return "?"
+
+
 def extract_policy_sample(trace):
     dt = trace.get("dt")
-    chosen_play = trace.get("c")
-    chosen_match = trace.get("s")
-    chosen_option = action_alias(trace.get("at"))
+    compact = trace.get("ch")
+    chosen_play = compact if dt == "play" else trace.get("c")
+    chosen_match = compact if dt == "match" else trace.get("s")
+    chosen_option = action_alias(compact if dt == "option" else trace.get("at"))
     if dt == "play" and chosen_play:
         return "play", [chosen_play], chosen_play
     if dt == "match" and chosen_match:
@@ -65,19 +78,19 @@ def extract_policy_sample(trace):
     sp = trace.get("sp") or {}
     cards = sp.get("cards")
     if cards:
-        chosen = trace.get("c")
+        chosen = compact if compact is not None else trace.get("c")
         if chosen in cards:
             return "play", cards, chosen
         return None
     board = sp.get("boardCardIds")
     if board:
-        chosen = trace.get("s")
+        chosen = compact if compact is not None else trace.get("s")
         if chosen in board:
             return "match", board, chosen
         return None
     options = sp.get("options")
     if options:
-        chosen = action_alias(trace.get("at"))
+        chosen = action_alias(compact if compact is not None else trace.get("at"))
         if chosen in options:
             return "option", options, chosen
         return None
@@ -126,7 +139,7 @@ def policy_context_key(trace, decision_type):
         [
             f"dt={decision_type}",
             f"ph={phase}",
-            f"o={trace.get('o','?')}",
+            f"o={trace_order(trace)}",
             f"db={deck_bucket}",
             f"hs={hand_self}",
             f"ho={hand_opp}",
@@ -250,9 +263,37 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
     y = value_target(line, actor, gold_per_point, target_mode)
     if y is None:
         return None
+    def _prob01(v):
+        try:
+            x = float(v or 0.0)
+        except Exception:
+            return 0.0
+        if x > 1.0:
+            x = x / 100.0
+        return max(0.0, min(1.0, x))
+
+    def _signed_proxy(v, abs_max=3.0):
+        try:
+            x = float(v or 0.0)
+        except Exception:
+            return 0.0
+        if abs(x) > abs_max:
+            x = x / 1000.0
+        if x > abs_max:
+            x = abs_max
+        if x < -abs_max:
+            x = -abs_max
+        return x
+
+    bak_risk_total = (
+        float(1 if dc.get("piBakRisk") else 0)
+        + float(1 if dc.get("gwangBakRisk") else 0)
+        + float(1 if dc.get("mongBakRisk") else 0)
+    )
+    score_diff = float(dc.get("currentScoreSelf") or 0) - float(dc.get("currentScoreOpp") or 0)
     tokens = [
         f"phase={dc.get('phase','?')}",
-        f"order={trace.get('o','?')}",
+        f"order={trace_order(trace)}",
         f"decision_type={decision_type}",
         f"action={chosen or '?'}",
         f"deck_bucket={int((dc.get('deckCount') or 0)//3)}",
@@ -260,6 +301,11 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
         f"opp_hand={int(dc.get('handCountOpp') or 0)}",
         f"self_go={int(dc.get('goCountSelf') or 0)}",
         f"opp_go={int(dc.get('goCountOpp') or 0)}",
+        f"score_diff={int(score_diff)}",
+        f"bak_risk={int(bak_risk_total)}",
+        f"jp_self_sum={int(dc.get('jokboProgressSelfSum') or 0)}",
+        f"jp_opp_sum={int(dc.get('jokboProgressOppSum') or 0)}",
+        f"go_stop_delta_bucket={int(_signed_proxy(dc.get('goStopDeltaProxy')) * 2)}",
     ]
     numeric = {
         "deck_count": float(dc.get("deckCount") or 0),
@@ -267,6 +313,19 @@ def value_sample(trace, decision_type, chosen, line, gold_per_point, target_mode
         "hand_opp": float(dc.get("handCountOpp") or 0),
         "go_self": float(dc.get("goCountSelf") or 0),
         "go_opp": float(dc.get("goCountOpp") or 0),
+        "score_diff": score_diff,
+        "bak_risk_total": bak_risk_total,
+        "jokbo_progress_self_sum": float(dc.get("jokboProgressSelfSum") or 0),
+        "jokbo_progress_opp_sum": float(dc.get("jokboProgressOppSum") or 0),
+        "jokbo_one_away_self_count": float(dc.get("jokboOneAwaySelfCount") or 0),
+        "jokbo_one_away_opp_count": float(dc.get("jokboOneAwayOppCount") or 0),
+        "self_jokbo_threat_prob": _prob01(dc.get("selfJokboThreatProb")),
+        "self_jokbo_one_away_prob": _prob01(dc.get("selfJokboOneAwayProb")),
+        "self_gwang_threat_prob": _prob01(dc.get("selfGwangThreatProb")),
+        "opp_jokbo_threat_prob": _prob01(dc.get("oppJokboThreatProb")),
+        "opp_jokbo_one_away_prob": _prob01(dc.get("oppJokboOneAwayProb")),
+        "opp_gwang_threat_prob": _prob01(dc.get("oppGwangThreatProb")),
+        "go_stop_delta_proxy": _signed_proxy(dc.get("goStopDeltaProxy")),
         "cand_count": float(len(sp.get("cards") or sp.get("boardCardIds") or sp.get("options") or [])),
         "immediate_reward": float(trace.get("ir") or 0),
     }
@@ -286,6 +345,15 @@ def value_predict(model, sample):
         i = stable_hash(f"num:{k}", dim)
         total += w[i] * (v / max(1e-9, float(scale.get(k, 1.0))))
     return total
+
+def go_choice_from_trace(trace):
+    dt = str(trace.get("dt") or "").strip()
+    if dt != "option":
+        return None
+    chosen = action_alias(trace.get("ch") if trace.get("ch") is not None else trace.get("at"))
+    if chosen in ("go", "stop"):
+        return chosen
+    return None
 
 
 def main():
@@ -330,6 +398,13 @@ def main():
     v_duel_new = 0
     v_duel_old = 0
     v_duel_tie = 0
+    games = 0
+    avg_gold_delta_sum = 0.0
+    avg_gold_delta_sq_sum = 0.0
+    go_declared_total = 0
+    go_failed_total = 0
+    go_declared_by_side = {SIDE_MY: 0, SIDE_YOUR: 0}
+    go_failed_by_side = {SIDE_MY: 0, SIDE_YOUR: 0}
 
     for path in input_paths:
         with open(path, "r", encoding="utf-8") as f:
@@ -339,7 +414,31 @@ def main():
                     continue
                 line = json.loads(line_raw)
                 decision_trace = line.get("decision_trace") or []
-                score = line.get("score") or {}
+                games += 1
+                gold_delta_my = _float_or_none(line.get("goldDeltaMy"))
+                if gold_delta_my is None:
+                    final_my = _float_or_none(line.get("finalGoldMy"))
+                    init_my = _float_or_none(line.get("initialGoldMy"))
+                    if final_my is not None and init_my is not None:
+                        gold_delta_my = final_my - init_my
+                if gold_delta_my is not None:
+                    avg_gold_delta_sum += gold_delta_my
+                    avg_gold_delta_sq_sum += gold_delta_my * gold_delta_my
+                winner = str(line.get("winner") or "unknown")
+                for trace in decision_trace:
+                    go_choice = go_choice_from_trace(trace)
+                    if go_choice != "go":
+                        continue
+                    actor = str(trace.get("a") or "")
+                    if actor not in (SIDE_MY, SIDE_YOUR):
+                        continue
+                    go_declared_total += 1
+                    go_declared_by_side[actor] += 1
+                    lost = (winner == SIDE_YOUR) if actor == SIDE_MY else (winner == SIDE_MY)
+                    if lost:
+                        go_failed_total += 1
+                        go_failed_by_side[actor] += 1
+
                 for trace in decision_trace:
                     s = extract_policy_sample(trace)
                     if s is None:
@@ -386,9 +485,52 @@ def main():
                             else:
                                 v_duel_tie += 1
 
+    gold_delta_avg = avg_gold_delta_sum / max(1, games)
+    if games > 1:
+        var = (avg_gold_delta_sq_sum - ((avg_gold_delta_sum * avg_gold_delta_sum) / games)) / max(1, games - 1)
+        var = max(0.0, var)
+        gold_delta_std = math.sqrt(var)
+        gold_delta_se = gold_delta_std / math.sqrt(games)
+    else:
+        gold_delta_std = 0.0
+        gold_delta_se = 0.0
+    gold_delta_ci95_low = gold_delta_avg - 1.96 * gold_delta_se
+    gold_delta_ci95_high = gold_delta_avg + 1.96 * gold_delta_se
+    go_fail_rate_total = go_failed_total / max(1, go_declared_total)
+    go_fail_rate_my = go_failed_by_side[SIDE_MY] / max(1, go_declared_by_side[SIDE_MY])
+    go_fail_rate_your = go_failed_by_side[SIDE_YOUR] / max(1, go_declared_by_side[SIDE_YOUR])
+
+    gold_gate = gold_delta_ci95_low > 0
+    risk_gate = go_fail_rate_total <= 0.08
+    value_gate = True
+    if value_old and value_new and v_total > 0:
+        value_gate = (v_new_abs / max(1, v_total)) <= (v_old_abs / max(1, v_total))
+    promotion_recommended = bool(gold_gate and risk_gate and value_gate)
+
     report = {
         "created_at": datetime.utcnow().isoformat() + "Z",
         "inputs": input_paths,
+        "north_star": {
+            "games": games,
+            "avg_gold_delta_my": gold_delta_avg,
+            "gold_delta_std": gold_delta_std,
+            "gold_delta_se": gold_delta_se,
+            "gold_delta_ci95_low": gold_delta_ci95_low,
+            "gold_delta_ci95_high": gold_delta_ci95_high,
+            "go_declared_total": go_declared_total,
+            "go_failed_total": go_failed_total,
+            "go_fail_rate_total": go_fail_rate_total,
+            "go_fail_rate_by_side": {
+                SIDE_MY: go_fail_rate_my,
+                SIDE_YOUR: go_fail_rate_your,
+            },
+            "gates": {
+                "gold_significant_positive": gold_gate,
+                "go_fail_rate_safe": risk_gate,
+                "value_not_worse": value_gate,
+            },
+            "promotion_recommended": promotion_recommended,
+        },
         "policy": {
             "samples": total,
             "old_top1_accuracy": old_correct / max(1, total),

@@ -1335,13 +1335,13 @@ function shouldGo(state, playerKey) {
   if (ctx.mode === "DESPERATE_DEFENSE" && !desperateGo) return false;
   if (ctx.nagariDelayMode && !desperateGo) return false;
   // Absolute bak-defense rule requested: no aggressive GO before pi safety.
-  if (selfPi < (desperateGo ? 7 : 9)) return false;
+  if (selfPi < (desperateGo ? 7 : 8)) return false;
   if (selfFive === 0 && oppFive >= 7 && !desperateGo) return false;
-  if (selfFive === 0 && oppFive >= 6 && deckCount <= 10 && !desperateGo) return false;
+  if (selfFive === 0 && oppFive >= 6 && deckCount <= 5 && !desperateGo) return false;
   if (isSecond && !strongLead && oppJokboEV.oneAwayCount >= 1 && !desperateGo) return false;
   if (
     !strongLead &&
-    deckCount <= 10 &&
+    deckCount <= 5 &&
     oppJokboEV.oneAwayCount >= 1 &&
     selfJokboEV.oneAwayCount === 0 &&
     !desperateGo
@@ -1351,14 +1351,15 @@ function shouldGo(state, playerKey) {
   if (mongDanger >= 0.75 && !strongLead && !desperateGo) return false;
   if (
     mongDanger >= 0.6 &&
-    (oppThreat || oppProgThreat >= 0.45 || oppNextTurnThreat >= 0.3) &&
+    (oppThreat || oppProgThreat >= 0.5 || oppNextTurnThreat >= 0.35) &&
     !strongLead &&
     !desperateGo
   ) {
     return false;
   }
-  if (carry >= 2) {
-    // Survival mode in carry-over rounds: stop unless edge is very clear.
+  let carryStopBias = 0;
+  if (carry >= 4) {
+    // Large carry-over: increase stop tendency, but do not hard-block GO.
     const lowRisk =
       oppProgThreat < 0.35 &&
       oppNextTurnThreat < 0.25 &&
@@ -1368,26 +1369,32 @@ function shouldGo(state, playerKey) {
       !(selfFive === 0 && oppFive >= 6);
     const noImmediateCounter = oppNextMatchCount === 0 && deckCount >= 7;
     if (!(strongLead && lowRisk && noImmediateCounter && selfPi >= 9 && oppPi <= 7) && !desperateGo) {
-      return false;
+      carryStopBias += 0.22;
     }
   }
   // Conservative default: avoid over-GO unless pi line is already stable.
-  if (!strongLead && selfPi < (desperateGo ? 8 : 9) && oppPi >= 6) return false;
-  if (!strongLead && deckCount <= (desperateGo ? 6 : 8) && selfPi < (desperateGo ? 9 : 10)) return false;
+  if (!strongLead && selfPi < (desperateGo ? 7 : 8) && oppPi >= 6) return false;
+  if (!strongLead && deckCount <= 5 && selfPi < (desperateGo ? 8 : 9)) return false;
   if (
     myScore >= 7 &&
     oppScore >= 5 &&
     (oppThreat ||
-      oppProgThreat >= 0.55 ||
+      oppProgThreat >= 0.6 ||
       oppNextMatchCount > 0 ||
-      oppNextTurnThreat >= 0.38 ||
-      jokboThreat.threat >= 0.3) &&
+      oppNextTurnThreat >= 0.43 ||
+      jokboThreat.threat >= 0.35) &&
     !desperateGo
   ) {
     return false;
   }
-  if (goCount >= 3 && !isOppVulnerableForBigGo(state, playerKey)) return false;
-  if (goCount >= 2 && !strongLead && !desperateGo) return false;
+  if (
+    goCount >= 3 &&
+    !strongLead &&
+    !desperateGo &&
+    !isOppVulnerableForBigGo(state, playerKey)
+  ) {
+    return false;
+  }
   // Expected gain layer
   const myGainPotential =
     Math.max(0, myScore - 6) * 0.12 +
@@ -1405,13 +1412,14 @@ function shouldGo(state, playerKey) {
   let goMargin = isSecond ? 0.28 : 0.12;
   if (desperateGo) goMargin -= 0.18;
   if (conservativeGo) goMargin += 0.22;
-  if (carry >= 2) goMargin *= 2;
+  goMargin -= 0.08;
+  goMargin += carryStopBias;
   goMargin = Math.max(-0.1, goMargin);
   if (!strongLead && myGainPotential < oppGainPotential + goMargin) return false;
   if (!strongLead && deckCount <= 8 && selfJokboEV.total < 0.45 && !desperateGo) return false;
-  if (isSecond && !strongLead && (oppProgThreat >= 0.35 || oppNextMatchCount > 0) && !desperateGo)
+  if (isSecond && !strongLead && (oppProgThreat >= 0.4 || oppNextMatchCount > 0) && !desperateGo)
     return false;
-  if ((oppProgThreat >= 0.45 || oppNextTurnThreat >= 0.3) && !desperateGo) return false;
+  if ((oppProgThreat >= 0.5 || oppNextTurnThreat >= 0.35) && !desperateGo) return false;
   if (selfFive === 0 && oppFive >= 6 && !desperateGo) return false;
   if (oppNextMatchCount > 0 && !strongLead && !desperateGo) return false;
   if (conservativeGo && !strongLead && myGainPotential <= oppGainPotential + goMargin + 0.08) {

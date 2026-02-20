@@ -40,6 +40,13 @@ const DECISION_CACHE_MAX = 200000;
 const HASH_CACHE_MAX = 500000;
 const TRAIN_EXPLORE_RATE_DEFAULT = 0.006;
 const TRAIN_EXPLORE_RATE_COMEBACK_DEFAULT = 0.012;
+const TRAIN_EXPLORE_DECAY_K_DEFAULT = 0;
+const TRAIN_EXPLORE_MIN_DEFAULT = 0;
+const TRAIN_EXPLORE_COMEBACK_MIN_DEFAULT = 0;
+const MOE_DEFENSE_SCORE_THRESHOLD_DEFAULT = -2;
+const MOE_ATTACK_SCORE_THRESHOLD_DEFAULT = 3;
+const MOE_RISK_THRESHOLD_DEFAULT = 1;
+const MOE_OPP_THREAT_THRESHOLD_DEFAULT = 0.55;
 const IR_TURN_CLIP = 0.3;
 const IR_EPISODE_CLIP = 1.0;
 const FULL_DECK = buildDeck();
@@ -50,6 +57,21 @@ const RIBBON_COMBO_MONTH_SETS = Object.freeze({
 });
 const GODORI_MONTHS = Object.freeze([2, 4, 8]);
 const GWANG_MONTHS = Object.freeze([1, 3, 8, 11, 12]);
+const TRACE_SCHEMA_VERSION = 2;
+const TRACE_FEATURE_VERSION = 14;
+const TRACE_TRIGGER_DICT_VERSION = 2;
+const TRIGGER_BIT = Object.freeze({
+  earlyTurnForced: 1 << 0,
+  goStopOption: 1 << 1,
+  shakingYesOption: 1 << 2,
+  optionTurnOther: 1 << 3,
+  deckEmpty: 1 << 4,
+  specialEvent: 1 << 5,
+  bombEvent: 1 << 6,
+  riskShift: 1 << 7,
+  comboThreatEnter: 1 << 8,
+  terminalContext: 1 << 9
+});
 
 const decisionInferenceCache = new Map();
 const hashIndexCache = new Map();
@@ -103,10 +125,21 @@ function parseArgs(argv) {
   let modelOnly = false;
   let policyModelMySide = null;
   let policyModelYourSide = null;
+  let policyModelAttackMySide = null;
+  let policyModelAttackYourSide = null;
+  let policyModelDefenseMySide = null;
+  let policyModelDefenseYourSide = null;
   let valueModelMySide = null;
   let valueModelYourSide = null;
+  let moeDefenseScoreThreshold = MOE_DEFENSE_SCORE_THRESHOLD_DEFAULT;
+  let moeAttackScoreThreshold = MOE_ATTACK_SCORE_THRESHOLD_DEFAULT;
+  let moeRiskThreshold = MOE_RISK_THRESHOLD_DEFAULT;
+  let moeOppThreatThreshold = MOE_OPP_THREAT_THRESHOLD_DEFAULT;
   let trainExploreRate = TRAIN_EXPLORE_RATE_DEFAULT;
   let trainExploreRateComeback = TRAIN_EXPLORE_RATE_COMEBACK_DEFAULT;
+  let trainExploreDecayK = TRAIN_EXPLORE_DECAY_K_DEFAULT;
+  let trainExploreMin = TRAIN_EXPLORE_MIN_DEFAULT;
+  let trainExploreComebackMin = TRAIN_EXPLORE_COMEBACK_MIN_DEFAULT;
   let traceMyTurnOnly = false;
   let traceImportantOnly = true;
   let traceContextRadius = 0;
@@ -166,6 +199,38 @@ function parseArgs(argv) {
       policyModelYourSide = arg.split("=", 2)[1].trim();
       continue;
     }
+    if (arg === "--policy-model-attack-my-side" && args.length > 0) {
+      policyModelAttackMySide = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--policy-model-attack-my-side=")) {
+      policyModelAttackMySide = arg.split("=", 2)[1].trim();
+      continue;
+    }
+    if (arg === "--policy-model-attack-your-side" && args.length > 0) {
+      policyModelAttackYourSide = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--policy-model-attack-your-side=")) {
+      policyModelAttackYourSide = arg.split("=", 2)[1].trim();
+      continue;
+    }
+    if (arg === "--policy-model-defense-my-side" && args.length > 0) {
+      policyModelDefenseMySide = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--policy-model-defense-my-side=")) {
+      policyModelDefenseMySide = arg.split("=", 2)[1].trim();
+      continue;
+    }
+    if (arg === "--policy-model-defense-your-side" && args.length > 0) {
+      policyModelDefenseYourSide = String(args.shift()).trim();
+      continue;
+    }
+    if (arg.startsWith("--policy-model-defense-your-side=")) {
+      policyModelDefenseYourSide = arg.split("=", 2)[1].trim();
+      continue;
+    }
     if (arg === "--value-model-my-side" && args.length > 0) {
       valueModelMySide = String(args.shift()).trim();
       continue;
@@ -200,6 +265,30 @@ function parseArgs(argv) {
     }
     if (arg.startsWith("--train-explore-rate-comeback=")) {
       trainExploreRateComeback = Number(arg.split("=", 2)[1]);
+      continue;
+    }
+    if (arg === "--train-explore-decay-k" && args.length > 0) {
+      trainExploreDecayK = Number(args.shift());
+      continue;
+    }
+    if (arg.startsWith("--train-explore-decay-k=")) {
+      trainExploreDecayK = Number(arg.split("=", 2)[1]);
+      continue;
+    }
+    if (arg === "--train-explore-min" && args.length > 0) {
+      trainExploreMin = Number(args.shift());
+      continue;
+    }
+    if (arg.startsWith("--train-explore-min=")) {
+      trainExploreMin = Number(arg.split("=", 2)[1]);
+      continue;
+    }
+    if (arg === "--train-explore-comeback-min" && args.length > 0) {
+      trainExploreComebackMin = Number(args.shift());
+      continue;
+    }
+    if (arg.startsWith("--train-explore-comeback-min=")) {
+      trainExploreComebackMin = Number(arg.split("=", 2)[1]);
       continue;
     }
     if (arg === "--trace-my-turn-only") {
@@ -239,6 +328,38 @@ function parseArgs(argv) {
       traceGoStopPlus2 = false;
       continue;
     }
+    if (arg === "--moe-defense-score-threshold" && args.length > 0) {
+      moeDefenseScoreThreshold = Number(args.shift());
+      continue;
+    }
+    if (arg.startsWith("--moe-defense-score-threshold=")) {
+      moeDefenseScoreThreshold = Number(arg.split("=", 2)[1]);
+      continue;
+    }
+    if (arg === "--moe-attack-score-threshold" && args.length > 0) {
+      moeAttackScoreThreshold = Number(args.shift());
+      continue;
+    }
+    if (arg.startsWith("--moe-attack-score-threshold=")) {
+      moeAttackScoreThreshold = Number(arg.split("=", 2)[1]);
+      continue;
+    }
+    if (arg === "--moe-risk-threshold" && args.length > 0) {
+      moeRiskThreshold = Number(args.shift());
+      continue;
+    }
+    if (arg.startsWith("--moe-risk-threshold=")) {
+      moeRiskThreshold = Number(arg.split("=", 2)[1]);
+      continue;
+    }
+    if (arg === "--moe-opp-threat-threshold" && args.length > 0) {
+      moeOppThreatThreshold = Number(args.shift());
+      continue;
+    }
+    if (arg.startsWith("--moe-opp-threat-threshold=")) {
+      moeOppThreatThreshold = Number(arg.split("=", 2)[1]);
+      continue;
+    }
     throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -267,12 +388,56 @@ function parseArgs(argv) {
       `Invalid --train-explore-rate-comeback: ${trainExploreRateComeback}. Expected [0, 1].`
     );
   }
+  if (!Number.isFinite(trainExploreDecayK) || trainExploreDecayK < 0) {
+    throw new Error(`Invalid --train-explore-decay-k: ${trainExploreDecayK}. Expected >= 0.`);
+  }
+  if (!Number.isFinite(trainExploreMin) || trainExploreMin < 0 || trainExploreMin > 1) {
+    throw new Error(`Invalid --train-explore-min: ${trainExploreMin}. Expected [0, 1].`);
+  }
+  if (
+    !Number.isFinite(trainExploreComebackMin) ||
+    trainExploreComebackMin < 0 ||
+    trainExploreComebackMin > 1
+  ) {
+    throw new Error(
+      `Invalid --train-explore-comeback-min: ${trainExploreComebackMin}. Expected [0, 1].`
+    );
+  }
+  if (trainExploreMin > trainExploreRate + 1e-12) {
+    throw new Error(
+      `Invalid explore range: --train-explore-min (${trainExploreMin}) must be <= --train-explore-rate (${trainExploreRate}).`
+    );
+  }
+  if (trainExploreComebackMin > trainExploreRateComeback + 1e-12) {
+    throw new Error(
+      `Invalid explore range: --train-explore-comeback-min (${trainExploreComebackMin}) must be <= --train-explore-rate-comeback (${trainExploreRateComeback}).`
+    );
+  }
   if (!Number.isFinite(traceContextRadius) || traceContextRadius < 0) {
     throw new Error(
       `Invalid --trace-context-radius: ${traceContextRadius}. Expected non-negative integer.`
     );
   }
   traceContextRadius = Math.floor(traceContextRadius);
+  if (!Number.isFinite(moeDefenseScoreThreshold)) {
+    throw new Error(`Invalid --moe-defense-score-threshold: ${moeDefenseScoreThreshold}`);
+  }
+  if (!Number.isFinite(moeAttackScoreThreshold)) {
+    throw new Error(`Invalid --moe-attack-score-threshold: ${moeAttackScoreThreshold}`);
+  }
+  if (!Number.isFinite(moeRiskThreshold) || moeRiskThreshold < 0) {
+    throw new Error(`Invalid --moe-risk-threshold: ${moeRiskThreshold}. Expected >= 0.`);
+  }
+  moeRiskThreshold = Math.floor(moeRiskThreshold);
+  if (
+    !Number.isFinite(moeOppThreatThreshold) ||
+    moeOppThreatThreshold < 0 ||
+    moeOppThreatThreshold > 1
+  ) {
+    throw new Error(
+      `Invalid --moe-opp-threat-threshold: ${moeOppThreatThreshold}. Expected [0, 1].`
+    );
+  }
 
   return {
     games,
@@ -282,11 +447,22 @@ function parseArgs(argv) {
     policyYourSide,
     policyModelMySide,
     policyModelYourSide,
+    policyModelAttackMySide,
+    policyModelAttackYourSide,
+    policyModelDefenseMySide,
+    policyModelDefenseYourSide,
     valueModelMySide,
     valueModelYourSide,
+    moeDefenseScoreThreshold,
+    moeAttackScoreThreshold,
+    moeRiskThreshold,
+    moeOppThreatThreshold,
     modelOnly,
     trainExploreRate,
     trainExploreRateComeback,
+    trainExploreDecayK,
+    trainExploreMin,
+    trainExploreComebackMin,
     traceMyTurnOnly,
     traceImportantOnly,
     traceContextRadius,
@@ -302,11 +478,22 @@ const policyMySide = parsed.policyMySide;
 const policyYourSide = parsed.policyYourSide;
 const policyModelMySidePath = parsed.policyModelMySide;
 const policyModelYourSidePath = parsed.policyModelYourSide;
+const policyModelAttackMySidePath = parsed.policyModelAttackMySide;
+const policyModelAttackYourSidePath = parsed.policyModelAttackYourSide;
+const policyModelDefenseMySidePath = parsed.policyModelDefenseMySide;
+const policyModelDefenseYourSidePath = parsed.policyModelDefenseYourSide;
 const valueModelMySidePath = parsed.valueModelMySide;
 const valueModelYourSidePath = parsed.valueModelYourSide;
+const moeDefenseScoreThreshold = parsed.moeDefenseScoreThreshold;
+const moeAttackScoreThreshold = parsed.moeAttackScoreThreshold;
+const moeRiskThreshold = parsed.moeRiskThreshold;
+const moeOppThreatThreshold = parsed.moeOppThreatThreshold;
 const modelOnly = !!parsed.modelOnly;
 const trainExploreRate = parsed.trainExploreRate;
 const trainExploreRateComeback = parsed.trainExploreRateComeback;
+const trainExploreDecayK = parsed.trainExploreDecayK;
+const trainExploreMin = parsed.trainExploreMin;
+const trainExploreComebackMin = parsed.trainExploreComebackMin;
 const traceMyTurnOnly = !!parsed.traceMyTurnOnly;
 const traceImportantOnly = parsed.traceImportantOnly !== false;
 const traceContextRadius = Number.isFinite(parsed.traceContextRadius)
@@ -317,15 +504,20 @@ const isTrainMode = logMode === "train";
 const isDeltaMode = logMode === "delta";
 const needsDecisionTrace = true;
 const useLeanKibo = isTrainMode || isDeltaMode;
+let gameProgress = 0;
 const sideConfig = {
   [SIDE_MY]: {
     fallbackPolicy: policyMySide,
     policyModelPath: policyModelMySidePath,
+    policyModelAttackPath: policyModelAttackMySidePath,
+    policyModelDefensePath: policyModelDefenseMySidePath,
     valueModelPath: valueModelMySidePath
   },
   [SIDE_YOUR]: {
     fallbackPolicy: policyYourSide,
     policyModelPath: policyModelYourSidePath,
+    policyModelAttackPath: policyModelAttackYourSidePath,
+    policyModelDefensePath: policyModelDefenseYourSidePath,
     valueModelPath: valueModelYourSidePath
   }
 };
@@ -336,6 +528,22 @@ sideConfig[SIDE_MY].policyModel = loadJsonModel(
 sideConfig[SIDE_YOUR].policyModel = loadJsonModel(
   sideConfig[SIDE_YOUR].policyModelPath,
   "policy-model-your-side"
+);
+sideConfig[SIDE_MY].policyModelAttack = loadJsonModel(
+  sideConfig[SIDE_MY].policyModelAttackPath,
+  "policy-model-attack-my-side"
+);
+sideConfig[SIDE_YOUR].policyModelAttack = loadJsonModel(
+  sideConfig[SIDE_YOUR].policyModelAttackPath,
+  "policy-model-attack-your-side"
+);
+sideConfig[SIDE_MY].policyModelDefense = loadJsonModel(
+  sideConfig[SIDE_MY].policyModelDefensePath,
+  "policy-model-defense-my-side"
+);
+sideConfig[SIDE_YOUR].policyModelDefense = loadJsonModel(
+  sideConfig[SIDE_YOUR].policyModelDefensePath,
+  "policy-model-defense-your-side"
 );
 sideConfig[SIDE_MY].valueModel = loadJsonModel(
   sideConfig[SIDE_MY].valueModelPath,
@@ -348,23 +556,46 @@ sideConfig[SIDE_YOUR].valueModel = loadJsonModel(
 
 if (modelOnly) {
   for (const side of [SIDE_MY, SIDE_YOUR]) {
-    if (!sideConfig[side].policyModel && !sideConfig[side].valueModel) {
+    if (
+      !sideConfig[side].policyModel &&
+      !sideConfig[side].policyModelAttack &&
+      !sideConfig[side].policyModelDefense &&
+      !sideConfig[side].valueModel
+    ) {
       throw new Error(
-        `model-only requires model for ${side}. Provide --policy-model-${side} and/or --value-model-${side}`
+        `model-only requires model for ${side}. Provide policy model(s) and/or --value-model-${side}`
       );
     }
   }
 }
 
+for (const side of [SIDE_MY, SIDE_YOUR]) {
+  sideConfig[side].moe = {
+    enabled: !!(sideConfig[side].policyModelAttack && sideConfig[side].policyModelDefense),
+    defenseScoreThreshold: moeDefenseScoreThreshold,
+    attackScoreThreshold: moeAttackScoreThreshold,
+    riskThreshold: moeRiskThreshold,
+    oppThreatThreshold: moeOppThreatThreshold
+  };
+}
+
 const agentLabelBySide = {
   [SIDE_MY]:
-    sideConfig[SIDE_MY].policyModel || sideConfig[SIDE_MY].valueModel
+    sideConfig[SIDE_MY].moe?.enabled
+      ? `moe:${path.basename(sideConfig[SIDE_MY].policyModelAttackPath)}|${path.basename(
+          sideConfig[SIDE_MY].policyModelDefensePath
+        )}`
+      : sideConfig[SIDE_MY].policyModel || sideConfig[SIDE_MY].valueModel
       ? `model:${path.basename(
           sideConfig[SIDE_MY].policyModelPath || sideConfig[SIDE_MY].valueModelPath
         )}`
       : sideConfig[SIDE_MY].fallbackPolicy,
   [SIDE_YOUR]:
-    sideConfig[SIDE_YOUR].policyModel || sideConfig[SIDE_YOUR].valueModel
+    sideConfig[SIDE_YOUR].moe?.enabled
+      ? `moe:${path.basename(sideConfig[SIDE_YOUR].policyModelAttackPath)}|${path.basename(
+          sideConfig[SIDE_YOUR].policyModelDefensePath
+        )}`
+      : sideConfig[SIDE_YOUR].policyModel || sideConfig[SIDE_YOUR].valueModel
       ? `model:${path.basename(
           sideConfig[SIDE_YOUR].policyModelPath || sideConfig[SIDE_YOUR].valueModelPath
         )}`
@@ -739,6 +970,8 @@ function decisionContext(state, actor, options = {}) {
   const oppThreat = computeJokboThreatProbabilities(jokboOppStats, visibleCardIds, unknownPool);
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
   const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const jokboProgressSelf = jokboSelfStats.progress;
+  const jokboProgressOpp = jokboOppStats.progress;
   const context = {
     phase: state.phase,
     turnNoBefore: (state.turnSeq || 0) + 1,
@@ -760,16 +993,22 @@ function decisionContext(state, actor, options = {}) {
     piBakRisk: scoreSelf?.bak?.pi ? 1 : 0,
     gwangBakRisk: scoreSelf?.bak?.gwang ? 1 : 0,
     mongBakRisk: scoreSelf?.bak?.mongBak ? 1 : 0,
-    jokboProgressSelf: jokboSelfStats.progress,
-    jokboProgressOpp: jokboOppStats.progress,
+    jokboProgressSelf,
+    jokboProgressOpp,
+    jokboProgressSelfSum: jokboProgressMagnitude(jokboProgressSelf),
+    jokboProgressOppSum: jokboProgressMagnitude(jokboProgressOpp),
+    jokboOneAwaySelfCount: jokboOneAwayCount(jokboProgressSelf),
+    jokboOneAwayOppCount: jokboOneAwayCount(jokboProgressOpp),
     comboBlockSelf,
     selfJokboThreatProb: clamp01(selfThreat.totalProb),
     selfJokboOneAwayProb: clamp01(selfThreat.oneAwayProb),
     selfGwangThreatProb: clamp01(selfThreat.gwangThreatProb),
     oppJokboThreatProb: clamp01(oppThreat.totalProb),
     oppJokboOneAwayProb: clamp01(oppThreat.oneAwayProb),
-    oppGwangThreatProb: clamp01(oppThreat.gwangThreatProb)
+    oppGwangThreatProb: clamp01(oppThreat.gwangThreatProb),
+    goStopDeltaProxy: 0
   };
+  context.goStopDeltaProxy = goStopDeltaProxy(context);
   if (includeCardLists) {
     context.handCards = (state.players?.[actor]?.hand || []).map((c) => c.id);
     context.boardCards = (state.board || []).map((c) => c.id);
@@ -862,6 +1101,10 @@ function policyProb(model, sample, choice) {
 
 function valueTokens(dc, order, decisionType, actionLabel) {
   const isFirst = order === "first" ? 1 : 0;
+  const scoreDiff = Math.floor(Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0));
+  const bakRiskTotal =
+    Number(dc.piBakRisk || 0) + Number(dc.gwangBakRisk || 0) + Number(dc.mongBakRisk || 0);
+  const goStopDeltaBucket = Math.floor(Number(dc.goStopDeltaProxy || 0) * 2);
   return [
     `phase=${dc.phase || "?"}`,
     `order=${order || "?"}`,
@@ -872,20 +1115,40 @@ function valueTokens(dc, order, decisionType, actionLabel) {
     `opp_hand=${Math.floor(dc.handCountOpp || 0)}`,
     `self_go=${Math.floor(dc.goCountSelf || 0)}`,
     `opp_go=${Math.floor(dc.goCountOpp || 0)}`,
-    `is_first_attacker=${isFirst}`
+    `is_first_attacker=${isFirst}`,
+    `score_diff=${scoreDiff}`,
+    `bak_risk=${bakRiskTotal}`,
+    `jp_self_sum=${Math.floor(Number(dc.jokboProgressSelfSum || 0))}`,
+    `jp_opp_sum=${Math.floor(Number(dc.jokboProgressOppSum || 0))}`,
+    `go_stop_delta_bucket=${goStopDeltaBucket}`
   ];
 }
 
 function valueNumeric(dc, candidateCount, order) {
   const isFirst = order === "first" ? 1 : 0;
+  const bakRiskTotal =
+    Number(dc.piBakRisk || 0) + Number(dc.gwangBakRisk || 0) + Number(dc.mongBakRisk || 0);
   return {
     deck_count: Number(dc.deckCount || 0),
     hand_self: Number(dc.handCountSelf || 0),
     hand_opp: Number(dc.handCountOpp || 0),
     go_self: Number(dc.goCountSelf || 0),
     go_opp: Number(dc.goCountOpp || 0),
+    score_diff: Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0),
     is_first_attacker: isFirst,
     cand_count: Number(candidateCount || 0),
+    bak_risk_total: bakRiskTotal,
+    jokbo_progress_self_sum: Number(dc.jokboProgressSelfSum || 0),
+    jokbo_progress_opp_sum: Number(dc.jokboProgressOppSum || 0),
+    jokbo_one_away_self_count: Number(dc.jokboOneAwaySelfCount || 0),
+    jokbo_one_away_opp_count: Number(dc.jokboOneAwayOppCount || 0),
+    self_jokbo_threat_prob: Number(dc.selfJokboThreatProb || 0),
+    self_jokbo_one_away_prob: Number(dc.selfJokboOneAwayProb || 0),
+    self_gwang_threat_prob: Number(dc.selfGwangThreatProb || 0),
+    opp_jokbo_threat_prob: Number(dc.oppJokboThreatProb || 0),
+    opp_jokbo_one_away_prob: Number(dc.oppJokboOneAwayProb || 0),
+    opp_gwang_threat_prob: Number(dc.oppGwangThreatProb || 0),
+    go_stop_delta_proxy: Number(dc.goStopDeltaProxy || 0),
     immediate_reward: 0
   };
 }
@@ -926,6 +1189,65 @@ function optionActionToType(action) {
     president_hold: "choose_president_hold"
   };
   return aliases[action] || action;
+}
+
+function actionTypeToChoice(actionType) {
+  const mapped = optionActionToType(actionType);
+  return mapped || String(actionType || "option");
+}
+
+function traceOrderFromSide(actorSide) {
+  return actorSide === SIDE_MY ? "first" : "second";
+}
+
+function triggerMaskFromNames(names) {
+  let mask = 0;
+  for (const n of Array.isArray(names) ? names : []) {
+    const bit = TRIGGER_BIT[String(n || "")];
+    if (bit) mask |= bit;
+  }
+  return mask;
+}
+
+function buildRuntimeModelConfig(state, actor, cfg) {
+  if (!cfg) return cfg;
+  const hasMoE = !!(cfg.policyModelAttack && cfg.policyModelDefense);
+  if (!hasMoE) return cfg;
+
+  const dc = decisionContext(state, actor, { includeCardLists: false });
+  const scoreDiff = Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0);
+  const bakRiskCount =
+    Number(dc.piBakRisk || 0) + Number(dc.gwangBakRisk || 0) + Number(dc.mongBakRisk || 0);
+  const oppThreat = Math.max(
+    Number(dc.oppJokboThreatProb || 0),
+    Number(dc.oppJokboOneAwayProb || 0),
+    Number(dc.oppGwangThreatProb || 0)
+  );
+  const carry = Number(dc.carryOverMultiplier || 1);
+  const riskScore =
+    bakRiskCount +
+    (oppThreat >= Number(cfg?.moe?.oppThreatThreshold ?? MOE_OPP_THREAT_THRESHOLD_DEFAULT) ? 1 : 0) +
+    (carry >= 3 ? 1 : 0);
+  const defenseScoreThreshold = Number(
+    cfg?.moe?.defenseScoreThreshold ?? MOE_DEFENSE_SCORE_THRESHOLD_DEFAULT
+  );
+  const attackScoreThreshold = Number(
+    cfg?.moe?.attackScoreThreshold ?? MOE_ATTACK_SCORE_THRESHOLD_DEFAULT
+  );
+  const riskThreshold = Number(cfg?.moe?.riskThreshold ?? MOE_RISK_THRESHOLD_DEFAULT);
+
+  const useDefense = riskScore >= riskThreshold || scoreDiff <= defenseScoreThreshold;
+  const useAttack = !useDefense && scoreDiff >= attackScoreThreshold;
+  const selectedRole = useDefense ? "defense" : useAttack ? "attack" : "attack";
+  const selectedModel = selectedRole === "attack" ? cfg.policyModelAttack : cfg.policyModelDefense;
+  const selectedPath =
+    selectedRole === "attack" ? cfg.policyModelAttackPath : cfg.policyModelDefensePath;
+
+  return {
+    ...cfg,
+    policyModel: selectedModel || cfg.policyModel || null,
+    policyModelPath: selectedPath || cfg.policyModelPath || null
+  };
 }
 
 function modelSelectCandidate(state, actor, cfg) {
@@ -1001,7 +1323,13 @@ function maybePickExplorationChoice(state, actor, cfg) {
   const dc = decisionContext(state, actor, { includeCardLists: false });
   const scoreDiff = Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0);
   const comebackMode = actor !== state.startingTurnKey && scoreDiff <= -5;
-  const exploreRate = comebackMode ? trainExploreRateComeback : trainExploreRate;
+  const exploreBase = comebackMode ? trainExploreRateComeback : trainExploreRate;
+  const exploreMin = comebackMode ? trainExploreComebackMin : trainExploreMin;
+  let exploreRate = exploreBase;
+  if (trainExploreDecayK > 0) {
+    const decayFactor = Math.exp(-trainExploreDecayK * clampRange(gameProgress, 0, 1));
+    exploreRate = exploreMin + (exploreBase - exploreMin) * decayFactor;
+  }
   if (Math.random() >= exploreRate) return null;
 
   const sp = selectPool(state, actor);
@@ -1114,6 +1442,13 @@ function toPercentInt(v) {
   return Math.round(n * 100);
 }
 
+function toSignedPermille(v, absMax = 3) {
+  const n = Number(v || 0);
+  if (!Number.isFinite(n)) return 0;
+  const c = clampRange(n, -Math.abs(absMax), Math.abs(absMax));
+  return Math.round(c * 1000);
+}
+
 function specialEventTags(turn) {
   const events = turn?.action?.matchEvents || [];
   const tags = new Set();
@@ -1201,8 +1536,8 @@ function applyTerminalContextTrigger(records) {
   const beforeLen = rec.triggers.length;
   pushTrigger(rec.triggers, "terminalContext", 0, 0);
   if (rec.triggers.length > beforeLen) {
-    if (!Array.isArray(rec.data?.tg)) rec.data.tg = [];
-    if (!rec.data.tg.includes("terminalContext")) rec.data.tg.push("terminalContext");
+    const current = Number(rec.data?.tm || 0);
+    rec.data.tm = current | Number(TRIGGER_BIT.terminalContext || 0);
   }
 }
 
@@ -1341,6 +1676,36 @@ function jokboProgressMagnitude(progress) {
   );
 }
 
+function jokboOneAwayCount(progress) {
+  if (!progress) return 0;
+  let n = 0;
+  if (Number(progress.hongdan || 0) >= 2) n += 1;
+  if (Number(progress.cheongdan || 0) >= 2) n += 1;
+  if (Number(progress.chodan || 0) >= 2) n += 1;
+  if (Number(progress.godori || 0) >= 2) n += 1;
+  if (Number(progress.gwang || 0) >= 2) n += 1;
+  return n;
+}
+
+function goStopDeltaProxy(dc) {
+  if (!dc || dc.phase !== "go-stop") return 0;
+  const scoreDiff = Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0);
+  const carry = Math.max(1, Number(dc.carryOverMultiplier || 1));
+  const selfPress =
+    Number(dc.selfJokboThreatProb || 0) * 0.75 +
+    Number(dc.selfJokboOneAwayProb || 0) * 0.7 +
+    Number(dc.selfGwangThreatProb || 0) * 0.55;
+  const oppPress =
+    Number(dc.oppJokboThreatProb || 0) * 0.95 +
+    Number(dc.oppJokboOneAwayProb || 0) * 0.75 +
+    Number(dc.oppGwangThreatProb || 0) * 0.6;
+  const bakRisk =
+    Number(dc.piBakRisk || 0) + Number(dc.gwangBakRisk || 0) + Number(dc.mongBakRisk || 0);
+  const goValue = selfPress + Math.max(0, scoreDiff) * 0.07 + Math.max(0, carry - 1) * 0.14;
+  const stopValue = oppPress + bakRisk * 0.32;
+  return clampRange(goValue - stopValue, -3, 3);
+}
+
 function bakRiskShiftReward(beforeDc, afterDc, key, weight) {
   const b = Number(beforeDc?.[key] || 0);
   const a = Number(afterDc?.[key] || 0);
@@ -1440,9 +1805,17 @@ function compactDecisionContextForTrace(dc) {
     piBakRisk: Number(dc.piBakRisk || 0) ? 1 : 0,
     gwangBakRisk: Number(dc.gwangBakRisk || 0) ? 1 : 0,
     mongBakRisk: Number(dc.mongBakRisk || 0) ? 1 : 0,
+    jokboProgressSelfSum: Math.max(0, Math.floor(Number(dc.jokboProgressSelfSum || 0))),
+    jokboProgressOppSum: Math.max(0, Math.floor(Number(dc.jokboProgressOppSum || 0))),
+    jokboOneAwaySelfCount: Math.max(0, Math.floor(Number(dc.jokboOneAwaySelfCount || 0))),
+    jokboOneAwayOppCount: Math.max(0, Math.floor(Number(dc.jokboOneAwayOppCount || 0))),
+    selfJokboThreatProb: toPercentInt(dc.selfJokboThreatProb),
+    selfJokboOneAwayProb: toPercentInt(dc.selfJokboOneAwayProb),
+    selfGwangThreatProb: toPercentInt(dc.selfGwangThreatProb),
     oppJokboThreatProb: toPercentInt(dc.oppJokboThreatProb),
     oppJokboOneAwayProb: toPercentInt(dc.oppJokboOneAwayProb),
     oppGwangThreatProb: toPercentInt(dc.oppGwangThreatProb),
+    goStopDeltaProxy: toSignedPermille(dc.goStopDeltaProxy, 3),
     currentScoreSelf: Math.floor(Number(dc.currentScoreSelf || 0)),
     currentScoreOpp: Math.floor(Number(dc.currentScoreOpp || 0))
   };
@@ -1490,7 +1863,6 @@ function buildDecisionTrace(
     const candidateCount = traceCandidateCount(before?.selectionPool || null);
     if (candidateCount < 1) continue;
     const compactDc = compactDecisionContextForTrace(before?.decisionContext || null);
-    const order = actorSide === SIDE_MY ? "first" : "second";
     const jpPre = before?.decisionContext?.jokboProgressSelf || null;
     const jpPost = after?.decisionContext?.jokboProgressSelf || null;
     const jpCompletedNow = !!(jokboCompleted(jpPost) && !jokboCompleted(jpPre));
@@ -1512,21 +1884,25 @@ function buildDecisionTrace(
       goStopPlus2
     });
     const tg = triggerNames(triggers);
+    const tm = triggerMaskFromNames(tg);
+    const choice =
+      decisionType === "play"
+        ? action.card?.id || null
+        : decisionType === "match"
+        ? action.selectedBoardCard?.id || null
+        : actionTypeToChoice(action.type || "option");
     records.push({
       seq: Number(turnCtx?.seq || t.turnNo || 0),
       triggers,
       data: {
       t: t.turnNo,
       a: actorSide,
-      o: order,
       dt: decisionType,
       cc: candidateCount,
-      at: action.type || "unknown",
-      c: action.card?.id || null,
-      s: action.selectedBoardCard?.id || null,
+      ch: choice,
       ir: immediateReward,
       dc: compactDc,
-      ...(tg.length ? { tg } : {})
+      ...(tm ? { tm } : {})
       }
     });
   }
@@ -1541,7 +1917,6 @@ function buildDecisionTrace(
     const afterDc = ev?.afterDc || null;
     const compactDc = compactDecisionContextForTrace(beforeDc);
     const turnNo = Math.max(0, Math.floor(Number(ev?.turnNo || 0)));
-    const order = actorSide === SIDE_MY ? "first" : "second";
     const triggerTurn = { action: { type: actionType, matchEvents: [] } };
     const triggers = classifyImportantTurnTriggers({
       decisionType: "option",
@@ -1552,21 +1927,19 @@ function buildDecisionTrace(
       goStopPlus2
     });
     const tg = triggerNames(triggers);
+    const tm = triggerMaskFromNames(tg);
     records.push({
       seq: Number(ev?.seq || 0),
       triggers,
       data: {
         t: turnNo,
         a: actorSide,
-        o: order,
         dt: "option",
         cc: candidateCount,
-        at: actionType,
-        c: null,
-        s: null,
+        ch: actionTypeToChoice(actionType),
         ir: 0,
         dc: compactDc,
-        ...(tg.length ? { tg } : {})
+        ...(tm ? { tm } : {})
       }
     });
   }
@@ -1612,7 +1985,6 @@ function buildDecisionTraceTrain(
     const candidateCount = traceCandidateCount(before?.selectionPool || null);
     if (candidateCount < 1) continue;
     const compactDc = compactDecisionContextForTrace(before?.decisionContext || null);
-    const order = actorSide === SIDE_MY ? "first" : "second";
     const jpPre = before?.decisionContext?.jokboProgressSelf || null;
     const jpPost = after?.decisionContext?.jokboProgressSelf || null;
     const jpCompletedNow = !!(jokboCompleted(jpPost) && !jokboCompleted(jpPre));
@@ -1634,21 +2006,25 @@ function buildDecisionTraceTrain(
       goStopPlus2
     });
     const tg = triggerNames(triggers);
+    const tm = triggerMaskFromNames(tg);
+    const choice =
+      decisionType === "play"
+        ? action.card?.id || null
+        : decisionType === "match"
+        ? action.selectedBoardCard?.id || null
+        : actionTypeToChoice(action.type || "option");
     records.push({
       seq: Number(turnCtx?.seq || t.turnNo || 0),
       triggers,
       data: {
       t: t.turnNo,
       a: actorSide,
-      o: order,
       dt: decisionType,
       cc: candidateCount,
-      at: action.type || "unknown",
-      c: action.card?.id || null,
-      s: action.selectedBoardCard?.id || null,
+      ch: choice,
       ir: immediateReward,
       dc: compactDc,
-      ...(tg.length ? { tg } : {})
+      ...(tm ? { tm } : {})
       }
     });
   }
@@ -1663,7 +2039,6 @@ function buildDecisionTraceTrain(
     const afterDc = ev?.afterDc || null;
     const compactDc = compactDecisionContextForTrace(beforeDc);
     const turnNo = Math.max(0, Math.floor(Number(ev?.turnNo || 0)));
-    const order = actorSide === SIDE_MY ? "first" : "second";
     const triggerTurn = { action: { type: actionType, matchEvents: [] } };
     const triggers = classifyImportantTurnTriggers({
       decisionType: "option",
@@ -1674,21 +2049,19 @@ function buildDecisionTraceTrain(
       goStopPlus2
     });
     const tg = triggerNames(triggers);
+    const tm = triggerMaskFromNames(tg);
     records.push({
       seq: Number(ev?.seq || 0),
       triggers,
       data: {
         t: turnNo,
         a: actorSide,
-        o: order,
         dt: "option",
         cc: candidateCount,
-        at: actionType,
-        c: null,
-        s: null,
+        ch: actionTypeToChoice(actionType),
         ir: 0,
         dc: compactDc,
-        ...(tg.length ? { tg } : {})
+        ...(tm ? { tm } : {})
       }
     });
   }
@@ -1741,10 +2114,12 @@ function buildDecisionTraceDelta(
     out.push({
       t: t.turnNo,
       a: actorSide,
-      o: actorSide === SIDE_MY ? "first" : "second",
-      at: action.type || "unknown",
-      c: action.card?.id || null,
-      s: action.selectedBoardCard?.id || null,
+      ch:
+        (before?.selectionPool?.decisionType || "play") === "match"
+          ? action.selectedBoardCard?.id || null
+          : (before?.selectionPool?.decisionType || "play") === "option"
+          ? actionTypeToChoice(action.type || "option")
+          : action.card?.id || null,
       delta: {
         deck: deckDelta,
         handSelf: handSelfDelta,
@@ -1992,9 +2367,15 @@ async function writeLine(writer, line) {
 }
 
 function executeActorTurn(state, actor, cfg) {
-  const canUseModel = !!(cfg?.policyModel || cfg?.valueModel);
+  const runtimeCfg = buildRuntimeModelConfig(state, actor, cfg);
+  const canUseModel = !!(
+    runtimeCfg?.policyModel ||
+    runtimeCfg?.policyModelAttack ||
+    runtimeCfg?.policyModelDefense ||
+    runtimeCfg?.valueModel
+  );
   if (canUseModel) {
-    const picked = modelSelectCandidate(state, actor, cfg);
+    const picked = modelSelectCandidate(state, actor, runtimeCfg);
     if (picked) {
       const next = applyModelChoice(state, actor, picked);
       if (next !== state) return next;
@@ -2006,12 +2387,12 @@ function executeActorTurn(state, actor, cfg) {
   if (modelOnly) {
     throw new Error(`model-only missing model for actor=${actor}`);
   }
-  const exploratoryPick = maybePickExplorationChoice(state, actor, cfg);
+  const exploratoryPick = maybePickExplorationChoice(state, actor, runtimeCfg);
   if (exploratoryPick) {
     const explored = applyModelChoice(state, actor, exploratoryPick);
     if (explored !== state) return explored;
   }
-  return botPlay(state, actor, { policy: cfg?.fallbackPolicy || DEFAULT_POLICY });
+  return botPlay(state, actor, { policy: runtimeCfg?.fallbackPolicy || DEFAULT_POLICY });
 }
 
 async function run() {
@@ -2028,6 +2409,7 @@ async function run() {
   };
 
   for (let i = 0; i < games; i += 1) {
+    gameProgress = games <= 1 ? 1 : i / (games - 1);
     const seed = `sim-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
     const forcedFirstTurnKey = firstTurnPlan[i];
     const forcedSecondTurnKey = forcedFirstTurnKey === actorA ? actorB : actorA;
@@ -2169,9 +2551,6 @@ async function run() {
     const yourSideBankrupt = yourSideGold <= 0;
     const sessionReset = mySideBankrupt || yourSideBankrupt;
     const goldDeltaMy = mySideGold - initialGoldMy;
-    const goldDeltaYour = yourSideGold - initialGoldYour;
-    const goldDeltaMyRatio = goldDeltaMy / Math.max(1, initialGoldMy);
-    const goldDeltaMyNorm = Math.tanh(goldDeltaMyRatio);
 
     if (sessionReset) {
       sessionGold[SIDE_MY] = STARTING_GOLD;
@@ -2186,12 +2565,18 @@ async function run() {
 
     if (isTrainMode) {
       const line = {
+        ver: {
+          s: TRACE_SCHEMA_VERSION,
+          f: TRACE_FEATURE_VERSION,
+          t: TRACE_TRIGGER_DICT_VERSION
+        },
+        run: {
+          [SIDE_MY]: agentLabelBySide[SIDE_MY],
+          [SIDE_YOUR]: agentLabelBySide[SIDE_YOUR]
+        },
         game: i + 1,
         seed,
         steps,
-        completed: state.phase === "resolution",
-        logMode,
-        firstAttackerSide: SIDE_MY,
         firstAttackerActor: firstTurnKey,
         policy: {
           [SIDE_MY]: agentLabelBySide[SIDE_MY],
@@ -2207,22 +2592,14 @@ async function run() {
         finalGoldMy: mySideGold,
         finalGoldYour: yourSideGold,
         goldDeltaMy,
-        goldDeltaYour,
-        goldDeltaMyRatio,
-        goldDeltaMyNorm,
-        gold: {
-          [SIDE_MY]: mySideGold,
-          [SIDE_YOUR]: yourSideGold
-        },
         bankrupt: {
           [SIDE_MY]: mySideBankrupt,
           [SIDE_YOUR]: yourSideBankrupt
         },
-        sessionReset,
         decision_trace: decisionTrace
       };
       baseSummary({
-        completed: line.completed,
+        completed: state.phase === "resolution",
         winner: line.winner,
         mySideScore,
         yourSideScore,
@@ -2330,12 +2707,18 @@ async function run() {
     });
 
     const persistedLine = {
+      ver: {
+        s: TRACE_SCHEMA_VERSION,
+        f: TRACE_FEATURE_VERSION,
+        t: TRACE_TRIGGER_DICT_VERSION
+      },
+      run: {
+        [SIDE_MY]: agentLabelBySide[SIDE_MY],
+        [SIDE_YOUR]: agentLabelBySide[SIDE_YOUR]
+      },
       game: i + 1,
       seed,
       steps,
-      completed,
-      logMode,
-      firstAttackerSide: SIDE_MY,
       firstAttackerActor: firstTurnKey,
       policy: policyRef,
       winner: winnerSide,
@@ -2348,18 +2731,10 @@ async function run() {
       finalGoldMy: mySideGold,
       finalGoldYour: yourSideGold,
       goldDeltaMy,
-      goldDeltaYour,
-      goldDeltaMyRatio,
-      goldDeltaMyNorm,
-      gold: {
-        [SIDE_MY]: mySideGold,
-        [SIDE_YOUR]: yourSideGold
-      },
       bankrupt: {
         [SIDE_MY]: mySideBankrupt,
         [SIDE_YOUR]: yourSideBankrupt
       },
-      sessionReset,
       decision_trace: decisionTrace
     };
 

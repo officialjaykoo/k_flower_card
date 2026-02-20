@@ -37,6 +37,46 @@ def _trace_phase_code(phase):
     return 0
 
 
+def _trace_order(trace):
+    o = str((trace or {}).get("o") or "").strip().lower()
+    if o in ("first", "second"):
+        return o
+    a = str((trace or {}).get("a") or "").strip()
+    if a == "mySide":
+        return "first"
+    if a == "yourSide":
+        return "second"
+    return "?"
+
+
+def _action_alias(action):
+    aliases = {
+        "choose_go": "go",
+        "choose_stop": "stop",
+        "choose_shaking_yes": "shaking_yes",
+        "choose_shaking_no": "shaking_no",
+        "choose_president_stop": "president_stop",
+        "choose_president_hold": "president_hold",
+    }
+    return aliases.get(action, action)
+
+
+def _trace_choice(trace):
+    if not isinstance(trace, dict):
+        return None
+    compact = trace.get("ch")
+    if compact is not None:
+        return compact
+    dt = str(trace.get("dt") or "")
+    if dt == "play":
+        return trace.get("c")
+    if dt == "match":
+        return trace.get("s")
+    if dt == "option":
+        return _action_alias(trace.get("at"))
+    return trace.get("c") or trace.get("s") or _action_alias(trace.get("at"))
+
+
 def _policy_context_key(trace):
     if not isinstance(trace, dict):
         return None
@@ -45,7 +85,7 @@ def _policy_context_key(trace):
         return cached
     dc = trace.get("dc") or {}
     decision_type = str(trace.get("dt") or "?")
-    order = str(trace.get("o") or "?")
+    order = _trace_order(trace)
     deck_bucket = int((dc.get("deckCount") or 0) // 3)
     hand_self = int(dc.get("handCountSelf") or 0)
     hand_opp = int(dc.get("handCountOpp") or 0)
@@ -84,9 +124,10 @@ def _minimal_policy_trace(trace):
     except Exception:
         pass
     out = {}
-    for k in ("a", "o", "dt", "cc", "at", "c", "s"):
+    for k in ("a", "o", "dt", "cc"):
         if k in trace:
             out[k] = trace.get(k)
+    out["ch"] = _trace_choice(trace)
     ck = _policy_context_key(trace)
     if isinstance(ck, str) and ck:
         out["ck"] = ck
@@ -192,7 +233,8 @@ def main():
                         except Exception:
                             continue
 
-                        if obj.get("completed"):
+                        winner_flag = str(obj.get("winner") or "")
+                        if obj.get("completed") or winner_flag in ("mySide", "yourSide", "draw", "unknown"):
                             completed += 1
                         winner = obj.get("winner")
                         if winner in winners:
@@ -231,16 +273,14 @@ def main():
                                 policy_writer.write(
                                     json.dumps(
                                         {
-                                            "firstAttackerSide": obj.get("firstAttackerSide"),
+                                            "ver": obj.get("ver"),
+                                            "run": obj.get("run"),
                                             "firstAttackerActor": obj.get("firstAttackerActor"),
                                             "initialGoldMy": obj.get("initialGoldMy"),
                                             "initialGoldYour": obj.get("initialGoldYour"),
                                             "finalGoldMy": obj.get("finalGoldMy"),
                                             "finalGoldYour": obj.get("finalGoldYour"),
                                             "goldDeltaMy": obj.get("goldDeltaMy"),
-                                            "goldDeltaYour": obj.get("goldDeltaYour"),
-                                            "goldDeltaMyRatio": obj.get("goldDeltaMyRatio"),
-                                            "goldDeltaMyNorm": obj.get("goldDeltaMyNorm"),
                                             "decision_trace": policy_traces,
                                         },
                                         ensure_ascii=False,
@@ -324,4 +364,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

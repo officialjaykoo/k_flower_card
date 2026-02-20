@@ -1,4 +1,4 @@
-# 맞고 데모 룰북 (현재 구현 기준)
+﻿# 맞고 데모 룰북 (현재 구현 기준)
 
 브라우저에서 실행되는 2인 맞고(플레이어/AI) 데모입니다.
 기준 코드: `src/state.js`, `src/engine/*`, `src/cards.js`.
@@ -165,14 +165,6 @@
 - `kibo.turn_end.ppukState`
 - 턴 리플레이 지원: 이전/다음/자동재생/슬라이더/속도
 
-## 12. 운영 스크립트
-- RAM 가드: `./scripts/run-with-ram-guard.ps1 -- -3 scripts/02_train_value.py ...`
-- 챔피언 사이클: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_champion_cycle.ps1 -Champion heuristic_v3 -Challenger heuristic_v3 -GamesPerSide 100000 -PromoteThreshold 0.52 -Rounds 1 -Tag stage4`
-- 챔피언 사이클 재개: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_champion_cycle.ps1 -Tag stage4 -Resume`
-- fast 루프: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-fast-loop.ps1 -TrainGames 200000 -Workers 4 -Tag fast`
-- 리그 fast 루프: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-fast-loop.ps1 -TrainGames 200000 -Workers 4 -Tag fast-league -LeagueConfig scripts/league_config.example.json`
-- 점수표 갱신: `py -3 scripts/update_champion_scoreboard.py`
-
 ## 13. React 구조
 - UI 프레임워크: React + Vite
 - 엔진: `src/gameEngine.js`, `src/state.js`, `src/engine/*`
@@ -180,7 +172,3 @@
 - `src/ui/components/GameBoard.jsx`
 - `src/ui/components/GameOverlays.jsx`
 - `src/ui/components/CardView.jsx`
-
-## 14. 레이아웃 디버그(임시)
-- `styles.css`의 `TEMP: layout debug rainbow borders` 블록이 켜져 있으면 무지개 테두리 표시
-- 릴리즈 전 해당 블록 삭제

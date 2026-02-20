@@ -1,4 +1,4 @@
-# Project Agent Rules
+﻿# Project Agent Rules
 
 These rules are mandatory for this repository.
 
@@ -14,3 +14,7 @@ These rules are mandatory for this repository.
 3. Test game count lock
 - For testing simulations, use exactly 1000 games.
 - If a planned test simulation uses a different game count, stop and ask the user first.
+
+4. Encoding lock
+- Save files as UTF-8 with BOM (EF BB BF).
+- Keep this encoding so IDEs detect Korean text correctly.

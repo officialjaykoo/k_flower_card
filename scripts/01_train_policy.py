@@ -62,6 +62,17 @@ def action_alias(action):
     }
     return aliases.get(action, action)
 
+def trace_order(trace):
+    o = str(trace.get("o") or "").strip().lower()
+    if o in ("first", "second"):
+        return o
+    a = str(trace.get("a") or "").strip()
+    if a == "mySide":
+        return "first"
+    if a == "yourSide":
+        return "second"
+    return "?"
+
 
 def _to_int_or_none(value):
     try:
@@ -137,7 +148,7 @@ def context_key(trace, decision_type):
         [
             f"dt={decision_type}",
             f"ph={phase}",
-            f"o={trace.get('o','?')}",
+            f"o={trace_order(trace)}",
             f"db={deck_bucket}",
             f"hs={hand_self}",
             f"ho={hand_opp}",
@@ -153,9 +164,10 @@ def context_key(trace, decision_type):
 
 def extract_sample(trace):
     dt = trace.get("dt")
-    chosen_play = trace.get("c")
-    chosen_match = trace.get("s")
-    chosen_option = action_alias(trace.get("at"))
+    chosen_compact = trace.get("ch")
+    chosen_play = chosen_compact if dt == "play" else trace.get("c")
+    chosen_match = chosen_compact if dt == "match" else trace.get("s")
+    chosen_option = action_alias(chosen_compact if dt == "option" else trace.get("at"))
     if dt == "play" and chosen_play:
         return "play", [chosen_play], chosen_play
     if dt == "match" and chosen_match:
@@ -207,7 +219,7 @@ def extract_sample(trace):
         return None
     candidates = sp.get("options")
     if candidates:
-        chosen = action_alias(trace.get("at"))
+        chosen = action_alias(trace.get("ch") if trace.get("ch") is not None else trace.get("at"))
         if chosen in candidates:
             return "option", candidates, chosen
         return None
@@ -432,6 +444,22 @@ def predict_top1(model, sample):
             best_choice = c
     return best_choice, best_prob
 
+def sample_entropy(model, sample):
+    candidates = sample.get("candidates") or []
+    if not candidates:
+        return 0.0, 0.0
+    probs = [max(1e-12, float(prob_of_choice(model, sample, c))) for c in candidates]
+    z = sum(probs)
+    if z <= 0:
+        return 0.0, 0.0
+    probs = [p / z for p in probs]
+    ent = -sum(p * math.log(p) for p in probs)
+    k = len(candidates)
+    if k <= 1:
+        return ent, 0.0
+    ent_norm = ent / math.log(k)
+    return ent, ent_norm
+
 
 def _resolve_sample_cache_path(output_path, sample_cache_arg, backend):
     cache_arg = str(sample_cache_arg or "").strip()
@@ -551,6 +579,8 @@ def main():
     total = 0
     correct = 0
     nll = 0.0
+    entropy_sum = 0.0
+    entropy_norm_sum = 0.0
     if args.skip_train_metrics:
         total = sum(sum(v.values()) for v in (model.get("global_counts") or {}).values())
         if total <= 0:
@@ -563,6 +593,9 @@ def main():
                 correct += 1
             p = max(1e-12, prob_of_choice(model, s, s["chosen"]))
             nll += -math.log(p)
+            ent, ent_norm = sample_entropy(model, s)
+            entropy_sum += ent
+            entropy_norm_sum += ent_norm
         if total <= 0:
             raise RuntimeError("No trainable decision samples found.")
 
@@ -570,6 +603,8 @@ def main():
         "samples": total,
         "accuracy_top1": None if args.skip_train_metrics else (correct / total),
         "nll_per_sample": None if args.skip_train_metrics else (nll / total),
+        "entropy_avg": None if args.skip_train_metrics else (entropy_sum / total),
+        "entropy_norm_avg": None if args.skip_train_metrics else (entropy_norm_sum / total),
         "input_files": input_paths,
         "max_samples": args.max_samples,
         "skip_train_metrics": bool(args.skip_train_metrics),
