@@ -9,8 +9,6 @@ function parseArgs(argv) {
     attackOut: "logs/train_delta_v4_label_attack.jsonl",
     defenseOut: "logs/train_delta_v4_label_defense.jsonl",
     actorTag: "heuristic_v4",
-    attackTopPercent: 20,
-    defenseOppScoreMax: 9,
     minActorTraces: 1
   };
 
@@ -49,22 +47,6 @@ function parseArgs(argv) {
       args.actorTag = arg.split("=", 2)[1];
       continue;
     }
-    if (arg === "--attack-top-percent" && rest.length) {
-      args.attackTopPercent = Number(rest.shift());
-      continue;
-    }
-    if (arg.startsWith("--attack-top-percent=")) {
-      args.attackTopPercent = Number(arg.split("=", 2)[1]);
-      continue;
-    }
-    if (arg === "--defense-opp-score-max" && rest.length) {
-      args.defenseOppScoreMax = Number(rest.shift());
-      continue;
-    }
-    if (arg.startsWith("--defense-opp-score-max=")) {
-      args.defenseOppScoreMax = Number(arg.split("=", 2)[1]);
-      continue;
-    }
     if (arg === "--min-actor-traces" && rest.length) {
       args.minActorTraces = Number(rest.shift());
       continue;
@@ -78,12 +60,6 @@ function parseArgs(argv) {
 
   if (!args.inputs.length) {
     throw new Error("Missing --input <path>. Provide one or more --input.");
-  }
-  if (!Number.isFinite(args.attackTopPercent) || args.attackTopPercent <= 0 || args.attackTopPercent > 100) {
-    throw new Error(`Invalid --attack-top-percent: ${args.attackTopPercent}`);
-  }
-  if (!Number.isFinite(args.defenseOppScoreMax)) {
-    throw new Error(`Invalid --defense-opp-score-max: ${args.defenseOppScoreMax}`);
   }
   if (!Number.isFinite(args.minActorTraces) || args.minActorTraces < 1) {
     throw new Error(`Invalid --min-actor-traces: ${args.minActorTraces}`);
@@ -111,89 +87,19 @@ function sideMatchesActor(game, side, actorTagLower) {
   return policy.includes(actorTagLower);
 }
 
-function sideGoldDelta(game, side) {
-  const dMy = Number(game?.goldDeltaMy);
-  if (Number.isFinite(dMy)) return side === "mySide" ? dMy : -dMy;
-
-  const fMy = Number(game?.finalGoldMy);
-  const iMy = Number(game?.initialGoldMy);
-  if (Number.isFinite(fMy) && Number.isFinite(iMy)) {
-    const deltaMy = fMy - iMy;
-    return side === "mySide" ? deltaMy : -deltaMy;
-  }
-
-  const fYour = Number(game?.finalGoldYour);
-  const iYour = Number(game?.initialGoldYour);
-  if (Number.isFinite(fYour) && Number.isFinite(iYour)) {
-    const deltaYour = fYour - iYour;
-    return side === "yourSide" ? deltaYour : -deltaYour;
-  }
-  return 0;
+function normalizeLearningRole(value) {
+  const v = String(value || "").trim().toUpperCase();
+  if (v === "ATTACK" || v === "DEFENSE") return v;
+  return "NEUTRAL";
 }
 
-function sideScore(game, side) {
-  const s = Number(game?.score?.[side]);
-  if (Number.isFinite(s)) return s;
-  return 0;
-}
-
-function otherSide(side) {
-  return side === "mySide" ? "yourSide" : "mySide";
-}
-
-function isWinner(game, side) {
-  return String(game?.winner || "") === side;
-}
-
-function isLoser(game, side) {
-  const w = String(game?.winner || "");
-  if (w === "draw" || w === "unknown" || !w) return false;
-  return w !== side;
-}
-
-function quantileThreshold(sortedValues, q01) {
-  if (!sortedValues.length) return null;
-  const q = Math.max(0, Math.min(1, q01));
-  const idx = Math.max(0, Math.min(sortedValues.length - 1, Math.floor((sortedValues.length - 1) * q)));
-  return sortedValues[idx];
-}
-
-async function collectAttackThreshold(inputs, actorTag, attackTopPercent) {
-  const actorTagLower = String(actorTag || "").toLowerCase();
-  const winningGold = [];
-  let gamesRead = 0;
-
-  for (const p of inputs) {
-    const rl = readline.createInterface({
-      input: fs.createReadStream(p, { encoding: "utf8" }),
-      crlfDelay: Infinity
-    });
-    for await (const raw of rl) {
-      const line = String(raw || "").trim();
-      if (!line) continue;
-      gamesRead += 1;
-      let game;
-      try {
-        game = JSON.parse(line);
-      } catch (err) {
-        throw new Error(`JSON parse failed (${p}, line ${gamesRead}): ${String(err)}`);
-      }
-      for (const side of ["mySide", "yourSide"]) {
-        if (!sideMatchesActor(game, side, actorTagLower)) continue;
-        if (isWinner(game, side)) {
-          winningGold.push(sideGoldDelta(game, side));
-        }
-      }
-    }
-  }
-
-  winningGold.sort((a, b) => a - b);
-  const q = 1 - attackTopPercent / 100;
-  const threshold = quantileThreshold(winningGold, q);
-  return {
-    threshold,
-    winningCount: winningGold.length
-  };
+function roleForSideFromLearningRole(learningRole, side) {
+  const lr = normalizeLearningRole(learningRole);
+  // learningRole is defined from mySide perspective.
+  if (side === "mySide") return lr;
+  if (lr === "ATTACK") return "DEFENSE";
+  if (lr === "DEFENSE") return "ATTACK";
+  return "NEUTRAL";
 }
 
 function filteredActorTraces(game, side) {
@@ -215,7 +121,8 @@ async function writeLabeled(outputs, cfg) {
     defenseGames: 0,
     attackTraces: 0,
     defenseTraces: 0,
-    droppedByMinTraces: 0
+    droppedByMinTraces: 0,
+    droppedByNeutralRole: 0
   };
 
   for (const p of cfg.inputs) {
@@ -244,32 +151,24 @@ async function writeLabeled(outputs, cfg) {
           continue;
         }
 
-        const opp = otherSide(side);
-        const actorDelta = sideGoldDelta(game, side);
-        const oppScore = sideScore(game, opp);
-        const actorWin = isWinner(game, side);
-        const actorLose = isLoser(game, side);
+        const gameLearningRole = normalizeLearningRole(game?.learningRole);
+        const actorRole = roleForSideFromLearningRole(gameLearningRole, side);
+        if (actorRole !== "ATTACK" && actorRole !== "DEFENSE") {
+          stats.droppedByNeutralRole += 1;
+          continue;
+        }
 
-        const attackPass =
-          actorWin &&
-          cfg.attackThreshold != null &&
-          actorDelta >= cfg.attackThreshold;
-        const defensePass =
-          actorLose &&
-          oppScore <= cfg.defenseOppScoreMax;
-
-        if (attackPass) {
+        if (actorRole === "ATTACK") {
           const out = {
             ...game,
             decision_trace: actorTraces,
             label: {
-              role: "attack",
+              role: "ATTACK",
+              roleSource: "learningRole",
+              gameLearningRole,
               actorTag: cfg.actorTag,
               actorSide: side,
               actorPolicy: sidePolicy(game, side),
-              actorGoldDelta: actorDelta,
-              attackTopPercent: cfg.attackTopPercent,
-              attackThreshold: cfg.attackThreshold,
               sourceFile: p
             }
           };
@@ -278,18 +177,17 @@ async function writeLabeled(outputs, cfg) {
           stats.attackTraces += actorTraces.length;
         }
 
-        if (defensePass) {
+        if (actorRole === "DEFENSE") {
           const out = {
             ...game,
             decision_trace: actorTraces,
             label: {
-              role: "defense",
+              role: "DEFENSE",
+              roleSource: "learningRole",
+              gameLearningRole,
               actorTag: cfg.actorTag,
               actorSide: side,
               actorPolicy: sidePolicy(game, side),
-              actorGoldDelta: actorDelta,
-              opponentScore: oppScore,
-              defenseOppScoreMax: cfg.defenseOppScoreMax,
               sourceFile: p
             }
           };
@@ -310,12 +208,6 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   assertFilesExist(args.inputs);
 
-  const thresholdInfo = await collectAttackThreshold(args.inputs, args.actorTag, args.attackTopPercent);
-  const attackThreshold = thresholdInfo.threshold;
-  if (attackThreshold == null) {
-    throw new Error("No winning samples found for actor tag. Cannot compute attack top-percent threshold.");
-  }
-
   const stats = await writeLabeled(
     {
       attackOut: args.attackOut,
@@ -324,12 +216,15 @@ async function main() {
     {
       inputs: args.inputs,
       actorTag: args.actorTag,
-      attackTopPercent: args.attackTopPercent,
-      attackThreshold,
-      defenseOppScoreMax: args.defenseOppScoreMax,
       minActorTraces: args.minActorTraces
     }
   );
+
+  if ((stats.attackGames + stats.defenseGames) <= 0) {
+    throw new Error(
+      "No ATTACK/DEFENSE labels found from learningRole. Input logs likely do not contain learningRole (or are all NEUTRAL)."
+    );
+  }
 
   console.log(
     JSON.stringify(
@@ -341,12 +236,8 @@ async function main() {
           defense: args.defenseOut
         },
         criteria: {
-          attack: `actor win + top ${args.attackTopPercent}% by actor gold delta`,
-          defense: `actor loss + opponent score <= ${args.defenseOppScoreMax}`
-        },
-        threshold: {
-          attackGoldDeltaMin: attackThreshold,
-          winningSamplesForThreshold: thresholdInfo.winningCount
+          attack: "learningRole == ATTACK (actor perspective)",
+          defense: "learningRole == DEFENSE (actor perspective)"
         },
         stats
       },
