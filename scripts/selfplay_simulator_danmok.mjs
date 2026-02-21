@@ -8,10 +8,11 @@ import {
   calculateScore,
   getDeclarableBombMonths,
   getDeclarableShakingMonths
-} from "../src/gameEngine.js";
+} from "../src/engine/index.js";
 import { buildDeck } from "../src/cards.js";
-import { BOT_POLICIES, botPlay } from "../src/bot.js";
-import { getActionPlayerKey } from "../src/engineRunner.js";
+import { BOT_POLICIES } from "../src/ai/policies.js";
+import { aiPlay } from "../src/ai/aiPlay.js";
+import { getActionPlayerKey } from "../src/engine/runner.js";
 import { STARTING_GOLD } from "../src/engine/economy.js";
 
 if (process.env.NO_SIMULATION === "1") {
@@ -531,8 +532,9 @@ async function run() {
 
       const actorSide = actorToSide(actor, firstTurnKey);
       if (parsed.traceMyTurnOnly && actorSide !== SIDE_MY) {
-        const next = botPlay(state, actor, {
-          policy: actorSide === SIDE_MY ? parsed.policyMySide : parsed.policyYourSide
+        const next = aiPlay(state, actor, {
+          source: "heuristic",
+          heuristicPolicy: actorSide === SIDE_MY ? parsed.policyMySide : parsed.policyYourSide
         });
         if (next === state) break;
         state = next;
@@ -547,8 +549,9 @@ async function run() {
 
       const prevTurnSeq = Number(state.turnSeq || 0);
       const prevKiboSeq = Number(state.kiboSeq || 0);
-      const next = botPlay(state, actor, {
-        policy: actorSide === SIDE_MY ? parsed.policyMySide : parsed.policyYourSide
+      const next = aiPlay(state, actor, {
+        source: "heuristic",
+        heuristicPolicy: actorSide === SIDE_MY ? parsed.policyMySide : parsed.policyYourSide
       });
       if (next === state) break;
 
@@ -684,3 +687,4 @@ run().catch((err) => {
   console.error(err instanceof Error ? err.stack || err.message : String(err));
   process.exitCode = 1;
 });
+

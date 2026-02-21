@@ -1,4 +1,4 @@
-import fs from "node:fs";
+﻿import fs from "node:fs";
 import path from "node:path";
 import { once } from "node:events";
 import crypto from "node:crypto";
@@ -18,11 +18,12 @@ import {
   chooseMatch,
   getDeclarableBombMonths,
   getDeclarableShakingMonths
-} from "../src/gameEngine.js";
+} from "../src/engine/index.js";
 import { STARTING_GOLD } from "../src/engine/economy.js";
 import { buildDeck } from "../src/cards.js";
-import { BOT_POLICIES, botPlay } from "../src/bot.js";
-import { getActionPlayerKey } from "../src/engineRunner.js";
+import { BOT_POLICIES } from "../src/ai/policies.js";
+import { aiPlay } from "../src/ai/aiPlay.js";
+import { getActionPlayerKey } from "../src/engine/runner.js";
 
 if (process.env.NO_SIMULATION === "1") {
   console.error("Simulation blocked: NO_SIMULATION=1");
@@ -2011,7 +2012,10 @@ function executeActorTurn(state, actor, cfg) {
     const explored = applyModelChoice(state, actor, exploratoryPick);
     if (explored !== state) return explored;
   }
-  return botPlay(state, actor, { policy: cfg?.fallbackPolicy || DEFAULT_POLICY });
+  return aiPlay(state, actor, {
+    source: "heuristic",
+    heuristicPolicy: cfg?.fallbackPolicy || DEFAULT_POLICY
+  });
 }
 
 async function run() {
@@ -2383,3 +2387,4 @@ run().catch((err) => {
   console.error(err instanceof Error ? err.message : String(err));
   process.exitCode = 1;
 });
+

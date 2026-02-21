@@ -1,4 +1,4 @@
-import fs from "fs/promises";
+﻿import fs from "fs/promises";
 import path from "path";
 import sharp from "sharp";
 
@@ -118,3 +118,4 @@ for (const month of MONTHS) {
   const summary = boxes.map((b) => `[x=${b.minX},y=${b.minY},w=${b.w},h=${b.h}]`).join(" ");
   console.log(`${month}.webp -> ${prefix}0..${prefix}3 ${summary}`);
 }
+

@@ -1,33 +1,31 @@
-import { buildDeck, normalizeCardTheme, DEFAULT_CARD_THEME, shuffle } from "./cards.js";
-import { ruleSets } from "./engine/rules.js";
-import { calculateScore, isGukjinCard } from "./engine/scoring.js";
-import { POINT_GOLD_UNIT, STARTING_GOLD, settleRoundGold } from "./engine/economy.js";
-import { resolveMatch } from "./engine/matching.js";
-import { resolveRound } from "./engine/resolution.js";
+﻿import { buildDeck, normalizeCardTheme, DEFAULT_CARD_THEME, shuffle } from "../cards.js";
+import { ruleSets } from "./rules.js";
+import { calculateScore, isGukjinCard } from "./scoring.js";
+import { POINT_GOLD_UNIT, STARTING_GOLD, settleRoundGold } from "./economy.js";
+import { resolveMatch } from "./matching.js";
+import { resolveRound } from "./resolution.js";
 import {
   decideFirstTurn,
   emptyPlayer,
   normalizeOpeningHands,
   normalizeOpeningBoard,
   findPresidentMonth
-} from "./engine/opening.js";
+} from "./opening.js";
 import {
   pushCaptured,
   needsChoice,
   bestMatchCard,
   stealPiFromOpponent
-} from "./engine/capturesEvents.js";
-import { clearExpiredReveal, ensurePassCardFor } from "./engine/turnFlow.js";
-import { packCard } from "./engine/game/normalize.js";
+} from "./capturesEvents.js";
+import { clearExpiredReveal, ensurePassCardFor } from "./turnFlow.js";
 import {
+  packCard,
   finalizeTurn,
-  continueAfterTurnIfNeeded
-} from "./engine/game/finalizeTurn.js";
-import {
+  continueAfterTurnIfNeeded,
   getDeclarableShakingMonths,
   getDeclarableBombMonths,
   getShakingReveal as selectShakingReveal
-} from "./engine/game/selectors.js";
+} from "./finalizeTurn.js";
 export { getDeclarableShakingMonths, getDeclarableBombMonths };
 export function createSeededRng(seedText = "") {
   let h = 1779033703 ^ seedText.length;
@@ -1448,6 +1446,7 @@ export function chooseGukjinMode(state, playerKey, mode) {
   };
   return continueAfterTurnIfNeeded(nextState, playerKey);
 }
+
 
 
 

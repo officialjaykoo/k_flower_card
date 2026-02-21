@@ -3,9 +3,11 @@ export const SUPPORTED_LANGUAGES = Object.freeze(["ko", "en"]);
 
 const MESSAGES = {
   ko: {
-    "model.sendol": "샌돌",
-    "model.dolbaram": "돌바람",
     "model.heuristicV3": "휴리스틱 V3",
+    "model.heuristicV4": "휴리스틱 V4",
+    "model.v14Moe": "모델 V14 자동",
+    "model.v14Attack": "모델 V14 공격",
+    "model.v14Defense": "모델 V14 수비",
     "player.player1": "플레이어1",
     "player.player2": "플레이어2",
     "replay.loadedSourceDefault": "불러온 기보",
@@ -112,9 +114,11 @@ const MESSAGES = {
     "card.alt.format": "{month}월 {name}"
   },
   en: {
-    "model.sendol": "Sendol",
-    "model.dolbaram": "Dolbaram",
     "model.heuristicV3": "Heuristic V3",
+    "model.heuristicV4": "Heuristic V4",
+    "model.v14Moe": "Model V14 Auto",
+    "model.v14Attack": "Model V14 Attack",
+    "model.v14Defense": "Model V14 Defense",
     "player.player1": "Player 1",
     "player.player2": "Player 2",
     "replay.loadedSourceDefault": "Loaded Replay",

@@ -8,17 +8,17 @@
   "explore_comeback_min": 0.002,
   "explore_decay_k": 2.0,
   "focal": {
-    "name": "dolbaram",
+    "name": "policy-danmokv15-defense",
     "fallback_policy": "heuristic_v3",
-    "policy_model": "models/policy-dolbaram.json",
-    "value_model": "models/value-dolbaram.json"
+    "policy_model": "models/policy-danmokv15-defense.json",
+    "value_model": "models/value-danmokv15-gold.json"
   },
   "opponents": [
     {
-      "name": "sendol",
+      "name": "policy-danmokv15-attack",
       "fallback_policy": "heuristic_v3",
-      "policy_model": "models/policy-sendol.json",
-      "value_model": "models/value-sendol.json",
+      "policy_model": "models/policy-danmokv15-attack.json",
+      "value_model": "models/value-danmokv15-gold.json",
       "weight": 0.5
     },
     {

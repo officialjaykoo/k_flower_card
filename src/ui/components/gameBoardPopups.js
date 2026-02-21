@@ -1,5 +1,5 @@
 import readmeRaw from "../../../README.md?raw";
-import { DEFAULT_LANGUAGE, makeTranslator } from "../i18n/index.js";
+import { DEFAULT_LANGUAGE, makeTranslator } from "../i18n/i18n.js";
 
 function escapeHtml(text) {
   return String(text ?? "")
@@ -253,4 +253,3 @@ export function openGameLogPopup({ log = [], language = DEFAULT_LANGUAGE }) {
   popup.document.close();
   popup.focus();
 }
-

@@ -404,7 +404,7 @@ export default function GameBoard({
         <div className="status-name">
           {isAiSlot ? (
             <select
-              value={ui.modelPicks?.[playerKey] || (playerKey === "human" ? "sendol" : "dolbaram")}
+              value={ui.modelPicks?.[playerKey] || "heuristic_v3"}
               onChange={(e) =>
                 setUi((u) => ({
                   ...u,

@@ -1,17 +1,137 @@
-import { ruleSets } from "../rules.js";
-import { calculateScore, isGukjinCard } from "../scoring.js";
-import { pointsToGold, stealGoldFromOpponent } from "../economy.js";
-import { resolveRound } from "../resolution.js";
-import { findPresidentMonth } from "../opening.js";
+import { ruleSets } from "./rules.js";
+import { calculateScore, isGukjinCard } from "./scoring.js";
+import { pointsToGold, stealGoldFromOpponent } from "./economy.js";
+import { resolveRound } from "./resolution.js";
+import { findPresidentMonth } from "./opening.js";
 import {
   pushCaptured,
   stealPiFromOpponent
-} from "../capturesEvents.js";
-import { clearExpiredReveal, ensurePassCardFor } from "../turnFlow.js";
-import {
-  normalizeUniqueCardZones,
-  packCard
-} from "./normalize.js";
+} from "./capturesEvents.js";
+import { clearExpiredReveal, ensurePassCardFor } from "./turnFlow.js";
+
+export function normalizeUniqueCardZones(players, board, deck) {
+  const seen = new Set();
+
+  const dedupeReal = (cards = []) => {
+    const next = [];
+    cards.forEach((card) => {
+      if (!card?.id || seen.has(card.id)) return;
+      seen.add(card.id);
+      next.push(card);
+    });
+    return next;
+  };
+
+  const dedupeHand = (cards = []) => {
+    const passSeen = new Set();
+    const next = [];
+    cards.forEach((card) => {
+      if (!card) return;
+      if (card.passCard) {
+        if (!card.id || passSeen.has(card.id)) return;
+        passSeen.add(card.id);
+        next.push(card);
+        return;
+      }
+      if (!card.id || seen.has(card.id)) return;
+      seen.add(card.id);
+      next.push(card);
+    });
+    return next;
+  };
+
+  // Priority order: hand -> captured -> board -> deck
+  const nextHumanHand = dedupeHand(players.human.hand || []);
+  const nextAiHand = dedupeHand(players.ai.hand || []);
+
+  const nextHumanCaptured = {
+    ...players.human.captured,
+    kwang: dedupeReal(players.human.captured?.kwang || []),
+    five: dedupeReal(players.human.captured?.five || []),
+    ribbon: dedupeReal(players.human.captured?.ribbon || []),
+    junk: dedupeReal(players.human.captured?.junk || [])
+  };
+
+  const nextAiCaptured = {
+    ...players.ai.captured,
+    kwang: dedupeReal(players.ai.captured?.kwang || []),
+    five: dedupeReal(players.ai.captured?.five || []),
+    ribbon: dedupeReal(players.ai.captured?.ribbon || []),
+    junk: dedupeReal(players.ai.captured?.junk || [])
+  };
+
+  const nextBoard = dedupeReal(board || []);
+  const nextDeck = dedupeReal(deck || []);
+
+  return {
+    players: {
+      ...players,
+      human: {
+        ...players.human,
+        hand: nextHumanHand,
+        captured: nextHumanCaptured
+      },
+      ai: {
+        ...players.ai,
+        hand: nextAiHand,
+        captured: nextAiCaptured
+      }
+    },
+    board: nextBoard,
+    deck: nextDeck
+  };
+}
+
+export function packCard(card) {
+  return {
+    id: card.id,
+    month: card.month,
+    category: card.category,
+    name: card.name,
+    asset: card.asset || null,
+    passCard: !!card.passCard
+  };
+}
+
+export function getDeclarableShakingMonths(state, playerKey) {
+  if (state.phase !== "playing" || state.currentTurn !== playerKey) return [];
+  const player = state.players[playerKey];
+  const declared = new Set(player.shakingDeclaredMonths || []);
+  const counts = {};
+  player.hand.forEach((c) => {
+    if (!c || c.passCard) return;
+    if (c.month < 1 || c.month > 12) return;
+    counts[c.month] = (counts[c.month] || 0) + 1;
+  });
+  return Object.entries(counts)
+    .map(([m, count]) => ({ month: Number(m), count }))
+    .filter((x) => x.count >= 3 && !declared.has(x.month))
+    .filter((x) => state.board.every((b) => b.month !== x.month))
+    .map((x) => x.month);
+}
+
+export function getDeclarableBombMonths(state, playerKey) {
+  if (state.phase !== "playing" || state.currentTurn !== playerKey) return [];
+  const player = state.players[playerKey];
+  const counts = {};
+  player.hand.forEach((c) => {
+    if (!c || c.passCard) return;
+    if (c.month < 1 || c.month > 12) return;
+    counts[c.month] = (counts[c.month] || 0) + 1;
+  });
+  return Object.entries(counts)
+    .map(([m, count]) => ({ month: Number(m), count }))
+    .filter((x) => x.count >= 3)
+    .filter((x) => state.board.filter((b) => b.month === x.month).length === 1)
+    .map((x) => x.month);
+}
+
+export function getShakingReveal(state, now) {
+  if (state.actionReveal && state.actionReveal.expiresAt > now) return state.actionReveal;
+  if (!state.shakingReveal) return null;
+  if (state.shakingReveal.expiresAt <= now) return null;
+  return state.shakingReveal;
+}
 
 function hasPendingGukjinChoice(player) {
   if (!player || player.gukjinLocked) return false;

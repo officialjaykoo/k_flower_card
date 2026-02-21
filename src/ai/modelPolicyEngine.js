@@ -8,7 +8,7 @@ import {
   choosePresidentHold,
   chooseGukjinMode,
   chooseMatch
-} from "./gameEngine.js";
+} from "../engine/index.js";
 
 function selectPool(state, actor, options = {}) {
   const previewPlay = !!options.previewPlay;

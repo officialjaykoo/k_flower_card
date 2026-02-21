@@ -18,11 +18,20 @@ import {
   chooseMatch,
   getDeclarableBombMonths,
   getDeclarableShakingMonths
-} from "../src/gameEngine.js";
+} from "../src/engine/index.js";
 import { STARTING_GOLD } from "../src/engine/economy.js";
 import { buildDeck } from "../src/cards.js";
-import { BOT_POLICIES, botPlay } from "../src/bot.js";
-import { getActionPlayerKey } from "../src/engineRunner.js";
+import { BOT_POLICIES } from "../src/ai/policies.js";
+import { aiPlay } from "../src/ai/aiPlay.js";
+import {
+  MOE_ATTACK_SCORE_THRESHOLD_DEFAULT,
+  MOE_DEFENSE_SCORE_THRESHOLD_DEFAULT,
+  MOE_OPP_THREAT_THRESHOLD_DEFAULT,
+  MOE_RISK_THRESHOLD_DEFAULT,
+  buildMoeSelectionContext,
+  selectMoeRoleByContext
+} from "../src/ai/moePolicy.js";
+import { getActionPlayerKey } from "../src/engine/runner.js";
 
 if (process.env.NO_SIMULATION === "1") {
   console.error("Simulation blocked: NO_SIMULATION=1");
@@ -46,10 +55,6 @@ const TRAIN_EXPLORE_COMEBACK_MIN_DEFAULT = 0;
 const GO_STOP_THRESHOLD_BASE_PERMILLE = 1200;
 const GO_STOP_THRESHOLD_AHEAD_PERMILLE = 2000;
 const GO_STOP_THRESHOLD_BEHIND_PERMILLE = 500;
-const MOE_DEFENSE_SCORE_THRESHOLD_DEFAULT = -2;
-const MOE_ATTACK_SCORE_THRESHOLD_DEFAULT = 3;
-const MOE_RISK_THRESHOLD_DEFAULT = 1;
-const MOE_OPP_THREAT_THRESHOLD_DEFAULT = 0.55;
 const IR_TURN_CLIP = 0.3;
 const IR_EPISODE_CLIP = 1.0;
 const FULL_DECK = buildDeck();
@@ -1231,32 +1236,15 @@ function buildRuntimeModelConfig(state, actor, cfg) {
   if (!cfg) return cfg;
   const hasMoE = !!(cfg.policyModelAttack && cfg.policyModelDefense);
   if (!hasMoE) return cfg;
-
-  const dc = decisionContext(state, actor, { includeCardLists: false });
-  const scoreDiff = Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0);
-  const bakRiskCount =
-    Number(dc.piBakRisk || 0) + Number(dc.gwangBakRisk || 0) + Number(dc.mongBakRisk || 0);
-  const oppThreat = Math.max(
-    Number(dc.oppJokboThreatProb || 0),
-    Number(dc.oppJokboOneAwayProb || 0),
-    Number(dc.oppGwangThreatProb || 0)
+  const selectedRole = selectMoeRoleByContext(
+    buildMoeSelectionContext(state, actor),
+    cfg?.moe || {
+      defenseScoreThreshold: MOE_DEFENSE_SCORE_THRESHOLD_DEFAULT,
+      attackScoreThreshold: MOE_ATTACK_SCORE_THRESHOLD_DEFAULT,
+      riskThreshold: MOE_RISK_THRESHOLD_DEFAULT,
+      oppThreatThreshold: MOE_OPP_THREAT_THRESHOLD_DEFAULT
+    }
   );
-  const carry = Number(dc.carryOverMultiplier || 1);
-  const riskScore =
-    bakRiskCount +
-    (oppThreat >= Number(cfg?.moe?.oppThreatThreshold ?? MOE_OPP_THREAT_THRESHOLD_DEFAULT) ? 1 : 0) +
-    (carry >= 3 ? 1 : 0);
-  const defenseScoreThreshold = Number(
-    cfg?.moe?.defenseScoreThreshold ?? MOE_DEFENSE_SCORE_THRESHOLD_DEFAULT
-  );
-  const attackScoreThreshold = Number(
-    cfg?.moe?.attackScoreThreshold ?? MOE_ATTACK_SCORE_THRESHOLD_DEFAULT
-  );
-  const riskThreshold = Number(cfg?.moe?.riskThreshold ?? MOE_RISK_THRESHOLD_DEFAULT);
-
-  const useDefense = riskScore >= riskThreshold || scoreDiff <= defenseScoreThreshold;
-  const useAttack = !useDefense && scoreDiff >= attackScoreThreshold;
-  const selectedRole = useDefense ? "defense" : useAttack ? "attack" : "attack";
   const selectedModel = selectedRole === "attack" ? cfg.policyModelAttack : cfg.policyModelDefense;
   const selectedPath =
     selectedRole === "attack" ? cfg.policyModelAttackPath : cfg.policyModelDefensePath;
@@ -2421,7 +2409,10 @@ function executeActorTurn(state, actor, cfg) {
     const explored = applyModelChoice(state, actor, exploratoryPick);
     if (explored !== state) return explored;
   }
-  return botPlay(state, actor, { policy: runtimeCfg?.fallbackPolicy || DEFAULT_POLICY });
+  return aiPlay(state, actor, {
+    source: "heuristic",
+    heuristicPolicy: runtimeCfg?.fallbackPolicy || DEFAULT_POLICY
+  });
 }
 
 async function run() {
@@ -2787,3 +2778,4 @@ run().catch((err) => {
   console.error(err instanceof Error ? err.message : String(err));
   process.exitCode = 1;
 });
+
