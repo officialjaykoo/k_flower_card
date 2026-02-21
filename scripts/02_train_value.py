@@ -30,19 +30,6 @@ DEFAULT_VALUE_FILTER_RULES = {
     "keep_if_trigger_prefixes": ["specialEvent", "bomb", "riskShift"],
     "keep_if_trigger_names": ["comboThreatEnter", "terminalContext", "goStopOption", "shakingYesOption"],
 }
-TRIGGER_BIT = {
-    "earlyTurnForced": 1 << 0,
-    "goStopOption": 1 << 1,
-    "shakingYesOption": 1 << 2,
-    "optionTurnOther": 1 << 3,
-    "deckEmpty": 1 << 4,
-    "specialEvent": 1 << 5,
-    "bombEvent": 1 << 6,
-    "riskShift": 1 << 7,
-    "comboThreatEnter": 1 << 8,
-    "terminalContext": 1 << 9,
-}
-
 
 def expand_inputs(patterns):
     paths = []
@@ -90,34 +77,26 @@ def trace_order(trace):
 
 
 def _dc_hand_opp(dc):
-    if (dc or {}).get("handCountOpp") is not None:
-        return int((dc or {}).get("handCountOpp") or 0)
-    hand_self = int((dc or {}).get("handCountSelf") or 0)
-    hand_diff = int((dc or {}).get("handCountDiff") or 0)
+    hand_self = int((dc or {}).get("hs") or 0)
+    hand_diff = int((dc or {}).get("hd") or 0)
     return hand_self - hand_diff
 
 
 def _dc_score_diff(dc):
-    if (dc or {}).get("scoreDiff") is not None:
-        return float((dc or {}).get("scoreDiff") or 0)
-    return float((dc or {}).get("currentScoreSelf") or 0) - float((dc or {}).get("currentScoreOpp") or 0)
+    return float((dc or {}).get("sd") or 0)
 
 
 def trigger_names(trace):
-    tg = trace.get("tg")
-    if isinstance(tg, list):
-        return [str(x or "") for x in tg if str(x or "").strip()]
-    tm = trace.get("tm")
-    try:
-        mask = int(tm or 0)
-    except Exception:
-        mask = 0
-    if mask <= 0:
-        return []
     out = []
-    for name, bit in TRIGGER_BIT.items():
-        if mask & int(bit):
-            out.append(name)
+    for raw in trace.get("keepBy") or []:
+        if not isinstance(raw, dict):
+            continue
+        mapped = ""
+        trig = str(raw.get("trigger") or "").strip()
+        if trig:
+            mapped = trig
+        if mapped and mapped not in out:
+            out.append(mapped)
     return out
 
 
@@ -174,20 +153,23 @@ def choose_label(trace):
     dt = trace.get("dt")
     compact = trace.get("ch")
     if dt == "play":
-        return (compact if compact is not None else trace.get("c")), "play"
+        return compact, "play"
     if dt == "match":
-        return (compact if compact is not None else trace.get("s")), "match"
+        return compact, "match"
     if dt == "option":
-        return action_alias(compact if compact is not None else trace.get("at")), "option"
-
-    sp = trace.get("sp") or {}
-    if sp.get("cards"):
-        return (compact if compact is not None else trace.get("c")), "play"
-    if sp.get("boardCardIds"):
-        return (compact if compact is not None else trace.get("s")), "match"
-    if sp.get("options"):
-        return action_alias(compact if compact is not None else trace.get("at")), "option"
+        return action_alias(compact), "option"
     return None, None
+
+
+def option_action_type(trace):
+    if str(trace.get("dt") or "") != "option":
+        return ""
+    chosen = action_alias(trace.get("ch"))
+    if not chosen:
+        return ""
+    if chosen in ("go", "stop", "shaking_yes", "shaking_no", "president_stop", "president_hold"):
+        return f"choose_{chosen}"
+    return str(chosen)
 
 
 def is_value_exception_trace(trace, filter_rules):
@@ -198,11 +180,7 @@ def is_value_exception_trace(trace, filter_rules):
     prefix_list = _as_str_list(rules.get("keep_if_trigger_prefixes"))
     name_set = set(_as_str_list(rules.get("keep_if_trigger_names")))
 
-    action_type = str(trace.get("at") or "")
-    if not action_type:
-        chosen = action_alias(trace.get("ch"))
-        if chosen in ("go", "stop"):
-            action_type = f"choose_{chosen}"
+    action_type = option_action_type(trace)
     if action_type in action_set:
         return True
     for raw in trigger_names(trace):
@@ -250,53 +228,107 @@ def extract_numeric(trace):
             x = -abs_max
         return x
 
+    def _clip01(v):
+        try:
+            x = float(v or 0.0)
+        except Exception:
+            x = 0.0
+        if x < 0.0:
+            return 0.0
+        if x > 1.0:
+            return 1.0
+        return x
+
+    def _clip(v, lo, hi):
+        try:
+            x = float(v or 0.0)
+        except Exception:
+            x = 0.0
+        if x < lo:
+            return lo
+        if x > hi:
+            return hi
+        return x
+
     dc = trace.get("dc") or {}
-    sp = trace.get("sp") or {}
     cands = int(trace.get("cc") or 0)
-    if cands <= 0:
-        cands = len(sp.get("cards") or sp.get("boardCardIds") or sp.get("options") or [])
     order = trace_order(trace)
-    if order in ("first", "second"):
-        is_first = 1.0 if order == "first" else 0.0
-    else:
-        is_first = float(1 if int(dc.get("isFirstAttacker") or 0) else 0)
+    is_first = 1.0 if order == "first" else 0.0
     bak_risk_total = (
-        float(1 if dc.get("piBakRisk") else 0)
-        + float(1 if dc.get("gwangBakRisk") else 0)
-        + float(1 if dc.get("mongBakRisk") else 0)
+        float(1 if dc.get("rp") else 0)
+        + float(1 if dc.get("rg") else 0)
+        + float(1 if dc.get("rm") else 0)
     )
     score_diff = _dc_score_diff(dc)
     hand_opp = _dc_hand_opp(dc)
+    deck_count = float(dc.get("d") or 0)
+    go_self = float(dc.get("gs") or 0)
+    go_opp = float(dc.get("go") or 0)
+    shake_self = float(dc.get("ss") or 0)
+    shake_opp = float(dc.get("so") or 0)
+    score_self = float(dc.get("sm") or 0)
+    score_opp = float(dc.get("sy") or 0)
+    opp_oneaway = _prob01(dc.get("ojo"))
+    opp_threat = max(_prob01(dc.get("ojt")), _prob01(dc.get("ogt")))
+    self_finish = max(_prob01(dc.get("sjo")), _prob01(dc.get("sjt")))
+    progress_gap = float(dc.get("jps") or 0) - float(dc.get("jpo") or 0)
+    threat_gap = _clip(self_finish - opp_threat, -1.0, 1.0)
+
+    deck_low = _clip01((10.0 - deck_count) / 10.0)
+    score_trail = _clip01((-score_diff) / 12.0)
+    score_lead = _clip01(score_diff / 12.0)
+
+    x_opp_oneaway_deck_low = _clip(opp_oneaway * deck_low, 0.0, 1.0)
+    x_opp_threat_deck_low = _clip(opp_threat * deck_low, 0.0, 1.0)
+    x_bak_opp_threat = _clip(bak_risk_total * opp_threat, 0.0, 3.0)
+    x_scorediff_go = _clip((score_lead - score_trail) * (1.0 + max(0.0, go_self - go_opp)), -3.0, 3.0)
+    x_trailing_opp_oneaway = _clip(score_trail * opp_oneaway, 0.0, 1.0)
+    x_finish_vs_threat = _clip(self_finish - opp_threat, -1.0, 1.0)
+    x_shake_pressure = _clip((shake_opp - shake_self) * opp_threat, -3.0, 3.0)
+    x_progress_gap_deck = _clip(progress_gap * deck_low, -6.0, 6.0)
+
     return {
-        "deck_count": float(dc.get("deckCount") or 0),
-        "hand_self": float(dc.get("handCountSelf") or 0),
+        "deck_count": deck_count,
+        "hand_self": float(dc.get("hs") or 0),
         "hand_opp": float(hand_opp),
-        "go_self": float(dc.get("goCountSelf") or 0),
-        "go_opp": float(dc.get("goCountOpp") or 0),
+        "go_self": go_self,
+        "go_opp": go_opp,
+        "shake_self": shake_self,
+        "shake_opp": shake_opp,
+        "score_self_at_turn": score_self,
+        "score_opp_at_turn": score_opp,
         "score_diff": score_diff,
         "is_first_attacker": is_first,
         "cand_count": float(cands),
         "bak_risk_total": bak_risk_total,
-        "jokbo_progress_self_sum": float(dc.get("jokboProgressSelfSum") or 0),
-        "jokbo_progress_opp_sum": float(dc.get("jokboProgressOppSum") or 0),
-        "jokbo_one_away_self_count": float(dc.get("jokboOneAwaySelfCount") or 0),
-        "jokbo_one_away_opp_count": float(dc.get("jokboOneAwayOppCount") or 0),
-        "self_jokbo_threat_prob": _prob01(dc.get("selfJokboThreatProb")),
-        "self_jokbo_one_away_prob": _prob01(dc.get("selfJokboOneAwayProb")),
-        "self_gwang_threat_prob": _prob01(dc.get("selfGwangThreatProb")),
-        "opp_jokbo_threat_prob": _prob01(dc.get("oppJokboThreatProb")),
-        "opp_jokbo_one_away_prob": _prob01(dc.get("oppJokboOneAwayProb")),
-        "opp_gwang_threat_prob": _prob01(dc.get("oppGwangThreatProb")),
-        "go_stop_delta_proxy": _signed_proxy(dc.get("goStopDeltaProxy")),
+        "jokbo_progress_self_sum": float(dc.get("jps") or 0),
+        "jokbo_progress_opp_sum": float(dc.get("jpo") or 0),
+        "jokbo_one_away_self_count": float(dc.get("jas") or 0),
+        "jokbo_one_away_opp_count": float(dc.get("jao") or 0),
+        "self_jokbo_threat_prob": _prob01(dc.get("sjt")),
+        "self_jokbo_one_away_prob": _prob01(dc.get("sjo")),
+        "self_gwang_threat_prob": _prob01(dc.get("sgt")),
+        "opp_jokbo_threat_prob": _prob01(dc.get("ojt")),
+        "opp_jokbo_one_away_prob": _prob01(dc.get("ojo")),
+        "opp_gwang_threat_prob": _prob01(dc.get("ogt")),
+        "progress_gap": progress_gap,
+        "threat_gap": threat_gap,
+        "go_stop_delta_proxy": _signed_proxy(dc.get("gsd")),
         "immediate_reward": float(trace.get("ir") or 0),
+        "x_opp_oneaway_deck_low": x_opp_oneaway_deck_low,
+        "x_opp_threat_deck_low": x_opp_threat_deck_low,
+        "x_bak_opp_threat": x_bak_opp_threat,
+        "x_scorediff_go": x_scorediff_go,
+        "x_trailing_opp_oneaway": x_trailing_opp_oneaway,
+        "x_finish_vs_threat": x_finish_vs_threat,
+        "x_shake_pressure": x_shake_pressure,
+        "x_progress_gap_deck": x_progress_gap_deck,
     }
 
 
 def extract_tokens(trace, decision_type, action_label):
     dc = trace.get("dc") or {}
     order = trace_order(trace)
-    if order not in ("first", "second"):
-        order = "first" if int(dc.get("isFirstAttacker") or 0) else "second"
     def _signed_proxy(v, abs_max=3.0):
         try:
             x = float(v or 0.0)
@@ -310,28 +342,31 @@ def extract_tokens(trace, decision_type, action_label):
             x = -abs_max
         return x
     bak_risk_total = (
-        float(1 if dc.get("piBakRisk") else 0)
-        + float(1 if dc.get("gwangBakRisk") else 0)
-        + float(1 if dc.get("mongBakRisk") else 0)
+        float(1 if dc.get("rp") else 0)
+        + float(1 if dc.get("rg") else 0)
+        + float(1 if dc.get("rm") else 0)
     )
     score_diff = _dc_score_diff(dc)
     hand_opp = _dc_hand_opp(dc)
     out = [
-        f"phase={dc.get('phase','?')}",
+        f"phase={dc.get('p', '?')}",
         f"order={order}",
         f"decision_type={decision_type}",
         f"action={action_label or '?'}",
-        f"deck_bucket={int((dc.get('deckCount') or 0)//3)}",
-        f"self_hand={int(dc.get('handCountSelf') or 0)}",
+        f"deck_bucket={int((dc.get('d') or 0)//3)}",
+        f"self_hand={int(dc.get('hs') or 0)}",
         f"opp_hand={int(hand_opp)}",
-        f"self_go={int(dc.get('goCountSelf') or 0)}",
-        f"opp_go={int(dc.get('goCountOpp') or 0)}",
+        f"self_go={int(dc.get('gs') or 0)}",
+        f"opp_go={int(dc.get('go') or 0)}",
+        f"self_shake={int(dc.get('ss') or 0)}",
+        f"opp_shake={int(dc.get('so') or 0)}",
         f"is_first_attacker={1 if order == 'first' else 0}",
         f"score_diff={int(score_diff)}",
         f"bak_risk={int(bak_risk_total)}",
-        f"jp_self_sum={int(dc.get('jokboProgressSelfSum') or 0)}",
-        f"jp_opp_sum={int(dc.get('jokboProgressOppSum') or 0)}",
-        f"go_stop_delta_bucket={int(_signed_proxy(dc.get('goStopDeltaProxy')) * 2)}",
+        f"jp_self_sum={int(dc.get('jps') or 0)}",
+        f"jp_opp_sum={int(dc.get('jpo') or 0)}",
+        f"progress_gap={int((dc.get('jps') or 0) - (dc.get('jpo') or 0))}",
+        f"go_stop_delta_bucket={int(_signed_proxy(dc.get('gsd')) * 2)}",
     ]
     return out
 
@@ -345,29 +380,66 @@ def _float_or_none(v):
         return None
 
 
+def _clamp(v, lo, hi):
+    x = float(v)
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+
+def value_sample_weight(trace, decision_type, action_label, numeric, y, weight_config):
+    cfg = dict(weight_config or {})
+    mode = str(cfg.get("mode") or "none").strip().lower()
+    if mode == "none":
+        return 1.0
+
+    m = 1.0
+    names = set(trigger_names(trace))
+    action = str(action_label or "").strip().lower()
+    dt = str(decision_type or "").strip().lower()
+
+    if "terminalContext" in names:
+        m *= float(cfg.get("terminal_mult") or 1.0)
+    if "comboThreatEnter" in names:
+        m *= float(cfg.get("combo_threat_mult") or 1.0)
+    if "goStopOption" in names or (dt == "option" and action in ("go", "stop")):
+        m *= float(cfg.get("go_stop_mult") or 1.0)
+    if dt == "option" and action in ("shaking_yes", "shaking_no", "president_stop", "president_hold", "five", "junk"):
+        m *= float(cfg.get("special_option_mult") or 1.0)
+
+    deck_count = float((numeric or {}).get("deck_count") or 0.0)
+    late_cut = float(cfg.get("late_deck_cut") or 8.0)
+    if deck_count <= late_cut:
+        m *= float(cfg.get("late_mult") or 1.0)
+
+    oneaway = float((numeric or {}).get("opp_jokbo_one_away_prob") or 0.0)
+    oneaway_thr = float(cfg.get("opp_oneaway_threshold") or 0.6)
+    if oneaway >= oneaway_thr:
+        m *= float(cfg.get("opp_oneaway_mult") or 1.0)
+
+    if float(y or 0.0) > 0:
+        m *= float(cfg.get("positive_target_mult") or 1.0)
+
+    lo = float(cfg.get("clip_min") or 0.05)
+    hi = float(cfg.get("clip_max") or 8.0)
+    return _clamp(max(0.0, m), min(lo, hi), max(lo, hi))
+
+
 def target_gold(line, actor, gold_per_point, target_mode="gold"):
     mode = str(target_mode or "gold").strip().lower()
 
     if mode == "gold":
         if actor == SIDE_MY:
-            direct = _float_or_none(line.get("goldDeltaMy"))
-            if direct is not None:
-                return direct
             final_gold = _float_or_none(line.get("finalGoldMy"))
             initial_gold = _float_or_none(line.get("initialGoldMy"))
         else:
-            direct = _float_or_none(line.get("goldDeltaYour"))
-            if direct is not None:
-                return direct
             final_gold = _float_or_none(line.get("finalGoldYour"))
             initial_gold = _float_or_none(line.get("initialGoldYour"))
 
         if final_gold is not None and initial_gold is not None:
             return final_gold - initial_gold
-
-        mirror_my = _float_or_none(line.get("goldDeltaMy"))
-        if mirror_my is not None:
-            return mirror_my if actor == SIDE_MY else -mirror_my
 
     score = line.get("score") or {}
     self_score = score.get(actor)
@@ -385,6 +457,7 @@ def iter_samples(
     target_mode="gold",
     max_samples=None,
     filter_rules=None,
+    weight_config=None,
 ):
     yielded = 0
     active_rules = _normalize_value_filter_rules(filter_rules)
@@ -407,11 +480,14 @@ def iter_samples(
                     y = target_gold(line, actor, gold_per_point, target_mode=target_mode)
                     if y is None:
                         continue
+                    numeric = extract_numeric(trace)
+                    sample_w = value_sample_weight(trace, decision_type, action_label, numeric, y, weight_config)
                     yield {
                         "tokens": extract_tokens(trace, decision_type, action_label),
-                        "numeric": extract_numeric(trace),
+                        "numeric": numeric,
                         "y": y,
                         "actor": actor,
+                        "sample_weight": sample_w,
                     }
                     yielded += 1
                     if max_samples is not None and yielded >= max_samples:
@@ -460,13 +536,14 @@ def scan_dataset_stats(
     seed,
     numeric_keys,
     filter_rules,
+    weight_config,
 ):
     numeric_max_abs = {k: 1.0 for k in numeric_keys}
     total = 0
     train_count = 0
     valid_count = 0
     for s in iter_samples(
-        paths, gold_per_point, target_mode, max_samples, filter_rules
+        paths, gold_per_point, target_mode, max_samples, filter_rules, weight_config=weight_config
     ):
         is_valid = split_is_valid(total, valid_ratio, seed)
         if is_valid:
@@ -497,16 +574,24 @@ def iter_sparse_source_samples(
     seed,
     subset,
     filter_rules,
+    weight_config,
 ):
     for idx, sample in enumerate(
-        iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules)
+        iter_samples(
+            paths,
+            gold_per_point,
+            target_mode,
+            max_samples,
+            filter_rules,
+            weight_config=weight_config,
+        )
     ):
         is_valid = split_is_valid(idx, valid_ratio, seed)
         split = "valid" if is_valid else "train"
         if subset is not None and split != subset:
             continue
         idxs, vals = sparse_features(sample, dim, numeric_scale)
-        yield idxs, vals, float(sample["y"])
+        yield idxs, vals, float(sample["y"]), float(sample.get("sample_weight") or 1.0)
 
 
 def _cache_meta_path(cache_path):
@@ -543,12 +628,12 @@ def cache_matches(meta, config, manifest):
     return meta.get("config") == config and meta.get("input_manifest") == manifest
 
 
-def _pack_cached_record(split_code, y, idxs, vals):
+def _pack_cached_record(split_code, y, sample_weight, idxs, vals):
     n = len(idxs)
     if n >= 65535:
         raise RuntimeError(f"Feature count too large for cache record: {n}")
     flag = 1 if split_code == "v" else 0
-    header = struct.pack("<BfH", flag, float(y), n)
+    header = struct.pack("<BffH", flag, float(y), float(sample_weight), n)
 
     a_idx = array.array("I", (int(i) for i in idxs))
     if sys.byteorder != "little":
@@ -562,8 +647,8 @@ def _pack_cached_record(split_code, y, idxs, vals):
 
 
 def _unpack_cached_record(blob):
-    flag, y, n = struct.unpack_from("<BfH", blob, 0)
-    off = 7
+    flag, y, sample_weight, n = struct.unpack_from("<BffH", blob, 0)
+    off = 11
     idx_bytes = int(n) * 4
     val_bytes = int(n) * 4
 
@@ -581,7 +666,7 @@ def _unpack_cached_record(blob):
         a_val.byteswap()
 
     split_code = "v" if int(flag) == 1 else "t"
-    return split_code, float(y), list(a_idx), list(a_val)
+    return split_code, float(y), float(sample_weight), list(a_idx), list(a_val)
 
 
 def build_feature_cache_jsonl(
@@ -595,12 +680,20 @@ def build_feature_cache_jsonl(
     valid_ratio,
     seed,
     filter_rules,
+    weight_config,
 ):
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     counts = {"samples_total": 0, "samples_train": 0, "samples_valid": 0}
     with open(cache_path, "w", encoding="utf-8") as f:
         for idx, sample in enumerate(
-            iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules)
+            iter_samples(
+                paths,
+                gold_per_point,
+                target_mode,
+                max_samples,
+                filter_rules,
+                weight_config=weight_config,
+            )
         ):
             is_valid = split_is_valid(idx, valid_ratio, seed)
             split_code = "v" if is_valid else "t"
@@ -608,6 +701,7 @@ def build_feature_cache_jsonl(
             rec = {
                 "s": split_code,
                 "y": float(sample["y"]),
+                "w": float(sample.get("sample_weight") or 1.0),
                 "i": idxs,
                 "v": vals,
             }
@@ -632,6 +726,7 @@ def build_feature_cache_lmdb(
     seed,
     map_size_bytes,
     filter_rules,
+    weight_config,
 ):
     _ensure_lmdb_available()
     os.makedirs(cache_path, exist_ok=True)
@@ -650,12 +745,25 @@ def build_feature_cache_lmdb(
         txn = env.begin(write=True)
         try:
             for idx, sample in enumerate(
-                iter_samples(paths, gold_per_point, target_mode, max_samples, filter_rules)
+                iter_samples(
+                    paths,
+                    gold_per_point,
+                    target_mode,
+                    max_samples,
+                    filter_rules,
+                    weight_config=weight_config,
+                )
             ):
                 is_valid = split_is_valid(idx, valid_ratio, seed)
                 split_code = "v" if is_valid else "t"
                 idxs, vals = sparse_features(sample, dim, numeric_scale)
-                val = _pack_cached_record(split_code, float(sample["y"]), idxs, vals)
+                val = _pack_cached_record(
+                    split_code,
+                    float(sample["y"]),
+                    float(sample.get("sample_weight") or 1.0),
+                    idxs,
+                    vals,
+                )
                 key = b"d" + int(idx).to_bytes(8, byteorder="big", signed=False)
                 txn.put(key, val)
 
@@ -691,6 +799,7 @@ def build_feature_cache(
     seed,
     lmdb_map_size_bytes,
     filter_rules,
+    weight_config,
 ):
     if cache_backend == "lmdb":
         return build_feature_cache_lmdb(
@@ -705,6 +814,7 @@ def build_feature_cache(
             seed,
             lmdb_map_size_bytes,
             filter_rules,
+            weight_config,
         )
     return build_feature_cache_jsonl(
         cache_path,
@@ -717,6 +827,7 @@ def build_feature_cache(
         valid_ratio,
         seed,
         filter_rules,
+        weight_config,
     )
 
 
@@ -740,7 +851,8 @@ def iter_cached_sparse_samples_jsonl(cache_path, subset):
             idxs = rec.get("i") or []
             vals = rec.get("v") or []
             y = float(rec.get("y") or 0.0)
-            yield idxs, vals, y
+            sample_weight = float(rec.get("w") or 1.0)
+            yield idxs, vals, y, sample_weight
 
 
 def iter_cached_sparse_samples_lmdb(cache_path, subset):
@@ -766,10 +878,10 @@ def iter_cached_sparse_samples_lmdb(cache_path, subset):
             for key, val in cursor:
                 if not key or key[:1] != b"d":
                     continue
-                split_code, y, idxs, vals = _unpack_cached_record(bytes(val))
+                split_code, y, sample_weight, idxs, vals = _unpack_cached_record(bytes(val))
                 if want is not None and split_code != want:
                     continue
-                yield idxs, vals, y
+                yield idxs, vals, y, sample_weight
     finally:
         env.close()
 
@@ -816,7 +928,7 @@ def evaluate_cpu_streaming(weight, bias, sample_iter):
     sum_pp = 0.0
     sum_yy = 0.0
     sum_py = 0.0
-    for idxs, vals, y in sample_iter:
+    for idxs, vals, y, _sample_weight in sample_iter:
         p = predict_sparse_cpu(weight, bias, idxs, vals)
         e = p - y
         se += e * e
@@ -847,9 +959,10 @@ def train_cpu_streaming(
     w = [0.0] * dim
     b = 0.0
     for epoch in range(epochs):
-        for idxs, vals, y in train_iter_epoch_factory(epoch):
+        for idxs, vals, y, sample_weight in train_iter_epoch_factory(epoch):
             p = predict_sparse_cpu(w, b, idxs, vals)
-            err = p - y
+            sw = max(0.0, float(sample_weight or 1.0))
+            err = (p - y) * sw
             b -= lr * err
             for i, xv in zip(idxs, vals):
                 grad = err * xv + l2 * w[i]
@@ -868,7 +981,7 @@ def resolve_cuda_device():
     return "cuda"
 
 
-def build_batch_tensors_from_samples(batch_features, batch_y, device):
+def build_batch_tensors_from_samples(batch_features, batch_y, batch_sw, device):
     rows = []
     cols = []
     vals = []
@@ -887,7 +1000,8 @@ def build_batch_tensors_from_samples(batch_features, batch_y, device):
         cols_t = torch.empty((0,), dtype=torch.long, device=device)
         vals_t = torch.empty((0,), dtype=torch.float32, device=device)
     y_t = torch.tensor(batch_y, dtype=torch.float32, device=device)
-    return rows_t, cols_t, vals_t, y_t
+    sw_t = torch.tensor(batch_sw, dtype=torch.float32, device=device)
+    return rows_t, cols_t, vals_t, y_t, sw_t
 
 
 def predict_batch_torch(w, b, rows, cols, vals, batch_size):
@@ -909,13 +1023,17 @@ def evaluate_torch_streaming(sample_iter, w, b, batch_size, device):
     sum_py = 0.0
     batch_features = []
     batch_y = []
+    batch_sw = []
     with torch.no_grad():
-        for idxs, vals, y in sample_iter:
+        for idxs, vals, y, sample_weight in sample_iter:
             batch_features.append((idxs, vals))
             batch_y.append(float(y))
+            batch_sw.append(float(sample_weight or 1.0))
             if len(batch_features) < batch_size:
                 continue
-            rows, cols, vals_t, y_t = build_batch_tensors_from_samples(batch_features, batch_y, device)
+            rows, cols, vals_t, y_t, _sw_t = build_batch_tensors_from_samples(
+                batch_features, batch_y, batch_sw, device
+            )
             pred = predict_batch_torch(w, b, rows, cols, vals_t, len(batch_features))
             err = pred - y_t
             se += float(torch.sum(err * err).item())
@@ -928,8 +1046,11 @@ def evaluate_torch_streaming(sample_iter, w, b, batch_size, device):
             n += len(batch_features)
             batch_features.clear()
             batch_y.clear()
+            batch_sw.clear()
         if batch_features:
-            rows, cols, vals_t, y_t = build_batch_tensors_from_samples(batch_features, batch_y, device)
+            rows, cols, vals_t, y_t, _sw_t = build_batch_tensors_from_samples(
+                batch_features, batch_y, batch_sw, device
+            )
             pred = predict_batch_torch(w, b, rows, cols, vals_t, len(batch_features))
             err = pred - y_t
             se += float(torch.sum(err * err).item())
@@ -981,22 +1102,27 @@ def train_torch_streaming(
         seen = 0
         batch_features = []
         batch_y = []
-        for idxs, vals, y in train_iter_epoch_factory(epoch):
+        batch_sw = []
+        for idxs, vals, y, sample_weight in train_iter_epoch_factory(epoch):
             batch_features.append((idxs, vals))
             batch_y.append(float(y))
+            batch_sw.append(float(sample_weight or 1.0))
             if len(batch_features) < batch_size:
                 continue
             bi += 1
             seen += len(batch_features)
-            rows, cols, vals_t, y_t = build_batch_tensors_from_samples(batch_features, batch_y, device)
+            rows, cols, vals_t, y_t, sw_t = build_batch_tensors_from_samples(
+                batch_features, batch_y, batch_sw, device
+            )
 
             opt.zero_grad(set_to_none=True)
             pred = predict_batch_torch(w, b, rows, cols, vals_t, len(batch_features))
-            loss = torch.mean((pred - y_t) ** 2)
+            loss = torch.mean(sw_t * ((pred - y_t) ** 2))
             loss.backward()
             opt.step()
             batch_features.clear()
             batch_y.clear()
+            batch_sw.clear()
 
             if progress_every > 0 and (bi % progress_every == 0 or bi == num_batches):
                 print(
@@ -1006,10 +1132,12 @@ def train_torch_streaming(
         if batch_features:
             bi += 1
             seen += len(batch_features)
-            rows, cols, vals_t, y_t = build_batch_tensors_from_samples(batch_features, batch_y, device)
+            rows, cols, vals_t, y_t, sw_t = build_batch_tensors_from_samples(
+                batch_features, batch_y, batch_sw, device
+            )
             opt.zero_grad(set_to_none=True)
             pred = predict_batch_torch(w, b, rows, cols, vals_t, len(batch_features))
-            loss = torch.mean((pred - y_t) ** 2)
+            loss = torch.mean(sw_t * ((pred - y_t) ** 2))
             loss.backward()
             opt.step()
             if progress_every > 0:
@@ -1029,6 +1157,85 @@ def train_torch_streaming(
         b_out = float(b.detach().cpu().item())
 
     return w_out, b_out, train_mse, train_rmse, train_mae, train_corr, valid_mse, valid_rmse, valid_mae, valid_corr
+
+
+def sigmoid(x):
+    if x >= 0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    z = math.exp(x)
+    return z / (1.0 + z)
+
+
+def estimate_robust_residuals(sample_iter, w, b, max_residual_samples=200000):
+    n = 0
+    sum_sq = 0.0
+    sum_abs = 0.0
+    loss_n = 0
+    residual_samples = []
+    for idxs, vals, y, _sw in sample_iter:
+        pred = predict_sparse_cpu(w, b, idxs, vals)
+        err = float(y) - float(pred)
+        n += 1
+        sum_sq += err * err
+        sum_abs += abs(err)
+        if float(y) < 0:
+            loss_n += 1
+        if len(residual_samples) < max_residual_samples:
+            residual_samples.append(err)
+    if n <= 0:
+        return {
+            "count": 0,
+            "residual_rmse": 0.0,
+            "residual_mae": 0.0,
+            "residual_p10": 0.0,
+            "loss_rate": 0.0,
+        }
+    residual_samples.sort()
+    p10_idx = max(0, min(len(residual_samples) - 1, int(math.floor((len(residual_samples) - 1) * 0.1))))
+    return {
+        "count": int(n),
+        "residual_rmse": math.sqrt(max(0.0, sum_sq / n)),
+        "residual_mae": sum_abs / n,
+        "residual_p10": float(residual_samples[p10_idx]) if residual_samples else 0.0,
+        "loss_rate": loss_n / n,
+    }
+
+
+def fit_loss_probability_calibrator(
+    make_sample_iter,
+    w,
+    b,
+    epochs=2,
+    lr=0.02,
+    pred_scale=100000.0,
+    max_samples=300000,
+):
+    a = 0.0
+    b0 = 0.0
+    seen_total = 0
+    for _ in range(max(1, int(epochs))):
+        seen = 0
+        for idxs, vals, y, _sw in make_sample_iter():
+            pred = predict_sparse_cpu(w, b, idxs, vals)
+            x = float(pred) / max(1.0, float(pred_scale))
+            t = 1.0 if float(y) < 0.0 else 0.0
+            p = sigmoid(a * x + b0)
+            grad = p - t
+            a -= float(lr) * grad * x
+            b0 -= float(lr) * grad
+            seen += 1
+            seen_total += 1
+            if seen >= max_samples:
+                break
+        if seen <= 0:
+            break
+    return {
+        "a": float(a),
+        "b": float(b0),
+        "pred_scale": float(pred_scale),
+        "fit_samples": int(seen_total),
+    }
 
 
 def main():
@@ -1086,23 +1293,133 @@ def main():
         default=DEFAULT_VALUE_FILTER_RULES_PATH,
         help=f"Value filter rules JSON path (default: {DEFAULT_VALUE_FILTER_RULES_PATH}).",
     )
+    parser.add_argument(
+        "--loss-weight-mode",
+        choices=["none", "critical"],
+        default="critical",
+        help="Sample loss weighting mode for value training (default: critical).",
+    )
+    parser.add_argument("--weight-terminal-mult", type=float, default=1.7, help="Multiplier for terminal-context traces.")
+    parser.add_argument("--weight-go-stop-mult", type=float, default=1.8, help="Multiplier for go/stop option traces.")
+    parser.add_argument(
+        "--weight-special-option-mult",
+        type=float,
+        default=1.25,
+        help="Multiplier for shaking/president/gukjin option traces.",
+    )
+    parser.add_argument(
+        "--weight-combo-threat-mult",
+        type=float,
+        default=1.35,
+        help="Multiplier when comboThreatEnter trigger exists.",
+    )
+    parser.add_argument(
+        "--weight-late-deck-cut",
+        type=float,
+        default=8.0,
+        help="Deck threshold for late-game weighting.",
+    )
+    parser.add_argument("--weight-late-mult", type=float, default=1.2, help="Multiplier for late-game samples.")
+    parser.add_argument(
+        "--weight-opp-oneaway-threshold",
+        type=float,
+        default=0.6,
+        help="Threshold for opp one-away probability weighting.",
+    )
+    parser.add_argument(
+        "--weight-opp-oneaway-mult",
+        type=float,
+        default=1.25,
+        help="Multiplier when opp one-away probability exceeds threshold.",
+    )
+    parser.add_argument(
+        "--weight-positive-target-mult",
+        type=float,
+        default=1.0,
+        help="Optional multiplier for positive target samples.",
+    )
+    parser.add_argument("--weight-clip-min", type=float, default=0.05, help="Final sample weight clip min.")
+    parser.add_argument("--weight-clip-max", type=float, default=8.0, help="Final sample weight clip max.")
+    parser.add_argument(
+        "--robust-head",
+        choices=["on", "off"],
+        default="on",
+        help="Attach robust risk head metadata (residual + loss probability calibration).",
+    )
+    parser.add_argument("--robust-calib-epochs", type=int, default=2, help="Loss-prob calibration epochs.")
+    parser.add_argument("--robust-calib-lr", type=float, default=0.02, help="Loss-prob calibration learning rate.")
+    parser.add_argument(
+        "--robust-calib-max-samples",
+        type=int,
+        default=300000,
+        help="Max samples per calibration epoch.",
+    )
+    parser.add_argument(
+        "--robust-residual-samples",
+        type=int,
+        default=200000,
+        help="Max residual samples kept to estimate residual p10.",
+    )
     args = parser.parse_args()
 
     if not (0.0 <= float(args.valid_ratio) <= 1.0):
         raise RuntimeError("--valid-ratio must be in [0, 1].")
     if float(args.lmdb_map_size_gb) <= 0:
         raise RuntimeError("--lmdb-map-size-gb must be > 0.")
+    if float(args.weight_clip_min) <= 0 or float(args.weight_clip_max) <= 0:
+        raise RuntimeError("--weight-clip-min/max must be > 0.")
+    if int(args.robust_calib_epochs) < 1:
+        raise RuntimeError("--robust-calib-epochs must be >= 1.")
+    if float(args.robust_calib_lr) <= 0:
+        raise RuntimeError("--robust-calib-lr must be > 0.")
+    if int(args.robust_calib_max_samples) <= 0:
+        raise RuntimeError("--robust-calib-max-samples must be > 0.")
+    if int(args.robust_residual_samples) <= 0:
+        raise RuntimeError("--robust-residual-samples must be > 0.")
+    if float(args.weight_opp_oneaway_threshold) < 0 or float(args.weight_opp_oneaway_threshold) > 1:
+        raise RuntimeError("--weight-opp-oneaway-threshold must be in [0,1].")
+    if float(args.weight_late_deck_cut) < 0:
+        raise RuntimeError("--weight-late-deck-cut must be >= 0.")
+    for v, name in [
+        (args.weight_terminal_mult, "--weight-terminal-mult"),
+        (args.weight_go_stop_mult, "--weight-go-stop-mult"),
+        (args.weight_special_option_mult, "--weight-special-option-mult"),
+        (args.weight_combo_threat_mult, "--weight-combo-threat-mult"),
+        (args.weight_late_mult, "--weight-late-mult"),
+        (args.weight_opp_oneaway_mult, "--weight-opp-oneaway-mult"),
+        (args.weight_positive_target_mult, "--weight-positive-target-mult"),
+    ]:
+        if float(v) <= 0:
+            raise RuntimeError(f"{name} must be > 0.")
     if args.cache_backend == "lmdb":
         _ensure_lmdb_available()
 
     input_paths = expand_inputs(args.input)
     filter_rules, filter_rules_path = load_value_filter_rules(args.filter_rules)
+    value_weight_config = {
+        "mode": str(args.loss_weight_mode).strip().lower(),
+        "terminal_mult": float(args.weight_terminal_mult),
+        "go_stop_mult": float(args.weight_go_stop_mult),
+        "special_option_mult": float(args.weight_special_option_mult),
+        "combo_threat_mult": float(args.weight_combo_threat_mult),
+        "late_deck_cut": float(args.weight_late_deck_cut),
+        "late_mult": float(args.weight_late_mult),
+        "opp_oneaway_threshold": float(args.weight_opp_oneaway_threshold),
+        "opp_oneaway_mult": float(args.weight_opp_oneaway_mult),
+        "positive_target_mult": float(args.weight_positive_target_mult),
+        "clip_min": min(float(args.weight_clip_min), float(args.weight_clip_max)),
+        "clip_max": max(float(args.weight_clip_min), float(args.weight_clip_max)),
+    }
     keys = [
         "deck_count",
         "hand_self",
         "hand_opp",
         "go_self",
         "go_opp",
+        "shake_self",
+        "shake_opp",
+        "score_self_at_turn",
+        "score_opp_at_turn",
         "score_diff",
         "is_first_attacker",
         "cand_count",
@@ -1117,8 +1434,18 @@ def main():
         "opp_jokbo_threat_prob",
         "opp_jokbo_one_away_prob",
         "opp_gwang_threat_prob",
+        "progress_gap",
+        "threat_gap",
         "go_stop_delta_proxy",
         "immediate_reward",
+        "x_opp_oneaway_deck_low",
+        "x_opp_threat_deck_low",
+        "x_bak_opp_threat",
+        "x_scorediff_go",
+        "x_trailing_opp_oneaway",
+        "x_finish_vs_threat",
+        "x_shake_pressure",
+        "x_progress_gap_deck",
     ]
 
     cache_arg = str(args.sample_cache or "").strip()
@@ -1137,7 +1464,7 @@ def main():
     manifest = input_manifest(input_paths)
     lmdb_map_size_bytes = int(float(args.lmdb_map_size_gb) * (1024**3))
     cache_config = {
-        "format_version": "value_sparse_cache_v1",
+        "format_version": "value_sparse_cache_v2",
         "cache_backend": args.cache_backend,
         "dim": int(args.dim),
         "gold_per_point": float(args.gold_per_point),
@@ -1147,6 +1474,7 @@ def main():
         "seed": int(args.seed),
         "lmdb_map_size_bytes": lmdb_map_size_bytes if args.cache_backend == "lmdb" else None,
         "filter_rules": filter_rules,
+        "sample_weighting": value_weight_config,
     }
     numeric_scale = None
     counts = None
@@ -1171,6 +1499,7 @@ def main():
             args.seed,
             keys,
             filter_rules,
+            value_weight_config,
         )
         if int(stats["samples_total"]) <= 0:
             raise RuntimeError("No trainable value samples found.")
@@ -1195,6 +1524,7 @@ def main():
                 args.seed,
                 lmdb_map_size_bytes,
                 filter_rules,
+                value_weight_config,
             )
             counts = {
                 "samples_total": int(built_counts["samples_total"]),
@@ -1202,7 +1532,7 @@ def main():
                 "samples_valid": int(built_counts["samples_valid"]),
             }
             meta_out = {
-                "format_version": "value_sparse_cache_v1",
+                "format_version": "value_sparse_cache_v2",
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "config": cache_config,
                 "input_manifest": manifest,
@@ -1237,6 +1567,7 @@ def main():
                 args.seed,
                 "train",
                 filter_rules,
+                value_weight_config,
             )
         return iter_with_shuffle_buffer(base, shuffle_buf, shuffle_seed)
 
@@ -1254,6 +1585,7 @@ def main():
             args.seed,
             "train",
             filter_rules,
+            value_weight_config,
         )
 
     def make_valid_eval_iter():
@@ -1270,6 +1602,7 @@ def main():
             args.seed,
             "valid",
             filter_rules,
+            value_weight_config,
         )
 
     if args.device == "cpu":
@@ -1308,6 +1641,33 @@ def main():
             dev,
         )
 
+    robust_head = None
+    if str(args.robust_head).strip().lower() == "on":
+        residual_stats = estimate_robust_residuals(
+            make_train_eval_iter(),
+            w,
+            b,
+            max_residual_samples=int(args.robust_residual_samples),
+        )
+        loss_calib = fit_loss_probability_calibrator(
+            make_train_eval_iter,
+            w,
+            b,
+            epochs=int(args.robust_calib_epochs),
+            lr=float(args.robust_calib_lr),
+            max_samples=int(args.robust_calib_max_samples),
+        )
+        robust_head = {
+            "version": "robust_head_v1",
+            "residual_stats": residual_stats,
+            "loss_prob_calibrator": loss_calib,
+            "usage_hint": {
+                "p10_proxy": "pred + residual_p10",
+                "loss_prob": "sigmoid(a * (pred/pred_scale) + b)",
+                "robust_score": "pred - 0.25*max(0,-p10_proxy) - 0.15*loss_prob*abs(pred)",
+            },
+        }
+
     model = {
         "model_type": "value_linear_hash_v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1317,6 +1677,8 @@ def main():
         "numeric_scale": numeric_scale,
         "gold_per_point": args.gold_per_point,
         "target_mode": args.target_mode,
+        "sample_weighting": value_weight_config,
+        "robust_head": robust_head,
         "feature_spec": {
             "categorical_tokens": [
                 "phase",
@@ -1368,6 +1730,14 @@ def main():
             "lmdb_map_size_gb": args.lmdb_map_size_gb if args.cache_backend == "lmdb" else None,
             "filter_rules": filter_rules,
             "filter_rules_path": filter_rules_path,
+            "sample_weighting": value_weight_config,
+            "robust_head_enabled": robust_head is not None,
+            "robust_calibration": {
+                "epochs": int(args.robust_calib_epochs),
+                "lr": float(args.robust_calib_lr),
+                "max_samples": int(args.robust_calib_max_samples),
+                "residual_samples": int(args.robust_residual_samples),
+            },
         },
     }
 

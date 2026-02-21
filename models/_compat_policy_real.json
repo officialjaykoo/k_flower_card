@@ -1,0 +1,231 @@
+{
+  "model_type": "policy_frequency_weighted_v2",
+  "created_at": "2026-02-21T18:23:02.236377+00:00",
+  "alpha": 1.0,
+  "global_counts": {
+    "play": {
+      "K0": 4.0,
+      "H2": 3.0,
+      "H0": 2.0,
+      "I3": 2.0,
+      "C1": 1.0,
+      "B2": 3.0,
+      "J1": 5.0,
+      "D3": 2.0,
+      "E1": 1.0,
+      "L1": 2.0,
+      "L0": 1.0,
+      "K1": 4.0,
+      "F1": 2.0,
+      "J2": 3.0,
+      "I0": 3.0,
+      "K3": 2.0,
+      "L3": 4.0,
+      "E3": 1.0,
+      "F2": 1.0,
+      "G1": 2.0,
+      "A1": 2.0,
+      "G2": 1.0,
+      "I2": 1.0,
+      "E2": 1.0,
+      "H1": 2.0,
+      "D1": 2.0,
+      "E0": 1.0,
+      "B0": 2.0,
+      "B3": 1.0,
+      "J3": 1.0,
+      "F0": 1.0,
+      "D0": 1.0,
+      "K2": 1.0,
+      "A0": 1.0,
+      "C2": 1.0,
+      "C0": 1.0,
+      "C3": 2.0
+    },
+    "option": {
+      "junk": 7.0,
+      "go": 5.0,
+      "stop": 8.0
+    },
+    "match": {
+      "E1": 2.0,
+      "G1": 2.0,
+      "J1": 1.0,
+      "I1": 1.0,
+      "L3": 2.0,
+      "G0": 2.0
+    }
+  },
+  "context_counts": {
+    "play": {
+      "dt=play|ph=0|o=first|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=4p": {
+        "K0": 3.0,
+        "H0": 1.0,
+        "I3": 2.0,
+        "B2": 2.0,
+        "L0": 1.0,
+        "F1": 1.0,
+        "J2": 3.0,
+        "K3": 1.0,
+        "D3": 1.0,
+        "A1": 2.0,
+        "L3": 2.0,
+        "E2": 1.0,
+        "H1": 1.0,
+        "D1": 2.0,
+        "B3": 1.0,
+        "F0": 1.0,
+        "J1": 2.0,
+        "H2": 1.0,
+        "C3": 2.0,
+        "I0": 1.0
+      },
+      "dt=play|ph=0|o=second|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=4p": {
+        "H2": 2.0,
+        "C1": 1.0,
+        "J1": 3.0,
+        "K1": 4.0,
+        "K0": 1.0,
+        "I0": 2.0,
+        "L3": 2.0,
+        "F1": 1.0,
+        "E3": 1.0,
+        "F2": 1.0,
+        "G1": 1.0,
+        "G2": 1.0,
+        "B2": 1.0,
+        "J3": 1.0,
+        "D0": 1.0,
+        "K2": 1.0,
+        "A0": 1.0,
+        "C2": 1.0,
+        "B0": 1.0,
+        "C0": 1.0,
+        "H1": 1.0
+      },
+      "dt=play|ph=0|o=second|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=3": {
+        "D3": 1.0,
+        "G1": 1.0
+      },
+      "dt=play|ph=0|o=first|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": {
+        "E1": 1.0,
+        "B0": 1.0,
+        "H0": 1.0,
+        "K3": 1.0
+      },
+      "dt=play|ph=0|o=second|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": {
+        "L1": 2.0
+      },
+      "dt=play|ph=0|o=first|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=3": {
+        "I2": 1.0,
+        "E0": 1.0
+      }
+    },
+    "option": {
+      "dt=option|ph=0|o=first|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": {
+        "junk": 5.0,
+        "go": 5.0,
+        "stop": 7.0
+      },
+      "dt=option|ph=0|o=second|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": {
+        "junk": 2.0,
+        "stop": 1.0
+      }
+    },
+    "match": {
+      "dt=match|ph=0|o=first|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": {
+        "E1": 1.0,
+        "G1": 1.0,
+        "J1": 1.0,
+        "G0": 2.0
+      },
+      "dt=match|ph=0|o=second|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": {
+        "E1": 1.0,
+        "G1": 1.0,
+        "I1": 1.0,
+        "L3": 2.0
+      }
+    }
+  },
+  "context_totals": {
+    "play": {
+      "dt=play|ph=0|o=first|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=4p": 31.0,
+      "dt=play|ph=0|o=second|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=4p": 29.0,
+      "dt=play|ph=0|o=second|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=3": 2.0,
+      "dt=play|ph=0|o=first|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": 4.0,
+      "dt=play|ph=0|o=second|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": 2.0,
+      "dt=play|ph=0|o=first|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=3": 2.0
+    },
+    "option": {
+      "dt=option|ph=0|o=first|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": 17.0,
+      "dt=option|ph=0|o=second|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": 3.0
+    },
+    "match": {
+      "dt=match|ph=0|o=first|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": 5.0,
+      "dt=match|ph=0|o=second|db=0|hs=0_1|hd=z0|sd=z2|gs=0|go=0|ss=0|so=0|cc=2": 5.0
+    }
+  },
+  "samples_observed": 100,
+  "context_key_mode": "bucketed_v2",
+  "weighting": {
+    "mode": "none",
+    "coef": 1.2,
+    "scale": 250000.0,
+    "clip_min": 0.5,
+    "clip_max": 3.0,
+    "final_clip_min": 0.05,
+    "final_clip_max": 8.0,
+    "elite_enabled": false,
+    "elite_top_percent": 20.0,
+    "elite_multiplier": 2.2,
+    "elite_threshold": null,
+    "action_balance_enabled": false,
+    "play_weight": 1.0,
+    "match_weight": 1.1,
+    "option_weight": 1.8,
+    "go_extra_weight": 1.6666667,
+    "stop_extra_weight": 1.25,
+    "special_option_extra_weight": 1.1
+  },
+  "train_summary": {
+    "samples": 100,
+    "accuracy_top1": null,
+    "nll_per_sample": null,
+    "entropy_avg": null,
+    "entropy_norm_avg": null,
+    "input_files": [
+      "logs/v4_vs_v17_1000.jsonl"
+    ],
+    "max_samples": 100,
+    "skip_train_metrics": true,
+    "cache_path": null,
+    "cache_enabled": false,
+    "cache_used": false,
+    "cache_backend": "jsonl",
+    "filter_rules": {
+      "min_candidate_count": 2
+    },
+    "filter_rules_path": "C:\\k_flower_card\\configs\\policy_filter_rules.json",
+    "context_bucketing": true,
+    "weighting": {
+      "mode": "none",
+      "coef": 1.2,
+      "scale": 250000.0,
+      "clip_min": 0.5,
+      "clip_max": 3.0,
+      "final_clip_min": 0.05,
+      "final_clip_max": 8.0,
+      "elite_enabled": false,
+      "elite_top_percent": 20.0,
+      "elite_multiplier": 2.2,
+      "elite_threshold": null,
+      "action_balance_enabled": false,
+      "play_weight": 1.0,
+      "match_weight": 1.1,
+      "option_weight": 1.8,
+      "go_extra_weight": 1.6666667,
+      "stop_extra_weight": 1.25,
+      "special_option_extra_weight": 1.1
+    }
+  }
+}

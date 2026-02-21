@@ -50,7 +50,10 @@ export default function App() {
 
   const t = useMemo(() => makeTranslator(ui.language || DEFAULT_LANGUAGE), [ui.language]);
   const [state, setState] = useState(() =>
-    initGame("A", createSeededRng(randomSeed()), { carryOverMultiplier: 1 })
+    initGame("A", createSeededRng(randomSeed()), {
+      carryOverMultiplier: 1,
+      language: DEFAULT_LANGUAGE
+    })
   );
   const [openingPick, setOpeningPick] = useState({
     active: true,
@@ -159,7 +162,8 @@ export default function App() {
       carryOverMultiplier,
       firstTurnKey,
       initialGold,
-      cardTheme: ui.cardTheme || DEFAULT_CARD_THEME
+      cardTheme: ui.cardTheme || DEFAULT_CARD_THEME,
+      language: ui.language || DEFAULT_LANGUAGE
     });
     const nextUi = {
       ...ui,

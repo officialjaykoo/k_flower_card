@@ -1,3 +1,5 @@
+import { ENGINE_MESSAGES } from "./engineMessages.js";
+
 export const DEFAULT_LANGUAGE = "ko";
 export const SUPPORTED_LANGUAGES = Object.freeze(["ko", "en"]);
 
@@ -104,6 +106,9 @@ const MESSAGES = {
     "popup.gameLog.title": "게임로그",
     "popup.gameLog.meta": "현재 판 로그 {count}줄",
     "popup.gameLog.empty": "표시할 로그가 없습니다.",
+    "popup.gameLog.hidden.starterCandidate": "\uC120\uACF5 \uD6C4\uBCF4:",
+    "popup.gameLog.hidden.matchCapture": "\uB9E4\uCE58 \uCEA1\uCC98",
+    "popup.gameLog.hidden.cardSelect": "\uCE74\uB4DC \uC120\uD0DD",
     "replay.action.initial": "초기 배분",
     "replay.action.pass": "패스",
     "replay.action.play": "카드 플레이 ({month}월 {name})",
@@ -215,6 +220,9 @@ const MESSAGES = {
     "popup.gameLog.title": "Game Log",
     "popup.gameLog.meta": "Visible log lines: {count}",
     "popup.gameLog.empty": "No logs to display.",
+    "popup.gameLog.hidden.starterCandidate": "Starter candidate:",
+    "popup.gameLog.hidden.matchCapture": "match capture",
+    "popup.gameLog.hidden.cardSelect": "choose card",
     "replay.action.initial": "Initial deal",
     "replay.action.pass": "Pass",
     "replay.action.play": "Play card (M{month} {name})",
@@ -236,7 +244,9 @@ export function translate(language, key, params = {}, fallback = "") {
   const lang = SUPPORTED_LANGUAGES.includes(language) ? language : DEFAULT_LANGUAGE;
   const text =
     MESSAGES[lang]?.[key] ??
+    ENGINE_MESSAGES[lang]?.[key] ??
     MESSAGES[DEFAULT_LANGUAGE]?.[key] ??
+    ENGINE_MESSAGES[DEFAULT_LANGUAGE]?.[key] ??
     fallback ??
     key;
   return interpolate(text, params);

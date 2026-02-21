@@ -1,0 +1,18 @@
+{
+  "format_version": "action_vocab_v1",
+  "decision_types": [
+    "play",
+    "match",
+    "option"
+  ],
+  "option_actions": [
+    "go",
+    "stop",
+    "shaking_yes",
+    "shaking_no",
+    "president_stop",
+    "president_hold",
+    "five",
+    "junk"
+  ]
+}

@@ -208,8 +208,40 @@ export function openRulesPopup({ language = DEFAULT_LANGUAGE } = {}) {
   popup.focus();
 }
 
-function hiddenPatternsForLogs() {
-  return ["게임 시작 - 룰", "선공 후보:", "매치 캡처", "카드 선택", "Game start - rule", "Starter candidate:"];
+function stripLogPattern(text) {
+  return String(text || "")
+    .replace(/\{[^}]+\}/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hiddenPatternsForLogs(language = DEFAULT_LANGUAGE) {
+  const translators = [
+    getPopupTranslator(language),
+    getPopupTranslator("ko"),
+    getPopupTranslator("en")
+  ];
+  const patternKeys = [
+    ["log.gameStartRule", { ruleName: "" }],
+    ["log.playOneMatchCapture", { player: "", month: "" }],
+    ["log.flipMatchCapture", { month: "" }],
+    ["log.playTwoMatchWait", { player: "", month: "" }],
+    ["log.flipTwoMatchWait", { month: "" }],
+    ["pending.match.player", { player: "" }],
+    ["pending.match.flip", { player: "" }],
+    ["popup.gameLog.hidden.starterCandidate", {}],
+    ["popup.gameLog.hidden.matchCapture", {}],
+    ["popup.gameLog.hidden.cardSelect", {}]
+  ];
+
+  const set = new Set();
+  translators.forEach((tr) => {
+    patternKeys.forEach(([key, params]) => {
+      const pattern = stripLogPattern(tr(key, params));
+      if (pattern) set.add(pattern);
+    });
+  });
+  return Array.from(set);
 }
 
 export function openGameLogPopup({ log = [], language = DEFAULT_LANGUAGE }) {
@@ -220,7 +252,9 @@ export function openGameLogPopup({ log = [], language = DEFAULT_LANGUAGE }) {
     return;
   }
 
-  const visibleLogs = log.filter((line) => !hiddenPatternsForLogs().some((pattern) => String(line).includes(pattern)));
+  const visibleLogs = log.filter(
+    (line) => !hiddenPatternsForLogs(language).some((pattern) => String(line).includes(pattern))
+  );
   const logsHtml =
     visibleLogs.length > 0
       ? visibleLogs.map((line) => `<div class="log-line">${escapeHtml(line)}</div>`).join("")

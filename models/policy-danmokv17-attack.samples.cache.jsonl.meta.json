@@ -1,0 +1,82 @@
+{
+  "format_version": "policy_sample_cache_v1",
+  "created_at": "2026-02-21T14:30:27.706005+00:00",
+  "config": {
+    "format_version": "policy_sample_cache_v1",
+    "cache_backend": "jsonl",
+    "max_samples": null,
+    "filter_rules": {
+      "min_candidate_count": 2
+    },
+    "context_bucketing": true,
+    "weight_config": {
+      "mode": "gold_tanh",
+      "coef": 1.2,
+      "scale": 250000.0,
+      "clip_min": 0.5,
+      "clip_max": 3.0,
+      "final_clip_min": 0.05,
+      "final_clip_max": 8.0,
+      "elite_enabled": true,
+      "elite_top_percent": 20.0,
+      "elite_multiplier": 2.2,
+      "elite_threshold": 2000.0,
+      "action_balance_enabled": true,
+      "play_weight": 1.0,
+      "match_weight": 1.1,
+      "option_weight": 1.8,
+      "go_stop_extra_weight": 1.25,
+      "special_option_extra_weight": 1.1
+    }
+  },
+  "input_manifest": [
+    {
+      "path": "C:\\k_flower_card\\logs\\train_v4_vs_v4_300000.attack.jsonl",
+      "size": 1136070667,
+      "mtime_ns": 1771673997327665400
+    },
+    {
+      "path": "C:\\k_flower_card\\logs\\delta2_v3_vs_v4_1000.attack.jsonl",
+      "size": 6034194,
+      "mtime_ns": 1771684171691273400
+    },
+    {
+      "path": "C:\\k_flower_card\\logs\\delta2_v4_vs_v3_1000.attack.jsonl",
+      "size": 6287885,
+      "mtime_ns": 1771684171224168700
+    },
+    {
+      "path": "C:\\k_flower_card\\logs\\delta3_v3_vs_v4_1000.attack.jsonl",
+      "size": 6718138,
+      "mtime_ns": 1771684171821681500
+    },
+    {
+      "path": "C:\\k_flower_card\\logs\\delta3_v4_vs_v3_1000.attack.jsonl",
+      "size": 6645414,
+      "mtime_ns": 1771684171341958000
+    },
+    {
+      "path": "C:\\k_flower_card\\logs\\delta4_v3_vs_v4_1000.attack.jsonl",
+      "size": 6792518,
+      "mtime_ns": 1771684171949359300
+    },
+    {
+      "path": "C:\\k_flower_card\\logs\\delta4_v4_vs_v3_1000.attack.jsonl",
+      "size": 6894604,
+      "mtime_ns": 1771684171472775600
+    },
+    {
+      "path": "C:\\k_flower_card\\logs\\delta_v3_vs_v4_1000.attack.jsonl",
+      "size": 5303200,
+      "mtime_ns": 1771684171579725700
+    },
+    {
+      "path": "C:\\k_flower_card\\logs\\delta_v4_vs_v3_1000.attack.jsonl",
+      "size": 5507465,
+      "mtime_ns": 1771684171103881000
+    }
+  ],
+  "counts": {
+    "samples_total": 1635984
+  }
+}

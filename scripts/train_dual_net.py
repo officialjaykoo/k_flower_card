@@ -53,7 +53,6 @@ NUMERIC_FEATURE_WEIGHTS = {
     "is_first_attacker": 1.2,
 }
 
-_CATALOG_CACHE = {}
 SIDE_MY = "mySide"
 SIDE_YOUR = "yourSide"
 
@@ -102,27 +101,15 @@ def action_alias(action):
 
 
 def choose_label_and_candidates(trace):
-    sp = trace.get("sp") or {}
-    cards = sp.get("cards")
-    if cards:
-        chosen = trace.get("c")
-        if chosen in cards:
-            return str(chosen), "play", [str(x) for x in cards]
-        return None, None, None
-    board = sp.get("boardCardIds")
-    if board:
-        chosen = trace.get("s")
-        if chosen in board:
-            return str(chosen), "match", [str(x) for x in board]
-        return None, None, None
-    options = sp.get("options")
-    if options:
-        chosen = action_alias(trace.get("at"))
-        cands = [str(x) for x in options]
-        if chosen in cands:
-            return str(chosen), "option", cands
-        return None, None, None
-    if str(trace.get("dt") or "") == "option":
+    dt = str(trace.get("dt") or "")
+    chosen_compact = trace.get("ch")
+    if dt == "play" and chosen_compact is not None:
+        chosen = str(chosen_compact)
+        return chosen, "play", [chosen]
+    if dt == "match" and chosen_compact is not None:
+        chosen = str(chosen_compact)
+        return chosen, "match", [chosen]
+    if dt == "option":
         by_chosen = {
             "go": ["go", "stop"],
             "stop": ["go", "stop"],
@@ -133,10 +120,10 @@ def choose_label_and_candidates(trace):
             "shaking_yes": ["shaking_yes", "shaking_no"],
             "shaking_no": ["shaking_yes", "shaking_no"],
         }
-        chosen = action_alias(trace.get("at"))
+        chosen = action_alias(chosen_compact)
         if chosen in by_chosen:
             return str(chosen), "option", [str(x) for x in by_chosen[chosen]]
-        phase = (trace.get("dc") or {}).get("phase")
+        phase = (trace.get("dc") or {}).get("p")
         by_phase = {
             "go-stop": ["go", "stop"],
             "president-choice": ["president_stop", "president_hold"],
@@ -148,21 +135,12 @@ def choose_label_and_candidates(trace):
             6: ["shaking_yes", "shaking_no"],
         }
         cands = by_phase.get(phase) or by_phase.get(str(phase))
-        chosen = action_alias(trace.get("at"))
+        chosen = action_alias(chosen_compact)
         if cands and chosen in cands:
             return str(chosen), "option", [str(x) for x in cands]
+        if chosen:
+            return str(chosen), "option", [str(chosen)]
     return None, None, None
-
-
-def _nested_get(root, path):
-    cur = root
-    for key in path:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-        if cur is None:
-            return None
-    return cur
 
 
 def _to_float(v, default=0.0):
@@ -183,239 +161,59 @@ def _prob01(v):
     return out
 
 
-def _extract_actor_stat(line, actor, names):
-    opp = _opp_side(actor)
-    roots = [
-        line.get("result"),
-        line.get("summary"),
-        line.get("stats"),
-        line.get("captured"),
-    ]
-    key_groups = [
-        [actor],
-        [f"{actor}_stats"],
-        [f"{actor}Stats"],
-        [f"{actor}_capture"],
-        [f"{actor}Capture"],
-        [opp],  # fallback if naming is inverted
-    ]
-    for root in roots:
-        if not isinstance(root, dict):
-            continue
-        for keys in key_groups:
-            for n in names:
-                v = _nested_get(root, keys + [n])
-                if v is not None:
-                    return _to_float(v, 0.0)
-        for n in names:
-            v = root.get(n)
-            if v is not None:
-                return _to_float(v, 0.0)
-    return 0.0
-
-
-def _extract_first_number(line, names, default=0.0):
-    roots = [line, line.get("result"), line.get("summary"), line.get("state"), line.get("initial")]
-    for root in roots:
-        if not isinstance(root, dict):
-            continue
-        for n in names:
-            if n in root:
-                return _to_float(root.get(n), default)
-    return float(default)
-
-
-def _load_catalog(path):
-    if not path:
-        return None
-    if path in _CATALOG_CACHE:
-        return _CATALOG_CACHE[path]
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            _CATALOG_CACHE[path] = data
-            return data
-    except Exception:
-        pass
-    _CATALOG_CACHE[path] = None
-    return None
-
-
-def _card_id_from_item(item):
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        cid = item.get("id")
-        if isinstance(cid, str):
-            return cid
-    return None
-
-
-def _extract_card_ids(items):
-    out = []
-    if not isinstance(items, list):
-        return out
-    for it in items:
-        cid = _card_id_from_item(it)
-        if cid:
-            out.append(cid)
-    return out
-
-
-def _month_from_card_id(card_id):
-    if not isinstance(card_id, str):
-        return None
-
-    # Legacy runtime IDs: "<month>-<globalIndex>" (e.g. "9-32")
-    head = card_id.split("-", 1)[0]
-    try:
-        return int(head)
-    except Exception:
-        pass
-
-    # New stable IDs: A0..L3 (months 1..12), M0..M1 (bonus month 13)
-    if len(card_id) < 2:
-        return None
-    prefix = card_id[0].upper()
-    tail = card_id[1:]
-    if not tail.isdigit():
-        return None
-    idx = int(tail)
-
-    if "A" <= prefix <= "L" and 0 <= idx <= 3:
-        return ord(prefix) - ord("A") + 1
-    if prefix == "M" and 0 <= idx <= 1:
-        return 13
-    return None
-
-
-def _card_meta(line, card_id):
-    meta = None
-    catalog = _load_catalog(line.get("catalogPath"))
-    if isinstance(catalog, dict):
-        cand = catalog.get(card_id)
-        if isinstance(cand, dict):
-            meta = cand
-    month = None
-    category = None
-    if isinstance(meta, dict):
-        try:
-            month = int(meta.get("month")) if meta.get("month") is not None else None
-        except Exception:
-            month = None
-        cat = meta.get("category")
-        if isinstance(cat, str):
-            category = cat
-    if month is None:
-        month = _month_from_card_id(card_id)
-    return month, category
-
-
-def _category_alias(cat):
-    if not isinstance(cat, str):
-        return None
-    c = cat.strip().lower()
-    if c == "kwang":
-        return "gwang"
-    if c == "five":
-        return "yeol"
-    if c == "ribbon":
-        return "ttie"
-    if c == "junk":
-        return "pee"
-    return c
-
-
 def extract_numeric(line, trace, actor):
+    _ = line
     dc = trace.get("dc") or {}
-    sp = trace.get("sp") or {}
     order = str(trace.get("o") or "").strip().lower()
     if order in ("first", "second"):
         is_first_attacker = 1.0 if order == "first" else 0.0
     else:
-        is_first_attacker = float(1 if int(dc.get("isFirstAttacker") or 0) else 0)
-    shake_events = _to_float(dc.get("shakeCountSelf"), 0.0) + _to_float(dc.get("bombCountSelf"), 0.0)
-    deck_count = float(dc.get("deckCount") or 0.0)
-    init_deck_count = 22.0
-    if init_deck_count <= 0:
-        init_deck_count = 22.0
-    deck_end_ratio = max(0.0, min(1.0, 1.0 - (deck_count / init_deck_count)))
+        is_first_attacker = 1.0 if actor == SIDE_MY else 0.0
 
-    hand_self_raw = float(dc.get("handCountSelf") or 0.0)
-    hand_opp_raw = float(dc.get("handCountOpp") or 0.0)
+    deck_count = float(dc.get("d") or 0.0)
+    deck_end_ratio = max(0.0, min(1.0, 1.0 - (deck_count / 22.0)))
+
+    hand_self_raw = float(dc.get("hs") or 0.0)
+    hand_diff_raw = float(dc.get("hd") or 0.0)
+    hand_opp_raw = hand_self_raw - hand_diff_raw
     hand_self = max(0.0, min(1.0, hand_self_raw / 10.0))
     hand_opp = max(0.0, min(1.0, hand_opp_raw / 10.0))
 
-    hand_ids = _extract_card_ids((dc.get("handCards") or [])) or _extract_card_ids(sp.get("cards") or [])
-    board_ids = _extract_card_ids(dc.get("boardCards") or []) or _extract_card_ids(sp.get("boardCards") or [])
-    if not board_ids and isinstance(sp.get("boardCardIds"), list):
-        board_ids = _extract_card_ids(sp.get("boardCardIds"))
-    hand_months = {m for m in (_month_from_card_id(c) for c in hand_ids) if m is not None}
-    board_months = {m for m in (_month_from_card_id(c) for c in board_ids) if m is not None}
-    can_match = 1.0 if hand_months and board_months and (hand_months & board_months) else 0.0
+    go_self = float(dc.get("gs") or 0.0)
+    go_opp = float(dc.get("go") or 0.0)
+    score_diff = _to_float(dc.get("sd"), 0.0)
+    score_self_now = max(0.0, score_diff)
+    score_opp_now = max(0.0, -score_diff)
 
-    hand_by_month = {}
-    board_by_month = {}
-    for cid in hand_ids:
-        m, cat = _card_meta(line, cid)
-        if m is None:
-            continue
-        hand_by_month.setdefault(m, set()).add(cat or "?")
-    for cid in board_ids:
-        m, cat = _card_meta(line, cid)
-        if m is None:
-            continue
-        board_by_month.setdefault(m, set()).add(cat or "?")
-    high_value_months = hand_months & board_months
-    high_value_match = 0.0
-    godori_months = {2, 4, 8}
-    for m in high_value_months:
-        hand_cats = hand_by_month.get(m, set())
-        board_cats = board_by_month.get(m, set())
-        if ("kwang" in hand_cats or "kwang" in board_cats or "five" in hand_cats or "five" in board_cats or m in godori_months):
-            high_value_match = 1.0
-            break
+    opp_combo_threat = _prob01(dc.get("ojt"))
+    opp_gwang_threat = _prob01(dc.get("ogt"))
+    self_combo_threat = max(0.0, min(1.0, _to_float(dc.get("jps"), 0.0) / 8.0))
+    self_gwang_threat = max(0.0, min(1.0, _to_float(dc.get("jas"), 0.0) / 3.0))
 
-    go_self = float(dc.get("goCountSelf") or 0.0)
-    go_opp = float(dc.get("goCountOpp") or 0.0)
-
-    score_self_now = _to_float(dc.get("currentScoreSelf"), 0.0)
-    score_opp_now = _to_float(dc.get("currentScoreOpp"), 0.0)
-    opp_combo_threat = _prob01(dc.get("oppJokboThreatProb"))
-    opp_gwang_threat = _prob01(dc.get("oppGwangThreatProb"))
-    self_combo_threat = _prob01(dc.get("selfJokboThreatProb"))
-    self_gwang_threat = _prob01(dc.get("selfGwangThreatProb"))
+    can_match = 1.0 if abs(hand_diff_raw) <= 1 and hand_self_raw > 0 else 0.0
+    high_value_match = 1.0 if (self_combo_threat >= 0.6 or self_gwang_threat >= 0.6) else 0.0
+    jokbo_potential = max(self_combo_threat, self_gwang_threat)
 
     opp_danger_level = (
         0.30 * min(1.0, go_opp / 3.0)
         + 0.25 * min(1.0, max(0.0, 1.0 - hand_opp))
-        + 0.25 * min(1.0, opp_combo_threat)
-        + 0.20 * min(1.0, opp_gwang_threat)
+        + 0.25 * opp_combo_threat
+        + 0.20 * opp_gwang_threat
     )
     opp_danger_level = max(opp_danger_level, min(1.0, score_opp_now / 7.0))
     opp_danger_level = max(0.0, min(1.0, opp_danger_level))
 
     my_win_progress = (
         0.30 * min(1.0, go_self / 3.0)
-        + 0.25 * min(1.0, self_combo_threat)
-        + 0.20 * min(1.0, self_gwang_threat)
+        + 0.25 * self_combo_threat
+        + 0.20 * self_gwang_threat
         + 0.15 * can_match
         + 0.10 * min(1.0, max(0.0, 1.0 - hand_self))
     )
     my_win_progress = max(my_win_progress, min(1.0, score_self_now / 7.0))
     my_win_progress = max(0.0, min(1.0, my_win_progress))
-    jokbo_progress = dc.get("jokboProgressSelf") or {}
-    hongdan_self = _to_float(jokbo_progress.get("hongdan"), 0.0)
-    cheongdan_self = _to_float(jokbo_progress.get("cheongdan"), 0.0)
-    chodan_self = _to_float(jokbo_progress.get("chodan"), 0.0)
-    godori_self = _to_float(jokbo_progress.get("godori"), 0.0)
-    gwang_self = _to_float(jokbo_progress.get("gwang"), 0.0)
-    jokbo_potential = max(
-        min(1.0, max(hongdan_self, cheongdan_self, chodan_self) / 3.0),
-        min(1.0, godori_self / 3.0),
-        min(1.0, gwang_self / 5.0),
-    )
+
+    shake_multiplier_state = max(0.0, min(3.0, abs(_to_float(dc.get("gsd"), 0.0)) / 1000.0))
     return {
         "opp_danger_level": opp_danger_level,
         "my_win_progress": my_win_progress,
@@ -424,10 +222,10 @@ def extract_numeric(line, trace, actor):
         "jokbo_potential": jokbo_potential,
         "can_match": can_match,
         "immediate_reward": float(trace.get("ir") or 0.0),
-        "pi_bak_risk": _to_float(dc.get("piBakRisk"), 0.0),
-        "gwang_bak_risk": _to_float(dc.get("gwangBakRisk"), 0.0),
-        "mong_bak_risk": _to_float(dc.get("mongBakRisk"), 0.0),
-        "shake_multiplier_state": max(0.0, shake_events),
+        "pi_bak_risk": _to_float(dc.get("rp"), 0.0),
+        "gwang_bak_risk": _to_float(dc.get("rg"), 0.0),
+        "mong_bak_risk": _to_float(dc.get("rm"), 0.0),
+        "shake_multiplier_state": shake_multiplier_state,
         "hand_self": hand_self,
         "hand_opp": hand_opp,
         "is_first_attacker": is_first_attacker,
@@ -435,90 +233,36 @@ def extract_numeric(line, trace, actor):
 
 
 def extract_tokens(line, trace, decision_type, actor):
+    _ = line
     dc = trace.get("dc") or {}
     order = str(trace.get("o") or "").strip().lower()
     if order not in ("first", "second"):
-        order = "first" if int(dc.get("isFirstAttacker") or 0) else "second"
-    self_score = float(dc.get("currentScoreSelf") or 0.0)
-    opp_score = float(dc.get("currentScoreOpp") or 0.0)
-    score_diff = self_score - opp_score
-    actor_bak = (
-        _to_float(dc.get("piBakRisk"), 0.0)
-        + _to_float(dc.get("gwangBakRisk"), 0.0)
-        + _to_float(dc.get("mongBakRisk"), 0.0)
-    )
-    tokens = [
-        f"phase={dc.get('phase','?')}",
+        order = "first" if actor == SIDE_MY else "second"
+    hand_self = int(dc.get("hs") or 0)
+    hand_opp = int((dc.get("hs") or 0) - (dc.get("hd") or 0))
+    score_diff = int(_to_float(dc.get("sd"), 0.0))
+    actor_bak = int(_to_float(dc.get("rp"), 0.0) + _to_float(dc.get("rg"), 0.0) + _to_float(dc.get("rm"), 0.0))
+    return [
+        f"phase={dc.get('p', '?')}",
         f"order={order}",
         f"decision_type={decision_type}",
-        f"deck_bucket={int((dc.get('deckCount') or 0)//3)}",
-        f"self_hand={int(dc.get('handCountSelf') or 0)}",
-        f"opp_hand={int(dc.get('handCountOpp') or 0)}",
-        f"self_go={int(dc.get('goCountSelf') or 0)}",
-        f"opp_go={int(dc.get('goCountOpp') or 0)}",
+        f"deck_bucket={int((dc.get('d') or 0)//3)}",
+        f"self_hand={hand_self}",
+        f"opp_hand={hand_opp}",
+        f"self_go={int(dc.get('gs') or 0)}",
+        f"opp_go={int(dc.get('go') or 0)}",
         f"actor={actor}",
-        f"self_score_b={int(self_score // 2)}",
-        f"opp_score_b={int(opp_score // 2)}",
         f"score_diff_b={int(score_diff // 2)}",
         f"is_first_attacker={1 if order == 'first' else 0}",
-        f"carry_mult_b={int(dc.get('carryOverMultiplier') or 1)}",
-        f"bak_signal={int(actor_bak)}",
+        f"bak_signal={actor_bak}",
+        f"jps={int(dc.get('jps') or 0)}",
+        f"jpo={int(dc.get('jpo') or 0)}",
+        f"jas={int(dc.get('jas') or 0)}",
+        f"jao={int(dc.get('jao') or 0)}",
+        f"ojt_b={int(_prob01(dc.get('ojt')) * 10)}",
+        f"ogt_b={int(_prob01(dc.get('ogt')) * 10)}",
+        f"gsd_b={int((_to_float(dc.get('gsd'), 0.0) / 1000.0) * 4)}",
     ]
-    hand_ids = _extract_card_ids((dc.get("handCards") or [])) or _extract_card_ids((trace.get("sp") or {}).get("cards") or [])
-    board_ids = _extract_card_ids((dc.get("boardCards") or [])) or _extract_card_ids((trace.get("sp") or {}).get("boardCards") or [])
-    if not board_ids and isinstance((trace.get("sp") or {}).get("boardCardIds"), list):
-        board_ids = _extract_card_ids((trace.get("sp") or {}).get("boardCardIds"))
-    hand_info = []
-    board_info = []
-    for cid in hand_ids:
-        m, cat = _card_meta(line, cid)
-        hand_info.append((m, cat))
-        if m is not None:
-            tokens.append(f"hand_month={m}")
-        if cat:
-            tokens.append(f"hand_cat={cat}")
-    for cid in board_ids:
-        m, cat = _card_meta(line, cid)
-        board_info.append((m, cat))
-        if m is not None:
-            tokens.append(f"board_month={m}")
-        if cat:
-            tokens.append(f"board_cat={cat}")
-    cap = trace.get("cap") or {}
-    for cid in _extract_card_ids(cap.get("hand") or []) + _extract_card_ids(cap.get("flip") or []):
-        m, cat = _card_meta(line, cid)
-        if m is not None:
-            tokens.append(f"cap_self_month={m}")
-        if cat:
-            tokens.append(f"cap_self_cat={cat}")
-    hand_months = {m for m in (_month_from_card_id(c) for c in hand_ids) if m is not None}
-    board_months = {m for m in (_month_from_card_id(c) for c in board_ids) if m is not None}
-    tokens.append(f"can_match={1 if hand_months and board_months and (hand_months & board_months) else 0}")
-
-    # Semantic tokens for better generalization than raw card IDs.
-    for m in sorted({m for m, _ in hand_info if m is not None}):
-        tokens.append(f"hand_m{m}")
-    for m in sorted({m for m, _ in board_info if m is not None}):
-        tokens.append(f"board_m{m}")
-    for cat_alias in sorted({_category_alias(cat) for _, cat in hand_info if _category_alias(cat)}):
-        tokens.append(f"hand_{cat_alias}")
-    for cat_alias in sorted({_category_alias(cat) for _, cat in board_info if _category_alias(cat)}):
-        tokens.append(f"board_{cat_alias}")
-
-    matchable_months = hand_months & board_months
-    if matchable_months:
-        tokens.append("can_match_any")
-    else:
-        tokens.append("can_match_none")
-    matchable_board_aliases = set()
-    for m, cat in board_info:
-        if m in matchable_months:
-            ca = _category_alias(cat)
-            if ca:
-                matchable_board_aliases.add(ca)
-    for ca in sorted(matchable_board_aliases):
-        tokens.append(f"can_match_{ca}")
-    return tokens
 
 
 def target_value(line, actor, value_scale):

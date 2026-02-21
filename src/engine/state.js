@@ -18,6 +18,7 @@ import {
   stealPiFromOpponent
 } from "./capturesEvents.js";
 import { clearExpiredReveal, ensurePassCardFor } from "./turnFlow.js";
+import { DEFAULT_LANGUAGE, translate as i18nTranslate } from "../ui/i18n/i18n.js";
 import {
   packCard,
   finalizeTurn,
@@ -27,6 +28,25 @@ import {
   getShakingReveal as selectShakingReveal
 } from "./finalizeTurn.js";
 export { getDeclarableShakingMonths, getDeclarableBombMonths };
+
+function normalizeEngineLanguage(language) {
+  return language === "en" ? "en" : DEFAULT_LANGUAGE;
+}
+
+function txLang(language, key, params = {}, fallback = "") {
+  const lang = normalizeEngineLanguage(language);
+  return i18nTranslate(lang, key, params, fallback);
+}
+
+function tx(state, key, params = {}, fallback = "") {
+  return txLang(state?.language, key, params, fallback);
+}
+
+// ============================================================================
+// SECTION 1. SETUP
+// ----------------------------------------------------------------------------
+// Game initialization and seeded RNG
+// ============================================================================
 export function createSeededRng(seedText = "") {
   let h = 1779033703 ^ seedText.length;
   for (let i = 0; i < seedText.length; i += 1) {
@@ -47,6 +67,7 @@ export function createSeededRng(seedText = "") {
 
 export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
   let carryOverMultiplier = options.carryOverMultiplier ?? 1;
+  const language = normalizeEngineLanguage(options.language);
   const cardTheme = normalizeCardTheme(options.cardTheme || DEFAULT_CARD_THEME);
   const kiboDetail = options.kiboDetail === "lean" ? "lean" : "full";
   const initialGoldBase =
@@ -60,7 +81,7 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
   while (true) {
     const deck = shuffle(buildDeck(cardTheme), seedRng);
     const players = {
-      human: emptyPlayer("플레이어"),
+      human: emptyPlayer(txLang(language, "player.human")),
       ai: emptyPlayer("AI")
     };
     if (options.initialGold?.human != null) {
@@ -85,13 +106,15 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
     const firstTurnInfo = fixedFirstTurnKey
       ? {
           winnerKey: fixedFirstTurnKey,
-          log: `선턴 유지: ${fixedFirstTurnKey === "human" ? "플레이어" : "AI"} 선`
+          log: txLang(language, "label.firstTurn", {
+            starter: fixedFirstTurnKey === "human" ? txLang(language, "player.human") : "AI"
+          })
         }
       : decideFirstTurn(players.human.hand[0], players.ai.hand[0], seedRng);
     const initLog = [];
     initLog.push(firstTurnInfo.log);
 
-    // 보너스 카드 시작 보정(손패/바닥패)
+    // Opening normalization for bonus cards (hand/board)
     remain = normalizeOpeningHands(players, remain, initLog);
     ({ board, remain } = normalizeOpeningBoard(
       board,
@@ -100,18 +123,22 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
       initLog
     ));
 
-    // 바닥 대통령(같은 월 4장): 선공 즉시 승리(10점 종료).
+    // Board president (4 cards of same month): starter instant win (10-point end)
     const boardPresident = findPresidentMonth(board);
     if (boardPresident !== null) {
       const winnerKey = firstTurnInfo.winnerKey;
       const winnerLabel = players[winnerKey].label;
       const baseScore = 10;
       const settled = settleRoundGold(players, winnerKey, baseScore);
-      const openLog = [`게임 시작 - 룰: ${ruleSets[ruleKey].name}`];
+      const openLog = [txLang(language, "log.gameStartRule", { ruleName: ruleSets[ruleKey].name })];
       const log = [...openLog, ...carryLogs, ...initLog];
-      log.push(`바닥 대통령(${boardPresident}월 4장): ${winnerLabel} 선공 즉시 승리(10점 종료)`);
+      log.push(txLang(language, "log.boardPresidentWin", { month: boardPresident, winner: winnerLabel }));
       log.push(
-        `라운드 정산(골드): ${winnerLabel} 요구 ${settled.requested}골드 / 수령 ${settled.paid}골드`
+        txLang(language, "log.roundGoldSettle", {
+          winner: winnerLabel,
+          requested: settled.requested,
+          paid: settled.paid
+        })
       );
       log.push(...settled.log);
 
@@ -158,6 +185,7 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
         players: settled.updatedPlayers,
         currentTurn: winnerKey === "human" ? "ai" : "human",
         startingTurnKey: firstTurnInfo.winnerKey,
+        language,
         cardTheme,
         initialGoldBase,
         phase: "resolution",
@@ -232,13 +260,16 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
         month: handPresident
       };
       initLog.push(
-        `${players[firstTurnInfo.winnerKey].label} 손패 대통령(${handPresident}월 4장): 선턴은 10점 종료 또는 들고치기 선택 가능`
+        txLang(language, "log.handPresidentAvailable", {
+          player: players[firstTurnInfo.winnerKey].label,
+          month: handPresident
+        })
       );
     }
 
-    const openLog = [`게임 시작 - 룰: ${ruleSets[ruleKey].name}`];
+    const openLog = [txLang(language, "log.gameStartRule", { ruleName: ruleSets[ruleKey].name })];
     if (carryOverMultiplier > 1) {
-      openLog.push(`적용 배수: x${carryOverMultiplier}`);
+      openLog.push(txLang(language, "log.carryOverMultiplier", { multiplier: carryOverMultiplier }));
     }
 
     return {
@@ -247,6 +278,7 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
       players,
       currentTurn: firstTurnInfo.winnerKey,
       startingTurnKey: firstTurnInfo.winnerKey,
+      language,
       cardTheme,
       initialGoldBase,
       phase,
@@ -296,189 +328,12 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
 
 
 
-export function declareShaking(state, playerKey, month) {
-  if (state.phase !== "playing" || state.currentTurn !== playerKey) return state;
-  const monthNum = Number(month);
-  const available = getDeclarableShakingMonths(state, playerKey);
-  if (!available.includes(monthNum)) return state;
 
-  const player = state.players[playerKey];
-  const nextDeclared = [...(player.shakingDeclaredMonths || []), monthNum];
-  const revealCards = player.hand.filter((c) => c.month === monthNum).slice(0, 3);
-  const nextPlayers = {
-    ...state.players,
-    [playerKey]: {
-      ...player,
-      shakingDeclaredMonths: nextDeclared,
-      events: { ...player.events, shaking: player.events.shaking + 1 }
-    }
-  };
-
-  return {
-    ...state,
-    players: nextPlayers,
-    shakingReveal: {
-      playerKey,
-      month: monthNum,
-      cards: revealCards.map(packCard),
-      expiresAt: Date.now() + 2000
-    },
-    actionReveal: {
-      type: "shaking",
-      title: "흔들기",
-      message: `${player.label}님 흔들기 했습니다.`,
-      cards: revealCards.map(packCard),
-      expiresAt: Date.now() + 2000
-    },
-    log: state.log.concat(`${player.label}: 흔들기 선언 (${monthNum}월 공개 2초, 카드 보류 가능)`),
-    kibo: state.kibo.concat({
-      no: (state.kiboSeq || 0) + 1,
-      type: "shaking_declare",
-      playerKey,
-      month: monthNum,
-      revealCards: revealCards.map(packCard),
-      revealMs: 2000
-    }),
-    kiboSeq: (state.kiboSeq || 0) + 1
-  };
-}
-
-
-export function declareBomb(state, playerKey, month) {
-  if (state.phase !== "playing" || state.currentTurn !== playerKey) return state;
-  const monthNum = Number(month);
-  const bombable = getDeclarableBombMonths(state, playerKey);
-  if (!bombable.includes(monthNum)) return state;
-
-  const player = state.players[playerKey];
-  const monthCards = player.hand.filter((c) => c.month === monthNum);
-  const matched = state.board.find((c) => c.month === monthNum);
-  if (!matched || monthCards.length < 3) return state;
-
-  const hand = player.hand.filter((c) => c.month !== monthNum);
-  const board = state.board.filter((c) => c.id !== matched.id);
-  const captured = {
-    ...player.captured,
-    kwang: player.captured.kwang.slice(),
-    five: player.captured.five.slice(),
-    ribbon: player.captured.ribbon.slice(),
-    junk: player.captured.junk.slice()
-  };
-  const events = { ...player.events, bomb: player.events.bomb + 1 };
-  const log = state.log.concat(
-    `${player.label}: 폭탄 선언 (${monthNum}월 ${monthCards.length}장 + 바닥 1장 획득)`
-  );
-  const newlyCaptured = [];
-  const capturedFromHand = [];
-  pushCaptured(captured, matched);
-  newlyCaptured.push(matched);
-  capturedFromHand.push(matched);
-  monthCards.forEach((c) => {
-    pushCaptured(captured, c);
-    newlyCaptured.push(c);
-    capturedFromHand.push(c);
-  });
-
-  const flipResult = runFlipPhase({
-    state,
-    currentKey: playerKey,
-    playedCard: { id: `bomb-declare-${monthNum}`, month: monthNum, category: "junk", name: "Bomb Declare" },
-    isLastHandTurn: hand.length === 0,
-    board,
-    deck: state.deck.slice(),
-    hand,
-    captured,
-    events,
-    log,
-    newlyCaptured,
-    pendingSteal: 1
-  });
-  if (flipResult.pendingState) return flipResult.pendingState;
-  const bombState = {
-    ...state,
-    actionReveal: {
-      type: "bomb",
-      title: "폭탄",
-      message: `${player.label}님 폭탄 선언했습니다.`,
-      cards: [matched, ...monthCards].map(packCard),
-      expiresAt: Date.now() + 2000
-    }
-  };
-  return finalizeTurn({
-    state: bombState,
-    currentKey: playerKey,
-    hand,
-    captured,
-    events,
-    deck: flipResult.deck,
-    board: flipResult.board,
-    log: flipResult.log,
-    newlyCaptured: flipResult.newlyCaptured,
-    pendingSteal: flipResult.pendingSteal,
-    turnMeta: {
-      type: "declare_bomb",
-      month: monthNum,
-      captured: [packCard(matched), ...monthCards.map(packCard)],
-      flips: flipResult.flips || [],
-      captureBySource: {
-        hand: capturedFromHand.map(packCard),
-        flip: (flipResult.capturedFromFlip || []).map(packCard)
-      }
-    }
-  });
-}
-
-export function askShakingConfirm(state, playerKey, cardId) {
-  if (state.phase !== "playing" || state.currentTurn !== playerKey) return state;
-  const player = state.players[playerKey];
-  if (!player) return state;
-  const selected = player.hand.find((c) => c.id === cardId);
-  if (!selected) return state;
-  const available = getDeclarableShakingMonths(state, playerKey);
-  if (!available.includes(selected.month)) return state;
-
-  return {
-    ...state,
-    phase: "shaking-confirm",
-    pendingShakingConfirm: {
-      playerKey,
-      cardId,
-      month: selected.month
-    }
-  };
-}
-
-export function chooseShakingYes(state, playerKey) {
-  if (state.phase !== "shaking-confirm" || state.pendingShakingConfirm?.playerKey !== playerKey) {
-    return state;
-  }
-  const { cardId, month } = state.pendingShakingConfirm;
-  const resumed = {
-    ...state,
-    phase: "playing",
-    pendingShakingConfirm: null
-  };
-  const declared = declareShaking(resumed, playerKey, month);
-  return playTurn(declared, cardId);
-}
-
-export function chooseShakingNo(state, playerKey) {
-  if (state.phase !== "shaking-confirm" || state.pendingShakingConfirm?.playerKey !== playerKey) {
-    return state;
-  }
-  const { cardId } = state.pendingShakingConfirm;
-  const resumed = {
-    ...state,
-    phase: "playing",
-    pendingShakingConfirm: null
-  };
-  return playTurn(resumed, cardId);
-}
-
-export function getShakingReveal(state, now = Date.now()) {
-  return selectShakingReveal(state, now);
-}
-
+// ============================================================================
+// SECTION 2. CORE ACTIONS
+// ----------------------------------------------------------------------------
+// Core turn entry points and match-choice action
+// ============================================================================
 export function playTurn(state, cardId) {
   if (state.phase !== "playing") return state;
   state = clearExpiredReveal(state);
@@ -568,11 +423,21 @@ export function playTurn(state, cardId) {
 
     const events = { ...player.events };
     let nextLog = state.log
-      .concat(`${player.label}: 보너스 카드 사용 (${playedCard.name}, 피 ${playedCard.bonus.stealPi}장 강탈)`)
+      .concat(
+        tx(state, "log.bonusUse", {
+          player: player.label,
+          cardName: playedCard.name,
+          stealPi: playedCard.bonus.stealPi
+        })
+      )
       .concat(
         drawnToHand
-          ? `${player.label}: 보너스 보상으로 손패 1장 보충 (${drawnToHand.month}월 ${drawnToHand.name})`
-          : `${player.label}: 보너스 보상 보충 실패 (덱 부족)`
+          ? tx(state, "log.bonusDraw", {
+              player: player.label,
+              month: drawnToHand.month,
+              cardName: drawnToHand.name
+            })
+          : tx(state, "log.bonusDrawFail", { player: player.label })
       );
 
     let nextPlayers = {
@@ -585,7 +450,7 @@ export function playTurn(state, cardId) {
       }
     };
 
-    // 마지막 손패 턴이 아니면 보너스 강탈 1장을 처리한다.
+    // Bonus steal applies only when this is not the last-hand turn.
     if (!startedWithLastHand && playedCard.bonus.stealPi > 0) {
       const { updatedPlayers, stealLog } = stealPiFromOpponent(nextPlayers, currentKey, playedCard.bonus.stealPi);
       nextPlayers = updatedPlayers;
@@ -607,13 +472,16 @@ export function playTurn(state, cardId) {
         pendingPresident: { playerKey: currentKey, month: bonusPresidentMonth },
         actionReveal: {
           type: "bonus",
-          title: "보너스 패 사용",
-          message: `${player.label}님 보너스 패를 사용했습니다. 대통령 선택으로 진행합니다.`,
+          title: tx(state, "reveal.bonus.title"),
+          message: tx(state, "reveal.bonus.toPresident", { player: player.label }),
           cards: [packCard(playedCard)],
           expiresAt: Date.now() + 2000
         },
         log: nextLog.concat(
-          `${player.label}: 보너스 보충으로 손패 대통령(${bonusPresidentMonth}월 4장) 성립 - 10점 종료/들고치기 선택`
+          tx(state, "log.bonusPresidentAvailable", {
+            player: player.label,
+            month: bonusPresidentMonth
+          })
         ),
         kiboSeq: (state.kiboSeq || 0) + 1,
         kibo: (state.kibo || []).concat({
@@ -638,12 +506,12 @@ export function playTurn(state, cardId) {
       pendingGukjinChoice: null,
       actionReveal: {
         type: "bonus",
-        title: "보너스 패 사용",
-        message: `${player.label}님 보너스 패를 사용했습니다. 같은 턴에서 손패 1장을 더 선택하세요.`,
+        title: tx(state, "reveal.bonus.title"),
+        message: tx(state, "reveal.bonus.extraHand", { player: player.label }),
         cards: [packCard(playedCard)],
         expiresAt: Date.now() + 2000
       },
-      log: nextLog.concat(`${player.label}: 보너스 사용 후 같은 턴 계속 진행 (손패 1장 추가 선택)`),
+      log: nextLog.concat(tx(state, "log.bonusContinueTurn", { player: player.label })),
       kiboSeq: (state.kiboSeq || 0) + 1,
       kibo: (state.kibo || []).concat({
         no: (state.kiboSeq || 0) + 1,
@@ -680,7 +548,7 @@ export function playTurn(state, cardId) {
 
   if (handMatch.type === "NONE") {
     board.push(playedCard);
-    log.push(`${player.label}: ${playedCard.month}월 카드 투입 (매치 없음)`);
+    log.push(tx(state, "log.playNoMatch", { player: player.label, month: playedCard.month }));
   } else if (handMatch.type === "ONE") {
     const matched = handMatch.matches[0];
     board = board.filter((c) => c.id !== matched.id);
@@ -688,10 +556,10 @@ export function playTurn(state, cardId) {
     pushCaptured(captured, playedCard);
     newlyCaptured.push(matched, playedCard);
     capturedFromHand.push(matched, playedCard);
-    log.push(`${player.label}: ${playedCard.month}월 매치 캡처`);
+    log.push(tx(state, "log.playOneMatchCapture", { player: player.label, month: playedCard.month }));
     if (!isLastHandTurn && presidentChainArmed) {
       events.shaking += 1;
-      log.push(`${player.label}: 대통령 들고치기 연계 성공 (${playedCard.month}월) - 흔들기 처리`);
+      log.push(tx(state, "log.presidentChainShake", { player: player.label, month: playedCard.month }));
     }
   } else if (handMatch.type === "TWO") {
     if (handMatch.needsChoice) {
@@ -704,9 +572,11 @@ export function playTurn(state, cardId) {
           cardId,
           boardCardIds: handMatch.matches.map((c) => c.id),
           presidentChainArmed,
-          message: `${player.label}: 낸 카드와 매치할 보드 카드 1장을 선택하세요`
+          message: tx(state, "pending.match.player", { player: player.label })
         },
-        log: state.log.concat(`${player.label}: ${playedCard.month}월 2장 매치 - 카드 선택 대기`)
+        log: state.log.concat(
+          tx(state, "log.playTwoMatchWait", { player: player.label, month: playedCard.month })
+        )
       };
     }
     const matched = bestMatchCard(handMatch.matches);
@@ -715,10 +585,10 @@ export function playTurn(state, cardId) {
     pushCaptured(captured, playedCard);
     newlyCaptured.push(matched, playedCard);
     capturedFromHand.push(matched, playedCard);
-    log.push(`${player.label}: ${playedCard.month}월 자동 매치 캡처`);
+    log.push(tx(state, "log.playTwoMatchAuto", { player: player.label, month: playedCard.month }));
     if (!isLastHandTurn && presidentChainArmed) {
       events.shaking += 1;
-      log.push(`${player.label}: 대통령 들고치기 연계 성공 (${playedCard.month}월) - 흔들기 처리`);
+      log.push(tx(state, "log.presidentChainShake", { player: player.label, month: playedCard.month }));
     }
   } else {
     board = board.filter((c) => c.month !== playedCard.month);
@@ -731,14 +601,14 @@ export function playTurn(state, cardId) {
     newlyCaptured.push(playedCard);
     capturedFromHand.push(playedCard);
     if (handMatch.eventTag === "PANSSEUL") events.pansseul = (events.pansseul || 0) + 1;
-    log.push(`${player.label}: ${playedCard.month}월 싹쓸이 캡처`);
+    log.push(tx(state, "log.playSweepCapture", { player: player.label, month: playedCard.month }));
     if (!isLastHandTurn) {
       pendingSteal += 1;
-      log.push(`${player.label}: 판쓸 발생 (상대 피 1장 강탈 예약)`);
+      log.push(tx(state, "log.pansseulReserved", { player: player.label }));
     }
     if (!isLastHandTurn && presidentChainArmed) {
       events.shaking += 1;
-      log.push(`${player.label}: 대통령 들고치기 연계 성공 (${playedCard.month}월) - 흔들기 처리`);
+      log.push(tx(state, "log.presidentChainShake", { player: player.label, month: playedCard.month }));
     }
   }
   matchEvents.push({ source: "hand", eventTag: handMatch.eventTag, type: handMatch.type });
@@ -787,6 +657,478 @@ export function playTurn(state, cardId) {
   });
 }
 
+export function chooseMatch(state, boardCardId) {
+  if (state.phase !== "select-match" || !state.pendingMatch) return state;
+
+  const pending = state.pendingMatch;
+  if (state.currentTurn !== pending.playerKey) return state;
+  if (!pending.boardCardIds.includes(boardCardId)) return state;
+
+  if (pending.stage === "player") {
+    return resolvePlayerMatchChoice(state, boardCardId);
+  }
+  if (pending.stage === "flip") {
+    return resolveFlipMatchChoice(state, boardCardId);
+  }
+
+  return state;
+}
+
+
+// ============================================================================
+// SECTION 3. EVENT ACTIONS
+// ----------------------------------------------------------------------------
+// Special event actions: shaking, bomb, go/stop, president, gukjin
+// ============================================================================
+export function declareShaking(state, playerKey, month) {
+  if (state.phase !== "playing" || state.currentTurn !== playerKey) return state;
+  const monthNum = Number(month);
+  const available = getDeclarableShakingMonths(state, playerKey);
+  if (!available.includes(monthNum)) return state;
+
+  const player = state.players[playerKey];
+  const nextDeclared = [...(player.shakingDeclaredMonths || []), monthNum];
+  const revealCards = player.hand.filter((c) => c.month === monthNum).slice(0, 3);
+  const nextPlayers = {
+    ...state.players,
+    [playerKey]: {
+      ...player,
+      shakingDeclaredMonths: nextDeclared,
+      events: { ...player.events, shaking: player.events.shaking + 1 }
+    }
+  };
+
+  return {
+    ...state,
+    players: nextPlayers,
+    shakingReveal: {
+      playerKey,
+      month: monthNum,
+      cards: revealCards.map(packCard),
+      expiresAt: Date.now() + 2000
+    },
+    actionReveal: {
+      type: "shaking",
+      title: tx(state, "reveal.shaking.title"),
+      message: tx(state, "reveal.shaking.message", { player: player.label }),
+      cards: revealCards.map(packCard),
+      expiresAt: Date.now() + 2000
+    },
+    log: state.log.concat(tx(state, "log.shakingDeclare", { player: player.label, month: monthNum })),
+    kibo: state.kibo.concat({
+      no: (state.kiboSeq || 0) + 1,
+      type: "shaking_declare",
+      playerKey,
+      month: monthNum,
+      revealCards: revealCards.map(packCard),
+      revealMs: 2000
+    }),
+    kiboSeq: (state.kiboSeq || 0) + 1
+  };
+}
+
+
+export function declareBomb(state, playerKey, month) {
+  if (state.phase !== "playing" || state.currentTurn !== playerKey) return state;
+  const monthNum = Number(month);
+  const bombable = getDeclarableBombMonths(state, playerKey);
+  if (!bombable.includes(monthNum)) return state;
+
+  const player = state.players[playerKey];
+  const monthCards = player.hand.filter((c) => c.month === monthNum);
+  const matched = state.board.find((c) => c.month === monthNum);
+  if (!matched || monthCards.length < 3) return state;
+
+  const hand = player.hand.filter((c) => c.month !== monthNum);
+  const board = state.board.filter((c) => c.id !== matched.id);
+  const captured = {
+    ...player.captured,
+    kwang: player.captured.kwang.slice(),
+    five: player.captured.five.slice(),
+    ribbon: player.captured.ribbon.slice(),
+    junk: player.captured.junk.slice()
+  };
+  const events = { ...player.events, bomb: player.events.bomb + 1 };
+  const log = state.log.concat(
+    tx(state, "log.bombDeclare", { player: player.label, month: monthNum, count: monthCards.length })
+  );
+  const newlyCaptured = [];
+  const capturedFromHand = [];
+  pushCaptured(captured, matched);
+  newlyCaptured.push(matched);
+  capturedFromHand.push(matched);
+  monthCards.forEach((c) => {
+    pushCaptured(captured, c);
+    newlyCaptured.push(c);
+    capturedFromHand.push(c);
+  });
+
+  const flipResult = runFlipPhase({
+    state,
+    currentKey: playerKey,
+    playedCard: { id: `bomb-declare-${monthNum}`, month: monthNum, category: "junk", name: "Bomb Declare" },
+    isLastHandTurn: hand.length === 0,
+    board,
+    deck: state.deck.slice(),
+    hand,
+    captured,
+    events,
+    log,
+    newlyCaptured,
+    pendingSteal: 1
+  });
+  if (flipResult.pendingState) return flipResult.pendingState;
+  const bombState = {
+    ...state,
+    actionReveal: {
+      type: "bomb",
+      title: tx(state, "reveal.bomb.title"),
+      message: tx(state, "reveal.bomb.message", { player: player.label }),
+      cards: [matched, ...monthCards].map(packCard),
+      expiresAt: Date.now() + 2000
+    }
+  };
+  return finalizeTurn({
+    state: bombState,
+    currentKey: playerKey,
+    hand,
+    captured,
+    events,
+    deck: flipResult.deck,
+    board: flipResult.board,
+    log: flipResult.log,
+    newlyCaptured: flipResult.newlyCaptured,
+    pendingSteal: flipResult.pendingSteal,
+    turnMeta: {
+      type: "declare_bomb",
+      month: monthNum,
+      captured: [packCard(matched), ...monthCards.map(packCard)],
+      flips: flipResult.flips || [],
+      captureBySource: {
+        hand: capturedFromHand.map(packCard),
+        flip: (flipResult.capturedFromFlip || []).map(packCard)
+      }
+    }
+  });
+}
+
+export function askShakingConfirm(state, playerKey, cardId) {
+  if (state.phase !== "playing" || state.currentTurn !== playerKey) return state;
+  const player = state.players[playerKey];
+  if (!player) return state;
+  const selected = player.hand.find((c) => c.id === cardId);
+  if (!selected) return state;
+  const available = getDeclarableShakingMonths(state, playerKey);
+  if (!available.includes(selected.month)) return state;
+
+  return {
+    ...state,
+    phase: "shaking-confirm",
+    pendingShakingConfirm: {
+      playerKey,
+      cardId,
+      month: selected.month
+    }
+  };
+}
+
+export function chooseShakingYes(state, playerKey) {
+  if (state.phase !== "shaking-confirm" || state.pendingShakingConfirm?.playerKey !== playerKey) {
+    return state;
+  }
+  const { cardId, month } = state.pendingShakingConfirm;
+  const resumed = {
+    ...state,
+    phase: "playing",
+    pendingShakingConfirm: null
+  };
+  const declared = declareShaking(resumed, playerKey, month);
+  return playTurn(declared, cardId);
+}
+
+export function chooseShakingNo(state, playerKey) {
+  if (state.phase !== "shaking-confirm" || state.pendingShakingConfirm?.playerKey !== playerKey) {
+    return state;
+  }
+  const { cardId } = state.pendingShakingConfirm;
+  const resumed = {
+    ...state,
+    phase: "playing",
+    pendingShakingConfirm: null
+  };
+  return playTurn(resumed, cardId);
+}
+
+export function getShakingReveal(state, now = Date.now()) {
+  return selectShakingReveal(state, now);
+}
+
+export function chooseGo(state, playerKey) {
+  if (state.phase !== "go-stop" || state.pendingGoStop !== playerKey) return state;
+
+  const player = state.players[playerKey];
+  const opponentKey = playerKey === "human" ? "ai" : "human";
+  const scoreInfo = calculateScore(state.players[playerKey], state.players[opponentKey], state.ruleKey);
+  const nextPlayers = {
+    ...state.players,
+    [playerKey]: {
+      ...player,
+      goCount: player.goCount + 1,
+      lastGoBase: scoreInfo.base
+    }
+  };
+
+  const log = state.log.concat(tx(state, "log.goDeclare", { player: player.label, goCount: player.goCount + 1 }));
+
+  const nextState = {
+    ...state,
+    players: nextPlayers,
+    currentTurn: opponentKey,
+    phase: "playing",
+    pendingGoStop: null,
+    pendingMatch: null,
+    pendingShakingConfirm: null,
+    log,
+    kiboSeq: (state.kiboSeq || 0) + 1,
+    kibo: (state.kibo || []).concat({
+      no: (state.kiboSeq || 0) + 1,
+      type: "go",
+      playerKey,
+      goCount: player.goCount + 1
+    })
+  };
+  return ensurePassCardFor(nextState, nextState.currentTurn);
+}
+
+export function chooseStop(state, playerKey) {
+  if (state.phase !== "go-stop" || state.pendingGoStop !== playerKey) return state;
+
+  const player = state.players[playerKey];
+  const nextPlayers = {
+    ...state.players,
+    [playerKey]: { ...player, declaredStop: true }
+  };
+
+  const log = state.log.concat(tx(state, "log.stopDeclare", { player: player.label }));
+  let nextState = {
+    ...state,
+    players: nextPlayers,
+    phase: "resolution",
+    pendingGoStop: null,
+    pendingMatch: null,
+    pendingShakingConfirm: null,
+    log,
+    kiboSeq: (state.kiboSeq || 0) + 1,
+    kibo: (state.kibo || []).concat({
+      no: (state.kiboSeq || 0) + 1,
+      type: "stop",
+      playerKey
+    })
+  };
+
+  nextState = resolveRound(nextState, playerKey);
+  return nextState;
+}
+
+export function choosePresidentStop(state, playerKey) {
+  if (state.phase !== "president-choice" || state.pendingPresident?.playerKey !== playerKey) {
+    return state;
+  }
+
+  const baseScore = 10;
+  const payout = baseScore * (state.carryOverMultiplier || 1);
+  let log = state.log.concat(
+    tx(state, "log.presidentStopChoose", { player: state.players[playerKey].label, payout })
+  );
+  const settled = settleRoundGold(state.players, playerKey, payout);
+  log = log.concat(
+    tx(state, "log.roundGoldSettle", {
+      winner: state.players[playerKey].label,
+      requested: settled.requested,
+      paid: settled.paid
+    })
+  );
+
+  const human =
+    playerKey === "human"
+      ? {
+          base: baseScore,
+          multiplier: state.carryOverMultiplier || 1,
+          total: payout,
+          bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
+          breakdown: { presidentStop: true, goBonus: 0 }
+        }
+      : {
+          base: 0,
+          multiplier: 1,
+          total: 0,
+          bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
+          breakdown: { goBonus: 0 }
+        };
+  const ai =
+    playerKey === "ai"
+      ? {
+          base: baseScore,
+          multiplier: state.carryOverMultiplier || 1,
+          total: payout,
+          bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
+          breakdown: { presidentStop: true, goBonus: 0 }
+        }
+      : {
+          base: 0,
+          multiplier: 1,
+          total: 0,
+          bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
+          breakdown: { goBonus: 0 }
+        };
+
+  return {
+    ...state,
+    phase: "resolution",
+    pendingPresident: null,
+    pendingGoStop: null,
+    pendingMatch: null,
+    pendingShakingConfirm: null,
+    nextCarryOverMultiplier: 1,
+    players: settled.updatedPlayers,
+    kiboSeq: (state.kiboSeq || 0) + 1,
+    kibo: (state.kibo || []).concat({
+      no: (state.kiboSeq || 0) + 1,
+      type: "president_stop",
+      playerKey,
+      payout
+    }),
+    result: {
+      human,
+      ai,
+      winner: playerKey,
+      nagari: false,
+      nagariReasons: [],
+      gold: {
+        requested: settled.requested,
+        paid: settled.paid,
+        unitPerPoint: POINT_GOLD_UNIT
+      }
+    },
+    log
+  };
+}
+
+export function choosePresidentHold(state, playerKey) {
+  if (state.phase !== "president-choice" || state.pendingPresident?.playerKey !== playerKey) {
+    return state;
+  }
+  const player = state.players[playerKey];
+  const month = state.pendingPresident?.month ?? null;
+  const nextPlayers = {
+    ...state.players,
+    [playerKey]: { ...player, presidentHold: true, presidentHoldMonth: month }
+  };
+  const log = state.log.concat(
+    tx(state, "log.presidentHoldChoose", { player: state.players[playerKey].label, month })
+  );
+  return {
+    ...state,
+    players: nextPlayers,
+    phase: "playing",
+    pendingPresident: null,
+    pendingShakingConfirm: null,
+    log,
+    kiboSeq: (state.kiboSeq || 0) + 1,
+    kibo: (state.kibo || []).concat({
+      no: (state.kiboSeq || 0) + 1,
+      type: "president_hold",
+      playerKey,
+      month
+    })
+  };
+}
+
+export function chooseGukjinMode(state, playerKey, mode) {
+  if (state.phase !== "gukjin-choice" || state.pendingGukjinChoice?.playerKey !== playerKey) {
+    return state;
+  }
+  if (!state.players[playerKey]) return state;
+  if (mode !== "five" && mode !== "junk") return state;
+
+  const player = state.players[playerKey];
+  if (player.gukjinLocked) return state;
+  const captured = {
+    ...player.captured,
+    kwang: (player.captured.kwang || []).slice(),
+    five: (player.captured.five || []).slice(),
+    ribbon: (player.captured.ribbon || []).slice(),
+    junk: (player.captured.junk || []).slice()
+  };
+  if (mode === "junk") {
+    const gukjinIdx = captured.five.findIndex(
+      (card) => isGukjinCard(card) && card.category === "five" && !card.gukjinTransformed
+    );
+    if (gukjinIdx >= 0) {
+      const [gukjinCard] = captured.five.splice(gukjinIdx, 1);
+      captured.junk.push({
+        ...gukjinCard,
+        category: "junk",
+        piValue: 2,
+        gukjinTransformed: true,
+        name: `${gukjinCard.name}${tx(state, "label.gukjinSuffix")}`
+      });
+    }
+  } else if (mode === "five") {
+    const gukjinJunkIdx = captured.junk.findIndex(
+      (card) => isGukjinCard(card) && card.category === "junk"
+    );
+    if (gukjinJunkIdx >= 0) {
+      const [gukjinCard] = captured.junk.splice(gukjinJunkIdx, 1);
+      captured.five.push({
+        ...gukjinCard,
+        category: "five",
+        piValue: undefined,
+        gukjinTransformed: false,
+        name: String(gukjinCard.name || "").replace(tx(state, "label.gukjinSuffix"), "")
+      });
+    }
+  }
+  const nextPlayers = {
+    ...state.players,
+    [playerKey]: { ...player, captured, gukjinMode: mode, gukjinLocked: true }
+  };
+  const modeLabel = mode === "junk" ? tx(state, "label.gukjin.junk") : tx(state, "label.gukjin.five");
+  const log = state.log.concat(tx(state, "log.gukjinModeChoose", { player: player.label, modeLabel }));
+
+  const nextState = {
+    ...state,
+    players: nextPlayers,
+    phase: "playing",
+    pendingGukjinChoice: null,
+    pendingShakingConfirm: null,
+    log,
+    kiboSeq: (state.kiboSeq || 0) + 1,
+    kibo: (state.kibo || []).concat({
+      no: (state.kiboSeq || 0) + 1,
+      type: "gukjin_mode",
+      playerKey,
+      mode
+    })
+  };
+  return continueAfterTurnIfNeeded(nextState, playerKey);
+}
+
+
+
+
+
+
+
+
+
+
+
+// ============================================================================
+// SECTION 4. HELPERS
+// ----------------------------------------------------------------------------
+// Internal helper logic used by core/event actions
+// ============================================================================
 function runFlipPhase(context) {
   let {
     board,
@@ -811,7 +1153,7 @@ function runFlipPhase(context) {
 
     if (flip.bonus?.stealPi) {
       pendingBonusFlips = pendingBonusFlips.concat(flip);
-      log.push(`뒤집기: ${flip.name} 보류(재뒤집기 후 확정)`);
+      log.push(tx(state, "log.flipHoldForRedraw", { cardName: flip.name }));
       continue;
     }
 
@@ -831,15 +1173,15 @@ function runFlipPhase(context) {
           newlyCaptured.push(b);
           capturedFromFlip.push(b);
         });
-        log.push(`보류 보너스 ${pendingBonusFlips.length}장 획득 확정`);
+        log.push(tx(state, "log.flipPendingBonusConfirmed", { count: pendingBonusFlips.length }));
         pendingBonusFlips = [];
       }
       board.push(flip);
-      log.push(`뒤집기: ${flip.month}월 보드 배치`);
+      log.push(tx(state, "log.flipPlaceBoard", { month: flip.month }));
       if (flipMatch.eventTag === "JJOB") {
         events.jjob += 1;
         pendingSteal += 1;
-        log.push("쪽 발생 (+1, 상대 피 1장 강탈 예약)");
+        log.push(tx(state, "log.flipJjobReserved"));
       }
       return {
         board,
@@ -862,7 +1204,7 @@ function runFlipPhase(context) {
           newlyCaptured.push(b);
           capturedFromFlip.push(b);
         });
-        log.push(`보류 보너스 ${pendingBonusFlips.length}장 획득 확정`);
+        log.push(tx(state, "log.flipPendingBonusConfirmed", { count: pendingBonusFlips.length }));
         pendingBonusFlips = [];
       }
       const matched = flipMatch.matches[0];
@@ -871,11 +1213,11 @@ function runFlipPhase(context) {
       pushCaptured(captured, matched);
       newlyCaptured.push(flip, matched);
       capturedFromFlip.push(flip, matched);
-      log.push(`뒤집기: ${flip.month}월 매치 캡처`);
+      log.push(tx(state, "log.flipMatchCapture", { month: flip.month }));
       if (flipMatch.eventTag === "DDADAK") {
         events.ddadak = (events.ddadak || 0) + 1;
         pendingSteal += 1;
-        log.push(`따닥 발생 (상대 피 1장 강탈 예약)`);
+        log.push(tx(state, "log.flipDdadakReserved"));
       }
       return {
         board,
@@ -900,7 +1242,7 @@ function runFlipPhase(context) {
             stage: "flip",
             playerKey: currentKey,
             boardCardIds: flipMatch.matches.map((c) => c.id),
-            message: `${state.players[currentKey].label}: 뒤집은 카드와 매치할 보드 카드 1장을 선택하세요`,
+            message: tx(state, "pending.match.flip", { player: state.players[currentKey].label }),
             context: {
               hand,
               captured,
@@ -917,14 +1259,14 @@ function runFlipPhase(context) {
               capturedFromFlip
             }
           },
-          log: log.concat(`뒤집기: ${flip.month}월 2장 매치 - 카드 선택 대기`)
+          log: log.concat(tx(state, "log.flipTwoMatchWait", { month: flip.month }))
         }
       };
     }
 
     if (flipMatch.type === "TWO") {
       if (!isLastHandTurn && pendingBonusFlips.length > 0) {
-        log.push(`뻑 발생: 보류 보너스 ${pendingBonusFlips.length}장 홀딩`);
+        log.push(tx(state, "log.ppukHoldBonus", { count: pendingBonusFlips.length }));
         heldBonusOnPpuk = heldBonusOnPpuk.concat(pendingBonusFlips);
         pendingBonusFlips = [];
       } else if (pendingBonusFlips.length > 0) {
@@ -933,7 +1275,7 @@ function runFlipPhase(context) {
           newlyCaptured.push(b);
           capturedFromFlip.push(b);
         });
-        log.push(`보류 보너스 ${pendingBonusFlips.length}장 획득 확정`);
+        log.push(tx(state, "log.flipPendingBonusConfirmed", { count: pendingBonusFlips.length }));
         pendingBonusFlips = [];
       }
       if (flipMatch.eventTag === "PPUK") events.ppuk += 1;
@@ -943,7 +1285,7 @@ function runFlipPhase(context) {
       pushCaptured(captured, matched);
       newlyCaptured.push(flip, matched);
       capturedFromFlip.push(flip, matched);
-      log.push(`뒤집기: ${flip.month}월 다중 매치 선택 캡처`);
+      log.push(tx(state, "log.flipMultiMatchCapture", { month: flip.month }));
       return {
         board,
         deck,
@@ -961,7 +1303,7 @@ function runFlipPhase(context) {
 
     if (flipMatch.eventTag === "PPUK") events.ppuk += 1;
     if (!isLastHandTurn && pendingBonusFlips.length > 0) {
-      log.push(`뻑 발생: 보류 보너스 ${pendingBonusFlips.length}장 홀딩`);
+      log.push(tx(state, "log.ppukHoldBonus", { count: pendingBonusFlips.length }));
       heldBonusOnPpuk = heldBonusOnPpuk.concat(pendingBonusFlips);
       pendingBonusFlips = [];
     } else if (pendingBonusFlips.length > 0) {
@@ -970,7 +1312,7 @@ function runFlipPhase(context) {
         newlyCaptured.push(b);
         capturedFromFlip.push(b);
       });
-      log.push(`보류 보너스 ${pendingBonusFlips.length}장 획득 확정`);
+      log.push(tx(state, "log.flipPendingBonusConfirmed", { count: pendingBonusFlips.length }));
       pendingBonusFlips = [];
     }
     board = board.filter((c) => c.month !== flip.month);
@@ -982,7 +1324,7 @@ function runFlipPhase(context) {
     pushCaptured(captured, flip);
     newlyCaptured.push(flip);
     capturedFromFlip.push(flip);
-    log.push(`뒤집기: ${flip.month}월 4장 캡처`);
+    log.push(tx(state, "log.flipFourCapture", { month: flip.month }));
     return {
       board,
       deck,
@@ -1004,7 +1346,7 @@ function runFlipPhase(context) {
       newlyCaptured.push(b);
       capturedFromFlip.push(b);
     });
-    log.push(`보류 보너스 ${pendingBonusFlips.length}장 획득 확정`);
+    log.push(tx(state, "log.flipPendingBonusConfirmed", { count: pendingBonusFlips.length }));
     pendingBonusFlips = [];
   }
   return {
@@ -1020,23 +1362,6 @@ function runFlipPhase(context) {
     matchEvents,
     capturedFromFlip
   };
-}
-
-export function chooseMatch(state, boardCardId) {
-  if (state.phase !== "select-match" || !state.pendingMatch) return state;
-
-  const pending = state.pendingMatch;
-  if (state.currentTurn !== pending.playerKey) return state;
-  if (!pending.boardCardIds.includes(boardCardId)) return state;
-
-  if (pending.stage === "player") {
-    return resolvePlayerMatchChoice(state, boardCardId);
-  }
-  if (pending.stage === "flip") {
-    return resolveFlipMatchChoice(state, boardCardId);
-  }
-
-  return state;
 }
 
 function resolvePlayerMatchChoice(state, boardCardId) {
@@ -1058,7 +1383,7 @@ function resolvePlayerMatchChoice(state, boardCardId) {
   const captured = { ...player.captured };
   const events = { ...player.events };
   let log = state.log.concat(
-    `${player.label}: ${playedCard.month}월 선택 캡처 (${selected.name})`
+    tx(state, "log.selectCapture", { player: player.label, month: playedCard.month, cardName: selected.name })
   );
   const newlyCaptured = [playedCard, selected];
   const capturedFromHand = [playedCard, selected];
@@ -1067,7 +1392,7 @@ function resolvePlayerMatchChoice(state, boardCardId) {
   pushCaptured(captured, selected);
   if (!startedWithLastHand && presidentChainArmed) {
     events.shaking = (events.shaking || 0) + 1;
-    log = log.concat(`${player.label}: 대통령 들고치기 연계 성공 (${playedCard.month}월) - 흔들기 처리`);
+    log = log.concat(tx(state, "log.presidentChainShake", { player: player.label, month: playedCard.month }));
   }
 
   const flipResult = runFlipPhase({
@@ -1153,7 +1478,7 @@ function resolveFlipMatchChoice(state, boardCardId) {
   let nextLog = log.slice();
   let bonusQueue = pendingBonusFlips.slice();
   if (!isLastHandTurn && bonusQueue.length > 0) {
-    nextLog.push(`뻑 선택 발생: 보류 보너스 ${bonusQueue.length}장 홀딩`);
+    nextLog.push(tx(state, "log.ppukSelectHoldBonus", { count: bonusQueue.length }));
     bonusQueue = [];
   } else if (bonusQueue.length > 0) {
     bonusQueue.forEach((b) => {
@@ -1161,7 +1486,7 @@ function resolveFlipMatchChoice(state, boardCardId) {
       nextNewlyCaptured.push(b);
       capturedFromFlip.push(b);
     });
-    nextLog.push(`보류 보너스 ${bonusQueue.length}장 획득 확정`);
+    nextLog.push(tx(state, "log.flipPendingBonusConfirmed", { count: bonusQueue.length }));
     bonusQueue = [];
   }
 
@@ -1170,7 +1495,7 @@ function resolveFlipMatchChoice(state, boardCardId) {
   nextNewlyCaptured.push(flipCard, selected);
   capturedFromFlip.push(flipCard, selected);
   const nextBoard = board.filter((c) => c.id !== selected.id);
-  nextLog.push(`뒤집기: ${flipCard.month}월 선택 캡처 (${selected.name})`);
+  nextLog.push(tx(state, "log.flipSelectCapture", { month: flipCard.month, cardName: selected.name }));
 
   return finalizeTurn({
     state,
@@ -1198,261 +1523,5 @@ function resolveFlipMatchChoice(state, boardCardId) {
     }
   });
 }
-
-
-export function chooseGo(state, playerKey) {
-  if (state.phase !== "go-stop" || state.pendingGoStop !== playerKey) return state;
-
-  const player = state.players[playerKey];
-  const opponentKey = playerKey === "human" ? "ai" : "human";
-  const scoreInfo = calculateScore(state.players[playerKey], state.players[opponentKey], state.ruleKey);
-  const nextPlayers = {
-    ...state.players,
-    [playerKey]: {
-      ...player,
-      goCount: player.goCount + 1,
-      lastGoBase: scoreInfo.base
-    }
-  };
-
-  const log = state.log.concat(`${player.label}: GO 선언 (${player.goCount + 1}고)`);
-
-  const nextState = {
-    ...state,
-    players: nextPlayers,
-    currentTurn: opponentKey,
-    phase: "playing",
-    pendingGoStop: null,
-    pendingMatch: null,
-    pendingShakingConfirm: null,
-    log,
-    kiboSeq: (state.kiboSeq || 0) + 1,
-    kibo: (state.kibo || []).concat({
-      no: (state.kiboSeq || 0) + 1,
-      type: "go",
-      playerKey,
-      goCount: player.goCount + 1
-    })
-  };
-  return ensurePassCardFor(nextState, nextState.currentTurn);
-}
-
-export function chooseStop(state, playerKey) {
-  if (state.phase !== "go-stop" || state.pendingGoStop !== playerKey) return state;
-
-  const player = state.players[playerKey];
-  const nextPlayers = {
-    ...state.players,
-    [playerKey]: { ...player, declaredStop: true }
-  };
-
-  const log = state.log.concat(`${player.label}: STOP 선언`);
-  let nextState = {
-    ...state,
-    players: nextPlayers,
-    phase: "resolution",
-    pendingGoStop: null,
-    pendingMatch: null,
-    pendingShakingConfirm: null,
-    log,
-    kiboSeq: (state.kiboSeq || 0) + 1,
-    kibo: (state.kibo || []).concat({
-      no: (state.kiboSeq || 0) + 1,
-      type: "stop",
-      playerKey
-    })
-  };
-
-  nextState = resolveRound(nextState, playerKey);
-  return nextState;
-}
-
-export function choosePresidentStop(state, playerKey) {
-  if (state.phase !== "president-choice" || state.pendingPresident?.playerKey !== playerKey) {
-    return state;
-  }
-
-  const baseScore = 10;
-  const payout = baseScore * (state.carryOverMultiplier || 1);
-  let log = state.log.concat(
-    `${state.players[playerKey].label}: 손패 대통령 즉시 종료 선택 (${payout}점)`
-  );
-  const settled = settleRoundGold(state.players, playerKey, payout);
-  log = log.concat(
-    `라운드 정산(골드): ${state.players[playerKey].label} 요구 ${settled.requested}골드 / 수령 ${settled.paid}골드`
-  );
-
-  const human =
-    playerKey === "human"
-      ? {
-          base: baseScore,
-          multiplier: state.carryOverMultiplier || 1,
-          total: payout,
-          bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
-          breakdown: { presidentStop: true, goBonus: 0 }
-        }
-      : {
-          base: 0,
-          multiplier: 1,
-          total: 0,
-          bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
-          breakdown: { goBonus: 0 }
-        };
-  const ai =
-    playerKey === "ai"
-      ? {
-          base: baseScore,
-          multiplier: state.carryOverMultiplier || 1,
-          total: payout,
-          bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
-          breakdown: { presidentStop: true, goBonus: 0 }
-        }
-      : {
-          base: 0,
-          multiplier: 1,
-          total: 0,
-          bak: { gwang: false, pi: false, mongBak: false, multiplier: 1 },
-          breakdown: { goBonus: 0 }
-        };
-
-  return {
-    ...state,
-    phase: "resolution",
-    pendingPresident: null,
-    pendingGoStop: null,
-    pendingMatch: null,
-    pendingShakingConfirm: null,
-    nextCarryOverMultiplier: 1,
-    players: settled.updatedPlayers,
-    kiboSeq: (state.kiboSeq || 0) + 1,
-    kibo: (state.kibo || []).concat({
-      no: (state.kiboSeq || 0) + 1,
-      type: "president_stop",
-      playerKey,
-      payout
-    }),
-    result: {
-      human,
-      ai,
-      winner: playerKey,
-      nagari: false,
-      nagariReasons: [],
-      gold: {
-        requested: settled.requested,
-        paid: settled.paid,
-        unitPerPoint: POINT_GOLD_UNIT
-      }
-    },
-    log
-  };
-}
-
-export function choosePresidentHold(state, playerKey) {
-  if (state.phase !== "president-choice" || state.pendingPresident?.playerKey !== playerKey) {
-    return state;
-  }
-  const player = state.players[playerKey];
-  const month = state.pendingPresident?.month ?? null;
-  const nextPlayers = {
-    ...state.players,
-    [playerKey]: { ...player, presidentHold: true, presidentHoldMonth: month }
-  };
-  const log = state.log.concat(
-    `${state.players[playerKey].label}: 손패 대통령(${month}월) 들고치기 선택`
-  );
-  return {
-    ...state,
-    players: nextPlayers,
-    phase: "playing",
-    pendingPresident: null,
-    pendingShakingConfirm: null,
-    log,
-    kiboSeq: (state.kiboSeq || 0) + 1,
-    kibo: (state.kibo || []).concat({
-      no: (state.kiboSeq || 0) + 1,
-      type: "president_hold",
-      playerKey,
-      month
-    })
-  };
-}
-
-export function chooseGukjinMode(state, playerKey, mode) {
-  if (state.phase !== "gukjin-choice" || state.pendingGukjinChoice?.playerKey !== playerKey) {
-    return state;
-  }
-  if (!state.players[playerKey]) return state;
-  if (mode !== "five" && mode !== "junk") return state;
-
-  const player = state.players[playerKey];
-  if (player.gukjinLocked) return state;
-  const captured = {
-    ...player.captured,
-    kwang: (player.captured.kwang || []).slice(),
-    five: (player.captured.five || []).slice(),
-    ribbon: (player.captured.ribbon || []).slice(),
-    junk: (player.captured.junk || []).slice()
-  };
-  if (mode === "junk") {
-    const gukjinIdx = captured.five.findIndex(
-      (card) => isGukjinCard(card) && card.category === "five" && !card.gukjinTransformed
-    );
-    if (gukjinIdx >= 0) {
-      const [gukjinCard] = captured.five.splice(gukjinIdx, 1);
-      captured.junk.push({
-        ...gukjinCard,
-        category: "junk",
-        piValue: 2,
-        gukjinTransformed: true,
-        name: `${gukjinCard.name} (국진피)`
-      });
-    }
-  } else if (mode === "five") {
-    const gukjinJunkIdx = captured.junk.findIndex(
-      (card) => isGukjinCard(card) && card.category === "junk"
-    );
-    if (gukjinJunkIdx >= 0) {
-      const [gukjinCard] = captured.junk.splice(gukjinJunkIdx, 1);
-      captured.five.push({
-        ...gukjinCard,
-        category: "five",
-        piValue: undefined,
-        gukjinTransformed: false,
-        name: String(gukjinCard.name || "").replace(" (국진피)", "")
-      });
-    }
-  }
-  const nextPlayers = {
-    ...state.players,
-    [playerKey]: { ...player, captured, gukjinMode: mode, gukjinLocked: true }
-  };
-  const label = mode === "junk" ? "쌍피" : "열";
-  const log = state.log.concat(`${player.label}: 국진(9월 열) ${label} 처리 선택(낙장불입)`);
-
-  const nextState = {
-    ...state,
-    players: nextPlayers,
-    phase: "playing",
-    pendingGukjinChoice: null,
-    pendingShakingConfirm: null,
-    log,
-    kiboSeq: (state.kiboSeq || 0) + 1,
-    kibo: (state.kibo || []).concat({
-      no: (state.kiboSeq || 0) + 1,
-      type: "gukjin_mode",
-      playerKey,
-      mode
-    })
-  };
-  return continueAfterTurnIfNeeded(nextState, playerKey);
-}
-
-
-
-
-
-
-
-
 
 

@@ -143,6 +143,13 @@ function scoringFiveCount(player) {
   return scoringFiveCards(player).length;
 }
 
+function fiveCountIncludingCapturedGukjin(player) {
+  const fiveCount = (player?.captured?.five || []).length;
+  if (!player?.captured) return fiveCount;
+  if (hasCardId(player.captured.five || [], GUKJIN_CARD_ID)) return fiveCount;
+  return hasGukjinInCaptured(player.captured) ? fiveCount + 1 : fiveCount;
+}
+
 function otherPlayerKey(playerKey) {
   return playerKey === "human" ? "ai" : "human";
 }
@@ -239,6 +246,14 @@ function summarizeScenarioRange(scenarios, field) {
   const max = Math.max(...vals);
   const avg = vals.reduce((sum, v) => sum + v, 0) / vals.length;
   return { min, max, avg };
+}
+
+function pickGukjinScenario(scenarios, selfMode, oppMode) {
+  return (scenarios || []).find((s) => s?.selfMode === selfMode && s?.oppMode === oppMode) || null;
+}
+
+function preferredGukjinModeByFiveCount(fiveCount) {
+  return Number(fiveCount || 0) >= 7 ? "five" : "junk";
 }
 
 function analyzeGukjinBranches(state, playerKey) {
@@ -357,6 +372,10 @@ function analyzeGameContext(state, playerKey) {
   const deckCount = state.deck?.length || 0;
   const carryOverMultiplier = state.carryOverMultiplier || 1;
   const oppGoCount = state.players?.[opp]?.goCount || 0;
+  const selfPlayer = state.players?.[playerKey];
+  const oppPlayer = state.players?.[opp];
+  const selfCapturedFiveRaw = fiveCountIncludingCapturedGukjin(selfPlayer);
+  const oppCapturedFiveRaw = fiveCountIncludingCapturedGukjin(oppPlayer);
   let selfPi = capturedCountByCategory(state.players?.[playerKey], "junk");
   let oppPi = capturedCountByCategory(state.players?.[opp], "junk");
   let mong = computeMongRiskProfile(state, playerKey);
@@ -364,13 +383,30 @@ function analyzeGameContext(state, playerKey) {
   let oppFive = mong.oppFive;
   const gukjinBranch = analyzeGukjinBranches(state, playerKey);
   if (gukjinBranch.enabled) {
-    myScore = gukjinBranch.myScore.avg;
-    oppScore = gukjinBranch.oppScore.avg;
-    selfPi = gukjinBranch.selfPi.avg;
-    oppPi = gukjinBranch.oppPi.avg;
+    // Default policy: treat gukjin as junk(ssangpi) unless five count reaches 7+ (including captured gukjin).
+    const preferredSelfMode = preferredGukjinModeByFiveCount(selfCapturedFiveRaw);
+    const preferredOppMode = preferredGukjinModeByFiveCount(oppCapturedFiveRaw);
+    const preferredScenario = pickGukjinScenario(gukjinBranch.scenarios, preferredSelfMode, preferredOppMode);
+
+    if (preferredScenario) {
+      myScore = Number(preferredScenario.myScore || 0);
+      oppScore = Number(preferredScenario.oppScore || 0);
+      selfPi = Number(preferredScenario.selfPi || 0);
+      oppPi = Number(preferredScenario.oppPi || 0);
+      selfFive = Number(preferredScenario.selfFive || 0);
+      oppFive = Number(preferredScenario.oppFive || 0);
+    } else {
+      // Fallback for safety when preferred scenario is unavailable.
+      myScore = gukjinBranch.myScore.avg;
+      oppScore = gukjinBranch.oppScore.avg;
+      selfPi = gukjinBranch.selfPi.avg;
+      oppPi = gukjinBranch.oppPi.avg;
+      selfFive = gukjinBranch.selfFive.min;
+      oppFive = gukjinBranch.oppFive.max;
+    }
     // Defensive baseline: assume lower self five / higher opponent five.
-    selfFive = gukjinBranch.selfFive.min;
-    oppFive = gukjinBranch.oppFive.max;
+    selfFive = Math.min(selfFive, gukjinBranch.selfFive.min);
+    oppFive = Math.max(oppFive, gukjinBranch.oppFive.max);
     const criticalMongRisk = selfFive <= 0 && oppFive >= 6;
     mong = {
       ...mong,

@@ -1,3 +1,4 @@
+﻿import { DEFAULT_LANGUAGE, makeTranslator } from "../i18n/i18n.js";
 import { hydrateCard } from "./common.js";
 
 export function buildReplayFrames(state) {
@@ -42,25 +43,20 @@ export function buildReplayFrames(state) {
 }
 
 export function formatActionText(action, t = null) {
+  const tr = t || makeTranslator(DEFAULT_LANGUAGE);
   if (!action) return "-";
-  if (action.type === "initial") return t ? t("replay.action.initial") : "초기 배분";
-  if (action.type === "pass") return t ? t("replay.action.pass") : "패스";
+  if (action.type === "initial") return tr("replay.action.initial");
+  if (action.type === "pass") return tr("replay.action.pass");
   if (action.type === "play") {
-    return t
-      ? t("replay.action.play", { month: action.card?.month || "?", name: action.card?.name || "" })
-      : `카드 플레이 (${action.card?.month || "?"}월 ${action.card?.name || ""})`;
+    return tr("replay.action.play", { month: action.card?.month || "?", name: action.card?.name || "" });
   }
   if (action.type === "declare_bomb") {
-    return t
-      ? t("replay.action.declareBomb", { month: action.month })
-      : `폭탄 선언 (${action.month}월)`;
+    return tr("replay.action.declareBomb", { month: action.month });
   }
   if (action.type === "flip-select") {
-    return t
-      ? t("replay.action.flipSelect", { month: action.card?.month || "?" })
-      : `뒤집기 선택 캡처 (${action.card?.month || "?"}월)`;
+    return tr("replay.action.flipSelect", { month: action.card?.month || "?" });
   }
-  return action.type || (t ? t("replay.action.unknown") : "행동");
+  return action.type || tr("replay.action.unknown");
 }
 
 export function formatEventsText(events) {

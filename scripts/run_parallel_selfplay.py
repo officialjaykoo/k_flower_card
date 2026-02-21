@@ -49,32 +49,10 @@ def _trace_order(trace):
     return "?"
 
 
-def _action_alias(action):
-    aliases = {
-        "choose_go": "go",
-        "choose_stop": "stop",
-        "choose_shaking_yes": "shaking_yes",
-        "choose_shaking_no": "shaking_no",
-        "choose_president_stop": "president_stop",
-        "choose_president_hold": "president_hold",
-    }
-    return aliases.get(action, action)
-
-
 def _trace_choice(trace):
     if not isinstance(trace, dict):
         return None
-    compact = trace.get("ch")
-    if compact is not None:
-        return compact
-    dt = str(trace.get("dt") or "")
-    if dt == "play":
-        return trace.get("c")
-    if dt == "match":
-        return trace.get("s")
-    if dt == "option":
-        return _action_alias(trace.get("at"))
-    return trace.get("c") or trace.get("s") or _action_alias(trace.get("at"))
+    return trace.get("ch")
 
 
 def _policy_context_key(trace):
@@ -86,18 +64,16 @@ def _policy_context_key(trace):
     dc = trace.get("dc") or {}
     decision_type = str(trace.get("dt") or "?")
     order = _trace_order(trace)
-    deck_bucket = int((dc.get("deckCount") or 0) // 3)
-    hand_self = int(dc.get("handCountSelf") or 0)
-    if dc.get("handCountDiff") is not None:
-        hand_diff = int(dc.get("handCountDiff") or 0)
-    else:
-        hand_diff = hand_self - int(dc.get("handCountOpp") or 0)
-    go_self = int(dc.get("goCountSelf") or 0)
-    go_opp = int(dc.get("goCountOpp") or 0)
-    shake_self = min(3, int(dc.get("shakeCountSelf") or 0))
-    shake_opp = min(3, int(dc.get("shakeCountOpp") or 0))
-    cands = int(trace.get("cc") or 0)
-    phase = _trace_phase_code(dc.get("phase"))
+    deck_bucket = int((dc.get("d") or 0) // 3)
+    hand_self = int(dc.get("hs") or 0)
+    hand_diff = int(dc.get("hd") or 0)
+    go_self = int(dc.get("gs") or 0)
+    go_opp = int(dc.get("go") or 0)
+    shake_self = min(3, int(dc.get("ss") or 0))
+    shake_opp = min(3, int(dc.get("so") or 0))
+    la = trace.get("la")
+    cands = len(la) if isinstance(la, list) else int(trace.get("cc") or 0)
+    phase = _trace_phase_code(dc.get("p"))
     return "|".join(
         [
             f"dt={decision_type}",
@@ -118,16 +94,18 @@ def _policy_context_key(trace):
 def _minimal_policy_trace(trace):
     if not isinstance(trace, dict):
         return None
-    cc = trace.get("cc")
-    try:
-        if cc is not None and int(cc) <= 1:
-            return None
-    except Exception:
-        pass
+    la = trace.get("la")
+    if not isinstance(la, list):
+        return None
+    legal_actions = [str(x).strip() for x in la if str(x or "").strip()]
+    if len(legal_actions) <= 1:
+        return None
     out = {}
-    for k in ("a", "o", "dt", "cc"):
+    for k in ("seq", "a", "o", "dt"):
         if k in trace:
             out[k] = trace.get(k)
+    out["cc"] = len(legal_actions)
+    out["la"] = legal_actions
     out["ch"] = _trace_choice(trace)
     ck = _policy_context_key(trace)
     if isinstance(ck, str) and ck:
@@ -276,12 +254,13 @@ def main():
                                         {
                                             "ver": obj.get("ver"),
                                             "run": obj.get("run"),
+                                            "runId": obj.get("runId"),
+                                            "seatMode": obj.get("seatMode"),
                                             "firstAttackerActor": obj.get("firstAttackerActor"),
                                             "initialGoldMy": obj.get("initialGoldMy"),
                                             "initialGoldYour": obj.get("initialGoldYour"),
                                             "finalGoldMy": obj.get("finalGoldMy"),
                                             "finalGoldYour": obj.get("finalGoldYour"),
-                                            "goldDeltaMy": obj.get("goldDeltaMy"),
                                             "decision_trace": policy_traces,
                                         },
                                         ensure_ascii=False,

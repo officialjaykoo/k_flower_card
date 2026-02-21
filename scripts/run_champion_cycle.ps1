@@ -68,21 +68,6 @@ function TraceChoice {
   if ($null -eq $Trace) { return $null }
   $compact = $Trace.ch
   if ($null -ne $compact -and -not [string]::IsNullOrWhiteSpace([string]$compact)) { return [string]$compact }
-  $dt = [string]$Trace.dt
-  if ($dt -eq "play") { return [string]$Trace.c }
-  if ($dt -eq "match") { return [string]$Trace.s }
-  if ($dt -eq "option") {
-    $at = [string]$Trace.at
-    switch ($at) {
-      "choose_go" { return "go" }
-      "choose_stop" { return "stop" }
-      "choose_shaking_yes" { return "shaking_yes" }
-      "choose_shaking_no" { return "shaking_no" }
-      "choose_president_stop" { return "president_stop" }
-      "choose_president_hold" { return "president_hold" }
-      default { return $at }
-    }
-  }
   return $null
 }
 

@@ -11,7 +11,7 @@ param(
   [string]$PolicyModelYourSide = "",
   [string]$ValueModelYourSide = "",
   [switch]$ModelOnly,
-  [switch]$SkipEval
+  [string]$ValueDevice = "cpu"
 )
 
 if ($TrainGames -le 0) {
@@ -76,19 +76,48 @@ if ($LASTEXITCODE -ne 0) {
   exit $LASTEXITCODE
 }
 
-$pipelineArgs = @("-3", "scripts/04_run_pipeline.py", "--input", $trainLog, "--tag", $baseTag, "--fast")
-if ($SkipEval) {
-  $pipelineArgs += "--skip-eval"
+$policyOut = "models/policy-$baseTag.json"
+$valueOut = "models/value-$baseTag.json"
+
+if (-not (Test-Path "models")) {
+  New-Item -Path "models" -ItemType Directory | Out-Null
 }
 
-Write-Host "> py $($pipelineArgs -join ' ')"
-& py @pipelineArgs
+$policyArgs = @(
+  "-3", "scripts/01_train_policy.py",
+  "--input", $trainLog,
+  "--output", $policyOut,
+  "--max-samples", "100000",
+  "--skip-train-metrics"
+)
+Write-Host "> py $($policyArgs -join ' ')"
+& py @policyArgs
 if ($LASTEXITCODE -ne 0) {
-  Write-Error "Fast pipeline failed."
+  Write-Error "Policy training failed."
+  exit $LASTEXITCODE
+}
+
+$valueArgs = @(
+  "-3", "scripts/02_train_value.py",
+  "--input", $trainLog,
+  "--output", $valueOut,
+  "--max-samples", "200000",
+  "--device", $ValueDevice,
+  "--dim", "128",
+  "--epochs", "1",
+  "--batch-size", "8192",
+  "--progress-every", "0"
+)
+Write-Host "> py $($valueArgs -join ' ')"
+& py @valueArgs
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Value training failed."
   exit $LASTEXITCODE
 }
 
 Write-Host "Fast loop completed."
 Write-Host "Train log: $trainLog"
 Write-Host "Tag: $baseTag"
+Write-Host "Policy model: $policyOut"
+Write-Host "Value model: $valueOut"
 

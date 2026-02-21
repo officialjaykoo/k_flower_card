@@ -23,16 +23,11 @@ import { STARTING_GOLD } from "../src/engine/economy.js";
 import { buildDeck } from "../src/cards.js";
 import { BOT_POLICIES } from "../src/ai/policies.js";
 import { aiPlay } from "../src/ai/aiPlay.js";
-import {
-  MOE_ATTACK_SCORE_THRESHOLD_DEFAULT,
-  MOE_DEFENSE_SCORE_THRESHOLD_DEFAULT,
-  MOE_OPP_THREAT_THRESHOLD_DEFAULT,
-  MOE_RISK_THRESHOLD_DEFAULT,
-  buildMoeSelectionContext,
-  selectMoeRoleByContext
-} from "../src/ai/moePolicy.js";
 import { getActionPlayerKey } from "../src/engine/runner.js";
 
+// -----------------------------------------------------------------------------
+// 1) Process guard
+// -----------------------------------------------------------------------------
 if (process.env.NO_SIMULATION === "1") {
   console.error("Simulation blocked: NO_SIMULATION=1");
   process.exit(2);
@@ -41,22 +36,32 @@ if (process.env.NO_SIMULATION === "1") {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// -----------------------------------------------------------------------------
+// 2) Global constants
+// -----------------------------------------------------------------------------
 const DEFAULT_LOG_MODE = "train";
-const SUPPORTED_LOG_MODES = new Set(["train", "delta"]);
 const SUPPORTED_POLICIES = new Set(BOT_POLICIES);
 const DEFAULT_POLICY = "heuristic_v3";
 const DECISION_CACHE_MAX = 200000;
 const HASH_CACHE_MAX = 500000;
-const TRAIN_EXPLORE_RATE_DEFAULT = 0.006;
-const TRAIN_EXPLORE_RATE_COMEBACK_DEFAULT = 0.012;
-const TRAIN_EXPLORE_DECAY_K_DEFAULT = 0;
-const TRAIN_EXPLORE_MIN_DEFAULT = 0;
-const TRAIN_EXPLORE_COMEBACK_MIN_DEFAULT = 0;
 const GO_STOP_THRESHOLD_BASE_PERMILLE = 1200;
 const GO_STOP_THRESHOLD_AHEAD_PERMILLE = 2000;
 const GO_STOP_THRESHOLD_BEHIND_PERMILLE = 500;
+const MIXED_STRATEGY_ENABLED_DEFAULT = true;
+const MIXED_TOP_K_PLAY = 3;
+const MIXED_TOP_K_MATCH = 2;
+const MIXED_TOP_K_OPTION = 2;
+const MIXED_TEMPERATURE_PLAY = 0.9;
+const MIXED_TEMPERATURE_MATCH = 0.8;
+const MIXED_TEMPERATURE_OPTION = 0.7;
+const OPTION_LOOKAHEAD_ENABLED_DEFAULT = true;
+const OPTION_LOOKAHEAD_ROLLOUTS_DEFAULT = 4;
+const OPTION_LOOKAHEAD_MAX_STEPS_DEFAULT = 180;
+const OPTION_LOOKAHEAD_DOWNSIDE_LAMBDA = 0.25;
 const IR_TURN_CLIP = 0.3;
 const IR_EPISODE_CLIP = 1.0;
+const LEARNING_ROLE_ATTACK_SCORE_MIN = 20;
+const LEARNING_ROLE_DEFENSE_OPP_SCORE_MAX = 10;
 const FULL_DECK = buildDeck();
 const RIBBON_COMBO_MONTH_SETS = Object.freeze({
   hongdan: Object.freeze([1, 2, 3]),
@@ -68,27 +73,44 @@ const GWANG_MONTHS = Object.freeze([1, 3, 8, 11, 12]);
 const TRACE_SCHEMA_VERSION = 2;
 const TRACE_FEATURE_VERSION = 14;
 const TRACE_TRIGGER_DICT_VERSION = 2;
-const TRIGGER_BIT = Object.freeze({
-  earlyTurnForced: 1 << 0,
-  goStopOption: 1 << 1,
-  shakingYesOption: 1 << 2,
-  optionTurnOther: 1 << 3,
-  deckEmpty: 1 << 4,
-  specialEvent: 1 << 5,
-  bombEvent: 1 << 6,
-  riskShift: 1 << 7,
-  comboThreatEnter: 1 << 8,
-  terminalContext: 1 << 9
-});
 
 const decisionInferenceCache = new Map();
 const hashIndexCache = new Map();
 const SIDE_MY = "mySide";
 const SIDE_YOUR = "yourSide";
 
+// -----------------------------------------------------------------------------
+// 3) Generic utilities
+// -----------------------------------------------------------------------------
 function setBoundedCache(cache, key, value, maxEntries) {
   if (cache.size >= maxEntries) cache.clear();
   cache.set(key, value);
+}
+
+function deterministicUnitFromText(text) {
+  const digest = crypto.createHash("md5").update(String(text || ""), "utf8").digest("hex");
+  const n = Number.parseInt(digest.slice(0, 8), 16);
+  return n / 0xffffffff;
+}
+
+function softmaxSampleFromScores(items, scoreOf, topK, temperature, entropyKey) {
+  const ranked = [...items].sort((a, b) => Number(scoreOf.get(b) || -Infinity) - Number(scoreOf.get(a) || -Infinity));
+  const k = Math.max(1, Math.min(ranked.length, Math.floor(Number(topK || ranked.length))));
+  const chosen = ranked.slice(0, k);
+  if (chosen.length <= 1) return chosen[0];
+  const temp = Math.max(0.05, Number(temperature || 1.0));
+  const raw = chosen.map((c) => Number(scoreOf.get(c) || -Infinity));
+  const maxRaw = Math.max(...raw);
+  const exps = raw.map((x) => Math.exp((x - maxRaw) / temp));
+  const sumExp = exps.reduce((a, b) => a + b, 0);
+  if (!(sumExp > 0)) return chosen[0];
+  const u = deterministicUnitFromText(entropyKey);
+  let acc = 0;
+  for (let i = 0; i < chosen.length; i += 1) {
+    acc += exps[i] / sumExp;
+    if (u <= acc) return chosen[i];
+  }
+  return chosen[chosen.length - 1];
 }
 
 function actorToSide(actor, firstTurnKey) {
@@ -123,35 +145,19 @@ function normalizePolicyInput(raw) {
   return p || DEFAULT_POLICY;
 }
 
+// -----------------------------------------------------------------------------
+// 4) CLI parsing
+// -----------------------------------------------------------------------------
 function parseArgs(argv) {
   const args = [...argv];
   let games = 1000;
   let outArg = null;
-  let logMode = DEFAULT_LOG_MODE;
   let policyMySide = DEFAULT_POLICY;
   let policyYourSide = DEFAULT_POLICY;
-  let modelOnly = false;
   let policyModelMySide = null;
   let policyModelYourSide = null;
-  let policyModelAttackMySide = null;
-  let policyModelAttackYourSide = null;
-  let policyModelDefenseMySide = null;
-  let policyModelDefenseYourSide = null;
-  let valueModelMySide = null;
-  let valueModelYourSide = null;
-  let moeDefenseScoreThreshold = MOE_DEFENSE_SCORE_THRESHOLD_DEFAULT;
-  let moeAttackScoreThreshold = MOE_ATTACK_SCORE_THRESHOLD_DEFAULT;
-  let moeRiskThreshold = MOE_RISK_THRESHOLD_DEFAULT;
-  let moeOppThreatThreshold = MOE_OPP_THREAT_THRESHOLD_DEFAULT;
-  let trainExploreRate = TRAIN_EXPLORE_RATE_DEFAULT;
-  let trainExploreRateComeback = TRAIN_EXPLORE_RATE_COMEBACK_DEFAULT;
-  let trainExploreDecayK = TRAIN_EXPLORE_DECAY_K_DEFAULT;
-  let trainExploreMin = TRAIN_EXPLORE_MIN_DEFAULT;
-  let trainExploreComebackMin = TRAIN_EXPLORE_COMEBACK_MIN_DEFAULT;
-  let traceMyTurnOnly = false;
-  let traceImportantOnly = true;
-  let traceContextRadius = 0;
-  let traceGoStopPlus2 = false;
+  let fixedSeats = false; // default: switching first-turn plan
+  let dedupeStableTurns = false;
 
   if (args.length > 0 && /^\d+$/.test(args[0])) {
     games = Number(args.shift());
@@ -163,18 +169,6 @@ function parseArgs(argv) {
 
   while (args.length > 0) {
     const arg = args.shift();
-    if (arg === "--log-mode" && args.length > 0) {
-      logMode = String(args.shift()).trim();
-      continue;
-    }
-    if (arg.startsWith("--log-mode=")) {
-      logMode = arg.split("=", 2)[1].trim();
-      continue;
-    }
-    if (SUPPORTED_LOG_MODES.has(arg)) {
-      logMode = arg;
-      continue;
-    }
     if (arg === "--policy-my-side" && args.length > 0) {
       policyMySide = normalizePolicyInput(args.shift());
       continue;
@@ -207,172 +201,32 @@ function parseArgs(argv) {
       policyModelYourSide = arg.split("=", 2)[1].trim();
       continue;
     }
-    if (arg === "--policy-model-attack-my-side" && args.length > 0) {
-      policyModelAttackMySide = String(args.shift()).trim();
+    if (arg === "--fixed-seats") {
+      fixedSeats = true;
       continue;
     }
-    if (arg.startsWith("--policy-model-attack-my-side=")) {
-      policyModelAttackMySide = arg.split("=", 2)[1].trim();
+    if (arg === "--switch-seats") {
+      fixedSeats = false;
       continue;
     }
-    if (arg === "--policy-model-attack-your-side" && args.length > 0) {
-      policyModelAttackYourSide = String(args.shift()).trim();
+    if (arg === "--dedupe-stable-turns") {
+      dedupeStableTurns = true;
       continue;
     }
-    if (arg.startsWith("--policy-model-attack-your-side=")) {
-      policyModelAttackYourSide = arg.split("=", 2)[1].trim();
-      continue;
-    }
-    if (arg === "--policy-model-defense-my-side" && args.length > 0) {
-      policyModelDefenseMySide = String(args.shift()).trim();
-      continue;
-    }
-    if (arg.startsWith("--policy-model-defense-my-side=")) {
-      policyModelDefenseMySide = arg.split("=", 2)[1].trim();
-      continue;
-    }
-    if (arg === "--policy-model-defense-your-side" && args.length > 0) {
-      policyModelDefenseYourSide = String(args.shift()).trim();
-      continue;
-    }
-    if (arg.startsWith("--policy-model-defense-your-side=")) {
-      policyModelDefenseYourSide = arg.split("=", 2)[1].trim();
-      continue;
-    }
-    if (arg === "--value-model-my-side" && args.length > 0) {
-      valueModelMySide = String(args.shift()).trim();
-      continue;
-    }
-    if (arg.startsWith("--value-model-my-side=")) {
-      valueModelMySide = arg.split("=", 2)[1].trim();
-      continue;
-    }
-    if (arg === "--value-model-your-side" && args.length > 0) {
-      valueModelYourSide = String(args.shift()).trim();
-      continue;
-    }
-    if (arg.startsWith("--value-model-your-side=")) {
-      valueModelYourSide = arg.split("=", 2)[1].trim();
-      continue;
-    }
-    if (arg === "--model-only" || arg === "--strict-model-only") {
-      modelOnly = true;
-      continue;
-    }
-    if (arg === "--train-explore-rate" && args.length > 0) {
-      trainExploreRate = Number(args.shift());
-      continue;
-    }
-    if (arg.startsWith("--train-explore-rate=")) {
-      trainExploreRate = Number(arg.split("=", 2)[1]);
-      continue;
-    }
-    if (arg === "--train-explore-rate-comeback" && args.length > 0) {
-      trainExploreRateComeback = Number(args.shift());
-      continue;
-    }
-    if (arg.startsWith("--train-explore-rate-comeback=")) {
-      trainExploreRateComeback = Number(arg.split("=", 2)[1]);
-      continue;
-    }
-    if (arg === "--train-explore-decay-k" && args.length > 0) {
-      trainExploreDecayK = Number(args.shift());
-      continue;
-    }
-    if (arg.startsWith("--train-explore-decay-k=")) {
-      trainExploreDecayK = Number(arg.split("=", 2)[1]);
-      continue;
-    }
-    if (arg === "--train-explore-min" && args.length > 0) {
-      trainExploreMin = Number(args.shift());
-      continue;
-    }
-    if (arg.startsWith("--train-explore-min=")) {
-      trainExploreMin = Number(arg.split("=", 2)[1]);
-      continue;
-    }
-    if (arg === "--train-explore-comeback-min" && args.length > 0) {
-      trainExploreComebackMin = Number(args.shift());
-      continue;
-    }
-    if (arg.startsWith("--train-explore-comeback-min=")) {
-      trainExploreComebackMin = Number(arg.split("=", 2)[1]);
-      continue;
-    }
-    if (arg === "--trace-my-turn-only") {
-      traceMyTurnOnly = true;
-      continue;
-    }
-    if (arg === "--trace-all-turns") {
-      traceMyTurnOnly = false;
-      continue;
-    }
-    if (arg.startsWith("--trace-my-turn-only=")) {
-      const raw = String(arg.split("=", 2)[1] || "").trim().toLowerCase();
-      traceMyTurnOnly = !(raw === "0" || raw === "false" || raw === "no" || raw === "off");
-      continue;
-    }
-    if (arg === "--trace-important-only") {
-      traceImportantOnly = true;
-      continue;
-    }
-    if (arg === "--trace-all-candidate-turns" || arg === "--trace-no-important-filter") {
-      traceImportantOnly = false;
-      continue;
-    }
-    if (arg === "--trace-context-radius" && args.length > 0) {
-      traceContextRadius = Number(args.shift());
-      continue;
-    }
-    if (arg.startsWith("--trace-context-radius=")) {
-      traceContextRadius = Number(arg.split("=", 2)[1]);
-      continue;
-    }
-    if (arg === "--trace-go-stop-plus2" || arg === "--trace-go-plus2") {
-      traceGoStopPlus2 = true;
-      continue;
-    }
-    if (arg === "--trace-no-go-stop-plus2" || arg === "--trace-no-go-plus2") {
-      traceGoStopPlus2 = false;
-      continue;
-    }
-    if (arg === "--moe-defense-score-threshold" && args.length > 0) {
-      moeDefenseScoreThreshold = Number(args.shift());
-      continue;
-    }
-    if (arg.startsWith("--moe-defense-score-threshold=")) {
-      moeDefenseScoreThreshold = Number(arg.split("=", 2)[1]);
-      continue;
-    }
-    if (arg === "--moe-attack-score-threshold" && args.length > 0) {
-      moeAttackScoreThreshold = Number(args.shift());
-      continue;
-    }
-    if (arg.startsWith("--moe-attack-score-threshold=")) {
-      moeAttackScoreThreshold = Number(arg.split("=", 2)[1]);
-      continue;
-    }
-    if (arg === "--moe-risk-threshold" && args.length > 0) {
-      moeRiskThreshold = Number(args.shift());
-      continue;
-    }
-    if (arg.startsWith("--moe-risk-threshold=")) {
-      moeRiskThreshold = Number(arg.split("=", 2)[1]);
-      continue;
-    }
-    if (arg === "--moe-opp-threat-threshold" && args.length > 0) {
-      moeOppThreatThreshold = Number(args.shift());
-      continue;
-    }
-    if (arg.startsWith("--moe-opp-threat-threshold=")) {
-      moeOppThreatThreshold = Number(arg.split("=", 2)[1]);
+    if (arg === "--no-dedupe-stable-turns") {
+      dedupeStableTurns = false;
       continue;
     }
     throw new Error(`Unknown argument: ${arg}`);
   }
 
-  if (!SUPPORTED_LOG_MODES.has(logMode)) {
-    throw new Error(`Unsupported log mode: ${logMode}. Use one of: train, delta`);
+  if (!Number.isInteger(games) || games <= 0) {
+    throw new Error(`games must be a positive integer. Received: ${games}`);
+  }
+  if (!fixedSeats && games % 2 !== 0) {
+    throw new Error(
+      `games must be even in switching mode for 50:50 first-turn split. Received: ${games}`
+    );
   }
   if (!SUPPORTED_POLICIES.has(policyMySide)) {
     throw new Error(
@@ -384,149 +238,45 @@ function parseArgs(argv) {
       `Unsupported policy for yourSide: ${policyYourSide}. Use one of: ${[...SUPPORTED_POLICIES].join(", ")}`
     );
   }
-  if (!Number.isFinite(trainExploreRate) || trainExploreRate < 0 || trainExploreRate > 1) {
-    throw new Error(`Invalid --train-explore-rate: ${trainExploreRate}. Expected [0, 1].`);
-  }
-  if (
-    !Number.isFinite(trainExploreRateComeback) ||
-    trainExploreRateComeback < 0 ||
-    trainExploreRateComeback > 1
-  ) {
-    throw new Error(
-      `Invalid --train-explore-rate-comeback: ${trainExploreRateComeback}. Expected [0, 1].`
-    );
-  }
-  if (!Number.isFinite(trainExploreDecayK) || trainExploreDecayK < 0) {
-    throw new Error(`Invalid --train-explore-decay-k: ${trainExploreDecayK}. Expected >= 0.`);
-  }
-  if (!Number.isFinite(trainExploreMin) || trainExploreMin < 0 || trainExploreMin > 1) {
-    throw new Error(`Invalid --train-explore-min: ${trainExploreMin}. Expected [0, 1].`);
-  }
-  if (
-    !Number.isFinite(trainExploreComebackMin) ||
-    trainExploreComebackMin < 0 ||
-    trainExploreComebackMin > 1
-  ) {
-    throw new Error(
-      `Invalid --train-explore-comeback-min: ${trainExploreComebackMin}. Expected [0, 1].`
-    );
-  }
-  if (trainExploreMin > trainExploreRate + 1e-12) {
-    throw new Error(
-      `Invalid explore range: --train-explore-min (${trainExploreMin}) must be <= --train-explore-rate (${trainExploreRate}).`
-    );
-  }
-  if (trainExploreComebackMin > trainExploreRateComeback + 1e-12) {
-    throw new Error(
-      `Invalid explore range: --train-explore-comeback-min (${trainExploreComebackMin}) must be <= --train-explore-rate-comeback (${trainExploreRateComeback}).`
-    );
-  }
-  if (!Number.isFinite(traceContextRadius) || traceContextRadius < 0) {
-    throw new Error(
-      `Invalid --trace-context-radius: ${traceContextRadius}. Expected non-negative integer.`
-    );
-  }
-  traceContextRadius = Math.floor(traceContextRadius);
-  if (!Number.isFinite(moeDefenseScoreThreshold)) {
-    throw new Error(`Invalid --moe-defense-score-threshold: ${moeDefenseScoreThreshold}`);
-  }
-  if (!Number.isFinite(moeAttackScoreThreshold)) {
-    throw new Error(`Invalid --moe-attack-score-threshold: ${moeAttackScoreThreshold}`);
-  }
-  if (!Number.isFinite(moeRiskThreshold) || moeRiskThreshold < 0) {
-    throw new Error(`Invalid --moe-risk-threshold: ${moeRiskThreshold}. Expected >= 0.`);
-  }
-  moeRiskThreshold = Math.floor(moeRiskThreshold);
-  if (
-    !Number.isFinite(moeOppThreatThreshold) ||
-    moeOppThreatThreshold < 0 ||
-    moeOppThreatThreshold > 1
-  ) {
-    throw new Error(
-      `Invalid --moe-opp-threat-threshold: ${moeOppThreatThreshold}. Expected [0, 1].`
-    );
-  }
 
   return {
     games,
     outArg,
-    logMode,
     policyMySide,
     policyYourSide,
     policyModelMySide,
     policyModelYourSide,
-    policyModelAttackMySide,
-    policyModelAttackYourSide,
-    policyModelDefenseMySide,
-    policyModelDefenseYourSide,
-    valueModelMySide,
-    valueModelYourSide,
-    moeDefenseScoreThreshold,
-    moeAttackScoreThreshold,
-    moeRiskThreshold,
-    moeOppThreatThreshold,
-    modelOnly,
-    trainExploreRate,
-    trainExploreRateComeback,
-    trainExploreDecayK,
-    trainExploreMin,
-    trainExploreComebackMin,
-    traceMyTurnOnly,
-    traceImportantOnly,
-    traceContextRadius,
-    traceGoStopPlus2
+    fixedSeats,
+    dedupeStableTurns
   };
 }
 
+// -----------------------------------------------------------------------------
+// 5) Runtime bootstrap (args -> config -> models)
+// -----------------------------------------------------------------------------
 const parsed = parseArgs(process.argv.slice(2));
 const games = parsed.games;
 const outArg = parsed.outArg;
-const logMode = parsed.logMode;
+const logMode = DEFAULT_LOG_MODE;
 const policyMySide = parsed.policyMySide;
 const policyYourSide = parsed.policyYourSide;
 const policyModelMySidePath = parsed.policyModelMySide;
 const policyModelYourSidePath = parsed.policyModelYourSide;
-const policyModelAttackMySidePath = parsed.policyModelAttackMySide;
-const policyModelAttackYourSidePath = parsed.policyModelAttackYourSide;
-const policyModelDefenseMySidePath = parsed.policyModelDefenseMySide;
-const policyModelDefenseYourSidePath = parsed.policyModelDefenseYourSide;
-const valueModelMySidePath = parsed.valueModelMySide;
-const valueModelYourSidePath = parsed.valueModelYourSide;
-const moeDefenseScoreThreshold = parsed.moeDefenseScoreThreshold;
-const moeAttackScoreThreshold = parsed.moeAttackScoreThreshold;
-const moeRiskThreshold = parsed.moeRiskThreshold;
-const moeOppThreatThreshold = parsed.moeOppThreatThreshold;
-const modelOnly = !!parsed.modelOnly;
-const trainExploreRate = parsed.trainExploreRate;
-const trainExploreRateComeback = parsed.trainExploreRateComeback;
-const trainExploreDecayK = parsed.trainExploreDecayK;
-const trainExploreMin = parsed.trainExploreMin;
-const trainExploreComebackMin = parsed.trainExploreComebackMin;
-const traceMyTurnOnly = !!parsed.traceMyTurnOnly;
-const traceImportantOnly = parsed.traceImportantOnly !== false;
-const traceContextRadius = Number.isFinite(parsed.traceContextRadius)
-  ? Math.max(0, Math.floor(parsed.traceContextRadius))
-  : 0;
-const traceGoStopPlus2 = !!parsed.traceGoStopPlus2;
-const isTrainMode = logMode === "train";
-const isDeltaMode = logMode === "delta";
-const needsDecisionTrace = true;
-const useLeanKibo = isTrainMode || isDeltaMode;
-let gameProgress = 0;
+const fixedSeats = parsed.fixedSeats;
+const traceDedupeStableTurns = parsed.dedupeStableTurns;
+const seatMode = fixedSeats ? "fixed" : "switching";
+const traceMyTurnOnly = false;
+const traceImportantOnly = true;
+const traceContextRadius = 0;
+const traceGoStopPlus2 = false;
 const sideConfig = {
   [SIDE_MY]: {
     fallbackPolicy: policyMySide,
-    policyModelPath: policyModelMySidePath,
-    policyModelAttackPath: policyModelAttackMySidePath,
-    policyModelDefensePath: policyModelDefenseMySidePath,
-    valueModelPath: valueModelMySidePath
+    policyModelPath: policyModelMySidePath
   },
   [SIDE_YOUR]: {
     fallbackPolicy: policyYourSide,
-    policyModelPath: policyModelYourSidePath,
-    policyModelAttackPath: policyModelAttackYourSidePath,
-    policyModelDefensePath: policyModelDefenseYourSidePath,
-    valueModelPath: valueModelYourSidePath
+    policyModelPath: policyModelYourSidePath
   }
 };
 sideConfig[SIDE_MY].policyModel = loadJsonModel(
@@ -537,92 +287,39 @@ sideConfig[SIDE_YOUR].policyModel = loadJsonModel(
   sideConfig[SIDE_YOUR].policyModelPath,
   "policy-model-your-side"
 );
-sideConfig[SIDE_MY].policyModelAttack = loadJsonModel(
-  sideConfig[SIDE_MY].policyModelAttackPath,
-  "policy-model-attack-my-side"
-);
-sideConfig[SIDE_YOUR].policyModelAttack = loadJsonModel(
-  sideConfig[SIDE_YOUR].policyModelAttackPath,
-  "policy-model-attack-your-side"
-);
-sideConfig[SIDE_MY].policyModelDefense = loadJsonModel(
-  sideConfig[SIDE_MY].policyModelDefensePath,
-  "policy-model-defense-my-side"
-);
-sideConfig[SIDE_YOUR].policyModelDefense = loadJsonModel(
-  sideConfig[SIDE_YOUR].policyModelDefensePath,
-  "policy-model-defense-your-side"
-);
-sideConfig[SIDE_MY].valueModel = loadJsonModel(
-  sideConfig[SIDE_MY].valueModelPath,
-  "value-model-my-side"
-);
-sideConfig[SIDE_YOUR].valueModel = loadJsonModel(
-  sideConfig[SIDE_YOUR].valueModelPath,
-  "value-model-your-side"
-);
-
-if (modelOnly) {
-  for (const side of [SIDE_MY, SIDE_YOUR]) {
-    if (
-      !sideConfig[side].policyModel &&
-      !sideConfig[side].policyModelAttack &&
-      !sideConfig[side].policyModelDefense &&
-      !sideConfig[side].valueModel
-    ) {
-      throw new Error(
-        `model-only requires model for ${side}. Provide policy model(s) and/or --value-model-${side}`
-      );
-    }
-  }
-}
-
-for (const side of [SIDE_MY, SIDE_YOUR]) {
-  sideConfig[side].moe = {
-    enabled: !!(sideConfig[side].policyModelAttack && sideConfig[side].policyModelDefense),
-    defenseScoreThreshold: moeDefenseScoreThreshold,
-    attackScoreThreshold: moeAttackScoreThreshold,
-    riskThreshold: moeRiskThreshold,
-    oppThreatThreshold: moeOppThreatThreshold
-  };
-}
 
 const agentLabelBySide = {
   [SIDE_MY]:
-    sideConfig[SIDE_MY].moe?.enabled
-      ? `moe:${path.basename(sideConfig[SIDE_MY].policyModelAttackPath)}|${path.basename(
-          sideConfig[SIDE_MY].policyModelDefensePath
-        )}`
-      : sideConfig[SIDE_MY].policyModel || sideConfig[SIDE_MY].valueModel
-      ? `model:${path.basename(
-          sideConfig[SIDE_MY].policyModelPath || sideConfig[SIDE_MY].valueModelPath
-        )}`
+    sideConfig[SIDE_MY].policyModel
+      ? `model:${path.basename(sideConfig[SIDE_MY].policyModelPath)}`
       : sideConfig[SIDE_MY].fallbackPolicy,
   [SIDE_YOUR]:
-    sideConfig[SIDE_YOUR].moe?.enabled
-      ? `moe:${path.basename(sideConfig[SIDE_YOUR].policyModelAttackPath)}|${path.basename(
-          sideConfig[SIDE_YOUR].policyModelDefensePath
-        )}`
-      : sideConfig[SIDE_YOUR].policyModel || sideConfig[SIDE_YOUR].valueModel
-      ? `model:${path.basename(
-          sideConfig[SIDE_YOUR].policyModelPath || sideConfig[SIDE_YOUR].valueModelPath
-        )}`
+    sideConfig[SIDE_YOUR].policyModel
+      ? `model:${path.basename(sideConfig[SIDE_YOUR].policyModelPath)}`
       : sideConfig[SIDE_YOUR].fallbackPolicy
 };
 
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+const runId = `run-${stamp}-${crypto.randomBytes(3).toString("hex")}`;
 const outPath = outArg || path.resolve(__dirname, "..", "logs", `side-vs-side-${stamp}.jsonl`);
 const reportPath = outPath.replace(/\.jsonl$/i, "-report.json");
 const sharedCatalogDir = path.resolve(__dirname, "..", "logs", "catalog");
 const sharedCatalogPath = path.join(sharedCatalogDir, "cards-catalog.json");
-const legacyCatalogPath = path.resolve(__dirname, "..", "logs", "catalog.json");
 
 fs.mkdirSync(path.dirname(outPath), { recursive: true });
 
+// -----------------------------------------------------------------------------
+// 6) Aggregation / counters
+// -----------------------------------------------------------------------------
 const aggregate = {
   games,
   completed: 0,
   winners: { mySide: 0, yourSide: 0, draw: 0, unknown: 0 },
+  learningRoleCounts: {
+    ATTACK: 0,
+    DEFENSE: 0,
+    NEUTRAL: 0
+  },
   bySide: {
     mySideWins: 0,
     yourSideWins: 0,
@@ -673,6 +370,27 @@ const aggregate = {
   luckHandCaptureValue: 0
 };
 
+function classifyLearningRoleMySide(winnerSide, mySideScore, yourSideScore) {
+  if (winnerSide === SIDE_MY && Number(mySideScore || 0) >= LEARNING_ROLE_ATTACK_SCORE_MIN) {
+    return "ATTACK";
+  }
+  if (
+    winnerSide === SIDE_YOUR &&
+    Number(yourSideScore || 0) <= LEARNING_ROLE_DEFENSE_OPP_SCORE_MAX
+  ) {
+    return "DEFENSE";
+  }
+  return "NEUTRAL";
+}
+
+function addLearningRoleCount(role) {
+  if (aggregate.learningRoleCounts[role] == null) return;
+  aggregate.learningRoleCounts[role] += 1;
+}
+
+// -----------------------------------------------------------------------------
+// 7) Game scheduling / catalog helpers
+// -----------------------------------------------------------------------------
 function createBalancedFirstTurnPlan(totalGames, actorA, actorB) {
   if (totalGames % 2 !== 0) {
     throw new Error(
@@ -690,6 +408,13 @@ function createBalancedFirstTurnPlan(totalGames, actorA, actorB) {
     plan[j] = tmp;
   }
   return plan;
+}
+
+function createFirstTurnPlan(totalGames, actorA, actorB, isFixedSeats) {
+  if (isFixedSeats) {
+    return Array.from({ length: totalGames }, () => actorA);
+  }
+  return createBalancedFirstTurnPlan(totalGames, actorA, actorB);
 }
 
 function captureWeight(card) {
@@ -734,14 +459,14 @@ function buildCatalog() {
 
 function ensureSharedCatalog() {
   fs.mkdirSync(sharedCatalogDir, { recursive: true });
-  if (!fs.existsSync(sharedCatalogPath) && fs.existsSync(legacyCatalogPath)) {
-    fs.renameSync(legacyCatalogPath, sharedCatalogPath);
-  }
   if (fs.existsSync(sharedCatalogPath)) return sharedCatalogPath;
   fs.writeFileSync(sharedCatalogPath, JSON.stringify(buildCatalog(), null, 2), "utf8");
   return sharedCatalogPath;
 }
 
+// -----------------------------------------------------------------------------
+// 8) Decision context / state feature extraction
+// -----------------------------------------------------------------------------
 function selectPool(state, actor, options = {}) {
   const includeCardLists = options.includeCardLists !== false;
   if (state.phase === "playing" && state.currentTurn === actor) {
@@ -1050,55 +775,168 @@ function stableHashCached(token, dim) {
   return idx;
 }
 
-function policyContextKey(trace, decisionType) {
+function policyContextKeyMode(policyModel) {
+  const raw = String(policyModel?.context_key_mode || "").trim().toLowerCase();
+  if (raw === "bucketed_v3") return "bucketed_v3";
+  if (raw === "bucketed_v2") return "bucketed_v2";
+  return "raw_v1";
+}
+
+function bucketHandSelf(handSelf) {
+  const hs = Math.floor(Number(handSelf || 0));
+  if (hs >= 8) return "8p";
+  if (hs >= 5) return "5_7";
+  if (hs >= 2) return "2_4";
+  return "0_1";
+}
+
+function bucketHandDiff(handDiff) {
+  const hd = Math.floor(Number(handDiff || 0));
+  if (hd <= -3) return "n3";
+  if (hd <= -1) return "n2_1";
+  if (hd === 0) return "z0";
+  if (hd <= 2) return "p1_2";
+  return "p3";
+}
+
+function bucketScoreDiff(scoreDiff) {
+  const sd = Number(scoreDiff || 0);
+  if (sd <= -10) return "n10";
+  if (sd <= -3) return "n9_3";
+  if (sd < 3) return "z2";
+  if (sd < 10) return "p3_9";
+  return "p10";
+}
+
+function bucketGoCount(goCount) {
+  const g = Math.floor(Number(goCount || 0));
+  if (g <= 0) return "0";
+  if (g === 1) return "1";
+  return "2p";
+}
+
+function bucketCandidates(cands) {
+  const c = Math.floor(Number(cands || 0));
+  if (c <= 1) return "1";
+  if (c === 2) return "2";
+  if (c === 3) return "3";
+  return "4p";
+}
+
+function bucketRiskTotal(total) {
+  const t = Math.max(0, Math.floor(Number(total || 0)));
+  if (t <= 0) return "0";
+  if (t === 1) return "1";
+  return "2p";
+}
+
+function bucketThreatPercent(v) {
+  const x = Math.max(0, Math.min(100, Math.floor(Number(v || 0))));
+  if (x >= 70) return "h";
+  if (x >= 35) return "m";
+  return "l";
+}
+
+function bucketProgressDelta(delta) {
+  const d = Math.floor(Number(delta || 0));
+  if (d <= -3) return "n3";
+  if (d <= -1) return "n2_1";
+  if (d === 0) return "z0";
+  if (d <= 2) return "p1_2";
+  return "p3";
+}
+
+function bucketGoStopSignal(gsdPermille) {
+  const x = Math.floor(Number(gsdPermille || 0));
+  if (x <= -1800) return "n2";
+  if (x <= -600) return "n1";
+  if (x < 600) return "z0";
+  if (x < 1800) return "p1";
+  return "p2";
+}
+
+function policyContextKey(trace, decisionType, policyModel = null) {
   const dc = trace.dc || {};
   const sp = trace.sp || {};
-  const deckBucket = Math.floor((dc.deckCount || 0) / 3);
-  const rawPhase = dc.phase;
+  const deckBucket = Math.floor((Number(dc.d || 0) || 0) / 3);
+  const rawPhase = dc.p;
   const phaseCode = Number.isFinite(Number(rawPhase))
     ? Math.floor(Number(rawPhase))
     : tracePhaseCode(rawPhase);
-  const handSelf = dc.handCountSelf || 0;
-  const handDiff =
-    dc.handCountDiff != null
-      ? Number(dc.handCountDiff || 0)
-      : Number(handSelf || 0) - Number(dc.handCountOpp || 0);
-  const goSelf = dc.goCountSelf || 0;
-  const goOpp = dc.goCountOpp || 0;
-  const shakeSelf = Math.min(3, Math.floor(Number(dc.shakeCountSelf || 0)));
-  const shakeOpp = Math.min(3, Math.floor(Number(dc.shakeCountOpp || 0)));
+  const handSelf = Number(dc.hs || 0) || 0;
+  const handDiff = Number(dc.hd || 0) || 0;
+  const goSelf = Number(dc.gs || 0) || 0;
+  const goOpp = Number(dc.go || 0) || 0;
+  const shakeSelf = Math.min(3, Math.floor(Number(dc.ss ?? 0)));
+  const shakeOpp = Math.min(3, Math.floor(Number(dc.so ?? 0)));
+  const scoreDiff = Number(dc.sd || 0) || 0;
+  const bakRiskTotal =
+    (Number(dc.rp || 0) ? 1 : 0) +
+    (Number(dc.rg || 0) ? 1 : 0) +
+    (Number(dc.rm || 0) ? 1 : 0);
+  const oppThreat = Math.max(
+    Number(dc.ojt || 0) || 0,
+    Number(dc.ojo || 0) || 0,
+    Number(dc.ogt || 0) || 0
+  );
+  const selfThreat = Math.max(
+    Number(dc.sjt || 0) || 0,
+    Number(dc.sjo || 0) || 0,
+    Number(dc.sgt || 0) || 0
+  );
+  const progressDelta = (Number(dc.jps || 0) || 0) - (Number(dc.jpo || 0) || 0);
+  const goStopSignal = Number(dc.gsd || 0) || 0;
   let cands = Number(trace.cc ?? sp.candidateCount ?? 0);
   if (!Number.isFinite(cands) || cands <= 0) {
     cands = (sp.cards || sp.boardCardIds || sp.options || []).length;
   }
   cands = Math.max(0, Math.floor(cands));
-  return [
+  const keyMode = policyContextKeyMode(policyModel);
+  const hsToken = keyMode === "bucketed_v2" ? bucketHandSelf(handSelf) : String(Math.floor(Number(handSelf || 0)));
+  const hdToken = keyMode === "bucketed_v2" ? bucketHandDiff(handDiff) : String(Math.floor(Number(handDiff || 0)));
+  const sdToken = keyMode === "bucketed_v2" ? bucketScoreDiff(scoreDiff) : String(Math.floor(scoreDiff));
+  const gsToken = keyMode === "bucketed_v2" ? bucketGoCount(goSelf) : String(Math.floor(Number(goSelf || 0)));
+  const goToken = keyMode === "bucketed_v2" ? bucketGoCount(goOpp) : String(Math.floor(Number(goOpp || 0)));
+  const ccToken = keyMode === "bucketed_v2" ? bucketCandidates(cands) : String(cands);
+  const base = [
     `dt=${decisionType}`,
     `ph=${phaseCode}`,
     `o=${trace.o || "?"}`,
     `db=${deckBucket}`,
-    `hs=${handSelf}`,
-    `hd=${handDiff}`,
-    `gs=${goSelf}`,
-    `go=${goOpp}`,
+    `hs=${hsToken}`,
+    `hd=${hdToken}`,
+    `sd=${sdToken}`,
+    `gs=${gsToken}`,
+    `go=${goToken}`,
     `ss=${shakeSelf}`,
     `so=${shakeOpp}`,
-    `cc=${cands}`
-  ].join("|");
+    `cc=${ccToken}`
+  ];
+  if (keyMode === "bucketed_v3") {
+    base.push(`br=${bucketRiskTotal(bakRiskTotal)}`);
+    base.push(`ot=${bucketThreatPercent(oppThreat)}`);
+    base.push(`st=${bucketThreatPercent(selfThreat)}`);
+    base.push(`jp=${bucketProgressDelta(progressDelta)}`);
+    base.push(`gd=${bucketGoStopSignal(goStopSignal)}`);
+  }
+  return base.join("|");
 }
 
+// -----------------------------------------------------------------------------
+// 9) Lightweight policy/value inference helpers
+// -----------------------------------------------------------------------------
 function policyProb(model, sample, choice) {
   const alpha = Number(model?.alpha ?? 1.0);
   const dt = sample.decisionType;
   const candidates = sample.candidates || [];
-  const ck = sample.contextKey;
+  const contextKey = sample.contextKey;
   const k = Math.max(1, candidates.length);
 
   const dtContextCounts = model?.context_counts?.[dt] || {};
   const dtContextTotals = model?.context_totals?.[dt] || {};
-  const ctxCounts = dtContextCounts?.[ck];
+  const ctxCounts = dtContextCounts?.[contextKey];
   if (ctxCounts) {
-    const total = Number(dtContextTotals?.[ck] || 0);
+    const total = Number(dtContextTotals?.[contextKey] || 0);
     return (Number(ctxCounts?.[choice] || 0) + alpha) / (total + alpha * k);
   }
 
@@ -1108,98 +946,9 @@ function policyProb(model, sample, choice) {
   return (Number(dtGlobal?.[choice] || 0) + alpha) / (total + alpha * k);
 }
 
-function valueTokens(dc, order, decisionType, actionLabel) {
-  const isFirst = order === "first" ? 1 : 0;
-  const scoreDiff =
-    dc.scoreDiff != null
-      ? Math.floor(Number(dc.scoreDiff || 0))
-      : Math.floor(Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0));
-  const handSelf = Math.floor(Number(dc.handCountSelf || 0));
-  const handOpp =
-    dc.handCountOpp != null
-      ? Math.floor(Number(dc.handCountOpp || 0))
-      : Math.floor(handSelf - Number(dc.handCountDiff || 0));
-  const bakRiskTotal =
-    Number(dc.piBakRisk || 0) + Number(dc.gwangBakRisk || 0) + Number(dc.mongBakRisk || 0);
-  const goStopDeltaBucket = Math.floor(Number(dc.goStopDeltaProxy || 0) * 2);
-  return [
-    `phase=${dc.phase || "?"}`,
-    `order=${order || "?"}`,
-    `decision_type=${decisionType}`,
-    `action=${actionLabel || "?"}`,
-    `deck_bucket=${Math.floor((dc.deckCount || 0) / 3)}`,
-    `self_hand=${handSelf}`,
-    `opp_hand=${handOpp}`,
-    `self_go=${Math.floor(dc.goCountSelf || 0)}`,
-    `opp_go=${Math.floor(dc.goCountOpp || 0)}`,
-    `is_first_attacker=${isFirst}`,
-    `score_diff=${scoreDiff}`,
-    `bak_risk=${bakRiskTotal}`,
-    `jp_self_sum=${Math.floor(Number(dc.jokboProgressSelfSum || 0))}`,
-    `jp_opp_sum=${Math.floor(Number(dc.jokboProgressOppSum || 0))}`,
-    `go_stop_delta_bucket=${goStopDeltaBucket}`
-  ];
-}
-
-function valueNumeric(dc, candidateCount, order) {
-  const isFirst = order === "first" ? 1 : 0;
-  const handSelf = Number(dc.handCountSelf || 0);
-  const handOpp = dc.handCountOpp != null ? Number(dc.handCountOpp || 0) : handSelf - Number(dc.handCountDiff || 0);
-  const scoreDiff =
-    dc.scoreDiff != null
-      ? Number(dc.scoreDiff || 0)
-      : Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0);
-  const bakRiskTotal =
-    Number(dc.piBakRisk || 0) + Number(dc.gwangBakRisk || 0) + Number(dc.mongBakRisk || 0);
-  return {
-    deck_count: Number(dc.deckCount || 0),
-    hand_self: handSelf,
-    hand_opp: handOpp,
-    go_self: Number(dc.goCountSelf || 0),
-    go_opp: Number(dc.goCountOpp || 0),
-    score_diff: scoreDiff,
-    is_first_attacker: isFirst,
-    cand_count: Number(candidateCount || 0),
-    bak_risk_total: bakRiskTotal,
-    jokbo_progress_self_sum: Number(dc.jokboProgressSelfSum || 0),
-    jokbo_progress_opp_sum: Number(dc.jokboProgressOppSum || 0),
-    jokbo_one_away_self_count: Number(dc.jokboOneAwaySelfCount || 0),
-    jokbo_one_away_opp_count: Number(dc.jokboOneAwayOppCount || 0),
-    self_jokbo_threat_prob: Number(dc.selfJokboThreatProb || 0),
-    self_jokbo_one_away_prob: Number(dc.selfJokboOneAwayProb || 0),
-    self_gwang_threat_prob: Number(dc.selfGwangThreatProb || 0),
-    opp_jokbo_threat_prob: Number(dc.oppJokboThreatProb || 0),
-    opp_jokbo_one_away_prob: Number(dc.oppJokboOneAwayProb || 0),
-    opp_gwang_threat_prob: Number(dc.oppGwangThreatProb || 0),
-    go_stop_delta_proxy: Number(dc.goStopDeltaProxy || 0),
-    immediate_reward: 0
-  };
-}
-
-function valuePredict(model, sample) {
-  if (!model || !Array.isArray(model.weights)) return 0;
-  const dim = Number(model.dim || 0);
-  if (dim <= 0) return 0;
-  const w = model.weights;
-  const b = Number(model.bias || 0);
-  const scale = model.numeric_scale || {};
-  let total = b;
-  for (const tok of sample.tokens) {
-    const i = stableHashCached(`tok:${tok}`, dim);
-    total += Number(w[i] || 0);
-  }
-  for (const [k, v] of Object.entries(sample.numeric || {})) {
-    const i = stableHashCached(`num:${k}`, dim);
-    const denom = Math.max(1e-9, Number(scale[k] || 1.0));
-    total += Number(w[i] || 0) * (Number(v) / denom);
-  }
-  return total;
-}
-
 function modelCacheKey(actor, cfg, decisionType, contextKey, candidates) {
   const p = cfg.policyModelPath || "-";
-  const v = cfg.valueModelPath || "-";
-  return `${actor}|${p}|${v}|${decisionType}|${contextKey}|${candidates.join(",")}`;
+  return `${actor}|${p}|${decisionType}|${contextKey}|${candidates.join(",")}`;
 }
 
 function optionActionToType(action) {
@@ -1214,6 +963,76 @@ function optionActionToType(action) {
   return aliases[action] || action;
 }
 
+function canonicalOptionAction(action) {
+  const a = String(action || "").trim();
+  if (!a) return "";
+  const aliases = {
+    choose_go: "go",
+    choose_stop: "stop",
+    choose_shaking_yes: "shaking_yes",
+    choose_shaking_no: "shaking_no",
+    choose_president_stop: "president_stop",
+    choose_president_hold: "president_hold",
+    choose_five: "five",
+    choose_junk: "junk"
+  };
+  return aliases[a] || a;
+}
+
+function normalizeOptionCandidates(items) {
+  if (!Array.isArray(items)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of items) {
+    const v = canonicalOptionAction(raw);
+    if (!v) continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+}
+
+function modelOptionActionSet(policyModel) {
+  const raw = policyModel?.action_vocab?.option_actions;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const normalized = normalizeOptionCandidates(raw);
+  if (!normalized.length) return null;
+  return new Set(normalized);
+}
+
+function modelDecisionTypesSet(policyModel) {
+  const raw = policyModel?.action_vocab?.decision_types;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const normalized = raw
+    .map((x) => String(x || "").trim().toLowerCase())
+    .filter((x) => x === "play" || x === "match" || x === "option");
+  if (!normalized.length) return null;
+  return new Set(normalized);
+}
+
+function legalCandidatesForInference(selectionPool, decisionType, policyModel) {
+  const sp = selectionPool || {};
+  const allowedDecisionTypes = modelDecisionTypesSet(policyModel);
+  if (allowedDecisionTypes && !allowedDecisionTypes.has(String(decisionType || "").toLowerCase())) {
+    return [];
+  }
+  if (decisionType === "play") {
+    return normalizeLegalActions(sp.cards || [], "play");
+  }
+  if (decisionType === "match") {
+    return normalizeLegalActions(sp.boardCardIds || [], "match");
+  }
+  if (decisionType === "option") {
+    const legal = normalizeOptionCandidates(sp.options || []);
+    const allowed = modelOptionActionSet(policyModel);
+    if (!allowed) return legal;
+    const filtered = legal.filter((x) => allowed.has(x));
+    return filtered.length > 0 ? filtered : legal;
+  }
+  return [];
+}
+
 function actionTypeToChoice(actionType) {
   const mapped = optionActionToType(actionType);
   return mapped || String(actionType || "option");
@@ -1223,83 +1042,171 @@ function traceOrderFromSide(actorSide) {
   return actorSide === SIDE_MY ? "first" : "second";
 }
 
-function triggerMaskFromNames(names) {
-  let mask = 0;
-  for (const n of Array.isArray(names) ? names : []) {
-    const bit = TRIGGER_BIT[String(n || "")];
-    if (bit) mask |= bit;
+function cloneStateForRollout(state) {
+  if (typeof globalThis.structuredClone === "function") {
+    return globalThis.structuredClone(state);
   }
-  return mask;
+  return JSON.parse(JSON.stringify(state));
+}
+
+function evaluateGoldDeltaFromMySide(state) {
+  const myActor = state?.startingTurnKey || null;
+  const yourActor = secondActorFromFirst(state, myActor);
+  if (!myActor || !yourActor) return 0;
+  const myGold = Number(state?.players?.[myActor]?.gold || 0);
+  const yourGold = Number(state?.players?.[yourActor]?.gold || 0);
+  return myGold - yourGold;
 }
 
 function buildRuntimeModelConfig(state, actor, cfg) {
-  if (!cfg) return cfg;
-  const hasMoE = !!(cfg.policyModelAttack && cfg.policyModelDefense);
-  if (!hasMoE) return cfg;
-  const selectedRole = selectMoeRoleByContext(
-    buildMoeSelectionContext(state, actor),
-    cfg?.moe || {
-      defenseScoreThreshold: MOE_DEFENSE_SCORE_THRESHOLD_DEFAULT,
-      attackScoreThreshold: MOE_ATTACK_SCORE_THRESHOLD_DEFAULT,
-      riskThreshold: MOE_RISK_THRESHOLD_DEFAULT,
-      oppThreatThreshold: MOE_OPP_THREAT_THRESHOLD_DEFAULT
-    }
-  );
-  const selectedModel = selectedRole === "attack" ? cfg.policyModelAttack : cfg.policyModelDefense;
-  const selectedPath =
-    selectedRole === "attack" ? cfg.policyModelAttackPath : cfg.policyModelDefensePath;
-
+  const base = cfg || {};
   return {
-    ...cfg,
-    policyModel: selectedModel || cfg.policyModel || null,
-    policyModelPath: selectedPath || cfg.policyModelPath || null
+    ...base,
+    mixedStrategyEnabled:
+      base?.mixedStrategyEnabled != null
+        ? !!base.mixedStrategyEnabled
+        : MIXED_STRATEGY_ENABLED_DEFAULT,
+    optionLookaheadEnabled:
+      base?.optionLookaheadEnabled != null
+        ? !!base.optionLookaheadEnabled
+        : OPTION_LOOKAHEAD_ENABLED_DEFAULT,
+    optionLookaheadRollouts: Math.max(
+      1,
+      Math.floor(Number(base?.optionLookaheadRollouts || OPTION_LOOKAHEAD_ROLLOUTS_DEFAULT))
+    ),
+    optionLookaheadMaxSteps: Math.max(
+      20,
+      Math.floor(Number(base?.optionLookaheadMaxSteps || OPTION_LOOKAHEAD_MAX_STEPS_DEFAULT))
+    ),
   };
 }
 
-function modelSelectCandidate(state, actor, cfg) {
-  const sp = selectPool(state, actor);
-  const cards = sp.cards || null;
-  const boardCardIds = sp.boardCardIds || null;
-  const options = sp.options || null;
-  const candidates = cards || boardCardIds || options || [];
-  if (!candidates.length) return null;
+function rolloutOptionCandidateScore(baseState, actor, cfg, candidate, control = {}) {
+  const rollouts = Math.max(1, Number(cfg?.optionLookaheadRollouts || OPTION_LOOKAHEAD_ROLLOUTS_DEFAULT));
+  const maxSteps = Math.max(20, Number(cfg?.optionLookaheadMaxSteps || OPTION_LOOKAHEAD_MAX_STEPS_DEFAULT));
+  const outcomes = [];
+  for (let ri = 0; ri < rollouts; ri += 1) {
+    let sim = cloneStateForRollout(baseState);
+    sim = applyModelChoice(sim, actor, { decisionType: "option", candidate }, cfg);
+    if (!sim) continue;
+    let steps = 0;
+    while (sim.phase !== "resolution" && steps < maxSteps) {
+      const actionActor = getActionPlayerKey(sim);
+      if (!actionActor) break;
+      const actionSide = actorToSide(actionActor, sim.startingTurnKey);
+      const actionCfg = sideConfig[actionSide];
+      const next = executeActorTurn(sim, actionActor, actionCfg, {
+        ...control,
+        disableOptionLookahead: true,
+        rolloutNonce: `${control?.rolloutNonce || "r"}:${ri}`,
+      });
+      if (!next || next === sim) break;
+      sim = next;
+      steps += 1;
+    }
+    outcomes.push(evaluateGoldDeltaFromMySide(sim));
+  }
+  if (!outcomes.length) {
+    return { mean: -Infinity, p10: -Infinity, lossRate: 1, score: -Infinity };
+  }
+  outcomes.sort((a, b) => a - b);
+  const n = outcomes.length;
+  const p10 = outcomes[Math.max(0, Math.floor((n - 1) * 0.1))];
+  const mean = outcomes.reduce((a, b) => a + b, 0) / n;
+  const lossRate = outcomes.filter((x) => x < 0).length / n;
+  const downside = Math.max(0, -p10) + Math.max(0, -mean) * lossRate;
+  const score = mean - OPTION_LOOKAHEAD_DOWNSIDE_LAMBDA * downside;
+  return { mean, p10, lossRate, score };
+}
 
-  const decisionType = cards ? "play" : boardCardIds ? "match" : "option";
+function modelSelectCandidate(state, actor, cfg, control = {}) {
+  const sp = selectPool(state, actor);
+  const cards = Array.isArray(sp.cards) && sp.cards.length > 0 ? sp.cards : null;
+  const boardCardIds = Array.isArray(sp.boardCardIds) && sp.boardCardIds.length > 0 ? sp.boardCardIds : null;
+  const options = Array.isArray(sp.options) && sp.options.length > 0 ? sp.options : null;
+  const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
+  if (!decisionType) return null;
+  const candidates = legalCandidatesForInference(sp, decisionType, cfg?.policyModel);
+  if (!candidates.length) return null;
   const order = actor === state.startingTurnKey ? "first" : "second";
+  const actorSide = actorToSide(actor, state.startingTurnKey);
   const dc = decisionContext(state, actor);
-  const traceLike = { o: order, dc, sp: { cards, boardCardIds, options } };
-  const contextKey = policyContextKey(traceLike, decisionType);
+  const traceLike = {
+    o: order,
+    dc: compactDecisionContextForTrace(dc, actorSide),
+    sp: { cards, boardCardIds, options }
+  };
+  const contextKey = policyContextKey(traceLike, decisionType, cfg.policyModel);
   const cacheKey = modelCacheKey(actor, cfg, decisionType, contextKey, candidates);
   const cached = decisionInferenceCache.get(cacheKey);
   if (cached) return { decisionType, candidate: cached, sp };
 
   const baseSample = { decisionType, candidates, contextKey };
-  const useValue = !!cfg.valueModel;
-  const numeric = useValue ? valueNumeric(dc, candidates.length, order) : null;
-  const tokens = useValue ? valueTokens(dc, order, decisionType, "?") : null;
-
-  let bestCandidate = candidates[0];
-  let bestValue = Number.NEGATIVE_INFINITY;
-  let bestPolicy = -1;
+  const policyScoreByCandidate = new Map();
   for (const candidate of candidates) {
     const candidateLabel = decisionType === "option" ? candidate : String(candidate);
     const pp = cfg.policyModel ? policyProb(cfg.policyModel, baseSample, candidateLabel) : 0;
-    let vs = 0;
-    if (useValue) {
-      tokens[3] = `action=${candidateLabel}`;
-      vs = valuePredict(cfg.valueModel, { tokens, numeric });
-    }
-    const cmpPrimary = useValue ? vs : pp;
-    const tieBreaker = useValue ? pp : vs;
-    const currentPrimary = useValue ? bestValue : bestPolicy;
-    const better = cmpPrimary > currentPrimary + 1e-12;
-    const tieBetter = Math.abs(cmpPrimary - currentPrimary) <= 1e-12 && tieBreaker > (useValue ? bestPolicy : bestValue);
-    if (better || tieBetter) {
-      bestCandidate = candidate;
-      bestValue = vs;
-      bestPolicy = pp;
+    policyScoreByCandidate.set(candidate, Math.log(Math.max(1e-12, Number(pp || 0))));
+  }
+
+  const shouldRunOptionLookahead =
+    decisionType === "option" &&
+    candidates.length > 1 &&
+    !!cfg?.optionLookaheadEnabled &&
+    !control?.disableOptionLookahead &&
+    (
+      (candidates.includes("go") && candidates.includes("stop")) ||
+      (candidates.includes("shaking_yes") && candidates.includes("shaking_no")) ||
+      (candidates.includes("president_stop") && candidates.includes("president_hold"))
+    );
+  const combinedScoreByCandidate = new Map(policyScoreByCandidate);
+  if (shouldRunOptionLookahead) {
+    for (const candidate of candidates) {
+      const rollout = rolloutOptionCandidateScore(state, actor, cfg, candidate, control);
+      const policyTerm = Number(policyScoreByCandidate.get(candidate) || 0);
+      const rolloutTerm = Number(rollout.score || 0) / 1000000.0;
+      combinedScoreByCandidate.set(candidate, policyTerm + rolloutTerm);
     }
   }
+
+  const mixedEnabled = !!cfg?.mixedStrategyEnabled && !control?.disableMixedStrategy;
+  let bestCandidate = candidates[0];
+  if (mixedEnabled) {
+    const topK =
+      decisionType === "play" ? MIXED_TOP_K_PLAY : decisionType === "match" ? MIXED_TOP_K_MATCH : MIXED_TOP_K_OPTION;
+    const temp =
+      decisionType === "play"
+        ? MIXED_TEMPERATURE_PLAY
+        : decisionType === "match"
+        ? MIXED_TEMPERATURE_MATCH
+        : MIXED_TEMPERATURE_OPTION;
+    const entropyKey = [
+      runId,
+      control?.rolloutNonce || "main",
+      actor,
+      state.turnSeq || 0,
+      decisionType,
+      contextKey,
+      candidates.join(","),
+    ].join("|");
+    bestCandidate = softmaxSampleFromScores(
+      candidates,
+      combinedScoreByCandidate,
+      topK,
+      temp,
+      entropyKey
+    );
+  } else {
+    let bestScore = -Infinity;
+    for (const candidate of candidates) {
+      const s = Number(combinedScoreByCandidate.get(candidate) || -Infinity);
+      if (s > bestScore) {
+        bestCandidate = candidate;
+        bestScore = s;
+      }
+    }
+  }
+
   if (decisionType === "option") {
     const hasGo = candidates.includes("go");
     const hasStop = candidates.includes("stop");
@@ -1318,12 +1225,24 @@ function modelSelectCandidate(state, actor, cfg) {
   return { decisionType, candidate: bestCandidate, sp };
 }
 
-function applyModelChoice(state, actor, picked) {
+function applyModelChoice(state, actor, picked, cfg = null) {
   if (!picked) return state;
-  const c = picked.candidate;
-  if (picked.decisionType === "play") return playTurn(state, c);
-  if (picked.decisionType === "match") return chooseMatch(state, c);
-  if (picked.decisionType !== "option") return state;
+  const sp = selectPool(state, actor);
+  const cards = Array.isArray(sp.cards) && sp.cards.length > 0 ? sp.cards : null;
+  const boardCardIds = Array.isArray(sp.boardCardIds) && sp.boardCardIds.length > 0 ? sp.boardCardIds : null;
+  const options = Array.isArray(sp.options) && sp.options.length > 0 ? sp.options : null;
+  const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
+  if (!decisionType) return state;
+  const legal = legalCandidatesForInference(sp, decisionType, cfg?.policyModel || null);
+  if (!legal.length) return state;
+
+  let c = picked.candidate;
+  if (decisionType === "option") c = canonicalOptionAction(c);
+  if (!legal.includes(c)) c = legal[0];
+
+  if (decisionType === "play") return playTurn(state, c);
+  if (decisionType === "match") return chooseMatch(state, c);
+  if (decisionType !== "option") return state;
 
   if (c === "go") return chooseGo(state, actor);
   if (c === "stop") return chooseStop(state, actor);
@@ -1336,31 +1255,7 @@ function applyModelChoice(state, actor, picked) {
 }
 
 function maybePickExplorationChoice(state, actor, cfg) {
-  if (!isTrainMode || modelOnly) return null;
-  const policy = String(cfg?.fallbackPolicy || "").toLowerCase();
-  if (!policy.startsWith("heuristic")) return null;
-
-  const dc = decisionContext(state, actor, { includeCardLists: false });
-  const scoreDiff = Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0);
-  const comebackMode = actor !== state.startingTurnKey && scoreDiff <= -5;
-  const exploreBase = comebackMode ? trainExploreRateComeback : trainExploreRate;
-  const exploreMin = comebackMode ? trainExploreComebackMin : trainExploreMin;
-  let exploreRate = exploreBase;
-  if (trainExploreDecayK > 0) {
-    const decayFactor = Math.exp(-trainExploreDecayK * clampRange(gameProgress, 0, 1));
-    exploreRate = exploreMin + (exploreBase - exploreMin) * decayFactor;
-  }
-  if (Math.random() >= exploreRate) return null;
-
-  const sp = selectPool(state, actor);
-  const cards = sp.cards || null;
-  const boardCardIds = sp.boardCardIds || null;
-  const options = sp.options || null;
-  const candidates = cards || boardCardIds || options || [];
-  if (!candidates.length) return null;
-  const decisionType = cards ? "play" : boardCardIds ? "match" : "option";
-  const candidate = candidates[Math.floor(Math.random() * candidates.length)];
-  return { decisionType, candidate, exploratory: true };
+  return null;
 }
 
 function loadJsonModel(modelPath, label) {
@@ -1372,6 +1267,9 @@ function loadJsonModel(modelPath, label) {
   return JSON.parse(fs.readFileSync(full, "utf8"));
 }
 
+// -----------------------------------------------------------------------------
+// 10) Trace shaping and trigger extraction
+// -----------------------------------------------------------------------------
 function countCandidates(selectionPool) {
   if (!selectionPool) return 0;
   const explicit = Number(selectionPool.candidateCount || 0);
@@ -1396,6 +1294,48 @@ function traceDecisionType(selectionPool, actionType) {
 
 function traceCandidateCount(selectionPool) {
   return Math.max(0, Math.floor(Number(countCandidates(selectionPool) || 0)));
+}
+
+function normalizeLegalActions(items, decisionType) {
+  if (!Array.isArray(items)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of items) {
+    const v =
+      decisionType === "option"
+        ? actionAliasForOption(raw)
+        : String(raw ?? "").trim();
+    if (!v) continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+}
+
+function actionAliasForOption(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  const mapped = optionActionToType(s);
+  return String(mapped || s).trim();
+}
+
+function optionLegalActionsFromActionType(actionType) {
+  const at = String(actionType || "").trim();
+  if (at === "choose_go" || at === "choose_stop") return ["go", "stop"];
+  if (at === "choose_shaking_yes" || at === "choose_shaking_no") return ["shaking_yes", "shaking_no"];
+  if (at === "choose_president_stop" || at === "choose_president_hold")
+    return ["president_stop", "president_hold"];
+  if (at === "five" || at === "junk") return ["five", "junk"];
+  return [];
+}
+
+function traceLegalActions(selectionPool, decisionType) {
+  const sp = selectionPool || {};
+  if (decisionType === "play") return normalizeLegalActions(sp.cards || [], "play");
+  if (decisionType === "match") return normalizeLegalActions(sp.boardCardIds || [], "match");
+  if (decisionType === "option") return normalizeLegalActions(sp.options || [], "option");
+  return [];
 }
 
 function inferOptionActionType({
@@ -1553,12 +1493,7 @@ function applyTerminalContextTrigger(records) {
   const rec = records[idx];
   if (!rec) return;
   if (!Array.isArray(rec.triggers)) rec.triggers = [];
-  const beforeLen = rec.triggers.length;
   pushTrigger(rec.triggers, "terminalContext", 0, 0);
-  if (rec.triggers.length > beforeLen) {
-    const current = Number(rec.data?.tm || 0);
-    rec.data.tm = current | Number(TRIGGER_BIT.terminalContext || 0);
-  }
 }
 
 function classifyImportantTurnTriggers({
@@ -1628,39 +1563,106 @@ function classifyImportantTurnTriggers({
   return out;
 }
 
+function keepBySelf(name) {
+  const trigger = String(name || "").trim();
+  if (!trigger) return null;
+  return { kind: "self", trigger };
+}
+
+function keepByFrom(anchorTurn, name) {
+  const trigger = String(name || "").trim();
+  const turn = Math.max(0, Math.floor(Number(anchorTurn || 0)));
+  if (!trigger) return null;
+  return { kind: "from", fromTurn: turn, trigger };
+}
+
+function keepByCtx(anchorTurn) {
+  const turn = Math.max(0, Math.floor(Number(anchorTurn || 0)));
+  return { kind: "context", fromTurn: turn };
+}
+
+function keepByIndexKey(tag) {
+  if (!tag || typeof tag !== "object") return "";
+  const kind = String(tag.kind || "").trim();
+  if (!kind) return "";
+  if (kind === "self") return `self|${String(tag.trigger || "").trim()}`;
+  if (kind === "from")
+    return `from|${Math.max(0, Math.floor(Number(tag.fromTurn || 0)))}|${String(tag.trigger || "").trim()}`;
+  if (kind === "context") return `context|${Math.max(0, Math.floor(Number(tag.fromTurn || 0)))}`;
+  return `${kind}|${JSON.stringify(tag)}`;
+}
+
+function keepBySortKey(tag) {
+  if (!tag || typeof tag !== "object") return "";
+  const kind = String(tag.kind || "");
+  const trigger = String(tag.trigger || "");
+  const turn = Math.max(0, Math.floor(Number(tag.fromTurn || 0)));
+  return `${kind}|${turn}|${trigger}`;
+}
+
 function keepImportantWithContext(records, contextRadius = 0) {
   if (!Array.isArray(records) || !records.length) return [];
   const extraRadius = Math.max(0, Math.floor(Number(contextRadius || 0)));
   let anyTrigger = false;
   let keep = new Array(records.length).fill(false);
+  const keepReasons = Array.from({ length: records.length }, () => new Map());
   for (let i = 0; i < records.length; i += 1) {
     const triggers = Array.isArray(records[i]?.triggers) ? records[i].triggers : [];
     if (!triggers.length) continue;
     anyTrigger = true;
+    const anchorTurn = Number(records[i]?.data?.t || 0);
     for (const tr of triggers) {
+      const triggerName = String(tr?.name || "");
       const back = Math.max(0, Math.floor(Number(tr?.back || 0)));
       const forward = Math.max(0, Math.floor(Number(tr?.forward || 0)));
       const lo = Math.max(0, i - back);
       const hi = Math.min(records.length - 1, i + forward);
-      for (let j = lo; j <= hi; j += 1) keep[j] = true;
+      for (let j = lo; j <= hi; j += 1) {
+        keep[j] = true;
+        if (!triggerName) continue;
+        if (j === i) {
+          const tag = keepBySelf(triggerName);
+          if (tag) keepReasons[j].set(keepByIndexKey(tag), tag);
+        } else {
+          const tag = keepByFrom(anchorTurn, triggerName);
+          if (tag) keepReasons[j].set(keepByIndexKey(tag), tag);
+        }
+      }
     }
   }
   if (!anyTrigger) {
-    return records.map((r) => r.data);
+    return records.map((r) => ({ ...r.data, keepBy: [] }));
   }
 
   if (extraRadius > 0) {
     const expanded = keep.slice();
     for (let i = 0; i < keep.length; i += 1) {
       if (!keep[i]) continue;
+      const anchorTurn = Number(records[i]?.data?.t || 0);
       const lo = Math.max(0, i - extraRadius);
       const hi = Math.min(keep.length - 1, i + extraRadius);
-      for (let j = lo; j <= hi; j += 1) expanded[j] = true;
+      for (let j = lo; j <= hi; j += 1) {
+        expanded[j] = true;
+        if (j !== i) {
+          const tag = keepByCtx(anchorTurn);
+          keepReasons[j].set(keepByIndexKey(tag), tag);
+        }
+      }
     }
     keep = expanded;
   }
 
-  return records.filter((_, i) => keep[i]).map((r) => r.data);
+  const out = [];
+  for (let i = 0; i < records.length; i += 1) {
+    if (!keep[i]) continue;
+    out.push({
+      ...records[i].data,
+      keepBy: [...(keepReasons[i]?.values() || [])].sort((a, b) =>
+        keepBySortKey(a).localeCompare(keepBySortKey(b))
+      )
+    });
+  }
+  return out;
 }
 
 function triggerNames(triggers) {
@@ -1812,54 +1814,133 @@ function applyEpisodeIrBudget(irValue, actor, totalsByActor, limit = IR_EPISODE_
   return adjusted;
 }
 
-function compactDecisionContextForTrace(dc) {
+function compactDecisionContextForTrace(dc, actorSide = null) {
   if (!dc) return null;
   const handCountSelf = Math.max(0, Math.floor(Number(dc.handCountSelf || 0)));
   const handCountOpp = Math.max(0, Math.floor(Number(dc.handCountOpp || 0)));
+  const shakeSelf = Math.max(0, Math.floor(Number(dc.shakeCountSelf || 0)));
+  const shakeOpp = Math.max(0, Math.floor(Number(dc.shakeCountOpp || 0)));
+  const currentScoreSelf = Math.floor(Number(dc.currentScoreSelf || 0));
+  const currentScoreOpp = Math.floor(Number(dc.currentScoreOpp || 0));
   const scoreDiff = Math.floor(Number(dc.currentScoreSelf || 0) - Number(dc.currentScoreOpp || 0));
+  let scoreMy = currentScoreSelf;
+  let scoreYour = currentScoreOpp;
+  if (actorSide === SIDE_YOUR) {
+    scoreMy = currentScoreOpp;
+    scoreYour = currentScoreSelf;
+  }
   return {
-    phase: tracePhaseCode(dc.phase),
-    deckCount: Math.max(0, Math.floor(Number(dc.deckCount || 0))),
-    handCountSelf,
-    handCountDiff: handCountSelf - handCountOpp,
-    goCountSelf: Math.max(0, Math.floor(Number(dc.goCountSelf || 0))),
-    goCountOpp: Math.max(0, Math.floor(Number(dc.goCountOpp || 0))),
-    piBakRisk: Number(dc.piBakRisk || 0) ? 1 : 0,
-    gwangBakRisk: Number(dc.gwangBakRisk || 0) ? 1 : 0,
-    mongBakRisk: Number(dc.mongBakRisk || 0) ? 1 : 0,
-    jokboProgressOppSum: Math.max(0, Math.floor(Number(dc.jokboProgressOppSum || 0))),
-    jokboOneAwaySelfCount: Math.max(0, Math.floor(Number(dc.jokboOneAwaySelfCount || 0))),
-    jokboOneAwayOppCount: Math.max(0, Math.floor(Number(dc.jokboOneAwayOppCount || 0))),
-    oppJokboThreatProb: toPercentInt(dc.oppJokboThreatProb),
-    oppJokboOneAwayProb: toPercentInt(dc.oppJokboOneAwayProb),
-    oppGwangThreatProb: toPercentInt(dc.oppGwangThreatProb),
-    goStopDeltaProxy: toSignedPermille(dc.goStopDeltaProxy, 3),
-    scoreDiff
+    p: tracePhaseCode(dc.phase),
+    d: Math.max(0, Math.floor(Number(dc.deckCount || 0))),
+    hs: handCountSelf,
+    hd: handCountSelf - handCountOpp,
+    gs: Math.max(0, Math.floor(Number(dc.goCountSelf || 0))),
+    go: Math.max(0, Math.floor(Number(dc.goCountOpp || 0))),
+    rp: Number(dc.piBakRisk || 0) ? 1 : 0,
+    rg: Number(dc.gwangBakRisk || 0) ? 1 : 0,
+    rm: Number(dc.mongBakRisk || 0) ? 1 : 0,
+    ss: shakeSelf,
+    so: shakeOpp,
+    jps: Math.max(0, Math.floor(Number(dc.jokboProgressSelfSum || 0))),
+    jpo: Math.max(0, Math.floor(Number(dc.jokboProgressOppSum || 0))),
+    jas: Math.max(0, Math.floor(Number(dc.jokboOneAwaySelfCount || 0))),
+    jao: Math.max(0, Math.floor(Number(dc.jokboOneAwayOppCount || 0))),
+    sjt: toPercentInt(dc.selfJokboThreatProb),
+    sjo: toPercentInt(dc.selfJokboOneAwayProb),
+    sgt: toPercentInt(dc.selfGwangThreatProb),
+    ojt: toPercentInt(dc.oppJokboThreatProb),
+    ojo: toPercentInt(dc.oppJokboOneAwayProb),
+    ogt: toPercentInt(dc.oppGwangThreatProb),
+    gsd: toSignedPermille(dc.goStopDeltaProxy, 3),
+    sm: scoreMy,
+    sy: scoreYour,
+    sd: scoreDiff
   };
 }
 
-function compactSelectionPoolForTrace(sp) {
-  if (!sp) return null;
-  const out = {};
-  if (Array.isArray(sp.cards) && sp.cards.length) out.cards = sp.cards;
-  if (Array.isArray(sp.boardCardIds) && sp.boardCardIds.length) out.boardCardIds = sp.boardCardIds;
-  if (Array.isArray(sp.options) && sp.options.length) out.options = sp.options;
+function decisionTraceDcSignature(dc) {
+  if (!dc || typeof dc !== "object") return "";
+  return [
+    dc.p,
+    dc.d,
+    dc.hs,
+    dc.hd,
+    dc.gs,
+    dc.go,
+    dc.rp,
+    dc.rg,
+    dc.rm,
+    dc.ss,
+    dc.so,
+    dc.jps,
+    dc.jpo,
+    dc.jas,
+    dc.jao,
+    dc.sjt,
+    dc.sjo,
+    dc.sgt,
+    dc.ojt,
+    dc.ojo,
+    dc.ogt,
+    dc.gsd,
+    dc.sm,
+    dc.sy,
+    dc.sd
+  ]
+    .map((v) => String(v ?? ""))
+    .join("|");
+}
+
+function shouldDropStableTurnRecord(record, lastStableKeyByActor) {
+  if (!record || typeof record !== "object") return false;
+  const keepBy = Array.isArray(record.keepBy) ? record.keepBy : [];
+  if (keepBy.length > 0) return false;
+  if (Number(record.ir || 0) !== 0) return false;
+  const actor = String(record.a || "");
+  if (!actor) return false;
+  const key = [
+    record.cc,
+    record.dt,
+    record.ch,
+    decisionTraceDcSignature(record.dc)
+  ]
+    .map((v) => String(v ?? ""))
+    .join("|");
+  const prev = lastStableKeyByActor.get(actor);
+  if (prev && prev === key) return true;
+  lastStableKeyByActor.set(actor, key);
+  return false;
+}
+
+function dedupeStableDecisionTrace(trace) {
+  if (!Array.isArray(trace) || trace.length <= 1) return Array.isArray(trace) ? trace : [];
+  const out = [];
+  const lastStableKeyByActor = new Map();
+  for (const rec of trace) {
+    const actor = String(rec?.a || "");
+    if (shouldDropStableTurnRecord(rec, lastStableKeyByActor)) continue;
+    if (Array.isArray(rec?.keepBy) && rec.keepBy.length > 0) {
+      lastStableKeyByActor.delete(actor);
+    } else if (Number(rec?.ir || 0) !== 0) {
+      lastStableKeyByActor.delete(actor);
+    }
+    out.push(rec);
+  }
   return out;
 }
 
 function buildDecisionTrace(
   kibo,
-  winner,
-  contextByTurnNo,
   firstTurnKey,
   secondTurnKey,
-  policyBySideRef,
+  contextByTurnNo,
   options = {}
 ) {
   const myTurnOnly = !!options.myTurnOnly;
   const importantOnly = options.importantOnly !== false;
   const contextRadius = Number(options.contextRadius || 0);
   const goStopPlus2 = !!options.goStopPlus2;
+  const dedupeStableTurns = !!options.dedupeStableTurns;
   const optionEvents = Array.isArray(options.optionEvents) ? options.optionEvents : [];
   const turns = (kibo || []).filter((e) => e.type === "turn_end");
   const irTotalsByActor = new Map([
@@ -1877,9 +1958,10 @@ function buildDecisionTrace(
     const before = turnCtx?.before || null;
     const after = turnCtx?.after || null;
     const decisionType = traceDecisionType(before?.selectionPool || null, action.type);
-    const candidateCount = traceCandidateCount(before?.selectionPool || null);
+    const legalActions = traceLegalActions(before?.selectionPool || null, decisionType);
+    const candidateCount = legalActions.length;
     if (candidateCount < 2) continue;
-    const compactDc = compactDecisionContextForTrace(before?.decisionContext || null);
+    const compactDc = compactDecisionContextForTrace(before?.decisionContext || null, actorSide);
     const jpPre = before?.decisionContext?.jokboProgressSelf || null;
     const jpPost = after?.decisionContext?.jokboProgressSelf || null;
     const jpCompletedNow = !!(jokboCompleted(jpPost) && !jokboCompleted(jpPre));
@@ -1900,8 +1982,7 @@ function buildDecisionTrace(
       earlyTurnForced,
       goStopPlus2
     });
-    const tg = triggerNames(triggers);
-    const tm = triggerMaskFromNames(tg);
+    const seq = Number(turnCtx?.seq || t.turnNo || 0);
     const choice =
       decisionType === "play"
         ? action.card?.id || null
@@ -1909,17 +1990,18 @@ function buildDecisionTrace(
         ? action.selectedBoardCard?.id || null
         : actionTypeToChoice(action.type || "option");
     records.push({
-      seq: Number(turnCtx?.seq || t.turnNo || 0),
+      seq,
       triggers,
       data: {
-      t: t.turnNo,
-      a: actorSide,
-      dt: decisionType,
-      cc: candidateCount,
-      ch: choice,
-      ir: immediateReward,
-      dc: compactDc,
-      ...(tm ? { tm } : {})
+        seq,
+        t: t.turnNo,
+        a: actorSide,
+        dt: decisionType,
+        cc: candidateCount,
+        la: legalActions,
+        ch: choice,
+        ir: immediateReward,
+        dc: compactDc
       }
     });
   }
@@ -1927,12 +2009,14 @@ function buildDecisionTrace(
     const actor = ev?.actor;
     const actorSide = actorToSide(actor, firstTurnKey);
     if (myTurnOnly && actorSide !== SIDE_MY) continue;
-    const candidateCount = Math.max(0, Math.floor(Number(ev?.candidateCount || 0)));
-    if (candidateCount < 2) continue;
     const actionType = String(ev?.actionType || "option");
+    const optionActions = normalizeLegalActions(ev?.options || [], "option");
+    const legalActions = optionActions.length > 0 ? optionActions : optionLegalActionsFromActionType(actionType);
+    const candidateCount = legalActions.length;
+    if (candidateCount < 2) continue;
     const beforeDc = ev?.beforeDc || null;
     const afterDc = ev?.afterDc || null;
-    const compactDc = compactDecisionContextForTrace(beforeDc);
+    const compactDc = compactDecisionContextForTrace(beforeDc, actorSide);
     const turnNo = Math.max(0, Math.floor(Number(ev?.turnNo || 0)));
     const triggerTurn = { action: { type: actionType, matchEvents: [] } };
     const triggers = classifyImportantTurnTriggers({
@@ -1943,20 +2027,20 @@ function buildDecisionTrace(
       earlyTurnForced: false,
       goStopPlus2
     });
-    const tg = triggerNames(triggers);
-    const tm = triggerMaskFromNames(tg);
+    const seq = Number(ev?.seq || 0);
     records.push({
-      seq: Number(ev?.seq || 0),
+      seq,
       triggers,
       data: {
+        seq,
         t: turnNo,
         a: actorSide,
         dt: "option",
         cc: candidateCount,
+        la: legalActions,
         ch: actionTypeToChoice(actionType),
         ir: 0,
-        dc: compactDc,
-        ...(tm ? { tm } : {})
+        dc: compactDc
       }
     });
   }
@@ -1967,198 +2051,31 @@ function buildDecisionTrace(
     return Number(x?.data?.t || 0) - Number(y?.data?.t || 0);
   });
   applyTerminalContextTrigger(records);
-  return importantOnly ? keepImportantWithContext(records, contextRadius) : records.map((r) => r.data);
-}
-
-function buildDecisionTraceTrain(
-  kibo,
-  winner,
-  firstTurnKey,
-  secondTurnKey,
-  contextByTurnNo,
-  options = {}
-) {
-  const myTurnOnly = !!options.myTurnOnly;
-  const importantOnly = options.importantOnly !== false;
-  const contextRadius = Number(options.contextRadius || 0);
-  const goStopPlus2 = !!options.goStopPlus2;
-  const optionEvents = Array.isArray(options.optionEvents) ? options.optionEvents : [];
-  const turns = (kibo || []).filter((e) => e.type === "turn_end");
-  const irTotalsByActor = new Map([
-    [firstTurnKey, 0],
-    [secondTurnKey, 0]
-  ]);
-  const sideTurnOrdinal = { [SIDE_MY]: 0, [SIDE_YOUR]: 0 };
-  const records = [];
-  for (const t of turns) {
-    const actor = t.actor;
-    const actorSide = actorToSide(actor, firstTurnKey);
-    if (myTurnOnly && actorSide !== SIDE_MY) continue;
-    const action = t.action || {};
-    const turnCtx = contextByTurnNo.get(t.turnNo) || null;
-    const before = turnCtx?.before || null;
-    const after = turnCtx?.after || null;
-    const decisionType = traceDecisionType(before?.selectionPool || null, action.type);
-    const candidateCount = traceCandidateCount(before?.selectionPool || null);
-    if (candidateCount < 2) continue;
-    const compactDc = compactDecisionContextForTrace(before?.decisionContext || null);
-    const jpPre = before?.decisionContext?.jokboProgressSelf || null;
-    const jpPost = after?.decisionContext?.jokboProgressSelf || null;
-    const jpCompletedNow = !!(jokboCompleted(jpPost) && !jokboCompleted(jpPre));
-    const irEval = weightedImmediateReward(
-      t,
-      jpCompletedNow,
-      before?.decisionContext || null,
-      after?.decisionContext || null
-    );
-    const immediateReward = applyEpisodeIrBudget(irEval.clipped, actor, irTotalsByActor);
-    sideTurnOrdinal[actorSide] = Number(sideTurnOrdinal[actorSide] || 0) + 1;
-    const earlyTurnForced = sideTurnOrdinal[actorSide] <= 1;
-    const triggers = classifyImportantTurnTriggers({
-      decisionType,
-      turn: t,
-      beforeDc: before?.decisionContext || null,
-      afterDc: after?.decisionContext || null,
-      earlyTurnForced,
-      goStopPlus2
-    });
-    const tg = triggerNames(triggers);
-    const tm = triggerMaskFromNames(tg);
-    const choice =
-      decisionType === "play"
-        ? action.card?.id || null
-        : decisionType === "match"
-        ? action.selectedBoardCard?.id || null
-        : actionTypeToChoice(action.type || "option");
-    records.push({
-      seq: Number(turnCtx?.seq || t.turnNo || 0),
-      triggers,
-      data: {
-      t: t.turnNo,
-      a: actorSide,
-      dt: decisionType,
-      cc: candidateCount,
-      ch: choice,
-      ir: immediateReward,
-      dc: compactDc,
-      ...(tm ? { tm } : {})
-      }
+  let trace = [];
+  if (importantOnly) {
+    trace = keepImportantWithContext(records, contextRadius);
+  } else {
+    trace = records.map((r) => {
+      const selfTriggers = triggerNames(r?.triggers || [])
+        .map((name) => keepBySelf(name))
+        .filter(Boolean);
+      const unique = new Map();
+      for (const tag of selfTriggers) unique.set(keepByIndexKey(tag), tag);
+      return {
+        ...r.data,
+        keepBy: [...unique.values()].sort((a, b) => keepBySortKey(a).localeCompare(keepBySortKey(b)))
+      };
     });
   }
-  for (const ev of optionEvents) {
-    const actor = ev?.actor;
-    const actorSide = actorToSide(actor, firstTurnKey);
-    if (myTurnOnly && actorSide !== SIDE_MY) continue;
-    const candidateCount = Math.max(0, Math.floor(Number(ev?.candidateCount || 0)));
-    if (candidateCount < 2) continue;
-    const actionType = String(ev?.actionType || "option");
-    const beforeDc = ev?.beforeDc || null;
-    const afterDc = ev?.afterDc || null;
-    const compactDc = compactDecisionContextForTrace(beforeDc);
-    const turnNo = Math.max(0, Math.floor(Number(ev?.turnNo || 0)));
-    const triggerTurn = { action: { type: actionType, matchEvents: [] } };
-    const triggers = classifyImportantTurnTriggers({
-      decisionType: "option",
-      turn: triggerTurn,
-      beforeDc,
-      afterDc,
-      earlyTurnForced: false,
-      goStopPlus2
-    });
-    const tg = triggerNames(triggers);
-    const tm = triggerMaskFromNames(tg);
-    records.push({
-      seq: Number(ev?.seq || 0),
-      triggers,
-      data: {
-        t: turnNo,
-        a: actorSide,
-        dt: "option",
-        cc: candidateCount,
-        ch: actionTypeToChoice(actionType),
-        ir: 0,
-        dc: compactDc,
-        ...(tm ? { tm } : {})
-      }
-    });
+  if (dedupeStableTurns) {
+    trace = dedupeStableDecisionTrace(trace);
   }
-  records.sort((x, y) => {
-    const sx = Number(x?.seq || 0);
-    const sy = Number(y?.seq || 0);
-    if (sx !== sy) return sx - sy;
-    return Number(x?.data?.t || 0) - Number(y?.data?.t || 0);
-  });
-  applyTerminalContextTrigger(records);
-  return importantOnly ? keepImportantWithContext(records, contextRadius) : records.map((r) => r.data);
+  return trace;
 }
 
-function buildDecisionTraceDelta(
-  kibo,
-  winner,
-  firstTurnKey,
-  secondTurnKey,
-  contextByTurnNo,
-  policyBySideRef,
-  options = {}
-) {
-  const myTurnOnly = !!options.myTurnOnly;
-  const turns = (kibo || []).filter((e) => e.type === "turn_end");
-  let prevDeck = null;
-  let prevHand = { [firstTurnKey]: null, [secondTurnKey]: null };
-  const out = [];
-  for (const t of turns) {
-    const actor = t.actor;
-    const actorSide = actorToSide(actor, firstTurnKey);
-    if (myTurnOnly && actorSide !== SIDE_MY) continue;
-    const action = t.action || {};
-    const deckAfter = t.deckCount ?? 0;
-    const handSelfAfter = handCountFromTurn(t, actor);
-    const opp = actor === firstTurnKey ? secondTurnKey : firstTurnKey;
-    const handOppAfter = handCountFromTurn(t, opp);
-    const deckDelta = prevDeck == null ? null : deckAfter - prevDeck;
-    const handSelfDelta = prevHand[actor] == null ? null : handSelfAfter - prevHand[actor];
-    const handOppDelta = prevHand[opp] == null ? null : handOppAfter - prevHand[opp];
-    const turnCtx = contextByTurnNo.get(t.turnNo) || null;
-    const before = turnCtx?.before || null;
-    const candidateCount = traceCandidateCount(before?.selectionPool || null);
-    prevDeck = deckAfter;
-    prevHand = {
-      [firstTurnKey]: handCountFromTurn(t, firstTurnKey),
-      [secondTurnKey]: handCountFromTurn(t, secondTurnKey)
-    };
-    if (candidateCount < 2) continue;
-
-    out.push({
-      t: t.turnNo,
-      a: actorSide,
-      ch:
-        (before?.selectionPool?.decisionType || "play") === "match"
-          ? action.selectedBoardCard?.id || null
-          : (before?.selectionPool?.decisionType || "play") === "option"
-          ? actionTypeToChoice(action.type || "option")
-          : action.card?.id || null,
-      delta: {
-        deck: deckDelta,
-        handSelf: handSelfDelta,
-        handOpp: handOppDelta,
-        piSteal: t.steals?.pi || 0,
-        goldSteal: t.steals?.gold || 0,
-        capHand: (action.captureBySource?.hand || []).map((x) => x.id),
-        capFlip: (action.captureBySource?.flip || []).map((x) => x.id),
-        events: (action.matchEvents || [])
-          .filter((m) => m.eventTag && m.eventTag !== "NORMAL")
-          .map((m) => `${m.source}:${m.eventTag}`)
-      },
-      reasoning: {
-        policy: policyBySideRef[actorSide] || DEFAULT_POLICY,
-        candidatesCount: candidateCount,
-        evaluation: null
-      }
-    });
-  }
-  return out;
-}
-
+// -----------------------------------------------------------------------------
+// 11) Aggregation and report builders
+// -----------------------------------------------------------------------------
 function baseSummary({
   completed,
   winner,
@@ -2255,12 +2172,20 @@ function fullSummary({
   aggregate.luckHandCaptureValue += handCaptureValue;
 }
 
-function buildTrainReport() {
+function buildReportBase() {
   return {
     logMode,
+    seatMode,
     games: aggregate.games,
     completed: aggregate.completed,
     winners: aggregate.winners,
+    learningRole: {
+      attackCount: aggregate.learningRoleCounts.ATTACK,
+      defenseCount: aggregate.learningRoleCounts.DEFENSE,
+      neutralCount: aggregate.learningRoleCounts.NEUTRAL,
+      attackScoreMin: LEARNING_ROLE_ATTACK_SCORE_MIN,
+      defenseOppScoreMax: LEARNING_ROLE_DEFENSE_OPP_SCORE_MAX
+    },
     sideStats: {
       mySideWinRate: aggregate.bySide.mySideWins / Math.max(1, aggregate.games),
       yourSideWinRate: aggregate.bySide.yourSideWins / Math.max(1, aggregate.games),
@@ -2295,40 +2220,8 @@ function buildTrainReport() {
 
 function buildFullReport() {
   return {
-    logMode,
+    ...buildReportBase(),
     catalogPath: sharedCatalogPath,
-    games: aggregate.games,
-    completed: aggregate.completed,
-    winners: aggregate.winners,
-    sideStats: {
-      mySideWinRate: aggregate.bySide.mySideWins / Math.max(1, aggregate.games),
-      yourSideWinRate: aggregate.bySide.yourSideWins / Math.max(1, aggregate.games),
-      drawRate: aggregate.bySide.draw / Math.max(1, aggregate.games),
-      averageScoreMySide: aggregate.bySide.mySideScoreSum / Math.max(1, aggregate.games),
-      averageScoreYourSide: aggregate.bySide.yourSideScoreSum / Math.max(1, aggregate.games)
-    },
-    economy: {
-      averageGoldMySide: aggregate.economy.mySideGoldSum / Math.max(1, aggregate.games),
-      averageGoldYourSide: aggregate.economy.yourSideGoldSum / Math.max(1, aggregate.games),
-      averageGoldDeltaMySide: aggregate.economy.mySideDeltaSum / Math.max(1, aggregate.games),
-      cumulativeGoldDeltaOver1000:
-        (aggregate.economy.mySideDeltaSum / Math.max(1, aggregate.games)) * 1000,
-      cumulativeGoldDeltaMySideFirst1000: aggregate.economy.first1000MySideDeltaSum
-    },
-    bankrupt: {
-      mySideInflicted: aggregate.bankrupt.mySideInflicted,
-      mySideSuffered: aggregate.bankrupt.mySideSuffered,
-      mySideDiff: aggregate.bankrupt.mySideInflicted - aggregate.bankrupt.mySideSuffered,
-      yourSideInflicted: aggregate.bankrupt.yourSideInflicted,
-      yourSideSuffered: aggregate.bankrupt.yourSideSuffered,
-      yourSideDiff: aggregate.bankrupt.yourSideInflicted - aggregate.bankrupt.yourSideSuffered,
-      resets: aggregate.bankrupt.resets,
-      mySideInflictedRate: aggregate.bankrupt.mySideInflicted / Math.max(1, aggregate.games),
-      mySideSufferedRate: aggregate.bankrupt.mySideSuffered / Math.max(1, aggregate.games),
-      yourSideInflictedRate: aggregate.bankrupt.yourSideInflicted / Math.max(1, aggregate.games),
-      yourSideSufferedRate: aggregate.bankrupt.yourSideSuffered / Math.max(1, aggregate.games)
-    },
-    primaryMetric: "averageGoldDeltaMySide",
     nagariRate: aggregate.nagari / Math.max(1, aggregate.games),
     eventFrequencyPerGame: {
       ppuk: aggregate.eventTotals.ppuk / Math.max(1, aggregate.games),
@@ -2378,35 +2271,73 @@ function buildFullReport() {
   };
 }
 
+// -----------------------------------------------------------------------------
+// 12) Runtime IO and turn execution
+// -----------------------------------------------------------------------------
 async function writeLine(writer, line) {
   if (writer.write(`${JSON.stringify(line)}\n`)) return;
   await once(writer, "drain");
 }
 
-function executeActorTurn(state, actor, cfg) {
+function buildPersistedLine({
+  gameIndex,
+  seed,
+  steps,
+  firstTurnKey,
+  agentLabelBySide,
+  winnerSide,
+  mySideScore,
+  yourSideScore,
+  initialGoldMy,
+  initialGoldYour,
+  mySideGold,
+  yourSideGold,
+  learningRole,
+  decisionTrace
+}) {
+  return {
+    ver: {
+      s: TRACE_SCHEMA_VERSION,
+      f: TRACE_FEATURE_VERSION,
+      t: TRACE_TRIGGER_DICT_VERSION
+    },
+    game: gameIndex + 1,
+    runId,
+    seatMode,
+    seed,
+    steps,
+    firstAttackerActor: firstTurnKey,
+    policy: {
+      [SIDE_MY]: agentLabelBySide[SIDE_MY],
+      [SIDE_YOUR]: agentLabelBySide[SIDE_YOUR]
+    },
+    winner: winnerSide,
+    score: {
+      [SIDE_MY]: mySideScore,
+      [SIDE_YOUR]: yourSideScore
+    },
+    initialGoldMy,
+    initialGoldYour,
+    finalGoldMy: mySideGold,
+    finalGoldYour: yourSideGold,
+    learningRole,
+    decision_trace: decisionTrace
+  };
+}
+
+function executeActorTurn(state, actor, cfg, control = {}) {
   const runtimeCfg = buildRuntimeModelConfig(state, actor, cfg);
-  const canUseModel = !!(
-    runtimeCfg?.policyModel ||
-    runtimeCfg?.policyModelAttack ||
-    runtimeCfg?.policyModelDefense ||
-    runtimeCfg?.valueModel
-  );
+  const canUseModel = !!runtimeCfg?.policyModel;
   if (canUseModel) {
-    const picked = modelSelectCandidate(state, actor, runtimeCfg);
+    const picked = modelSelectCandidate(state, actor, runtimeCfg, control);
     if (picked) {
-      const next = applyModelChoice(state, actor, picked);
+      const next = applyModelChoice(state, actor, picked, runtimeCfg);
       if (next !== state) return next;
     }
-    if (modelOnly) {
-      throw new Error(`model-only decision failed for actor=${actor}, phase=${state.phase}`);
-    }
-  }
-  if (modelOnly) {
-    throw new Error(`model-only missing model for actor=${actor}`);
   }
   const exploratoryPick = maybePickExplorationChoice(state, actor, runtimeCfg);
   if (exploratoryPick) {
-    const explored = applyModelChoice(state, actor, exploratoryPick);
+    const explored = applyModelChoice(state, actor, exploratoryPick, runtimeCfg);
     if (explored !== state) return explored;
   }
   return aiPlay(state, actor, {
@@ -2415,6 +2346,9 @@ function executeActorTurn(state, actor, cfg) {
   });
 }
 
+// -----------------------------------------------------------------------------
+// 13) Main game loop
+// -----------------------------------------------------------------------------
 async function run() {
   const outStream = fs.createWriteStream(outPath, { encoding: "utf8" });
   const probeState = initGame("A", createSeededRng("side-probe-seed"), {
@@ -2422,14 +2356,13 @@ async function run() {
     kiboDetail: "lean"
   });
   const [actorA, actorB] = actorPairFromState(probeState);
-  const firstTurnPlan = createBalancedFirstTurnPlan(games, actorA, actorB);
+  const firstTurnPlan = createFirstTurnPlan(games, actorA, actorB, fixedSeats);
   const sessionGold = {
     [SIDE_MY]: STARTING_GOLD,
     [SIDE_YOUR]: STARTING_GOLD
   };
 
   for (let i = 0; i < games; i += 1) {
-    gameProgress = games <= 1 ? 1 : i / (games - 1);
     const seed = `sim-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
     const forcedFirstTurnKey = firstTurnPlan[i];
     const forcedSecondTurnKey = forcedFirstTurnKey === actorA ? actorB : actorA;
@@ -2439,7 +2372,7 @@ async function run() {
     };
     let state = initGame("A", createSeededRng(seed), {
       carryOverMultiplier: 1,
-      kiboDetail: useLeanKibo ? "lean" : "full",
+      kiboDetail: "lean",
       firstTurnKey: forcedFirstTurnKey,
       initialGold: initialGoldByActor
     });
@@ -2453,20 +2386,18 @@ async function run() {
     const initialGoldMy = Number(state.players?.[firstTurnKey]?.gold || 0);
     const initialGoldYour = Number(state.players?.[secondTurnKey]?.gold || 0);
 
-    const contextByTurnNo = needsDecisionTrace ? new Map() : null;
-    const optionTraceEvents = needsDecisionTrace ? [] : null;
+    const contextByTurnNo = new Map();
+    const optionTraceEvents = [];
     let steps = 0;
     const maxSteps = 4000;
     while (state.phase !== "resolution" && steps < maxSteps) {
       const actor = getActionPlayerKey(state);
       if (!actor) break;
-      const beforeContext = needsDecisionTrace
-        ? {
-            actor,
-            decisionContext: decisionContext(state, actor, { includeCardLists: false }),
-            selectionPool: selectPool(state, actor, { includeCardLists: false })
-          }
-        : null;
+      const beforeContext = {
+        actor,
+        decisionContext: decisionContext(state, actor, { includeCardLists: false }),
+        selectionPool: selectPool(state, actor, { includeCardLists: true })
+      };
       const prevTurnSeq = state.turnSeq || 0;
       const prevKiboSeq = state.kiboSeq || 0;
       const traceSeqBase = (steps + 1) * 2;
@@ -2474,38 +2405,37 @@ async function run() {
       const next = executeActorTurn(state, actor, sideConfig[actorSide]);
       if (next === state) break;
       const nextTurnSeq = next.turnSeq || 0;
-      if (needsDecisionTrace) {
-        const afterDc = decisionContext(next, actor, { includeCardLists: false });
-        const beforeSp = beforeContext?.selectionPool || null;
-        const beforeDecisionType = String(beforeSp?.decisionType || "");
-        if (beforeDecisionType === "option") {
-          optionTraceEvents.push({
-            seq: traceSeqBase,
-            turnNo: nextTurnSeq > prevTurnSeq ? nextTurnSeq : prevTurnSeq,
+      const afterDc = decisionContext(next, actor, { includeCardLists: false });
+      const beforeSp = beforeContext?.selectionPool || null;
+      const beforeDecisionType = String(beforeSp?.decisionType || "");
+      if (beforeDecisionType === "option") {
+        optionTraceEvents.push({
+          seq: traceSeqBase,
+          turnNo: nextTurnSeq > prevTurnSeq ? nextTurnSeq : prevTurnSeq,
+          actor,
+          candidateCount: traceCandidateCount(beforeSp),
+          options: Array.isArray(beforeSp?.options) ? [...beforeSp.options] : [],
+          actionType: inferOptionActionType({
+            beforeState: state,
+            nextState: next,
             actor,
-            candidateCount: traceCandidateCount(beforeSp),
-            actionType: inferOptionActionType({
-              beforeState: state,
-              nextState: next,
-              actor,
-              selectionPool: beforeSp,
-              prevKiboSeq
-            }),
-            beforeDc: beforeContext?.decisionContext || null,
-            afterDc
-          });
-        }
-        if (nextTurnSeq > prevTurnSeq) {
-          contextByTurnNo.set(nextTurnSeq, {
-            seq: traceSeqBase + 1,
-            before: beforeContext,
-            after: {
-              actor,
-              decisionContext: afterDc,
-              selectionPool: null
-            }
-          });
-        }
+            selectionPool: beforeSp,
+            prevKiboSeq
+          }),
+          beforeDc: beforeContext?.decisionContext || null,
+          afterDc
+        });
+      }
+      if (nextTurnSeq > prevTurnSeq) {
+        contextByTurnNo.set(nextTurnSeq, {
+          seq: traceSeqBase + 1,
+          before: beforeContext,
+          after: {
+            actor,
+            decisionContext: afterDc,
+            selectionPool: null
+          }
+        });
       }
       state = next;
       steps += 1;
@@ -2513,54 +2443,21 @@ async function run() {
 
     const winner = state.result?.winner || "unknown";
     const kibo = state.kibo || [];
-    const decisionTrace = needsDecisionTrace
-      ? isDeltaMode
-        ? buildDecisionTraceDelta(
-            kibo,
-            winner,
-            firstTurnKey,
-            secondTurnKey,
-            contextByTurnNo,
-            agentLabelBySide,
-            {
-              myTurnOnly: traceMyTurnOnly,
-              importantOnly: traceImportantOnly,
-              contextRadius: traceContextRadius,
-              goStopPlus2: traceGoStopPlus2,
-              optionEvents: optionTraceEvents
-            }
-          )
-        : isTrainMode
-        ? buildDecisionTraceTrain(
-            kibo,
-            winner,
-            firstTurnKey,
-            secondTurnKey,
-            contextByTurnNo,
-            {
-              myTurnOnly: traceMyTurnOnly,
-              importantOnly: traceImportantOnly,
-              contextRadius: traceContextRadius,
-              goStopPlus2: traceGoStopPlus2,
-              optionEvents: optionTraceEvents
-            }
-          )
-        : buildDecisionTrace(
-            kibo,
-            winner,
-            contextByTurnNo,
-            firstTurnKey,
-            secondTurnKey,
-            agentLabelBySide,
-            {
-              myTurnOnly: traceMyTurnOnly,
-              importantOnly: traceImportantOnly,
-              contextRadius: traceContextRadius,
-              goStopPlus2: traceGoStopPlus2,
-              optionEvents: optionTraceEvents
-            }
-          )
-      : null;
+    const traceOptions = {
+      myTurnOnly: traceMyTurnOnly,
+      importantOnly: traceImportantOnly,
+      contextRadius: traceContextRadius,
+      goStopPlus2: traceGoStopPlus2,
+      dedupeStableTurns: traceDedupeStableTurns,
+      optionEvents: optionTraceEvents
+    };
+    const decisionTrace = buildDecisionTrace(
+      kibo,
+      firstTurnKey,
+      secondTurnKey,
+      contextByTurnNo,
+      traceOptions
+    );
     const mySideActor = firstTurnKey;
     const yourSideActor = secondTurnKey;
     const mySideScore = Number(state.result?.[mySideActor]?.total || 0);
@@ -2570,8 +2467,6 @@ async function run() {
     const mySideBankrupt = mySideGold <= 0;
     const yourSideBankrupt = yourSideGold <= 0;
     const sessionReset = mySideBankrupt || yourSideBankrupt;
-    const goldDeltaMy = mySideGold - initialGoldMy;
-
     if (sessionReset) {
       sessionGold[SIDE_MY] = STARTING_GOLD;
       sessionGold[SIDE_YOUR] = STARTING_GOLD;
@@ -2582,53 +2477,24 @@ async function run() {
 
     const winnerSide =
       winner === "draw" || winner === "unknown" ? winner : actorToSide(winner, firstTurnKey);
-
-    if (isTrainMode) {
-      const line = {
-        ver: {
-          s: TRACE_SCHEMA_VERSION,
-          f: TRACE_FEATURE_VERSION,
-          t: TRACE_TRIGGER_DICT_VERSION
-        },
-        run: {
-          [SIDE_MY]: agentLabelBySide[SIDE_MY],
-          [SIDE_YOUR]: agentLabelBySide[SIDE_YOUR]
-        },
-        game: i + 1,
-        seed,
-        steps,
-        firstAttackerActor: firstTurnKey,
-        policy: {
-          [SIDE_MY]: agentLabelBySide[SIDE_MY],
-          [SIDE_YOUR]: agentLabelBySide[SIDE_YOUR]
-        },
-        winner: winnerSide,
-        score: {
-          [SIDE_MY]: mySideScore,
-          [SIDE_YOUR]: yourSideScore
-        },
-        initialGoldMy,
-        initialGoldYour,
-        finalGoldMy: mySideGold,
-        finalGoldYour: yourSideGold,
-        goldDeltaMy,
-        bankrupt: {
-          [SIDE_MY]: mySideBankrupt,
-          [SIDE_YOUR]: yourSideBankrupt
-        },
-        decision_trace: decisionTrace
-      };
-      baseSummary({
-        completed: state.phase === "resolution",
-        winner: line.winner,
-        mySideScore,
-        yourSideScore,
-        mySideGold,
-        yourSideGold
-      });
-      await writeLine(outStream, line);
-      continue;
-    }
+    const learningRole = classifyLearningRoleMySide(winnerSide, mySideScore, yourSideScore);
+    addLearningRoleCount(learningRole);
+    const persistedLine = buildPersistedLine({
+      gameIndex: i,
+      seed,
+      steps,
+      firstTurnKey,
+      agentLabelBySide,
+      winnerSide,
+      mySideScore,
+      yourSideScore,
+      initialGoldMy,
+      initialGoldYour,
+      mySideGold,
+      yourSideGold,
+      learningRole,
+      decisionTrace
+    });
 
     const goCalls = kibo.filter((e) => e.type === "go").length;
     const winnerTotal =
@@ -2690,10 +2556,6 @@ async function run() {
 
     const completed = state.phase === "resolution";
     const nagari = state.result?.nagari || false;
-    const policyRef = {
-      [SIDE_MY]: agentLabelBySide[SIDE_MY],
-      [SIDE_YOUR]: agentLabelBySide[SIDE_YOUR]
-    };
     const eventFrequency = {
       ppuk: (allEvents[SIDE_MY].ppuk || 0) + (allEvents[SIDE_YOUR].ppuk || 0),
       ddadak: (allEvents[SIDE_MY].ddadak || 0) + (allEvents[SIDE_YOUR].ddadak || 0),
@@ -2726,52 +2588,18 @@ async function run() {
       handCaptureValue
     });
 
-    const persistedLine = {
-      ver: {
-        s: TRACE_SCHEMA_VERSION,
-        f: TRACE_FEATURE_VERSION,
-        t: TRACE_TRIGGER_DICT_VERSION
-      },
-      run: {
-        [SIDE_MY]: agentLabelBySide[SIDE_MY],
-        [SIDE_YOUR]: agentLabelBySide[SIDE_YOUR]
-      },
-      game: i + 1,
-      seed,
-      steps,
-      firstAttackerActor: firstTurnKey,
-      policy: policyRef,
-      winner: winnerSide,
-      score: {
-        [SIDE_MY]: mySideScore,
-        [SIDE_YOUR]: yourSideScore
-      },
-      initialGoldMy,
-      initialGoldYour,
-      finalGoldMy: mySideGold,
-      finalGoldYour: yourSideGold,
-      goldDeltaMy,
-      bankrupt: {
-        [SIDE_MY]: mySideBankrupt,
-        [SIDE_YOUR]: yourSideBankrupt
-      },
-      decision_trace: decisionTrace
-    };
-
     await writeLine(outStream, persistedLine);
   }
 
   outStream.end();
   await once(outStream, "finish");
 
-  const report = isTrainMode ? buildTrainReport() : buildFullReport();
-  if (!isTrainMode) ensureSharedCatalog();
+  const report = buildFullReport();
+  ensureSharedCatalog();
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf8");
   console.log(`done: ${games} games -> ${outPath}`);
   console.log(`report: ${reportPath}`);
-  if (!isTrainMode) {
-    console.log(`catalog: ${sharedCatalogPath}`);
-  }
+  console.log(`catalog: ${sharedCatalogPath}`);
 }
 
 run().catch((err) => {

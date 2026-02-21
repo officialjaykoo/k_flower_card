@@ -151,6 +151,9 @@ export function rankHandCardsV4(state, playerKey, deps) {
       safeNumber(capturedByMonth.get(card.month), 0);
     const monthIsLiveDoublePi = liveDoublePiMonths.has(card.month);
     const monthIsComboHold = comboHoldMonths.has(card.month);
+    const monthBlockUrgency = safeNumber(blockUrgency.get(card.month), 0);
+    const monthJokboUrgency = safeNumber(jokboThreat?.monthUrgency?.get(card.month), 0);
+    const monthIsOneAwayThreat = monthBlockUrgency >= 3 || monthJokboUrgency >= 24;
 
     let score = 0;
     if (matches.length === 0) {
@@ -210,10 +213,12 @@ export function rankHandCardsV4(state, playerKey, deps) {
       // avoid live ssangpi months and combo months; otherwise reverse discard order.
       let discardScore = 0;
       if (card?.bonus?.stealPi) discardScore += 26; // prefer bonus-pi discard first
-      if (monthIsLiveDoublePi) discardScore -= 24;
-      if (isDoublePiLike(card, deps) && monthIsLiveDoublePi) discardScore -= 16;
+      if (monthIsLiveDoublePi) discardScore -= deckCount <= 8 ? 36 : 24;
+      if (isDoublePiLike(card, deps) && monthIsLiveDoublePi) discardScore -= deckCount <= 8 ? 26 : 16;
       if (isDoublePiLike(card, deps) && !monthIsLiveDoublePi) discardScore += 6;
-      if (monthIsComboHold) discardScore -= 44; // hold combo-critical month
+      if (monthIsComboHold) discardScore -= deckCount <= 8 ? 56 : 44; // hold combo-critical month
+      if (monthIsOneAwayThreat) discardScore -= deckCount <= 8 ? 58 : 42;
+      else if (monthBlockUrgency >= 2 || monthJokboUrgency >= 20) discardScore -= deckCount <= 8 ? 30 : 20;
       if (mongBakDefenseCritical && card.category === "five") discardScore -= 28;
       if (mongBakDefenseCritical && card.category === "junk") discardScore += 5;
 
@@ -551,41 +556,149 @@ export function shouldPresidentStopV4(state, playerKey, deps) {
   return !holdAllowed;
 }
 
+function estimateOpponentOneAwayProbV4(state, playerKey, deps, ctx) {
+  const deckCount = safeNumber(state?.deck?.length, 0);
+  const oppScore = safeNumber(ctx?.oppScore, 0);
+  const comboThreat = opponentComboThreatProfile(state, playerKey, deps);
+  const jokboProfile = deps.checkOpponentJokboProgress(state, playerKey);
+  const jokboThreat = safeNumber(jokboProfile?.threat, 0);
+  const nextThreat = safeNumber(deps.nextTurnThreatScore(state, playerKey), 0);
+
+  let topMonthUrgency = 0;
+  const monthUrgency = jokboProfile?.monthUrgency;
+  if (monthUrgency && typeof monthUrgency.values === "function") {
+    for (const urgency of monthUrgency.values()) {
+      topMonthUrgency = Math.max(topMonthUrgency, safeNumber(urgency, 0));
+    }
+  }
+
+  let prob =
+    comboThreat.count * 24 + // explicit near-completion combo lines
+    jokboThreat * 52 +
+    nextThreat * 36;
+
+  if (topMonthUrgency >= 24) prob += 12;
+  else if (topMonthUrgency >= 20) prob += 7;
+  if (oppScore >= 3) prob += 5;
+
+  // Late game weights: same threat should stop more often.
+  if (deckCount <= 10) prob += 8;
+  if (deckCount <= 6) prob += 6;
+  if (deckCount <= 3) prob += 5;
+
+  return {
+    oppOneAwayProb: Math.max(0, Math.min(100, prob)),
+    comboThreatCount: comboThreat.count,
+    jokboThreat,
+    nextThreat,
+    deckCount
+  };
+}
+
+function summarizeOppGukjinCase(branch, oppMode) {
+  const scenarios = (branch?.scenarios || []).filter((s) => s?.oppMode === oppMode);
+  if (!scenarios.length) return null;
+  return {
+    oppMode,
+    oppScore: Math.max(...scenarios.map((s) => safeNumber(s?.oppScore, 0))),
+    oppPi: Math.max(...scenarios.map((s) => safeNumber(s?.oppPi, 0))),
+    oppFive: Math.max(...scenarios.map((s) => safeNumber(s?.oppFive, 0)))
+  };
+}
+
 export function shouldGoV4(state, playerKey, deps) {
   if (deps.canBankruptOpponentByStop(state, playerKey)) return false;
 
   const ctx = deps.analyzeGameContext(state, playerKey);
-  const oppScore = safeNumber(ctx?.oppScore, 0);
+  const myScore = safeNumber(ctx?.myScore, 0);
+  const oppScoreBase = safeNumber(ctx?.oppScore, 0);
+  const threat = estimateOpponentOneAwayProbV4(state, playerKey, deps, ctx);
+  const lateGame = threat.deckCount <= 10;
+  const selfPlayer = state.players?.[playerKey];
+  const oppPlayer = state.players?.[deps.otherPlayerKey(playerKey)];
+  const oppPiBase = safeNumber(ctx?.oppPi, deps.capturedCountByCategory(oppPlayer, "junk"));
+  const selfCombo = comboCounts(selfPlayer);
+  const myCertainJokbo =
+    selfCombo.kwang >= 3 ||
+    selfCombo.birds >= 3 ||
+    selfCombo.red >= 3 ||
+    selfCombo.blue >= 3 ||
+    selfCombo.plain >= 3;
+  const unseenBonus = countUnseenByIdSet(state, playerKey, BONUS_CARD_ID_SET);
+  const unseenSsangpi = countUnseenByIdSet(state, playerKey, SSANGPI_WITH_GUKJIN_ID_SET);
+  const unseenHighPi = unseenSsangpi + unseenBonus;
+  let oppScoreRisk = oppScoreBase;
+  let oppPiRisk = oppPiBase;
+  const gukjinBranch = deps.analyzeGukjinBranches?.(state, playerKey);
+  const oppCaseFive = summarizeOppGukjinCase(gukjinBranch, "five");
+  const oppCaseJunk = summarizeOppGukjinCase(gukjinBranch, "junk");
+  for (const c of [oppCaseFive, oppCaseJunk]) {
+    if (!c) continue;
+    oppScoreRisk = Math.max(oppScoreRisk, c.oppScore);
+    oppPiRisk = Math.max(oppPiRisk, c.oppPi);
+  }
+  const caseRisk = (c) =>
+    !!c &&
+    (c.oppScore >= 6 ||
+      (c.oppScore >= 5 && !myCertainJokbo) ||
+      (unseenHighPi >= 2 && c.oppPi >= 7 && !myCertainJokbo));
+  if (caseRisk(oppCaseFive) || caseRisk(oppCaseJunk)) return false;
+  const scoreDiffRisk = myScore - oppScoreRisk;
+
+  // Ssangpi risk gate:
+  // when high-pi cards are still unseen, opponent pi is already high, and we don't have confirmed jokbo.
+  if (unseenHighPi >= 2 && oppPiRisk >= 7 && !myCertainJokbo) return false;
 
   // 1) Opponent 6+: always STOP.
-  if (oppScore >= 6) return false;
+  if (oppScoreRisk >= 6) return false;
 
-  // 2) Opponent 5: same as 4-point conditions with exceptions.
-  if (oppScore >= 5) {
+  // 2) Opponent 5+: default STOP.
+  // Exception only when big score lead + low threat.
+  if (oppScoreRisk >= 5) {
     const shouldStop = shouldStopForOpponentFourLike(state, playerKey, deps, ctx, {
       bonusUnseenThreshold: 1,
       ssangpiUnseenThreshold: 2
     });
-    return !shouldStop;
+    const bigLead = scoreDiffRisk >= 8 && myScore >= 11;
+    const lowThreat =
+      threat.oppOneAwayProb < (lateGame ? 20 : 25) &&
+      threat.jokboThreat < 0.3 &&
+      threat.nextThreat < 0.35 &&
+      threat.comboThreatCount <= 1;
+    return !shouldStop && bigLead && lowThreat;
   }
 
   // 3) Opponent 4: apply 3-1..3-6.
-  if (oppScore >= 4) {
+  if (oppScoreRisk >= 4) {
     const shouldStop = shouldStopForOpponentFourLike(state, playerKey, deps, ctx, {
       bonusUnseenThreshold: 2,
       ssangpiUnseenThreshold: 3
     });
-    return !shouldStop;
-  }
-
-  // 4) Opponent 3: stop if 2+ major combo threats.
-  if (oppScore >= 3) {
-    const comboThreat = opponentComboThreatProfile(state, playerKey, deps);
-    if (comboThreat.count >= 2) return false;
+    if (shouldStop) return false;
+    if (threat.oppOneAwayProb >= (lateGame ? 28 : 32)) return false;
     return true;
   }
 
-  // 5) Otherwise GO.
+  // 4) Opponent 1~3: strengthen STOP gate with one-away probability.
+  if (oppScoreRisk >= 1 && oppScoreRisk <= 3) {
+    if (oppScoreRisk === 3 && threat.comboThreatCount >= 2) return false;
+    const baseThreshold = oppScoreRisk === 3 ? 43 : oppScoreRisk === 2 ? 38 : 34;
+    const threshold = baseThreshold - (lateGame ? 1 : 0);
+    if (threat.oppOneAwayProb >= threshold) return false;
+
+    // Opponent <=2: remove auto-GO, require minimum threat check.
+    if (
+      oppScoreRisk <= 2 &&
+      (threat.jokboThreat >= 0.35 || threat.nextThreat >= 0.45 || (lateGame && threat.comboThreatCount >= 2))
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  // 5) Opponent 0: no automatic GO.
+  if (threat.oppOneAwayProb >= (lateGame ? 33 : 37)) return false;
+  if (threat.jokboThreat >= 0.37 || threat.nextThreat >= 0.47) return false;
   return true;
 }
 
@@ -726,3 +839,4 @@ export function decideShakingV4(state, playerKey, shakingMonths, deps) {
   const allow = myScore > oppScore || preferDoublePiShake;
   return { ...best, allow };
 }
+

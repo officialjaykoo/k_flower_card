@@ -1,297 +1,339 @@
 ﻿# TRAINING RUN LOG
 
-## 2026-02-20 시뮬레이션/모델링 업데이트 (scripts 기준 재정리)
+이 문서는 학습/셀프플레이 실행 방법, 산출 파일, 로그 필드 의미를 운영 기준으로 정리한 문서다.
+향후 다른 스크립트/파이프라인 내용도 이 파일에 계속 추가한다.
 
-- 기준 파일:
-  - `scripts/selfplay_simulator.mjs`
-  - `scripts/run_parallel_selfplay.py`
-  - `scripts/01_train_policy.py`
-  - `scripts/02_train_value.py`
-  - `scripts/03_evaluate.py`
-  - `scripts/build_errata_dataset.py`
-  - `scripts/run_league_selfplay.py`
-  - `scripts/run_champion_cycle.ps1`
+## 0) 현재 운영 원칙 (요약)
+- 시뮬레이션 엔진: `scripts/selfplay_simulator.mjs`
+- 병렬 실행 래퍼: `scripts/run_parallel_selfplay.py`
+- 리그 실행 래퍼: `scripts/run_league_selfplay.py`
+- 기본 평가 기준: `averageGoldDeltaMySide` (report의 `primaryMetric`)
+- 현재 코드 기준 train/delta는 파이프라인 상 단일화되어, 본문 로그 포맷은 동일하게 관리한다.
 
-### A. selfplay 생성기(`selfplay_simulator.mjs`) 핵심 변경점
+## 1) 실행 방법
 
-- 로그 스키마 버전 고정 필드 추가:
-  - `ver.s=2`, `ver.f=14`, `ver.t=2`
-- 실행 모드:
-  - `--log-mode=train|delta`만 허용
-  - 학습 모드(`train/delta`)에서 lean kibo 사용
-- 모델 기반 의사결정 경로 확장:
-  - 사이드별 `--policy-model-*`, `--value-model-*` 지원
-  - MoE 분기(`--policy-model-attack-*`, `--policy-model-defense-*`) 지원
-  - `--model-only` 사용 시 모델 추론 실패를 즉시 에러 처리
-- 탐색(Exploration) 파라미터 추가/강화:
-  - `--train-explore-rate`
-  - `--train-explore-rate-comeback`
-  - `--train-explore-decay-k`
-  - `--train-explore-min`
-  - `--train-explore-comeback-min`
-- `decision_trace` 압축/호환 필드:
-  - `ch`(compact chosen), `ck`(context key), `tm`(trigger bitmask) 사용
-  - 기존 `c/s/at`, `tg`와 병행 호환
-- 트리거 비트셋 정식화(10개):
-  - `earlyTurnForced`, `goStopOption`, `shakingYesOption`, `optionTurnOther`, `deckEmpty`, `specialEvent`, `bombEvent`, `riskShift`, `comboThreatEnter`, `terminalContext`
-- 경제 루프 반영:
-  - 게임 간 골드 carry-over
-  - 한쪽 파산 시 세션 골드 리셋
+### 1-1. 단일 실행 (Node)
+```powershell
+node scripts/selfplay_simulator.mjs 1000 logs/selfplay_1000.jsonl --policy-my-side=heuristic_v4 --policy-your-side=heuristic_v4
+```
 
-### B. 병렬 생성/리포트(`run_parallel_selfplay.py`) 변경점
+전체 옵션 목록 (`selfplay_simulator.mjs`):
+- 입력 1: `games` (필수)
+  - 기본(스위칭): **짝수 필수** (`mySide`/`yourSide` 선공 분배 50:50)
+  - `--fixed-seats` 사용 시: 고정 모드(선공 스위칭 없음)
+- 입력 2: `outPath` (선택, 생략 시 `logs/side-vs-side-<timestamp>.jsonl`)
+- 입력 3: 양쪽 정책/모델
+  - `--policy-my-side` (기본 `heuristic_v3`)
+  - `--policy-your-side` (기본 `heuristic_v3`)
+  - `--policy-model-my-side` (선택)
+  - `--policy-model-your-side` (선택)
+  - `--fixed-seats` (선택, 기본은 미지정=스위칭)
 
-- 총 게임 수는 짝수 강제(워커 분배도 짝수 단위)
-- `--emit-train-splits` 추가:
-  - shard별 최소 학습 로그(`*.train_policy.jsonl`) 생성
-  - 최소 trace 필드: `a,o,dt,cc,ch,ck`
-- `--shard-only` 추가:
-  - 병합 JSONL 생략, shard 산출물 중심 운영
-- 병합 리포트 지표 확장:
-  - `economy.averageGoldDeltaMySide`
-  - `economy.cumulativeGoldDeltaOver1000`
-  - `economy.cumulativeGoldDeltaMySideFirst1000`
-  - `bankrupt.*`(inflicted/suffered/rate/reset)
+### 1-2. 병렬 실행 (Python)
+```powershell
+python scripts/run_parallel_selfplay.py 1000 --workers 4 --output logs/selfplay_parallel_1000.jsonl -- --policy-my-side=heuristic_v4 --policy-your-side=heuristic_v4
+```
 
-### C. 정책 학습(`01_train_policy.py`) 변경점
+전체 옵션 목록 (`run_parallel_selfplay.py`):
+- 입력 1: `games` (필수)
+  - **짝수 필수** (내부적으로 worker shard도 짝수로 분배)
+- 입력 2: 병렬/실행 제어
+  - `--workers` (기본 `4`)
+  - `--output` (선택, 생략 시 `logs/side-vs-side-parallel-<timestamp>.jsonl`)
+  - `--node` (기본 `node`)
+  - `--script` (기본 `scripts/selfplay_simulator.mjs`)
+- 입력 3: 산출물 제어
+  - `--shard-only` (선택): 병합 안 하고 shard만 유지 (merge JSONL 미생성)
+  - `--keep-shards` (선택): 병합은 하되 worker shard 파일도 유지
+  - `--emit-train-splits` (선택): shard별 학습용 `*.train_policy.jsonl` 추가 생성
+- 입력 4: 시뮬레이터 전달 인자
+  - `--` 뒤 인자는 그대로 `selfplay_simulator.mjs`로 전달
+  - 예: `-- --policy-my-side=heuristic_v4 --policy-your-side=heuristic_v4 --fixed-seats`
 
-- 정책 필터 규칙 파일 도입:
-  - 기본 `configs/policy_filter_rules.json`
-  - 기본 규칙 `min_candidate_count=2`
-- 컨텍스트 키 생성 시 `ck` 우선 사용
-- 샘플 캐시 체계:
-  - `--cache-backend jsonl|lmdb`
-  - 입력 매니페스트/설정 기반 cache 재사용 판정
-  - `--skip-train-metrics` 지원
+### 1-3. 리그 실행 (Python)
+```powershell
+python scripts/run_league_selfplay.py --config scripts/league_config.json --total-games 1000 --workers 4 --output logs/league_1000.jsonl
+```
 
-### D. 가치 학습(`02_train_value.py`) 변경점
+메모:
+- focal vs opponents를 가중치로 매칭.
+- chunk 단위로 병렬 실행 후 최종 merge.
 
-- 학습 샘플 단위:
-  - 1게임 1샘플이 아니라 `decision_trace`의 각 턴이 1샘플
-  - 기본 필터는 `cc >= 2`, 예외(`declare_bomb`/특정 트리거)는 보존
-- 타깃(`y`) 설계:
-  - 기본 `--target-mode gold`에서 actor 기준 `gold delta` 회귀
-  - `goldDelta*` 우선, 없으면 `finalGold - initialGold`로 보완
-  - 대안 모드 `--target-mode score` 지원
-- 피처 설계:
-  - 토큰: `phase/order/decision_type/action/deck_bucket/...` 해시 인코딩
-  - 수치: `deck_count`, `hand_self`, `hand_opp`, `score_diff`, `bak_risk_total`,
-    `jokbo*`, `opp*ThreatProb`, `go_stop_delta_proxy`, `immediate_reward`
-  - 신규 로그 호환:
-    - `scoreDiff` 우선 사용, 구버전은 `currentScoreSelf-currentScoreOpp` fallback
-    - `handCountOpp` 없으면 `handCountSelf-handCountDiff`로 복원
-- 학습 방식:
-  - 선형 해시 회귀(`value_linear_hash_v1`) + MSE
-  - 옵티마이저: SGD, L2는 `weight_decay`로 적용
-  - 검증 분할: deterministic hash split(`--valid-ratio`)
-  - 지표: train/valid `MSE, RMSE, MAE, Pearson`
-- 실행/백엔드:
-  - `--device cpu|cuda` 지원(현재 기본 `cuda`)
-  - sparse sample cache(`jsonl/lmdb`) + `shuffle-buffer`
-  - 이번 실행 파라미터:
-    - `--device cuda --epochs 8 --lr 0.008 --l2 3e-6 --cache-backend jsonl --sample-cache none`
+## 2) 주요 산출 파일
 
-### E. 평가/승급 게이트(`03_evaluate.py`) 변경점
+### 2-1. selfplay_simulator 직접 실행 시
+- 메인 로그: `<out>.jsonl`
+- 리포트: `<out>-report.json`
+- 카탈로그: `logs/catalog/cards-catalog.json`
 
-- North-star 중심 리포트 구조:
-  - `avg_gold_delta_my` + 95% CI
-  - `go_fail_rate_total` / side별 go fail
-- 승급 추천 게이트(`promotion_recommended`):
-  - `gold_significant_positive`
-  - `go_fail_rate_safe`(총 go fail rate <= 0.08)
-  - `value_not_worse`
+### 2-2. run_parallel_selfplay 실행 시
+- 병합 로그: `--output` 경로의 `.jsonl`
+- 병합 리포트: 동일 경로의 `-report.json`
+- shard 로그(옵션): `<base>.partN.jsonl`
+- shard 리포트(옵션): `<base>.partN-report.json`
+- train split(옵션): `<base>.partN.train_policy.jsonl`
 
-### F. 에라타 데이터셋(`build_errata_dataset.py`) 변경점
+### 2-3. run_league_selfplay 실행 시
+- 병합 로그: `--output` 경로의 `.jsonl`
+- 리그 리포트: 동일 경로의 `-report.json`
+- chunk 임시 디렉터리: `<base>.chunks-<timestamp>/` (옵션에 따라 자동 정리)
 
-- 정책/가치 에러 임계치 자동 산정:
-  - 정책: `--policy-loss-quantile`
-  - 가치: `--value-error-min` + 선택 `--value-error-quantile`
-- 산출물 분리:
-  - 기본 errata JSONL + oversampled JSONL + summary JSON
+## 3) JSONL 한 줄(게임 1개) 필드와 역할
 
-### G. 리그/챔피언 운영 스크립트 변경점
+아래는 `selfplay_simulator.mjs`의 기본 persisted line 구조다.
 
-- `run_league_selfplay.py`:
-  - 가중치 상대 풀 기반 매치업 샘플링
-  - chunk 진행률 기반 explore decay 스케줄
-  - `model_only_when_possible` 시 자동 `--model-only` 전달
-- `run_champion_cycle.ps1`:
-  - 승급 판단에 `ZScoreGate`, `GoFailRateTolerance`, `WorstSingleLoss` 비교 반영
-  - 라운드 상태 파일(`logs/champ-cycle-state-*.json`) 기반 resume 지원
+실제 저장되는 필드는 아래와 같다.
 
-### H. 운영 주의
+```json
+{
+  "ver": {
+    "s": 2,
+    "f": 14,
+    "t": 2
+  },
+  "game": 1,
+  "runId": "run-2026-...-a1b2c3",
+  "seatMode": "switching | fixed",
+  "seed": "sim-...",
+  "steps": 123,
+  "firstAttackerActor": "A",
+  "policy": {
+    "mySide": "heuristic_v4 | model:<file>",
+    "yourSide": "heuristic_v4 | model:<file>"
+  },
+  "winner": "mySide | yourSide | draw | unknown",
+  "score": {
+    "mySide": 0,
+    "yourSide": 0
+  },
+  "initialGoldMy": 0,
+  "initialGoldYour": 0,
+  "finalGoldMy": 0,
+  "finalGoldYour": 0,
+  "learningRole": "ATTACK | DEFENSE | NEUTRAL",
+  "decision_trace": [
+    {
+      "seq": 71,
+      "t": 0,
+      "a": "mySide | yourSide",
+      "dt": "play | match | option",
+      "cc": 0,
+      "la": ["legal action 1", "legal action 2"],
+      "ch": "chosen compact value",
+      "ir": 0.0,
+      "dc": {
+        "p": 0,
+        "d": 0,
+        "hs": 0,
+        "hd": 0,
+        "gs": 0,
+        "go": 0,
+        "rp": 0,
+        "rg": 0,
+        "rm": 0,
+        "ss": 0,
+        "so": 0,
+        "jps": 0,
+        "jpo": 0,
+        "jas": 0,
+        "jao": 0,
+        "sjt": 0,
+        "sjo": 0,
+        "sgt": 0,
+        "ojt": 0,
+        "ojo": 0,
+        "ogt": 0,
+        "gsd": 0,
+        "sm": 0,
+        "sy": 0,
+        "sd": 0
+      },
+      "keepBy": [
+        { "kind": "self", "trigger": "goStopOption" },
+        { "kind": "from", "fromTurn": 37, "trigger": "riskShiftUp" }
+      ]
+    }
+  ]
+}
+```
 
-- 본 업데이트는 `scripts` 정적 확인 기준 반영이며, 시뮬레이션 실행은 수행하지 않음.
-- 저장 인코딩은 UTF-8 BOM 유지.
-## 1) `decision_trace` 기록 시점(핵심)
+`dc` 축약 키 맵 (예시와 동일 레벨/동일 순서):
 
-`decision_trace`는 턴마다 무조건 저장하지 않고, 아래 기준을 통과한 턴만 기록한다.
+```json
+{
+  "p": "phase",
+  "d": "deckCount",
+  "hs": "handCountSelf",
+  "hd": "handCountDiff",
+  "gs": "goCountSelf",
+  "go": "goCountOpp",
+  "rp": "piBakRisk",
+  "rg": "gwangBakRisk",
+  "rm": "mongBakRisk",
+  "ss": "shakeCountSelf",
+  "so": "shakeCountOpp",
+  "jps": "jokboProgressSelfSum",
+  "jpo": "jokboProgressOppSum",
+  "jas": "jokboOneAwaySelfCount",
+  "jao": "jokboOneAwayOppCount",
+  "sjt": "selfJokboThreatProb",
+  "sjo": "selfJokboOneAwayProb",
+  "sgt": "selfGwangThreatProb",
+  "ojt": "oppJokboThreatProb",
+  "ojo": "oppJokboOneAwayProb",
+  "ogt": "oppGwangThreatProb",
+  "gsd": "goStopDeltaProxy",
+  "sm": "scoreMySideAtTurn",
+  "sy": "scoreYourSideAtTurn",
+  "sd": "scoreDiff(actor 기준)"
+}
+```
 
-- 수집 기준:
-  - `kibo.type === "turn_end"`에서 턴 단위 레코드 생성
-  - `selectionPool.decisionType === "option"`인 별도 option 이벤트도 추가 레코드 생성
-- 턴 확정:
-  - 루프에서 `nextTurnSeq > prevTurnSeq`일 때 해당 턴의 before/after 컨텍스트를 매핑
-- 사이드 필터:
-  - 기본: 양쪽 턴 기록
-  - `--trace-my-turn-only`: `mySide`만 기록
-- 후보 수 필터:
-  - `train`: `candidateCount >= 1`
-  - `delta`: `candidateCount >= 2`
-- 중요턴 필터:
-  - 기본 ON(`--trace-important-only`)
-  - OFF(`--trace-all-candidate-turns`) 시 후보 수 조건만 통과하면 기록
-- 컨텍스트 확장:
-  - `--trace-context-radius`로 중요턴 주변 반경 보존
-  - `--trace-go-stop-plus2`로 `goStopOption(go 선택)`의 forward 범위를 `+2`까지 확장
+`decision_trace` 핵심 규칙:
+- `la`: 해당 시점 합법 액션 목록(학습 입력의 단일 기준)
+- `ch`: 실제 선택 액션
+- 정책 학습(01)은 `la`만 후보로 사용하며, `ch in la`가 아니면 샘플을 버림
 
-## 2) 중요턴 10개 트리거 상세
+`dc` 키 한글 설명(옆 설명):
 
-아래 10개 그룹으로 관리한다.  
-내부 raw 트리거명(`specialEventPpuk`, `specialEventCore` 등)은 비트마스크(`tm`)로 10개 그룹에 매핑된다.
+| 키 | 원본 의미 | 한글 설명 |
+|---|---|---|
+| `p` | `phase` | 현재 의사결정 단계 |
+| `d` | `deckCount` | 남은 덱 장수 |
+| `hs` | `handCountSelf` | 행동 주체 손패 수 |
+| `hd` | `handCountDiff` | 손패 수 차이(나-상대) |
+| `gs` | `goCountSelf` | 행동 주체 GO 횟수 |
+| `go` | `goCountOpp` | 상대 GO 횟수 |
+| `rp` | `piBakRisk` | 피박 위험 여부(0/1) |
+| `rg` | `gwangBakRisk` | 광박 위험 여부(0/1) |
+| `rm` | `mongBakRisk` | 멍박 위험 여부(0/1) |
+| `ss` | `shakeCountSelf` | 행동 주체 흔들기 누적 횟수 |
+| `so` | `shakeCountOpp` | 상대 흔들기 누적 횟수 |
+| `jps` | `jokboProgressSelfSum` | 내 족보 진행 총합 |
+| `jpo` | `jokboProgressOppSum` | 상대 족보 진행 총합 |
+| `jas` | `jokboOneAwaySelfCount` | 내 원어웨이 족보 개수 |
+| `jao` | `jokboOneAwayOppCount` | 상대 원어웨이 족보 개수 |
+| `sjt` | `selfJokboThreatProb` | 내 족보 위협 확률 |
+| `sjo` | `selfJokboOneAwayProb` | 내 원어웨이 확률 |
+| `sgt` | `selfGwangThreatProb` | 내 광 위협 확률 |
+| `ojt` | `oppJokboThreatProb` | 상대 족보 위협 확률 |
+| `ojo` | `oppJokboOneAwayProb` | 상대 원어웨이 확률 |
+| `ogt` | `oppGwangThreatProb` | 상대 광 위협 확률 |
+| `gsd` | `goStopDeltaProxy` | GO/STOP 판단 프록시 값 |
+| `sm` | `scoreMySideAtTurn` | 해당 턴의 mySide 점수 |
+| `sy` | `scoreYourSideAtTurn` | 해당 턴의 yourSide 점수 |
+| `sd` | `scoreDiff` | 행동 주체 기준 점수차 |
 
-1. `earlyTurnForced`
-- 조건: 각 사이드 턴 카운트 `<= 1`
-- 저장: `T`
+추가 메모:
+- `runId`는 실행 단위 식별자이며, 서로 다른 실행 로그를 병합해도 원천 run을 구분할 수 있다.
+- `seatMode`는 해당 라인의 좌석 운영 모드(`switching`/`fixed`)를 의미한다.
+- `decision_trace[].keepBy`는 보존 사유 배열:
+  - `{ "kind":"self", "trigger":"<triggerName>" }`: 해당 턴 자체가 트리거
+  - `{ "kind":"from", "fromTurn":<anchorTurn>, "trigger":"<triggerName>" }`: 다른 턴 트리거 범위(back/forward)에 포함되어 보존
+  - `{ "kind":"context", "fromTurn":<anchorTurn> }`: `contextRadius` 확장으로 보존
+  - `trigger` 값은 전체 이름 사용:
+    - `earlyTurnForced`, `goStopOption`, `shakingYesOption`, `optionTurnOther`
+    - `deckEmpty`, `specialEventPpuk`, `specialEventCore`
+    - `bombDeclare`, `bombCountShift`
+    - `riskShiftUp`, `riskShiftDown`, `riskShiftMixed`
+    - `comboThreatEnter`, `terminalContext`
+- `goldDeltaMy`, `bankrupt`는 제거됨(필요 시 `initial/finalGold*`로 계산 가능).
+- `terminal` 필드는 제거됨(필요 시 `score`/`initialGold*`/`finalGold*` 기반으로 후처리 계산).
+- `learningRole` 규칙은 현재 고정:
+  - `ATTACK`: `winner == mySide && myScore >= 20`
+  - `DEFENSE`: `winner == yourSide && oppScore <= 10`
+  - 나머지 `NEUTRAL`
 
-2. `goStopOption`
-- 조건: `decisionType === "option"` + `go/stop`
-- 저장(기본): `T-1, T, T+1`
-- 저장(옵션): `go` 선택 시 `--trace-go-stop-plus2` 활성화면 `T+2` 추가
+### 3-1) 결정 트레이스 저장 조건 (`decision_trace`)
+- 소스:
+  - 기본은 `kibo`의 `turn_end` 턴에서 생성
+  - 추가로 option 턴(`optionEvents`)도 별도 레코드 생성
+- 하드 필터:
+  - 후보 수 `candidateCount < 2`는 저장하지 않음 (선택지 2개 이상만 저장)
+- 현재 고정 설정:
+  - `myTurnOnly=false` (양쪽 사이드 모두 기록)
+  - `importantOnly=true` (중요턴 중심 저장)
+  - `contextRadius=0`
+  - `goStopPlus2=false`
+- 중요턴 트리거(보존 범위 `back/forward`):
+  - `earlyTurnForced`: `0 / 0`
+  - `goStopOption`: 기본 `1 / 1` (예외: `choose_go` + `goStopPlus2=true`면 `1 / 2`)
+  - `shakingYesOption`: `0 / 1`
+  - `optionTurnOther`: `0 / 1`
+  - `deckEmpty`: `1 / 0`
+  - `specialEventPpuk`: `1 / 1`
+  - `specialEventCore`: `1 / 0`
+  - `bombDeclare`: `1 / 1`
+  - `bombCountShift`: `0 / 1`
+  - `riskShiftUp`: `1 / 0`
+  - `riskShiftDown`: `0 / 1`
+  - `riskShiftMixed`: `0 / 0`
+  - `comboThreatEnter`: `0 / 0`
+  - `terminalContext`: `0 / 0` (적용 위치: `records.length - 2`, 종료 직전 문맥 1개 전 레코드)
+- 최종 보존 규칙:
+  - 트리거가 있으면 트리거별 `back/forward` 범위만 보존
+  - 여러 트리거가 겹치면 합집합으로 보존
+  - `contextRadius > 0`이면 최종 keep 인덱스를 반경만큼 추가 확장
+  - 저장된 각 레코드에는 보존 사유가 `keepBy[]`로 함께 기록됨
+  - 트리거가 하나도 없으면(예외) 하드 필터를 통과한 레코드 전체를 보존
 
-3. `shakingYesOption`
-- 조건: `actionType === "choose_shaking_yes"`
-- 저장: `T, T+1`
+### 3-2) 순서 추적 필드
+- `decision_trace[].seq`:
+  - 같은 `t`에서 여러 레코드가 생길 수 있을 때(예: option/이벤트) 순서를 구분하는 1차 키
+  - 정렬 권장: `seq` 오름차순, 동률이면 `t` 오름차순
 
-4. `optionTurnOther`
-- 조건: `president_stop/president_hold/five/junk/shaking_no` 등 기타 옵션
-- 저장: `T, T+1`
+## 4) report JSON 필드와 역할
 
-5. `deckEmpty`
-- 조건: `beforeDc.deckCount <= 0`
-- 저장: `T-1, T`
+### 4-1. 공통
+- `logMode`, `games`, `completed`, `winners`
+- `learningRole.attackCount/defenseCount/neutralCount`
+- `learningRole.attackScoreMin`, `learningRole.defenseOppScoreMax`
+- `sideStats`:
+  - `mySideWinRate`, `yourSideWinRate`, `drawRate`
+  - `averageScoreMySide`, `averageScoreYourSide`
+- `economy`:
+  - `averageGoldMySide`, `averageGoldYourSide`
+  - `averageGoldDeltaMySide`
+  - `cumulativeGoldDeltaOver1000`
+  - `cumulativeGoldDeltaMySideFirst1000`
+- `bankrupt`:
+  - inflicted/suffered/diff/rate, resets
+- `primaryMetric`: `averageGoldDeltaMySide`
 
-6. `specialEvent`
-- 조건: `matchEvents` 중 `eventTag !== "NORMAL"`
-- raw 매핑:
-  - `specialEventPpuk` -> `PPUK` (`T-1, T, T+1`)
-  - `specialEventCore` -> `JJOB/DDADAK/PANSSEUL` 등 (`T-1, T`)
+### 4-2. full 확장
+- `catalogPath`
+- `nagariRate`
+- `eventFrequencyPerGame`
+- `goStopEfficiencyAvg`
+- `goDecision` (declared/success/successRate)
+- `stealEfficiency`
+- `bakEscapeRate`, `bakBreakdown`
+- `luckSkillIndex`
 
-7. `bombEvent`
-- 조건: 폭탄 선언 또는 폭탄 카운트 변화
-- raw 매핑:
-  - `bombDeclare` (`declare_bomb`): `T-1, T, T+1`
-  - `bombCountShift`(카운트 변화): `T, T+1`
+### 4-3. run_parallel_selfplay 리포트 확장
+- `logMode: merged_parallel`
+- `workers`, `shards`
+- `trainSplits.policyShards` (옵션 시)
 
-8. `riskShift`
-- 조건: `piBakRisk/gwangBakRisk/mongBakRisk` 변화
-- raw 매핑:
-  - `riskShiftUp`(증가): `T-1, T`
-  - `riskShiftDown`(감소): `T, T+1`
-  - `riskShiftMixed`(혼합): `T`
+### 4-4. run_league_selfplay 리포트 확장
+- `logMode: league_parallel`
+- `created_at`, `config`
+- `chunks[]` (chunk별 mySide/yourSide, games, output, report)
+- `matchups`
 
-9. `comboThreatEnter`
-- 조건: 상대 족보 위협 상태 진입(`false -> true`)
-- 조건(홍/청/초/고도리): 상대 진행 `>=2` && 내 블로킹 카드 `==0`
-- 조건(광 1차): 상대 광 `==2` && 내 블로킹 광 `<=2`
-- 조건(광 2차): 상대 광 `>=3` && 내 블로킹 광 `<=1`
-- 저장: `T`
+## 5) 실무 체크리스트
+- 실행 전:
+  - 출력 경로(`logs/...`) 충돌 여부 확인
+  - 모델 경로 오탈자 확인 (`models/...json`)
+- 실행 후:
+  - `<out>-report.json`의 `games`, `completed` 일치 확인
+  - `averageGoldDeltaMySide` 우선 확인
+  - `learningRole` 분포(ATTACK/DEFENSE/NEUTRAL) 확인
+- 장기 운영:
+  - baseline 비교 시 게임 수/옵션 고정
+  - 리포트 원본 파일 경로를 문서에 반드시 기록
 
-10. `terminalContext`
-- 조건: 게임 종료 컨텍스트 보존
-- 저장: 종료 기준 `2턴 전` 레코드 위치에 `terminalContext` 태그 부여 (`T`)
-
-공통 규칙:
-- 트리거별로 뽑힌 턴 인덱스는 게임 단위 `Set`으로 중복 제거 후 저장
-- 중요턴이 하나도 없으면, 후보 조건을 통과한 턴을 그대로 반환
-- `--trace-context-radius`는 기본 `0`이며 필요 시 전역 반경으로 추가 보존
-
-## 3) `decision_trace` 턴 레코드 구조
-
-`train` 모드 레코드(현재 구현):
-
-- `t`: 턴 번호
-- `a`: 액터 사이드(`mySide`/`yourSide`)
-- `dt`: 의사결정 타입(`play`/`match`/`option`)
-- `cc`: 후보 수
-- `ch`: compact 선택값(카드 id / 옵션 alias)
-- `ir`: 중간보상(immediate reward)
-- `dc`: 압축 decision context
-- `tm`: 트리거 비트마스크(해당 시)
-
-참고:
-
-- `tm`이 없으면 트리거 없는 일반 턴 레코드
-- `option` 이벤트는 별도 경로로 생성되지만 동일 필드 스키마로 기록됨
-- 과거/보조 스키마(`o`, `ck`, `at`, `c`, `s`, `tg`)는 현재 `train` 기록 기본 필드가 아님
-
-`delta` 모드 레코드(현재 구현):
-
-- `t`, `a`, `ch`
-- `delta`:
-  - `deck`, `handSelf`, `handOpp`
-  - `piSteal`, `goldSteal`
-  - `capHand`, `capFlip`, `events`
-- `reasoning`:
-  - `policy`, `candidatesCount`, `evaluation`
-
-`dc` 필드:
-
-- 현재 로그 저장 기준(`compactDecisionContextForTrace`)은 17개:
-- `phase`
-- `deckCount`
-- `handCountSelf`
-- `handCountDiff`
-- `goCountSelf`
-- `goCountOpp`
-- `piBakRisk`
-- `gwangBakRisk`
-- `mongBakRisk`
-- `jokboProgressOppSum`
-- `jokboOneAwaySelfCount`
-- `jokboOneAwayOppCount`
-- `oppJokboThreatProb`
-- `oppJokboOneAwayProb`
-- `oppGwangThreatProb`
-- `goStopDeltaProxy`
-- `scoreDiff`
-
-`dc` 축소 검토안(요청 반영):
-
-- 제거(적용):
-  - `carryOverMultiplier`
-- 축약(적용):
-  - `handCountSelf`, `handCountOpp` -> `handCountSelf` + `handCountDiff`
-- 통합(적용):
-  - `currentScoreSelf`, `currentScoreOpp` -> `scoreDiff`
-- 단계적 검토:
-  - 현재 없음
-
-## 4) 게임 루트(1게임 1레코드)
-
-- `ver`(schema/feature/trigger dict 버전)
-- `run`(각 side 에이전트 라벨)
-- `game`, `seed`, `steps`
-- `firstAttackerActor`
-- `policy`(각 side 라벨)
-- `winner`, `score`
-- `initialGoldMy`, `initialGoldYour`
-- `finalGoldMy`, `finalGoldYour`
-- `goldDeltaMy`
-- `bankrupt`(`mySide`, `yourSide`)
-- `decision_trace`
-
-참고:
-
-- `logMode`는 라인 필드로 저장하지 않고, 실행 인자/리포트(`*-report.json`)에서 관리
-- `goldDeltaYour`, `gold`, `sessionReset` 등은 현재 기본 라인 스키마에서 제거됨
-
-## 5) 관련 파일
-
-- `scripts/selfplay_simulator.mjs`
-- `scripts/run_parallel_selfplay.py`
-- `scripts/01_train_policy.py`
-- `scripts/02_train_value.py`
-- `scripts/03_evaluate.py`
-- `scripts/build_errata_dataset.py`
-- `scripts/run_league_selfplay.py`
-- `scripts/run_champion_cycle.ps1`
+## 6) 다음 업데이트 예정
+- 정책 학습(01) 입력 사양
+- 가치 학습(02) 입력 사양
+- 모델 버전별 실험 이력 템플릿
