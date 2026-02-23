@@ -1,0 +1,19 @@
+﻿{
+  "format_version": "neat_runtime_v2",
+  "generations": 100,
+  "games_per_genome": 40,
+  "eval_timeout_sec": 360,
+  "max_eval_steps": 600,
+  "opponent_policy": "heuristic_v4",
+  "switch_seats": true,
+  "checkpoint_every": 10,
+  "eval_script": "scripts/neat_eval_worker.mjs",
+  "seed": 13,
+  "fitness_gold_scale": 10000.0,
+  "fitness_win_weight": 2.5,
+  "fitness_loss_weight": 1.5,
+  "fitness_draw_weight": 0.1,
+  "gate_ema_window": 5,
+  "transition_streak": 3,
+  "failure_slope_5_max": 0.005
+}

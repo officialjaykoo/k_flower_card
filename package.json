@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "k_flower_card",
   "version": "1.0.0",
   "description": "Browser-based 2-player (Player vs AI) Matgo demo. Rules follow the actual implementation in src/state.js and src/cards.js. AI decisions are random.",
@@ -7,7 +7,12 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "simulate": "node scripts/selfplay_simulator.mjs"
+    "simulate": "echo legacy simulate removed",
+    "neat:train": "powershell -ExecutionPolicy Bypass -File scripts/run_neat_train.ps1",
+    "neat:dry": "powershell -ExecutionPolicy Bypass -File scripts/run_neat_train.ps1 -DryRun",
+    "neat:resume": "powershell -ExecutionPolicy Bypass -File scripts/run_neat_resume.ps1",
+    "neat:eval": "powershell -ExecutionPolicy Bypass -File scripts/run_neat_eval.ps1",
+    "neat:duel": "powershell -ExecutionPolicy Bypass -File scripts/run_neat_duel.ps1"
   },
   "keywords": [],
   "author": "",

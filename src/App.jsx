@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import {
   initGame,
+  startGameFromState,
   playTurn,
   getShakingReveal,
   calculateScore,
@@ -158,7 +159,10 @@ export default function App() {
       ? { human: state.players.human.gold, ai: state.players.ai.gold }
       : undefined;
 
-    let next = initGame(state.ruleKey, createSeededRng(seed), {
+    let next = startGameFromState(state, createSeededRng(seed), {
+      ruleKey: state.ruleKey,
+      keepGold,
+      useCarryOver: true,
       carryOverMultiplier,
       firstTurnKey,
       initialGold,

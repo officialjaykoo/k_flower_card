@@ -1,113 +1,161 @@
-# K-Flower Card Developer Guide
+﻿# K-Flower Card Developer Guide (NEAT)
 
-## 1) 목적
-이 문서는 현재 코드베이스의 디렉토리 구조와 파일 역할을 고정하기 위한 개발 기준서다.  
-새 파일 추가, 경로 변경, 리팩터링 시 이 문서를 기준으로 판단한다.
+## 결론
+- 현재 학습/평가 경로는 `neat-python` 단일 경로다.
+- 실행 진입점은 `scripts/run_neat_*.ps1`이며, 코어 러너는 `scripts/neat_train.py`다.
+- 평가/대전 워커는 `scripts/neat_eval_worker.mjs`, `scripts/neat_duel_worker.mjs`를 사용한다.
 
-## 2) 현재 구조 (기준)
-```text
-src/
-  main.jsx
-  App.jsx
-  cards.js
-  ai/
-    aiPlay.js
-    heuristicPolicyEngine.js
-    modelPolicyEngine.js
-    moePolicy.js
-    policies.js
-  app/
-    useAiRuntime.js
-    useReplayController.js
-  engine/
-    index.js
-    runner.js
-    state.js
-    finalizeTurn.js
-    rules.js
-    scoring.js
-    economy.js
-    matching.js
-    opening.js
-    resolution.js
-    turnFlow.js
-    capturesEvents.js
-    combos.js
-  heuristics/
-    heuristicV3.js
-    heuristicV4.js
-  ui/
-    components/
-    i18n/
-    utils/
+## 1. 문서 범위
+이 문서는 NEAT 도입 이후 개발자가 수정해야 할 파일 경계, 실행 절차, 산출물 해석 기준을 정의한다.
+레거시 경로(Deep CFR, 커스텀 유전체 포맷)는 활성 런타임 범위에서 제외한다.
+
+## 2. 단일 기준 파일(SoT)
+### 2-1. 실행 스크립트
+- `scripts/run_neat_train.ps1`: 학습 시작
+- `scripts/run_neat_resume.ps1`: 체크포인트 재개
+- `scripts/run_neat_eval.ps1`: 단일 유전체 평가
+- `scripts/run_neat_duel.ps1`: 유전체 A/B 1000게임 대전
+
+### 2-2. 코어 로직
+- `scripts/neat_train.py`: NEAT 러너, 병렬 평가, 게이트/실패 감지, 로그 저장
+- `scripts/neat_eval_worker.mjs`: 유전체 단일 평가(게임 반복, fitness 계산)
+- `scripts/neat_duel_worker.mjs`: 유전체 A/B 대전 결과 계산
+
+### 2-3. 설정
+- `configs/neat_feedforward.ini`: neat-python 토폴로지/돌연변이 설정
+- `configs/neat_runtime.json`: 기본 런타임 진입점(현재 phase2 i3_w6 확장)
+- `configs/neat_runtime_i3_w6.json`: i3 6워커 프로필
+- `configs/neat_runtime_i3_w7.json`: i3 7워커 비교 프로필
+- `configs/neat/common.runtime.json`: 공통 런타임 파라미터
+- `configs/neat/phases/phase1.runtime.json`: hybrid 게이트(초기 모방+승률)
+- `configs/neat/phases/phase2.runtime.json`: win-rate only 게이트
+- `configs/neat/phases/phase3.runtime.json`: 강화된 win-rate 게이트
+
+## 3. 환경 준비
+1. Python 가상환경 준비
+2. `neat-python` 설치
+
+```powershell
+.venv\Scripts\python -m pip install neat-python
 ```
 
-## 3) 레이어 역할
+3. Node 의존성 준비
 
-### Entry / 화면
-- `src/main.jsx`: React 진입점.
-- `src/App.jsx`: 화면 상태, 이벤트 핸들링, 엔진/AI 호출 오케스트레이션.
+```powershell
+npm ci
+```
 
-### App Hooks
-- `src/app/useAiRuntime.js`: AI 모델 로딩, 실행 옵션 선택, 자동 턴 실행.
-- `src/app/useReplayController.js`: 리플레이 상태/재생 제어.
+## 4. 실행 명령
+### 4-1. 학습 시작
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_neat_train.ps1
+```
 
-### AI
-- `src/ai/policies.js`: 정책 ID, 모델 카탈로그, 정책 선택 유틸의 단일 기준점.
-- `src/ai/aiPlay.js`: AI 실행 단일 진입점. 모델/휴리스틱 분기.
-- `src/ai/modelPolicyEngine.js`: 정책 모델 inference/행동 선택.
-- `src/ai/heuristicPolicyEngine.js`: 휴리스틱 기반 행동 선택(v3/v4 호출).
-- `src/ai/moePolicy.js`: 공격/방어(MoE) 선택 규칙.
+### 4-2. 학습 Dry Run (시뮬레이션 없이 배선 확인)
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_neat_train.ps1 -DryRun
+```
 
-### Engine
-- `src/engine/index.js`: 엔진 공개 API 배럴(외부에서 우선 사용).
-- `src/engine/runner.js`: 자동 턴 진행(`getActionPlayerKey`, `advanceAutoTurns`).
-- `src/engine/state.js`: 게임 상태머신 본체(초기화, 턴 진행, 의사결정 액션).
-- `src/engine/finalizeTurn.js`: 턴 종료 후 정산/정규화/Go-Stop 연계 핵심 로직.
-- `src/engine/rules.js`: 룰셋 상수.
-- `src/engine/scoring.js`: 점수 계산.
-- `src/engine/economy.js`: 골드/정산 계산.
-- `src/engine/matching.js`: 월 매칭 판정.
-- `src/engine/opening.js`: 초반 세팅/대통령 판정.
-- `src/engine/resolution.js`: 라운드 종료 판정/결과 확정.
-- `src/engine/turnFlow.js`: 턴 플로우 유틸(패스카드/리빌 만료 등).
-- `src/engine/capturesEvents.js`: 캡처/강탈/이벤트 유틸.
-- `src/engine/combos.js`: 족보 관련 공통 상수/유틸.
+### 4-3. 체크포인트 재개
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_neat_resume.ps1 -ResumeCheckpoint logs/neat_python/checkpoints/neat-checkpoint-50
+```
 
-### Heuristics
-- `src/heuristics/heuristicV3.js`: v3 규칙.
-- `src/heuristics/heuristicV4.js`: v4 규칙.
+### 4-4. 단일 유전체 평가
+기본 게임 수는 `1000`이다.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_neat_eval.ps1 -GenomePath logs/neat_python/models/winner_genome.json
+```
 
-### UI
-- `src/ui/components/*`: 화면 컴포넌트.
-- `src/ui/i18n/i18n.js`: 다국어.
-- `src/ui/utils/*`: UI 공통 유틸(리플레이/카드 정렬 등).
+### 4-5. 유전체 A/B 대전
+프로젝트 규칙으로 게임 수는 고정 `1000`이다.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_neat_duel.ps1 -GenomeAPath logs/runA/models/winner_genome.json -GenomeBPath logs/runB/models/winner_genome.json
+```
 
-### Shared Domain
-- `src/cards.js`: 카드 덱 정의/에셋 경로/셔플.
+## 5. 런타임 오버라이드 규칙
+`run_neat_train.ps1`/`run_neat_resume.ps1`는 아래 핵심 오버라이드를 전달할 수 있다.
 
-## 4) 의존성 규정 (중요)
-- `ui/*`는 `engine/*` 내부 구현 파일을 직접 참조하지 않는다.  
-  기본적으로 `engine/index.js`, `engine/runner.js`, `ai/*` 공개 API만 사용한다.
-- `ai/*`는 `ui/*`를 import하지 않는다.
-- `engine/*`는 `ai/*`, `ui/*`, `app/*`를 import하지 않는다.
-- 휴리스틱 구현(`heuristics/*`)은 React/UI 의존을 두지 않는다.
-- 구조 단순화를 위해 루트 래퍼 파일(`src/gameEngine.js` 등)은 재도입하지 않는다.
+- `--generations`
+- `--workers` (최소 2)
+- `--games-per-genome`
+- `--eval-timeout-sec`
+- `--max-eval-steps`
+- `--opponent-policy`
+- `--checkpoint-every`
+- `--seed`
+- `--switch-seats` 또는 `--fixed-seats`
+- `--fitness-gold-scale`
+- `--fitness-win-weight`
+- `--fitness-loss-weight`
+- `--fitness-draw-weight`
 
-## 5) 파일 추가/분리 기준
-- 파일 수 증가를 최소화한다.
-- 먼저 기존 파일에 합칠 수 있는지 검토한다.
-- 아래를 모두 만족할 때만 새 파일을 만든다.
-  - 역할이 독립적이고 재사용 경계가 분명함
-  - 순환 참조 없이 분리 가능함
-  - 테스트/시뮬레이터/UI에서 공통으로 쓰일 가능성이 있음
+실행 시 실제 적용값은 `logs/neat_python/run_summary.json`의 `runtime_effective`, `applied_overrides`로 확인한다.
 
-## 6) 변경 체크리스트
-- 경로 변경 시 `src`와 `scripts`의 import 경로를 함께 수정했는가
-- `npm run build`가 통과하는가
-- 구조 규정(4번)을 위반하는 신규 import가 없는가
+## 6. Fitness/평가 지표
+### 6-1. 최종 fitness
+`neat_eval_worker.mjs` 기준:
 
-## 7) 현재 권장 진입점
-- 엔진 기능 사용: `src/engine/index.js`
-- 턴 진행 유틸 사용: `src/engine/runner.js`
-- 정책/모델 목록 사용: `src/ai/policies.js`
+```text
+fitness = (mean_gold_delta / fitness_gold_scale)
+        + (win_rate * fitness_win_weight)
+        - (loss_rate * fitness_loss_weight)
+        + (draw_rate * fitness_draw_weight)
+```
+
+### 6-2. 보조 지표
+- `win_rate`, `loss_rate`, `draw_rate`
+- `p10/p50/p90_gold_delta`
+- `imitation_play/match/option_ratio`
+- `imitation_weighted_score`
+- `eval_time_ms`
+
+## 7. 게이트/전환/실패 감지
+게이트 상태는 `logs/neat_python/gate_state.json`에 저장된다.
+
+- `gate_mode`: `hybrid` 또는 `win_rate_only`
+- `ema_imitation`, `ema_win_rate`: 전환 판정용 EMA
+- `transition_generation`: 전환 조건 충족 세대
+- `failure_generation`: 실패 조건 충족 세대
+
+세대별 상세는 `logs/neat_python/generation_metrics.ndjson`, 개체별 평가는 `logs/neat_python/eval_metrics.ndjson`에서 분석한다.
+
+## 8. 산출물 디렉터리 기준
+기본 출력 디렉터리: `logs/neat_python`
+
+- `checkpoints/neat-checkpoint-*`
+- `models/winner_genome.pkl`
+- `models/winner_genome.json` (`neat_python_genome_v1`)
+- `run_summary.json`
+- `eval_metrics.ndjson`
+- `generation_metrics.ndjson`
+- `gate_state.json`
+- `eval_failures.log`
+
+## 9. 개발 시 필수 제약
+- NEAT 경로 수정 시, 스크립트/설정/문서의 경로 일관성을 같이 갱신한다.
+- `scripts/neat_eval_worker.mjs`와 `scripts/neat_duel_worker.mjs`는 엔진 API(`src/engine/index.js`, `src/engine/runner.js`) 변경에 민감하므로 함께 점검한다.
+- 유전체 JSON 포맷은 `format_version = neat_python_genome_v1`만 지원한다.
+- 저장 인코딩은 UTF-8 BOM을 유지한다.
+
+## 10. 운영 정책 (시뮬레이션/평가)
+- 시뮬레이션은 명시적 요청이 있을 때만 실행한다.
+- 테스트성 시뮬레이션 게임 수는 `1000` 고정이다.
+- 가능하면 멀티 워커 병렬 실행을 기본으로 사용한다.
+
+## 11. 트러블슈팅
+- `neat-python is not installed`:
+  `neat-python`을 가상환경에 설치한다.
+- `checkpoint not found`:
+  `-ResumeCheckpoint` 경로를 절대경로 또는 작업경로 기준으로 재확인한다.
+- 평가 실패 반복:
+  `logs/neat_python/eval_failures.log` 마지막 레코드의 `reason`, `traceback`을 우선 확인한다.
+- 입력 차원 오류(`feature vector size mismatch`):
+  `configs/neat_feedforward.ini`의 `num_inputs`와 워커 feature 벡터 정의를 동기화한다.
+
+## 12. 변경 체크리스트
+1. `npm run build` 통과
+2. `scripts/run_neat_train.ps1 -DryRun` 통과
+3. `run_summary.json`에 의도한 `runtime_effective` 반영 확인
+4. 게이트 산출물(`gate_state.json`, `generation_metrics.ndjson`) 생성 확인
+5. 문서/스크립트/설정 경로 불일치 없음 확인

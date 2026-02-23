@@ -1,0 +1,12 @@
+﻿{
+  "format_version": "neat_runtime_v2",
+  "gate_mode": "win_rate_only",
+  "transition_ema_imitation": null,
+  "transition_ema_win_rate": 0.45,
+  "transition_streak": 3,
+  "failure_generation_min": 20,
+  "failure_ema_win_rate_max": 0.30,
+  "failure_imitation_max": null,
+  "failure_slope_5_max": 0.005,
+  "failure_slope_metric": "win_rate"
+}

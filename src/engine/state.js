@@ -326,6 +326,72 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
   }
 }
 
+function isPlayerKey(key) {
+  return key === "human" || key === "ai";
+}
+
+function deriveFirstTurnFromPrevious(previousState) {
+  const previousWinner = previousState?.result?.winner;
+  if (isPlayerKey(previousWinner)) return previousWinner;
+
+  const wasNagari = !!previousState?.result?.nagari;
+  const previousStarter = previousState?.startingTurnKey;
+  if (wasNagari && isPlayerKey(previousStarter)) return previousStarter;
+
+  return isPlayerKey(previousStarter) ? previousStarter : null;
+}
+
+export function startGameFromState(previousState, seedRng = Math.random, options = {}) {
+  const nextOptions = { ...options };
+  const explicitRuleKey = typeof nextOptions.ruleKey === "string" ? nextOptions.ruleKey : "";
+  const ruleKey = explicitRuleKey || previousState?.ruleKey || "A";
+  const keepGold = nextOptions.keepGold !== false;
+  const useCarryOver = nextOptions.useCarryOver !== false;
+
+  const explicitFirstTurnKey = isPlayerKey(nextOptions.firstTurnKey) ? nextOptions.firstTurnKey : null;
+  const derivedFirstTurnKey = deriveFirstTurnFromPrevious(previousState);
+
+  const hasExplicitInitialGold = nextOptions.initialGold?.human != null || nextOptions.initialGold?.ai != null;
+  if (!hasExplicitInitialGold && keepGold && previousState?.players) {
+    nextOptions.initialGold = {
+      human: Number(previousState.players?.human?.gold ?? STARTING_GOLD),
+      ai: Number(previousState.players?.ai?.gold ?? STARTING_GOLD)
+    };
+  }
+
+  if (nextOptions.carryOverMultiplier == null) {
+    nextOptions.carryOverMultiplier = useCarryOver
+      ? Number(previousState?.nextCarryOverMultiplier || 1)
+      : 1;
+  }
+
+  nextOptions.firstTurnKey = explicitFirstTurnKey || derivedFirstTurnKey;
+
+  delete nextOptions.ruleKey;
+  delete nextOptions.keepGold;
+  delete nextOptions.useCarryOver;
+
+  return initGame(ruleKey, seedRng, nextOptions);
+}
+
+export function initSimulationGame(ruleKey = "A", seedRng = Math.random, options = {}) {
+  const nextOptions = { ...options };
+  if (!isPlayerKey(nextOptions.firstTurnKey)) {
+    throw new Error("initSimulationGame requires options.firstTurnKey ('human' or 'ai').");
+  }
+  return initGame(ruleKey, seedRng, nextOptions);
+}
+
+export function startSimulationGame(previousState, seedRng = Math.random, options = {}) {
+  const nextOptions = { ...options };
+  if (!isPlayerKey(nextOptions.firstTurnKey)) {
+    throw new Error("startSimulationGame requires options.firstTurnKey ('human' or 'ai').");
+  }
+  if (nextOptions.keepGold == null) nextOptions.keepGold = true;
+  if (nextOptions.useCarryOver == null) nextOptions.useCarryOver = true;
+  return startGameFromState(previousState, seedRng, nextOptions);
+}
+
 
 
 

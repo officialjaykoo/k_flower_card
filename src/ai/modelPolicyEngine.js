@@ -1,4 +1,4 @@
-import {
+﻿import {
   calculateScore,
   playTurn,
   chooseGo,
@@ -231,88 +231,19 @@ function policyContextKey(trace, decisionType, policyModel = null) {
   return base.join("|");
 }
 
-function rawNoScorePolicyContextKey(trace, decisionType) {
-  const dc = trace.dc || {};
-  const sp = trace.sp || {};
-  const deckBucket = Math.floor((dc.deckCount || 0) / 3);
-  const rawPhase = dc.phase;
-  const phaseCode = Number.isFinite(Number(rawPhase))
-    ? Math.floor(Number(rawPhase))
-    : tracePhaseCode(rawPhase);
-  const handSelf = dc.handCountSelf || 0;
-  const handDiff =
-    dc.handCountDiff != null
-      ? Number(dc.handCountDiff || 0)
-      : Number(handSelf || 0) - Number(dc.handCountOpp || 0);
-  const goSelf = dc.goCountSelf || 0;
-  const goOpp = dc.goCountOpp || 0;
-  const shakeSelf = Math.min(3, Math.floor(Number(dc.shakeCountSelf || 0)));
-  const shakeOpp = Math.min(3, Math.floor(Number(dc.shakeCountOpp || 0)));
-  const cands = (sp.cards || sp.boardCardIds || sp.options || []).length;
-  return [
-    `dt=${decisionType}`,
-    `ph=${phaseCode}`,
-    `o=${trace.o || "?"}`,
-    `db=${deckBucket}`,
-    `hs=${Math.floor(Number(handSelf || 0))}`,
-    `hd=${Math.floor(Number(handDiff || 0))}`,
-    `gs=${Math.floor(Number(goSelf || 0))}`,
-    `go=${Math.floor(Number(goOpp || 0))}`,
-    `ss=${shakeSelf}`,
-    `so=${shakeOpp}`,
-    `cc=${Math.floor(Number(cands || 0))}`
-  ].join("|");
-}
-
-function legacyPolicyContextKey(trace, decisionType) {
-  const dc = trace.dc || {};
-  const sp = trace.sp || {};
-  const deckBucket = Math.floor((dc.deckCount || 0) / 3);
-  const rawPhase = dc.phase;
-  const phaseCode = Number.isFinite(Number(rawPhase))
-    ? Math.floor(Number(rawPhase))
-    : tracePhaseCode(rawPhase);
-  const handSelf = dc.handCountSelf || 0;
-  const handOpp = dc.handCountOpp || 0;
-  const goSelf = dc.goCountSelf || 0;
-  const goOpp = dc.goCountOpp || 0;
-  const carry = Math.max(1, Math.floor(Number(dc.carryOverMultiplier || 1)));
-  const shakeSelf = Math.min(3, Math.floor(Number(dc.shakeCountSelf || 0)));
-  const shakeOpp = Math.min(3, Math.floor(Number(dc.shakeCountOpp || 0)));
-  const cands = (sp.cards || sp.boardCardIds || sp.options || []).length;
-  return [
-    `dt=${decisionType}`,
-    `ph=${phaseCode}`,
-    `o=${trace.o || "?"}`,
-    `db=${deckBucket}`,
-    `hs=${handSelf}`,
-    `ho=${handOpp}`,
-    `gs=${goSelf}`,
-    `go=${goOpp}`,
-    `cm=${carry}`,
-    `ss=${shakeSelf}`,
-    `so=${shakeOpp}`,
-    `cc=${cands}`
-  ].join("|");
-}
-
 function policyProb(model, sample, choice) {
   const alpha = Number(model?.alpha ?? 1.0);
   const dt = sample.decisionType;
   const candidates = sample.candidates || [];
-  const contextKeys = Array.isArray(sample.contextKeys)
-    ? sample.contextKeys
-    : [sample.contextKey].filter(Boolean);
+  const contextKey = sample.contextKey;
   const k = Math.max(1, candidates.length);
 
   const dtContextCounts = model?.context_counts?.[dt] || {};
   const dtContextTotals = model?.context_totals?.[dt] || {};
-  for (const ck of contextKeys) {
-    const ctxCounts = dtContextCounts?.[ck];
-    if (ctxCounts) {
-      const total = Number(dtContextTotals?.[ck] || 0);
-      return (Number(ctxCounts?.[choice] || 0) + alpha) / (total + alpha * k);
-    }
+  const ctxCounts = dtContextCounts?.[contextKey];
+  if (ctxCounts) {
+    const total = Number(dtContextTotals?.[contextKey] || 0);
+    return (Number(ctxCounts?.[choice] || 0) + alpha) / (total + alpha * k);
   }
 
   const dtGlobal = model?.global_counts?.[dt] || {};
@@ -483,10 +414,7 @@ export function getModelCandidateProbabilities(state, actor, policyModel, option
   const dc = decisionContext(state, actor);
   const traceLike = { o: order, dc, sp: { cards, boardCardIds, options: optionCandidates } };
   const contextKey = policyContextKey(traceLike, decisionType, policyModel);
-  const rawNoScoreKey = rawNoScorePolicyContextKey(traceLike, decisionType);
-  const legacyKey = legacyPolicyContextKey(traceLike, decisionType);
-  const contextKeys = Array.from(new Set([contextKey, rawNoScoreKey, legacyKey]));
-  const baseSample = { decisionType, candidates, contextKey, contextKeys };
+  const baseSample = { decisionType, candidates, contextKey };
   const probabilities = {};
   for (const c of candidates) {
     const label = decisionType === "option" ? c : String(c);
