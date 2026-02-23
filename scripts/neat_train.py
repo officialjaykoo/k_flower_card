@@ -826,12 +826,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="neat-python training runner for k_flower_card")
     parser.add_argument(
         "--config-feedforward",
-        default="configs/neat_feedforward.ini",
+        default="scripts/configs/neat_feedforward.ini",
         help="Path to neat-python config file",
     )
     parser.add_argument(
         "--runtime-config",
-        default="configs/neat_runtime.json",
+        default="scripts/configs/runtime_phase1.json",
         help="Path to runtime JSON (workers/games/checkpoint interval)",
     )
     parser.add_argument("--output-dir", default="logs/neat_python", help="Output directory")

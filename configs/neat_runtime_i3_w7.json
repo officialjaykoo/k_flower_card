@@ -1,6 +1,0 @@
-﻿{
-  "format_version": "neat_runtime_v2",
-  "extends": [
-    "neat/runtime_phase2_i3_w7.json"
-  ]
-}

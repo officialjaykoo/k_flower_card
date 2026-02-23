@@ -9,6 +9,8 @@ These rules are mandatory for this repository.
 - Before deleting anything, always provide a detailed delete list to the user.
 - The list must include paths and clear scope.
 - Do not delete until the user explicitly approves.
+- Exception: empty folders and temporary files can be deleted immediately without prior approval.
+- Temporary files scope (allowed for immediate deletion): `*.tmp`, `*.temp`, `*.bak`, `*.old`, `*.orig`, `*.swp`, `*.swo`, `~*`, `__pycache__/`, `.pytest_cache/`, `.mypy_cache/`, `.cache/`, `tmp/`, `temp/`.
 
 2. Simulation execution control
 - Do not run simulation commands on your own.
@@ -24,15 +26,8 @@ These rules are mandatory for this repository.
 - Save files as UTF-8 with BOM (EF BB BF).
 - Keep this encoding so IDEs detect Korean text correctly.
 
-5. CPU execution confirmation
-- Before running training/evaluation commands with CPU, always ask the user first.
-- Do not run CPU-based training/evaluation unless the user explicitly approves in the current conversation.
-
-6. Value training fixed policy
-- For `02_train_value.py`, use fixed epochs by data size:
-  - `<= 20,000` games: `epochs=6`
-  - `20,001 ~ 100,000` games: `epochs=8`
-  - `>= 100,001` games: `epochs=8` (maximum `10`)
-- For data size `>= 50,000`, cache is mandatory:
-  - Use `--sample-cache auto --cache-backend lmdb`
-  - Do not use `--sample-cache none`.
+5. Path structure lock
+- Keep all runtime/config files under `scripts/configs/`.
+- Keep orchestration/entry scripts under `scripts/` (e.g., `phase1_run.ps1`, `phase1_eval.ps1`, `phase2_run.ps1`, `phase2_eval.ps1`).
+- Do not create or reference root-level `configs/` paths.
+- Use repository-relative paths consistently in scripts.

@@ -1,6 +1,7 @@
 ﻿{
   "format_version": "neat_runtime_v2",
-  "generations": 100,
+  "generations": 20,
+  "eval_workers": 6,
   "games_per_genome": 40,
   "eval_timeout_sec": 360,
   "max_eval_steps": 600,
@@ -13,7 +14,14 @@
   "fitness_win_weight": 2.5,
   "fitness_loss_weight": 1.5,
   "fitness_draw_weight": 0.1,
+  "gate_mode": "hybrid",
   "gate_ema_window": 5,
+  "transition_ema_imitation": 0.60,
+  "transition_ema_win_rate": 0.40,
   "transition_streak": 3,
-  "failure_slope_5_max": 0.005
+  "failure_generation_min": 20,
+  "failure_ema_win_rate_max": null,
+  "failure_imitation_max": 0.55,
+  "failure_slope_5_max": 0.005,
+  "failure_slope_metric": "imitation"
 }

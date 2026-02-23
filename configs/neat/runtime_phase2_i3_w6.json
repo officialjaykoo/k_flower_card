@@ -1,8 +1,0 @@
-﻿{
-  "format_version": "neat_runtime_v2",
-  "extends": [
-    "common.runtime.json",
-    "profiles/i3_w6.runtime.json",
-    "phases/phase2.runtime.json"
-  ]
-}

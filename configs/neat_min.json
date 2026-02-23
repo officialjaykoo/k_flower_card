@@ -1,9 +1,0 @@
-﻿{
-  "format_version": "neat_runtime_v2",
-  "extends": [
-    "neat/runtime_phase1_i3_w6.json"
-  ],
-  "generations": 120,
-  "games_per_genome": 3,
-  "checkpoint_every": 50
-}
