@@ -1,8 +1,9 @@
 ﻿export const POLICY_HEURISTIC_V3 = "heuristic_v3";
 export const POLICY_HEURISTIC_V4 = "heuristic_v4";
+export const POLICY_HEURISTIC_V5 = "heuristic_v5";
 export const DEFAULT_BOT_POLICY = POLICY_HEURISTIC_V3;
 
-export const BOT_POLICIES = Object.freeze([POLICY_HEURISTIC_V3, POLICY_HEURISTIC_V4]);
+export const BOT_POLICIES = Object.freeze([POLICY_HEURISTIC_V3, POLICY_HEURISTIC_V4, POLICY_HEURISTIC_V5]);
 
 export const MODEL_CATALOG = Object.freeze({
   [POLICY_HEURISTIC_V3]: {
@@ -14,6 +15,11 @@ export const MODEL_CATALOG = Object.freeze({
     labelKey: "model.heuristicV4",
     kind: "bot_policy",
     botPolicy: POLICY_HEURISTIC_V4
+  },
+  [POLICY_HEURISTIC_V5]: {
+    labelKey: "model.heuristicV5",
+    kind: "bot_policy",
+    botPolicy: POLICY_HEURISTIC_V5
   }
 });
 

@@ -1,4 +1,4 @@
-import { ENGINE_MESSAGES } from "./engineMessages.js";
+﻿import { ENGINE_MESSAGES } from "./engineMessages.js";
 
 export const DEFAULT_LANGUAGE = "ko";
 export const SUPPORTED_LANGUAGES = Object.freeze(["ko", "en"]);
@@ -7,6 +7,7 @@ const MESSAGES = {
   ko: {
     "model.heuristicV3": "휴리스틱 V3",
     "model.heuristicV4": "휴리스틱 V4",
+    "model.heuristicV5": "휴리스틱 V5",
     "model.v14Moe": "모델 V14 자동",
     "model.v14Attack": "모델 V14 공격",
     "model.v14Defense": "모델 V14 수비",
@@ -121,6 +122,7 @@ const MESSAGES = {
   en: {
     "model.heuristicV3": "Heuristic V3",
     "model.heuristicV4": "Heuristic V4",
+    "model.heuristicV5": "Heuristic V5",
     "model.v14Moe": "Model V14 Auto",
     "model.v14Attack": "Model V14 Attack",
     "model.v14Defense": "Model V14 Defense",

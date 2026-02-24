@@ -1,4 +1,4 @@
-import {
+﻿import {
   playTurn,
   getDeclarableShakingMonths,
   declareShaking,
@@ -21,6 +21,7 @@ import {
   DEFAULT_BOT_POLICY,
   POLICY_HEURISTIC_V3,
   POLICY_HEURISTIC_V4,
+  POLICY_HEURISTIC_V5,
   normalizeBotPolicy
 } from "./policies.js";
 import {
@@ -43,6 +44,17 @@ import {
   shouldGoV4,
   shouldPresidentStopV4
 } from "../heuristics/heuristicV4.js";
+import {
+  chooseGukjinHeuristicV5,
+  chooseMatchHeuristicV5,
+  decideShakingV5,
+  rankHandCardsV5,
+  selectBombMonthV5,
+  shouldBombV5,
+  shouldGoV5,
+  shouldPresidentStopV5,
+  DEFAULT_PARAMS as V5_DEFAULT_PARAMS
+} from "../heuristics/heuristicV5.js";
 
 const GWANG_MONTHS = Object.freeze([1, 3, 8, 11, 12]);
 const GOLD_RISK_THRESHOLD_RATIO = 0.1;
@@ -54,8 +66,29 @@ const COMBO_REQUIRED_CATEGORY = Object.freeze({
   plainRibbons: "ribbon",
   fiveBirds: "five"
 });
+const HIGH_PI_CARD_IDS = Object.freeze(["M0", "M1", "K1", "L3", GUKJIN_CARD_ID]);
 
-export { BOT_POLICIES, DEFAULT_BOT_POLICY, POLICY_HEURISTIC_V3, POLICY_HEURISTIC_V4 };
+function loadV5Params() {
+  try {
+    const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_V5_PARAMS) || "";
+    if (!raw) return { ...V5_DEFAULT_PARAMS };
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { ...V5_DEFAULT_PARAMS, ...parsed };
+    }
+  } catch {
+    // Fall through to defaults on parse/runtime errors.
+  }
+  return { ...V5_DEFAULT_PARAMS };
+}
+
+function ssangpiCardIds() {
+  return [...HIGH_PI_CARD_IDS];
+}
+
+const HEURISTIC_V5_PARAMS = Object.freeze(loadV5Params());
+
+export { BOT_POLICIES, DEFAULT_BOT_POLICY, POLICY_HEURISTIC_V3, POLICY_HEURISTIC_V4, POLICY_HEURISTIC_V5 };
 
 export function botChooseCard(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   const player = state.players[playerKey];
@@ -1168,50 +1201,108 @@ const HEURISTIC_V4_DEPS = Object.freeze({
   shakingImmediateGainScore
 });
 
+const HEURISTIC_V5_DEPS = Object.freeze({
+  analyzeGameContext,
+  analyzeGukjinBranches,
+  blockingMonthsAgainst,
+  blockingUrgencyByMonth,
+  canBankruptOpponentByStop,
+  capturedCountByCategory,
+  capturedMonthCounts,
+  cardCaptureValue,
+  checkOpponentJokboProgress,
+  countKnownMonthCards,
+  getFirstTurnDoublePiPlan,
+  goldRiskProfile,
+  isHighImpactBomb,
+  isHighImpactShaking,
+  isRiskOfPuk,
+  junkPiValue,
+  monthBoardGain,
+  monthCounts,
+  monthStrategicPriority,
+  nextTurnThreatScore,
+  opponentThreatScore,
+  otherPlayerKey,
+  ownComboOpportunityScore,
+  boardMatchesByMonth,
+  estimateOpponentImmediateGainIfDiscard,
+  shakingImmediateGainScore,
+  ssangpiCardIds
+});
+
 function chooseGukjinByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
-  if (normalizeBotPolicy(policy) === POLICY_HEURISTIC_V4) {
+  const resolvedPolicy = normalizeBotPolicy(policy);
+  if (resolvedPolicy === POLICY_HEURISTIC_V5) {
+    return chooseGukjinHeuristicV5(state, playerKey, HEURISTIC_V5_DEPS, HEURISTIC_V5_PARAMS);
+  }
+  if (resolvedPolicy === POLICY_HEURISTIC_V4) {
     return chooseGukjinHeuristicV4(state, playerKey, HEURISTIC_V4_DEPS);
   }
   return chooseGukjinHeuristicV3(state, playerKey, HEURISTIC_V3_DEPS);
 }
 
 function shouldPresidentStopByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
-  if (normalizeBotPolicy(policy) === POLICY_HEURISTIC_V4) {
+  const resolvedPolicy = normalizeBotPolicy(policy);
+  if (resolvedPolicy === POLICY_HEURISTIC_V5) {
+    return shouldPresidentStopV5(state, playerKey, HEURISTIC_V5_DEPS, HEURISTIC_V5_PARAMS);
+  }
+  if (resolvedPolicy === POLICY_HEURISTIC_V4) {
     return shouldPresidentStopV4(state, playerKey, HEURISTIC_V4_DEPS);
   }
   return shouldPresidentStopV3(state, playerKey, HEURISTIC_V3_DEPS);
 }
 
 function chooseMatchByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
-  if (normalizeBotPolicy(policy) === POLICY_HEURISTIC_V4) {
+  const resolvedPolicy = normalizeBotPolicy(policy);
+  if (resolvedPolicy === POLICY_HEURISTIC_V5) {
+    return chooseMatchHeuristicV5(state, playerKey, HEURISTIC_V5_DEPS, HEURISTIC_V5_PARAMS);
+  }
+  if (resolvedPolicy === POLICY_HEURISTIC_V4) {
     return chooseMatchHeuristicV4(state, playerKey, HEURISTIC_V4_DEPS);
   }
   return chooseMatchHeuristicV3(state, playerKey, HEURISTIC_V3_DEPS);
 }
 
 function shouldGoByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
-  if (normalizeBotPolicy(policy) === POLICY_HEURISTIC_V4) {
+  const resolvedPolicy = normalizeBotPolicy(policy);
+  if (resolvedPolicy === POLICY_HEURISTIC_V5) {
+    return shouldGoV5(state, playerKey, HEURISTIC_V5_DEPS, HEURISTIC_V5_PARAMS);
+  }
+  if (resolvedPolicy === POLICY_HEURISTIC_V4) {
     return shouldGoV4(state, playerKey, HEURISTIC_V4_DEPS);
   }
   return shouldGoV3(state, playerKey, HEURISTIC_V3_DEPS);
 }
 
 function selectBombMonthByPolicy(state, playerKey, bombMonths, policy = DEFAULT_BOT_POLICY) {
-  if (normalizeBotPolicy(policy) === POLICY_HEURISTIC_V4) {
+  const resolvedPolicy = normalizeBotPolicy(policy);
+  if (resolvedPolicy === POLICY_HEURISTIC_V5) {
+    return selectBombMonthV5(state, playerKey, bombMonths, HEURISTIC_V5_DEPS);
+  }
+  if (resolvedPolicy === POLICY_HEURISTIC_V4) {
     return selectBombMonthV4(state, playerKey, bombMonths, HEURISTIC_V4_DEPS);
   }
   return selectBombMonthV3(state, playerKey, bombMonths, HEURISTIC_V3_DEPS);
 }
 
 function shouldBombByPolicy(state, playerKey, bombMonths, policy = DEFAULT_BOT_POLICY) {
-  if (normalizeBotPolicy(policy) === POLICY_HEURISTIC_V4) {
+  const resolvedPolicy = normalizeBotPolicy(policy);
+  if (resolvedPolicy === POLICY_HEURISTIC_V5) {
+    return shouldBombV5(state, playerKey, bombMonths, HEURISTIC_V5_DEPS, HEURISTIC_V5_PARAMS);
+  }
+  if (resolvedPolicy === POLICY_HEURISTIC_V4) {
     return shouldBombV4(state, playerKey, bombMonths, HEURISTIC_V4_DEPS);
   }
   return shouldBombV3(state, playerKey, bombMonths, HEURISTIC_V3_DEPS);
 }
 
 function decideShakingByPolicy(state, playerKey, shakingMonths, policy = DEFAULT_BOT_POLICY) {
-  if (normalizeBotPolicy(policy) === POLICY_HEURISTIC_V4) {
+  const resolvedPolicy = normalizeBotPolicy(policy);
+  if (resolvedPolicy === POLICY_HEURISTIC_V5) {
+    return decideShakingV5(state, playerKey, shakingMonths, HEURISTIC_V5_DEPS, HEURISTIC_V5_PARAMS);
+  }
+  if (resolvedPolicy === POLICY_HEURISTIC_V4) {
     return decideShakingV4(state, playerKey, shakingMonths, HEURISTIC_V4_DEPS);
   }
   return decideShakingV3(state, playerKey, shakingMonths, HEURISTIC_V3_DEPS);
@@ -1219,6 +1310,9 @@ function decideShakingByPolicy(state, playerKey, shakingMonths, policy = DEFAULT
 
 function rankHandCardsByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   const resolvedPolicy = normalizeBotPolicy(policy);
+  if (resolvedPolicy === POLICY_HEURISTIC_V5) {
+    return rankHandCardsV5(state, playerKey, HEURISTIC_V5_DEPS, HEURISTIC_V5_PARAMS);
+  }
   if (resolvedPolicy === POLICY_HEURISTIC_V4) {
     return rankHandCardsV4(state, playerKey, HEURISTIC_V4_DEPS);
   }
