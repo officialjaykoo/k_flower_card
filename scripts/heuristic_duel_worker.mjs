@@ -2,6 +2,10 @@
   initSimulationGame,
   startSimulationGame,
   createSeededRng,
+  calculateScore,
+  scoringPiCount,
+  getDeclarableShakingMonths,
+  getDeclarableBombMonths,
   playTurn,
   chooseMatch,
   chooseGo,
@@ -12,6 +16,8 @@
   choosePresidentHold,
   chooseGukjinMode,
 } from "../src/engine/index.js";
+import { createWriteStream, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { getActionPlayerKey } from "../src/engine/runner.js";
 import { aiPlay } from "../src/ai/aiPlay.js";
 import { BOT_POLICIES, normalizeBotPolicy } from "../src/ai/policies.js";
@@ -27,6 +33,10 @@ function parseArgs(argv) {
     firstTurnPolicy: "alternate",
     fixedFirstTurn: "human",
     continuousSeries: true,
+    kiboDetail: "lean",
+    kiboOut: "",
+    datasetOut: "",
+    datasetActor: "all",
   };
 
   while (args.length > 0) {
@@ -50,6 +60,10 @@ function parseArgs(argv) {
     else if (key === "--first-turn-policy") out.firstTurnPolicy = String(value || "alternate").trim().toLowerCase();
     else if (key === "--fixed-first-turn") out.fixedFirstTurn = String(value || "human").trim().toLowerCase();
     else if (key === "--continuous-series") out.continuousSeries = !(String(value || "1").trim() === "0");
+    else if (key === "--kibo-detail") out.kiboDetail = String(value || "lean").trim().toLowerCase();
+    else if (key === "--kibo-out") out.kiboOut = String(value || "").trim();
+    else if (key === "--dataset-out") out.datasetOut = String(value || "").trim();
+    else if (key === "--dataset-actor") out.datasetActor = String(value || "all").trim().toLowerCase();
     else throw new Error(`Unknown argument: ${key}`);
   }
 
@@ -74,6 +88,12 @@ function parseArgs(argv) {
   }
   if (out.fixedFirstTurn !== "human" && out.fixedFirstTurn !== "ai") {
     throw new Error(`invalid --fixed-first-turn: ${out.fixedFirstTurn}`);
+  }
+  if (out.kiboDetail !== "lean" && out.kiboDetail !== "full") {
+    throw new Error(`invalid --kibo-detail: ${out.kiboDetail} (allowed: lean, full)`);
+  }
+  if (out.datasetActor !== "all" && out.datasetActor !== "human" && out.datasetActor !== "ai") {
+    throw new Error(`invalid --dataset-actor: ${out.datasetActor} (allowed: all, human, ai)`);
   }
 
   return out;
@@ -182,6 +202,275 @@ function stateProgressKey(state) {
   ].join("|");
 }
 
+function clamp01(x) {
+  const v = Number(x || 0);
+  if (v <= 0) return 0;
+  if (v >= 1) return 1;
+  return v;
+}
+
+function tanhNorm(x, scale) {
+  const s = Math.max(1e-6, Number(scale || 1));
+  return Math.tanh(Number(x || 0) / s);
+}
+
+function findCardById(cards, cardId) {
+  const id = String(cardId || "");
+  if (!Array.isArray(cards)) return null;
+  return cards.find((c) => String(c?.id || "") === id) || null;
+}
+
+function optionCode(action) {
+  const a = canonicalOptionAction(action);
+  const map = {
+    go: 1,
+    stop: 2,
+    shaking_yes: 3,
+    shaking_no: 4,
+    president_stop: 5,
+    president_hold: 6,
+    five: 7,
+    junk: 8,
+  };
+  return Number(map[a] || 0) / 8.0;
+}
+
+function candidateCard(state, actor, decisionType, candidate) {
+  if (decisionType === "play") {
+    return findCardById(state?.players?.[actor]?.hand || [], candidate);
+  }
+  if (decisionType === "match") {
+    return findCardById(state?.board || [], candidate);
+  }
+  return null;
+}
+
+function countCardsByMonth(cards, month) {
+  const targetMonth = Number(month || 0);
+  if (!Array.isArray(cards) || targetMonth <= 0) return 0;
+  let count = 0;
+  for (const card of cards) {
+    if (Number(card?.month || 0) === targetMonth) count += 1;
+  }
+  return count;
+}
+
+function hasComboTag(card, tag) {
+  return Array.isArray(card?.comboTags) && card.comboTags.includes(tag);
+}
+
+function countCapturedComboTag(player, zone, tag) {
+  const cards = player?.captured?.[zone] || [];
+  if (!Array.isArray(cards)) return 0;
+  const seen = new Set();
+  let count = 0;
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (hasComboTag(card, tag)) count += 1;
+  }
+  return count;
+}
+
+function isDoublePiCard(card) {
+  if (!card) return false;
+  const id = String(card?.id || "");
+  const category = String(card?.category || "");
+  const piValue = Number(card?.piValue || 0);
+  if (id === "I0") return true;
+  return category === "junk" && piValue >= 2;
+}
+
+function resolveCandidateMonth(state, actor, decisionType, card) {
+  const cardMonth = Number(card?.month || 0);
+  if (cardMonth >= 1) return cardMonth;
+
+  if (decisionType === "option") {
+    if (state?.phase === "shaking-confirm" && state?.pendingShakingConfirm?.playerKey === actor) {
+      const pendingMonth = Number(state?.pendingShakingConfirm?.month || 0);
+      if (pendingMonth >= 1) return pendingMonth;
+    }
+    if (state?.phase === "president-choice" && state?.pendingPresident?.playerKey === actor) {
+      const pendingMonth = Number(state?.pendingPresident?.month || 0);
+      if (pendingMonth >= 1) return pendingMonth;
+    }
+  }
+  return 0;
+}
+
+function matchOpportunityDensity(state, month) {
+  const boardMonthCount = countCardsByMonth(state?.board || [], month);
+  return clamp01(boardMonthCount / 3.0);
+}
+
+function immediateMatchPossible(state, decisionType, month) {
+  if (decisionType === "match") return 1;
+  if (month <= 0) return 0;
+  return countCardsByMonth(state?.board || [], month) > 0 ? 1 : 0;
+}
+
+function monthTotalCards(month) {
+  const m = Number(month || 0);
+  if (m >= 1 && m <= 12) return 4;
+  if (m === 13) return 2;
+  return 0;
+}
+
+function collectKnownCardsForMonthRatio(state, actor) {
+  const out = [];
+  const pushAll = (cards) => {
+    if (!Array.isArray(cards)) return;
+    for (const card of cards) out.push(card);
+  };
+
+  pushAll(state?.board || []);
+  for (const side of ["human", "ai"]) {
+    const captured = state?.players?.[side]?.captured || {};
+    pushAll(captured.kwang || []);
+    pushAll(captured.five || []);
+    pushAll(captured.ribbon || []);
+    pushAll(captured.junk || []);
+  }
+  pushAll(state?.players?.[actor]?.hand || []);
+  return out;
+}
+
+function candidateMonthKnownRatio(state, actor, month) {
+  const total = monthTotalCards(month);
+  if (total <= 0) return 0;
+
+  const cards = collectKnownCardsForMonthRatio(state, actor);
+  const seen = new Set();
+  let known = 0;
+  for (const card of cards) {
+    if (!card) continue;
+    const id = String(card.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (Number(card.month || 0) === Number(month)) known += 1;
+  }
+  return clamp01(known / total);
+}
+
+function decisionAvailabilityFlags(state, actor) {
+  if (state?.phase === "shaking-confirm" && state?.pendingShakingConfirm?.playerKey === actor) {
+    return { hasShake: 1, hasBomb: 0 };
+  }
+  if (state?.phase !== "playing" || state?.currentTurn !== actor) {
+    return { hasShake: 0, hasBomb: 0 };
+  }
+  const shakingMonths = getDeclarableShakingMonths(state, actor);
+  const bombMonths = getDeclarableBombMonths(state, actor);
+  return {
+    hasShake: Array.isArray(shakingMonths) && shakingMonths.length > 0 ? 1 : 0,
+    hasBomb: Array.isArray(bombMonths) && bombMonths.length > 0 ? 1 : 0,
+  };
+}
+
+function currentMultiplierNorm(state, scoreSelf) {
+  const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
+  const mul = Math.max(1.0, Number(scoreSelf?.multiplier || 1.0));
+  const currentMultiplier = mul * carry;
+  return clamp01((currentMultiplier - 1.0) / 15.0);
+}
+
+function featureVectorForCandidate(state, actor, decisionType, candidate, legalCount) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+
+  const phase = String(state.phase || "");
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  const piValue = Number(card?.piValue || 0);
+  const category = String(card?.category || "");
+  const selfGwangCount = Number(state?.players?.[actor]?.captured?.kwang?.length || 0);
+  const oppGwangCount = Number(state?.players?.[opp]?.captured?.kwang?.length || 0);
+  const selfPiCount = Number(scoringPiCount(state.players[actor]) || 0);
+  const oppPiCount = Number(scoringPiCount(state.players[opp]) || 0);
+
+  const selfGodori = countCapturedComboTag(state.players?.[actor], "five", "fiveBirds");
+  const oppGodori = countCapturedComboTag(state.players?.[opp], "five", "fiveBirds");
+  const selfCheongdan = countCapturedComboTag(state.players?.[actor], "ribbon", "blueRibbons");
+  const oppCheongdan = countCapturedComboTag(state.players?.[opp], "ribbon", "blueRibbons");
+  const selfHongdan = countCapturedComboTag(state.players?.[actor], "ribbon", "redRibbons");
+  const oppHongdan = countCapturedComboTag(state.players?.[opp], "ribbon", "redRibbons");
+  const selfChodan = countCapturedComboTag(state.players?.[actor], "ribbon", "plainRibbons");
+  const oppChodan = countCapturedComboTag(state.players?.[opp], "ribbon", "plainRibbons");
+
+  const selfCanStop = Number(scoreSelf?.total || 0) >= 7 ? 1 : 0;
+  const oppCanStop = Number(scoreOpp?.total || 0) >= 7 ? 1 : 0;
+  const { hasShake, hasBomb } = decisionAvailabilityFlags(state, actor);
+
+  return [
+    phase === "playing" ? 1 : 0,
+    phase === "select-match" ? 1 : 0,
+    phase === "go-stop" ? 1 : 0,
+    phase === "president-choice" ? 1 : 0,
+    phase === "gukjin-choice" ? 1 : 0,
+    phase === "shaking-confirm" ? 1 : 0,
+    decisionType === "play" ? 1 : 0,
+    decisionType === "match" ? 1 : 0,
+    decisionType === "option" ? 1 : 0,
+    clamp01((state.deck?.length || 0) / 30.0),
+    clamp01((state.players?.[actor]?.hand?.length || 0) / 10.0),
+    clamp01((state.players?.[opp]?.hand?.length || 0) / 10.0),
+    clamp01((state.players?.[actor]?.goCount || 0) / 5.0),
+    clamp01((state.players?.[opp]?.goCount || 0) / 5.0),
+    tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0),
+    tanhNorm((scoreSelf?.total || 0), 10.0),
+    clamp01(Number(legalCount || 0) / 10.0),
+    clamp01(piValue / 5.0),
+    category === "kwang" ? 1 : 0,
+    category === "ribbon" ? 1 : 0,
+    category === "five" ? 1 : 0,
+    category === "junk" ? 1 : 0,
+    isDoublePiCard(card) ? 1 : 0,
+    matchOpportunityDensity(state, month),
+    immediateMatchPossible(state, decisionType, month),
+    optionCode(candidate),
+    clamp01(selfGwangCount / 5.0),
+    clamp01(oppGwangCount / 5.0),
+    clamp01(selfPiCount / 20.0),
+    clamp01(oppPiCount / 20.0),
+    clamp01(selfGodori / 3.0),
+    clamp01(oppGodori / 3.0),
+    clamp01(selfCheongdan / 3.0),
+    clamp01(oppCheongdan / 3.0),
+    clamp01(selfHongdan / 3.0),
+    clamp01(oppHongdan / 3.0),
+    clamp01(selfChodan / 3.0),
+    clamp01(oppChodan / 3.0),
+    selfCanStop,
+    oppCanStop,
+    hasShake,
+    currentMultiplierNorm(state, scoreSelf),
+    hasBomb,
+    scoreSelf?.bak?.pi ? 1 : 0,
+    scoreSelf?.bak?.gwang ? 1 : 0,
+    scoreSelf?.bak?.mongBak ? 1 : 0,
+    candidateMonthKnownRatio(state, actor, month),
+  ];
+}
+
+function normalizeDecisionCandidate(decisionType, candidate) {
+  if (decisionType === "option") return canonicalOptionAction(candidate);
+  return String(candidate || "").trim();
+}
+
+function inferChosenCandidateFromTransition(stateBefore, actor, decisionType, candidates, stateAfter) {
+  if (!stateAfter || !Array.isArray(candidates) || !candidates.length) return null;
+  const target = stateProgressKey(stateAfter);
+  for (const candidate of candidates) {
+    const simulated = applyAction(stateBefore, actor, decisionType, candidate);
+    if (simulated && stateProgressKey(simulated) === target) {
+      return normalizeDecisionCandidate(decisionType, candidate);
+    }
+  }
+  return null;
+}
+
 function randomChoice(arr, rng) {
   if (!arr.length) return null;
   const idx = Math.max(0, Math.min(arr.length - 1, Math.floor(Number(rng() || 0) * arr.length)));
@@ -206,16 +495,16 @@ function resolveFirstTurnKey(opts, gameIndex) {
   return gameIndex % 2 === 0 ? "ai" : "human";
 }
 
-function startRound(seed, firstTurnKey) {
+function startRound(seed, firstTurnKey, kiboDetail) {
   return initSimulationGame("A", createSeededRng(`${seed}|game`), {
-    kiboDetail: "lean",
+    kiboDetail,
     firstTurnKey,
   });
 }
 
-function continueRound(prevEndState, seed, firstTurnKey) {
+function continueRound(prevEndState, seed, firstTurnKey, kiboDetail) {
   return startSimulationGame(prevEndState, createSeededRng(`${seed}|game`), {
-    kiboDetail: "lean",
+    kiboDetail,
     keepGold: true,
     useCarryOver: true,
     firstTurnKey,
@@ -229,7 +518,7 @@ function goldDiffByActor(state, actor) {
   return selfGold - oppGold;
 }
 
-function playSingleRound(initialState, seed, policyByActor, maxSteps) {
+function playSingleRound(initialState, seed, policyByActor, maxSteps, onDecision = null) {
   const rng = createSeededRng(`${seed}|rng`);
   let state = initialState;
   let steps = 0;
@@ -239,17 +528,45 @@ function playSingleRound(initialState, seed, policyByActor, maxSteps) {
     if (!actor) break;
 
     const before = stateProgressKey(state);
+    const sp = selectPool(state, actor);
+    const cards = sp.cards || null;
+    const boardCardIds = sp.boardCardIds || null;
+    const options = sp.options || null;
+    const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
+    const candidates = decisionType ? legalCandidatesForDecision(sp, decisionType) : [];
     const policy = policyByActor[actor];
+    let actionSource = "heuristic";
     let next = aiPlay(state, actor, {
       source: "heuristic",
       heuristicPolicy: policy,
     });
 
     if (!next || stateProgressKey(next) === before) {
+      actionSource = "fallback_random";
       next = randomLegalAction(state, actor, rng);
     }
     if (!next || stateProgressKey(next) === before) {
       break;
+    }
+
+    if (typeof onDecision === "function" && decisionType && candidates.length > 0) {
+      const chosenCandidate = inferChosenCandidateFromTransition(
+        state,
+        actor,
+        decisionType,
+        candidates,
+        next
+      );
+      onDecision({
+        stateBefore: state,
+        actor,
+        policy,
+        decisionType,
+        candidates,
+        chosenCandidate,
+        actionSource,
+        step: steps,
+      });
     }
 
     state = next;
@@ -352,6 +669,22 @@ function buildSeatSplitSummary(firstRecord, secondRecord) {
 function main() {
   const evalStartMs = Date.now();
   const opts = parseArgs(process.argv.slice(2));
+  let kiboWriter = null;
+  if (opts.kiboOut) {
+    mkdirSync(dirname(opts.kiboOut), { recursive: true });
+    kiboWriter = createWriteStream(opts.kiboOut, { flags: "w", encoding: "utf8" });
+  }
+  let datasetWriter = null;
+  const datasetStats = {
+    rows: 0,
+    positive_rows: 0,
+    decisions: 0,
+    unresolved_decisions: 0,
+  };
+  if (opts.datasetOut) {
+    mkdirSync(dirname(opts.datasetOut), { recursive: true });
+    datasetWriter = createWriteStream(opts.datasetOut, { flags: "w", encoding: "utf8" });
+  }
 
   const actorA = "human";
   const actorB = "ai";
@@ -392,16 +725,54 @@ function main() {
 
     const roundStart = opts.continuousSeries
       ? seriesSession.previousEndState
-        ? continueRound(seriesSession.previousEndState, seed, firstTurnKey)
-        : startRound(seed, firstTurnKey)
-      : startRound(seed, firstTurnKey);
+        ? continueRound(seriesSession.previousEndState, seed, firstTurnKey, opts.kiboDetail)
+        : startRound(seed, firstTurnKey, opts.kiboDetail)
+      : startRound(seed, firstTurnKey, opts.kiboDetail);
 
     const beforeDiffA = goldDiffByActor(roundStart, actorA);
     const endState = playSingleRound(
       roundStart,
       seed,
       policyByActor,
-      Math.max(20, Math.floor(opts.maxSteps))
+      Math.max(20, Math.floor(opts.maxSteps)),
+      (decision) => {
+        if (!datasetWriter) return;
+        if (opts.datasetActor !== "all" && decision.actor !== opts.datasetActor) return;
+        datasetStats.decisions += 1;
+        const legalCount = decision.candidates.length;
+        if (legalCount <= 0) return;
+        let matched = false;
+        for (const candidate of decision.candidates) {
+          const candidateNorm = normalizeDecisionCandidate(decision.decisionType, candidate);
+          const isChosen = candidateNorm === decision.chosenCandidate ? 1 : 0;
+          if (isChosen) matched = true;
+          const row = {
+            game_index: gi,
+            seed,
+            first_turn: firstTurnKey,
+            step: decision.step,
+            actor: decision.actor,
+            actor_policy: decision.policy,
+            action_source: decision.actionSource,
+            decision_type: decision.decisionType,
+            legal_count: legalCount,
+            candidate: candidateNorm,
+            chosen: isChosen,
+            chosen_candidate: decision.chosenCandidate,
+            features: featureVectorForCandidate(
+              decision.stateBefore,
+              decision.actor,
+              decision.decisionType,
+              candidate,
+              legalCount
+            ),
+          };
+          datasetWriter.write(`${JSON.stringify(row)}\n`);
+          datasetStats.rows += 1;
+          if (isChosen) datasetStats.positive_rows += 1;
+        }
+        if (!matched) datasetStats.unresolved_decisions += 1;
+      }
     );
     const afterDiffA = goldDiffByActor(endState, actorA);
     goldDeltasA.push(afterDiffA - beforeDiffA);
@@ -422,6 +793,21 @@ function main() {
     if (winner === actorA) winsA += 1;
     else if (winner === actorB) winsB += 1;
     else draws += 1;
+
+    if (kiboWriter) {
+      const kiboRecord = {
+        game_index: gi,
+        seed,
+        first_turn: firstTurnKey,
+        policy_a: opts.policyA,
+        policy_b: opts.policyB,
+        winner,
+        result: endState?.result || null,
+        kibo_detail: endState?.kiboDetail || opts.kiboDetail,
+        kibo: Array.isArray(endState?.kibo) ? endState.kibo : [],
+      };
+      kiboWriter.write(`${JSON.stringify(kiboRecord)}\n`);
+    }
 
     const seatAKey = firstTurnKey === actorA ? "first" : "second";
     const seatBKey = firstTurnKey === actorB ? "first" : "second";
@@ -451,6 +837,14 @@ function main() {
     fixed_first_turn: opts.firstTurnPolicy === "fixed" ? opts.fixedFirstTurn : null,
     first_turn_counts: firstTurnCounts,
     continuous_series: !!opts.continuousSeries,
+    kibo_detail: opts.kiboDetail,
+    kibo_out: opts.kiboOut || null,
+    dataset_out: opts.datasetOut || null,
+    dataset_actor: opts.datasetActor,
+    dataset_rows: datasetStats.rows,
+    dataset_positive_rows: datasetStats.positive_rows,
+    dataset_decisions: datasetStats.decisions,
+    dataset_unresolved_decisions: datasetStats.unresolved_decisions,
     bankrupt,
     session_rounds: {
       total_rounds: seriesSession.roundsPlayed,
@@ -479,6 +873,9 @@ function main() {
     seat_split_b: splitSummaryB,
     eval_time_ms: Math.max(0, Date.now() - evalStartMs),
   };
+
+  if (kiboWriter) kiboWriter.end();
+  if (datasetWriter) datasetWriter.end();
 
   process.stdout.write(`${JSON.stringify(summary)}\n`);
 }

@@ -1,6 +1,6 @@
 ﻿import { buildDeck, normalizeCardTheme, DEFAULT_CARD_THEME, shuffle } from "../cards.js";
 import { ruleSets } from "./rules.js";
-import { calculateScore, isGukjinCard } from "./scoring.js";
+import { calculateScore, calculateBaseScore, isGukjinCard } from "./scoring.js";
 import { POINT_GOLD_UNIT, STARTING_GOLD, settleRoundGold } from "./economy.js";
 import { resolveMatch } from "./matching.js";
 import { resolveRound } from "./resolution.js";
@@ -934,13 +934,14 @@ export function chooseGo(state, playerKey) {
 
   const player = state.players[playerKey];
   const opponentKey = playerKey === "human" ? "ai" : "human";
-  const scoreInfo = calculateScore(state.players[playerKey], state.players[opponentKey], state.ruleKey);
+  const rules = ruleSets[state.ruleKey];
+  const baseInfo = calculateBaseScore(state.players[playerKey], rules);
   const nextPlayers = {
     ...state.players,
     [playerKey]: {
       ...player,
       goCount: player.goCount + 1,
-      lastGoBase: scoreInfo.base
+      lastGoBase: baseInfo.base
     }
   };
 

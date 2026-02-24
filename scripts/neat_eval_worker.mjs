@@ -6,6 +6,8 @@ import {
   createSeededRng,
   calculateScore,
   scoringPiCount,
+  getDeclarableShakingMonths,
+  getDeclarableBombMonths,
   playTurn,
   chooseMatch,
   chooseGo,
@@ -23,6 +25,7 @@ function parseArgs(argv) {
   const args = [...argv];
   const out = {
     genomePath: "",
+    opponentGenomePath: "",
     games: 3,
     seed: "neat-python",
     maxSteps: 600,
@@ -34,6 +37,9 @@ function parseArgs(argv) {
     fitnessWinWeight: 2.5,
     fitnessLossWeight: 1.5,
     fitnessDrawWeight: 0.1,
+    teacherDatasetCachePath: "",
+    teacherDatasetPath: "",
+    teacherKiboPath: "",
   };
 
   while (args.length > 0) {
@@ -50,6 +56,7 @@ function parseArgs(argv) {
     }
 
     if (key === "--genome") out.genomePath = String(value || "").trim();
+    else if (key === "--opponent-genome") out.opponentGenomePath = String(value || "").trim();
     else if (key === "--games") out.games = Math.max(1, Number(value || 0));
     else if (key === "--seed") out.seed = String(value || "neat-python");
     else if (key === "--max-steps") out.maxSteps = Math.max(20, Number(value || 600));
@@ -65,6 +72,9 @@ function parseArgs(argv) {
     else if (key === "--fitness-win-weight") out.fitnessWinWeight = Number(value || 2.5);
     else if (key === "--fitness-loss-weight") out.fitnessLossWeight = Number(value || 1.5);
     else if (key === "--fitness-draw-weight") out.fitnessDrawWeight = Number(value || 0.1);
+    else if (key === "--teacher-dataset-cache") out.teacherDatasetCachePath = String(value || "").trim();
+    else if (key === "--teacher-dataset-path") out.teacherDatasetPath = String(value || "").trim();
+    else if (key === "--teacher-kibo-path") out.teacherKiboPath = String(value || "").trim();
     else throw new Error(`Unknown argument: ${key}`);
   }
 
@@ -74,6 +84,9 @@ function parseArgs(argv) {
   }
   if (out.fixedFirstTurn !== "human" && out.fixedFirstTurn !== "ai") {
     throw new Error(`invalid --fixed-first-turn: ${out.fixedFirstTurn}`);
+  }
+  if (String(out.opponentPolicy || "").trim().toLowerCase() === "genome" && !out.opponentGenomePath) {
+    throw new Error("--opponent-genome is required when --opponent-policy=genome");
   }
   return out;
 }
@@ -224,6 +237,138 @@ function candidateCard(state, actor, decisionType, candidate) {
   return null;
 }
 
+function countCardsByMonth(cards, month) {
+  const targetMonth = Number(month || 0);
+  if (!Array.isArray(cards) || targetMonth <= 0) return 0;
+  let count = 0;
+  for (const card of cards) {
+    if (Number(card?.month || 0) === targetMonth) count += 1;
+  }
+  return count;
+}
+
+function hasComboTag(card, tag) {
+  return Array.isArray(card?.comboTags) && card.comboTags.includes(tag);
+}
+
+function countCapturedComboTag(player, zone, tag) {
+  const cards = player?.captured?.[zone] || [];
+  if (!Array.isArray(cards)) return 0;
+  const seen = new Set();
+  let count = 0;
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (hasComboTag(card, tag)) count += 1;
+  }
+  return count;
+}
+
+function isDoublePiCard(card) {
+  if (!card) return false;
+  const id = String(card?.id || "");
+  const category = String(card?.category || "");
+  const piValue = Number(card?.piValue || 0);
+  if (id === "I0") return true; // Gukjin card
+  return category === "junk" && piValue >= 2;
+}
+
+function resolveCandidateMonth(state, actor, decisionType, card) {
+  const cardMonth = Number(card?.month || 0);
+  if (cardMonth >= 1) return cardMonth;
+
+  if (decisionType === "option") {
+    if (state?.phase === "shaking-confirm" && state?.pendingShakingConfirm?.playerKey === actor) {
+      const pendingMonth = Number(state?.pendingShakingConfirm?.month || 0);
+      if (pendingMonth >= 1) return pendingMonth;
+    }
+    if (state?.phase === "president-choice" && state?.pendingPresident?.playerKey === actor) {
+      const pendingMonth = Number(state?.pendingPresident?.month || 0);
+      if (pendingMonth >= 1) return pendingMonth;
+    }
+  }
+  return 0;
+}
+
+function matchOpportunityDensity(state, month) {
+  const boardMonthCount = countCardsByMonth(state?.board || [], month);
+  return clamp01(boardMonthCount / 3.0);
+}
+
+function immediateMatchPossible(state, decisionType, month) {
+  if (decisionType === "match") return 1;
+  if (month <= 0) return 0;
+  return countCardsByMonth(state?.board || [], month) > 0 ? 1 : 0;
+}
+
+function monthTotalCards(month) {
+  const m = Number(month || 0);
+  if (m >= 1 && m <= 12) return 4;
+  if (m === 13) return 2;
+  return 0;
+}
+
+function collectKnownCardsForMonthRatio(state, actor) {
+  const out = [];
+  const pushAll = (cards) => {
+    if (!Array.isArray(cards)) return;
+    for (const card of cards) out.push(card);
+  };
+
+  // Public zones
+  pushAll(state?.board || []);
+  for (const side of ["human", "ai"]) {
+    const captured = state?.players?.[side]?.captured || {};
+    pushAll(captured.kwang || []);
+    pushAll(captured.five || []);
+    pushAll(captured.ribbon || []);
+    pushAll(captured.junk || []);
+  }
+  // Self-known only: own hand is allowed, opponent hand is forbidden.
+  pushAll(state?.players?.[actor]?.hand || []);
+  return out;
+}
+
+function candidateMonthKnownRatio(state, actor, month) {
+  const total = monthTotalCards(month);
+  if (total <= 0) return 0;
+
+  const cards = collectKnownCardsForMonthRatio(state, actor);
+  const seen = new Set();
+  let known = 0;
+  for (const card of cards) {
+    if (!card) continue;
+    const id = String(card.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (Number(card.month || 0) === Number(month)) known += 1;
+  }
+  return clamp01(known / total);
+}
+
+function decisionAvailabilityFlags(state, actor) {
+  if (state?.phase === "shaking-confirm" && state?.pendingShakingConfirm?.playerKey === actor) {
+    return { hasShake: 1, hasBomb: 0 };
+  }
+  if (state?.phase !== "playing" || state?.currentTurn !== actor) {
+    return { hasShake: 0, hasBomb: 0 };
+  }
+  const shakingMonths = getDeclarableShakingMonths(state, actor);
+  const bombMonths = getDeclarableBombMonths(state, actor);
+  return {
+    hasShake: Array.isArray(shakingMonths) && shakingMonths.length > 0 ? 1 : 0,
+    hasBomb: Array.isArray(bombMonths) && bombMonths.length > 0 ? 1 : 0,
+  };
+}
+
+function currentMultiplierNorm(state, scoreSelf) {
+  const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
+  const mul = Math.max(1.0, Number(scoreSelf?.multiplier || 1.0));
+  const currentMultiplier = mul * carry;
+  return clamp01((currentMultiplier - 1.0) / 15.0);
+}
+
 function featureVector(state, actor, decisionType, candidate, legalCount, inputDim) {
   const opp = actor === "human" ? "ai" : "human";
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
@@ -231,19 +376,29 @@ function featureVector(state, actor, decisionType, candidate, legalCount, inputD
 
   const phase = String(state.phase || "");
   const card = candidateCard(state, actor, decisionType, candidate);
-  const month = Number(card?.month || 0);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
   const piValue = Number(card?.piValue || 0);
   const category = String(card?.category || "");
   const selfGwangCount = Number(state?.players?.[actor]?.captured?.kwang?.length || 0);
   const oppGwangCount = Number(state?.players?.[opp]?.captured?.kwang?.length || 0);
   const selfPiCount = Number(scoringPiCount(state.players[actor]) || 0);
   const oppPiCount = Number(scoringPiCount(state.players[opp]) || 0);
-  const bakTotal =
-    (scoreSelf?.bak?.pi ? 1 : 0) +
-    (scoreSelf?.bak?.gwang ? 1 : 0) +
-    (scoreSelf?.bak?.mongBak ? 1 : 0);
 
-  const base = [
+  const selfGodori = countCapturedComboTag(state.players?.[actor], "five", "fiveBirds");
+  const oppGodori = countCapturedComboTag(state.players?.[opp], "five", "fiveBirds");
+  const selfCheongdan = countCapturedComboTag(state.players?.[actor], "ribbon", "blueRibbons");
+  const oppCheongdan = countCapturedComboTag(state.players?.[opp], "ribbon", "blueRibbons");
+  const selfHongdan = countCapturedComboTag(state.players?.[actor], "ribbon", "redRibbons");
+  const oppHongdan = countCapturedComboTag(state.players?.[opp], "ribbon", "redRibbons");
+  const selfChodan = countCapturedComboTag(state.players?.[actor], "ribbon", "plainRibbons");
+  const oppChodan = countCapturedComboTag(state.players?.[opp], "ribbon", "plainRibbons");
+
+  const selfCanStop = Number(scoreSelf?.total || 0) >= 7 ? 1 : 0;
+  const oppCanStop = Number(scoreOpp?.total || 0) >= 7 ? 1 : 0;
+  const { hasShake, hasBomb } = decisionAvailabilityFlags(state, actor);
+
+  const features = [
+    // 1-6 phase
     phase === "playing" ? 1 : 0,
     phase === "select-match" ? 1 : 0,
     phase === "go-stop" ? 1 : 0,
@@ -251,36 +406,73 @@ function featureVector(state, actor, decisionType, candidate, legalCount, inputD
     phase === "gukjin-choice" ? 1 : 0,
     phase === "shaking-confirm" ? 1 : 0,
 
+    // 7-9 decisionType
     decisionType === "play" ? 1 : 0,
     decisionType === "match" ? 1 : 0,
     decisionType === "option" ? 1 : 0,
 
+    // 10-14 game state
     clamp01((state.deck?.length || 0) / 30.0),
     clamp01((state.players?.[actor]?.hand?.length || 0) / 10.0),
     clamp01((state.players?.[opp]?.hand?.length || 0) / 10.0),
     clamp01((state.players?.[actor]?.goCount || 0) / 5.0),
     clamp01((state.players?.[opp]?.goCount || 0) / 5.0),
-    tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0),
-    clamp01(bakTotal / 3.0),
-    clamp01(Number(legalCount || 0) / 10.0),
-    clamp01(month / 12.0),
-    clamp01(piValue / 5.0),
-    optionCode(candidate),
-  ];
 
-  const extended = base.concat([
+    // 15-17 score
+    tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0),
+    tanhNorm((scoreSelf?.total || 0), 10.0), // self_score_total_norm
+    clamp01(Number(legalCount || 0) / 10.0),
+
+    // 18-23 candidate card
+    clamp01(piValue / 5.0),
     category === "kwang" ? 1 : 0,
-    category === "junk" && piValue >= 2 ? 1 : 0,
+    category === "ribbon" ? 1 : 0,
+    category === "five" ? 1 : 0,
+    category === "junk" ? 1 : 0,
+    isDoublePiCard(card) ? 1 : 0,
+
+    // 24-26 board/matching
+    matchOpportunityDensity(state, month),
+    immediateMatchPossible(state, decisionType, month),
+    optionCode(candidate),
+
+    // 27-30 gwang/pi
     clamp01(selfGwangCount / 5.0),
     clamp01(oppGwangCount / 5.0),
     clamp01(selfPiCount / 20.0),
     clamp01(oppPiCount / 20.0),
-  ]);
 
-  if (inputDim === base.length) return base;
-  if (inputDim === extended.length) return extended;
+    // 31-38 combo progress
+    clamp01(selfGodori / 3.0),
+    clamp01(oppGodori / 3.0),
+    clamp01(selfCheongdan / 3.0),
+    clamp01(oppCheongdan / 3.0),
+    clamp01(selfHongdan / 3.0),
+    clamp01(oppHongdan / 3.0),
+    clamp01(selfChodan / 3.0),
+    clamp01(oppChodan / 3.0),
+
+    // 39-40 stop thresholds
+    selfCanStop,
+    oppCanStop,
+
+    // 41-43 multiplier/shake/bomb
+    hasShake,
+    currentMultiplierNorm(state, scoreSelf),
+    hasBomb,
+
+    // 44-46 bak risks
+    scoreSelf?.bak?.pi ? 1 : 0,
+    scoreSelf?.bak?.gwang ? 1 : 0,
+    scoreSelf?.bak?.mongBak ? 1 : 0,
+
+    // 47 month-known ratio (public + self hand only)
+    candidateMonthKnownRatio(state, actor, month),
+  ];
+
+  if (inputDim === features.length) return features;
   throw new Error(
-    `feature vector size mismatch: expected ${inputDim}, supported=${base.length}|${extended.length}`
+    `feature vector size mismatch: expected ${inputDim}, supported=${features.length}`
   );
 }
 
@@ -544,7 +736,7 @@ function controlGoldDiff(state, controlActor) {
   return controlGold - oppGold;
 }
 
-function playSingleRound(initialState, compiled, seed, controlActor, opponentPolicy, maxSteps) {
+function playSingleRound(initialState, compiled, seed, controlActor, opponentPolicy, maxSteps, opponentCompiled) {
   const rng = createSeededRng(`${seed}|rng`);
   let state = initialState;
   const imitation = {
@@ -563,12 +755,16 @@ function playSingleRound(initialState, compiled, seed, controlActor, opponentPol
     if (actor === controlActor) {
       const picked = pickAction(state, actor, compiled);
       if (picked) {
+        const imitationRefPolicy =
+          String(opponentPolicy || "").trim().toLowerCase() === "genome"
+            ? "heuristic_v4"
+            : opponentPolicy;
         const refCandidate = heuristicCandidateForDecision(
           state,
           actor,
           picked.decisionType,
           picked.candidates || [],
-          opponentPolicy
+          imitationRefPolicy
         );
         if (refCandidate) {
           const key = picked.decisionType;
@@ -578,6 +774,11 @@ function playSingleRound(initialState, compiled, seed, controlActor, opponentPol
             imitation.matches[key] += 1;
           }
         }
+        next = applyAction(state, actor, picked.decisionType, picked.candidate);
+      }
+    } else if (String(opponentPolicy || "").trim().toLowerCase() === "genome") {
+      const picked = opponentCompiled ? pickAction(state, actor, opponentCompiled) : null;
+      if (picked) {
         next = applyAction(state, actor, picked.decisionType, picked.candidate);
       }
     } else {
@@ -608,6 +809,149 @@ function quantile(values, q) {
   return sorted[idx];
 }
 
+function cloneDecisionCounters(src) {
+  return {
+    play: Number(src?.play || 0),
+    match: Number(src?.match || 0),
+    option: Number(src?.option || 0),
+  };
+}
+
+function buildImitationMetrics(totals, matches) {
+  const t = cloneDecisionCounters(totals);
+  const m = cloneDecisionCounters(matches);
+  const ratio = (num, den) => (den > 0 ? num / den : 0);
+  const playRatio = ratio(m.play, t.play);
+  const matchRatio = ratio(m.match, t.match);
+  const optionRatio = ratio(m.option, t.option);
+  const weights = { play: 0.5, match: 0.3, option: 0.2 };
+  let weightSum = 0;
+  for (const k of ["play", "match", "option"]) {
+    if (Number(t[k] || 0) > 0) weightSum += Number(weights[k] || 0);
+  }
+  const weightedRaw =
+    weights.play * playRatio +
+    weights.match * matchRatio +
+    weights.option * optionRatio;
+  const weightedScore = weightSum > 0 ? weightedRaw / weightSum : 0;
+  return {
+    totals: t,
+    matches: m,
+    playRatio,
+    matchRatio,
+    optionRatio,
+    weights,
+    weightedScore,
+  };
+}
+
+function normalizeTeacherDecisionType(value) {
+  const dt = String(value || "").trim().toLowerCase();
+  if (dt === "play" || dt === "match" || dt === "option") return dt;
+  return "";
+}
+
+function loadTeacherDatasetCache(cachePath) {
+  const full = path.resolve(cachePath);
+  if (!fs.existsSync(full)) {
+    throw new Error(`teacher dataset cache not found: ${cachePath}`);
+  }
+  const raw = JSON.parse(fs.readFileSync(full, "utf8"));
+  const decisionsRaw = Array.isArray(raw) ? raw : Array.isArray(raw?.decisions) ? raw.decisions : [];
+  const decisions = [];
+
+  for (const item of decisionsRaw) {
+    const decisionType = normalizeTeacherDecisionType(item?.decision_type);
+    if (!decisionType) continue;
+    const chosenCandidate = normalizeDecisionCandidate(decisionType, item?.chosen_candidate);
+    const candidateRows = Array.isArray(item?.candidates) ? item.candidates : [];
+    const candidates = [];
+    const seen = new Set();
+
+    for (const row of candidateRows) {
+      const candidate = normalizeDecisionCandidate(decisionType, row?.candidate);
+      if (!candidate || seen.has(candidate)) continue;
+      const featuresRaw = Array.isArray(row?.features) ? row.features : [];
+      if (!featuresRaw.length) continue;
+      const features = [];
+      let ok = true;
+      for (const v of featuresRaw) {
+        const n = Number(v);
+        if (!Number.isFinite(n)) {
+          ok = false;
+          break;
+        }
+        features.push(n);
+      }
+      if (!ok) continue;
+      seen.add(candidate);
+      candidates.push({ candidate, features });
+    }
+
+    if (!chosenCandidate || !candidates.length) continue;
+    if (!candidates.some((c) => c.candidate === chosenCandidate)) continue;
+    decisions.push({ decisionType, chosenCandidate, candidates });
+  }
+
+  return {
+    cachePath: full,
+    sourceDatasetPath: String(raw?.source_dataset_path || ""),
+    sourceKiboPath: String(raw?.source_kibo_path || ""),
+    actorFilter: String(raw?.actor_filter || "all"),
+    decisions,
+  };
+}
+
+function evaluateTeacherDatasetImitation(compiled, teacherCache) {
+  const totals = { play: 0, match: 0, option: 0 };
+  const matches = { play: 0, match: 0, option: 0 };
+  const inputDim = Number(compiled?.inputKeys?.length || 0);
+  let decisionsUsed = 0;
+
+  for (const item of teacherCache.decisions || []) {
+    const decisionType = normalizeTeacherDecisionType(item?.decisionType);
+    if (!decisionType) continue;
+    const chosenCandidate = normalizeDecisionCandidate(decisionType, item?.chosenCandidate);
+    if (!chosenCandidate) continue;
+
+    const candidates = [];
+    for (const row of item?.candidates || []) {
+      const candidate = normalizeDecisionCandidate(decisionType, row?.candidate);
+      const features = Array.isArray(row?.features) ? row.features : [];
+      if (!candidate || features.length !== inputDim) continue;
+      candidates.push({ candidate, features });
+    }
+    if (!candidates.length) continue;
+    if (!candidates.some((c) => c.candidate === chosenCandidate)) continue;
+
+    let bestCandidate = candidates[0].candidate;
+    let bestScore = -Infinity;
+    for (const row of candidates) {
+      const score = forward(compiled, row.features);
+      if (score > bestScore) {
+        bestScore = score;
+        bestCandidate = row.candidate;
+      }
+    }
+
+    totals[decisionType] += 1;
+    decisionsUsed += 1;
+    if (bestCandidate === chosenCandidate) {
+      matches[decisionType] += 1;
+    }
+  }
+
+  const metrics = buildImitationMetrics(totals, matches);
+  return {
+    ...metrics,
+    decisionCount: decisionsUsed,
+    cachePath: teacherCache.cachePath,
+    sourceDatasetPath: teacherCache.sourceDatasetPath,
+    sourceKiboPath: teacherCache.sourceKiboPath,
+    actorFilter: teacherCache.actorFilter,
+  };
+}
+
 function main() {
   const evalStartMs = Date.now();
   const opts = parseArgs(process.argv.slice(2));
@@ -616,6 +960,19 @@ function main() {
 
   const raw = JSON.parse(fs.readFileSync(full, "utf8"));
   const compiled = compileGenome(raw);
+  let opponentCompiled = null;
+  if (String(opts.opponentPolicy || "").trim().toLowerCase() === "genome") {
+    const oppFull = path.resolve(opts.opponentGenomePath);
+    if (!fs.existsSync(oppFull)) {
+      throw new Error(`opponent genome not found: ${opts.opponentGenomePath}`);
+    }
+    const oppRaw = JSON.parse(fs.readFileSync(oppFull, "utf8"));
+    opponentCompiled = compileGenome(oppRaw);
+  }
+  let teacherCache = null;
+  if (String(opts.teacherDatasetCachePath || "").trim()) {
+    teacherCache = loadTeacherDatasetCache(opts.teacherDatasetCachePath);
+  }
 
   const games = Math.max(1, Math.floor(opts.games));
   const controlActor = "ai";
@@ -628,8 +985,10 @@ function main() {
     my_bankrupt_count: 0,
     my_inflicted_bankrupt_count: 0,
   };
-  const imitationTotals = { play: 0, match: 0, option: 0 };
-  const imitationMatches = { play: 0, match: 0, option: 0 };
+  let go3PlusCount = 0;
+  let myGotBakCount = 0;
+  const simImitationTotals = { play: 0, match: 0, option: 0 };
+  const simImitationMatches = { play: 0, match: 0, option: 0 };
   const firstTurnCounts = {
     human: 0,
     ai: 0,
@@ -655,7 +1014,8 @@ function main() {
       seed,
       controlActor,
       opts.opponentPolicy,
-      Math.max(20, Math.floor(opts.maxSteps))
+      Math.max(20, Math.floor(opts.maxSteps)),
+      opponentCompiled
     );
     const endState = gameResult?.endState || gameResult;
     const afterGoldDiff = controlGoldDiff(endState, controlActor);
@@ -665,6 +1025,18 @@ function main() {
     const opponentGold = Number(endState?.players?.[opponentActor]?.gold || 0);
     const controlBankrupt = controlGold <= 0;
     const opponentBankrupt = opponentGold <= 0;
+    const controlGoCount = Number(endState?.players?.[controlActor]?.goCount || 0);
+    if (controlGoCount >= 3) {
+      go3PlusCount += 1;
+    }
+    const resultWinner = String(endState?.result?.winner || "").trim();
+    if (resultWinner === opponentActor) {
+      const oppScore = endState?.result?.[opponentActor] || {};
+      const bak = oppScore?.bak || {};
+      if (bak?.dokbak === true) {
+        myGotBakCount += 1;
+      }
+    }
     if (opponentBankrupt) {
       bankrupt.my_inflicted_bankrupt_count += 1;
     }
@@ -684,45 +1056,56 @@ function main() {
     const gt = gameResult?.imitation?.totals || {};
     const gm = gameResult?.imitation?.matches || {};
     for (const k of ["play", "match", "option"]) {
-      imitationTotals[k] += Number(gt[k] || 0);
-      imitationMatches[k] += Number(gm[k] || 0);
+      simImitationTotals[k] += Number(gt[k] || 0);
+      simImitationMatches[k] += Number(gm[k] || 0);
     }
   }
 
   const meanGoldDelta = goldDeltas.length > 0 ? goldDeltas.reduce((a, b) => a + b, 0) / goldDeltas.length : 0;
   const winRate = wins / games;
   const lossRate = losses / games;
+  const go3PlusRate = go3PlusCount / games;
+  const myGotBakRate = myGotBakCount / games;
   const drawRate = draws / games;
+  const fitnessGoldScale = 3000.0;
+  const fitnessWinWeight = 0.8;
+  const fitnessLossWeight = 0.6;
+  const fitnessDrawWeight = 0.1;
 
-  const fitness =
-    (meanGoldDelta / Number(opts.fitnessGoldScale || 10000.0)) +
-    (winRate * Number(opts.fitnessWinWeight || 0)) -
-    (lossRate * Number(opts.fitnessLossWeight || 0)) +
-    (drawRate * Number(opts.fitnessDrawWeight || 0));
+  let fitness =
+    (meanGoldDelta / fitnessGoldScale) +
+    (winRate * fitnessWinWeight) -
+    (lossRate * fitnessLossWeight) +
+    (drawRate * fitnessDrawWeight);
+  if (winRate < 0.45 && meanGoldDelta < 0) {
+    fitness -= 0.4 + (0.45 - winRate) * 2.0;
+  }
 
-  const ratio = (num, den) => (den > 0 ? num / den : 0);
-  const imitationPlayRatio = ratio(imitationMatches.play, imitationTotals.play);
-  const imitationMatchRatio = ratio(imitationMatches.match, imitationTotals.match);
-  const imitationOptionRatio = ratio(imitationMatches.option, imitationTotals.option);
-  const imitationWeights = { play: 0.5, match: 0.3, option: 0.2 };
-  let imitationWeightSum = 0;
-  let imitationWeightedRaw = 0;
-  for (const k of ["play", "match", "option"]) {
-    if (Number(imitationTotals[k] || 0) <= 0) continue;
-    imitationWeightSum += imitationWeights[k];
+  const simImitation = buildImitationMetrics(simImitationTotals, simImitationMatches);
+  let imitationSource = "opponent_policy";
+  let activeImitation = simImitation;
+  let teacherImitation = null;
+  if (teacherCache) {
+    teacherImitation = evaluateTeacherDatasetImitation(compiled, teacherCache);
+    if (Number(teacherImitation.decisionCount || 0) > 0) {
+      imitationSource = "teacher_dataset_cache";
+      activeImitation = teacherImitation;
+    }
   }
-  if (imitationWeightSum > 0) {
-    imitationWeightedRaw =
-      imitationWeights.play * imitationPlayRatio +
-      imitationWeights.match * imitationMatchRatio +
-      imitationWeights.option * imitationOptionRatio;
-  }
-  const imitationWeightedScore = imitationWeightSum > 0 ? imitationWeightedRaw / imitationWeightSum : 0;
+  const imitationTotals = cloneDecisionCounters(activeImitation.totals);
+  const imitationMatches = cloneDecisionCounters(activeImitation.matches);
+  const imitationPlayRatio = Number(activeImitation.playRatio || 0);
+  const imitationMatchRatio = Number(activeImitation.matchRatio || 0);
+  const imitationOptionRatio = Number(activeImitation.optionRatio || 0);
+  const imitationWeights = activeImitation.weights || { play: 0.5, match: 0.3, option: 0.2 };
+  const imitationWeightedScore = Number(activeImitation.weightedScore || 0);
 
   const summary = {
     games,
     control_actor: controlActor,
     opponent_actor: opponentActor,
+    opponent_policy: opts.opponentPolicy,
+    opponent_genome: String(opts.opponentGenomePath || "") || null,
     first_turn_policy: opts.firstTurnPolicy,
     fixed_first_turn: opts.firstTurnPolicy === "fixed" ? opts.fixedFirstTurn : null,
     first_turn_counts: firstTurnCounts,
@@ -737,14 +1120,34 @@ function main() {
     win_rate: winRate,
     loss_rate: lossRate,
     draw_rate: drawRate,
+    go3_plus_count: go3PlusCount,
+    go3_plus_rate: go3PlusRate,
+    my_got_bak_count: myGotBakCount,
+    my_got_bak_rate: myGotBakRate,
     mean_gold_delta: meanGoldDelta,
     p10_gold_delta: quantile(goldDeltas, 0.1),
     p50_gold_delta: quantile(goldDeltas, 0.5),
     p90_gold_delta: quantile(goldDeltas, 0.9),
-    fitness_gold_scale: Number(opts.fitnessGoldScale || 10000.0),
-    fitness_win_weight: Number(opts.fitnessWinWeight || 0),
-    fitness_loss_weight: Number(opts.fitnessLossWeight || 0),
-    fitness_draw_weight: Number(opts.fitnessDrawWeight || 0),
+    fitness_gold_scale: fitnessGoldScale,
+    fitness_win_weight: fitnessWinWeight,
+    fitness_loss_weight: fitnessLossWeight,
+    fitness_draw_weight: fitnessDrawWeight,
+    imitation_source: imitationSource,
+    teacher_dataset_cache: teacherImitation
+      ? String(teacherImitation.cachePath || "")
+      : (String(opts.teacherDatasetCachePath || "").trim() ? path.resolve(opts.teacherDatasetCachePath) : null),
+    teacher_dataset_path: teacherImitation
+      ? (String(teacherImitation.sourceDatasetPath || "").trim() || null)
+      : (String(opts.teacherDatasetPath || "").trim() || null),
+    teacher_kibo_path: teacherImitation
+      ? (String(teacherImitation.sourceKiboPath || "").trim() || null)
+      : (String(opts.teacherKiboPath || "").trim() || null),
+    teacher_dataset_actor: teacherImitation ? String(teacherImitation.actorFilter || "all") : null,
+    teacher_dataset_decisions: teacherImitation ? Number(teacherImitation.decisionCount || 0) : 0,
+    teacher_imitation_weighted_score: teacherImitation
+      ? Number(teacherImitation.weightedScore || 0)
+      : null,
+    sim_imitation_weighted_score: Number(simImitation.weightedScore || 0),
     imitation_play_total: imitationTotals.play,
     imitation_play_matches: imitationMatches.play,
     imitation_play_ratio: imitationPlayRatio,

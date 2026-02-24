@@ -1,4 +1,15 @@
-﻿export function rankHandCardsV3(state, playerKey, deps) {
+﻿export {
+  rankHandCardsV3,
+  chooseMatchHeuristicV3,
+  chooseGukjinHeuristicV3,
+  shouldPresidentStopV3,
+  shouldGoV3,
+  selectBombMonthV3,
+  shouldBombV3,
+  decideShakingV3
+};
+
+function rankHandCardsV3(state, playerKey, deps) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
 
@@ -23,7 +34,7 @@
     monthStrategicPriority
   } = deps;
 
-  const opp = playerKey === "human" ? "ai" : "human";
+  const opp = otherPlayerKeyFromDeps(playerKey, deps);
   const oppPlayer = state.players?.[opp];
   const ctx = analyzeGameContext(state, playerKey);
   const jokboThreat = checkOpponentJokboProgress(state, playerKey);
@@ -214,12 +225,13 @@
   return ranked;
 }
 
+// Shared fallback: keep V3 tolerant even if deps.otherPlayerKey is missing.
 function otherPlayerKeyFromDeps(playerKey, deps) {
   if (typeof deps?.otherPlayerKey === "function") return deps.otherPlayerKey(playerKey);
   return playerKey === "human" ? "ai" : "human";
 }
 
-export function chooseMatchHeuristicV3(state, playerKey, deps) {
+function chooseMatchHeuristicV3(state, playerKey, deps) {
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
 
@@ -268,7 +280,7 @@ export function chooseMatchHeuristicV3(state, playerKey, deps) {
   return candidates[0].id;
 }
 
-export function chooseGukjinHeuristicV3(state, playerKey, deps) {
+function chooseGukjinHeuristicV3(state, playerKey, deps) {
   const branch = deps.analyzeGukjinBranches(state, playerKey);
   if (!branch.enabled || !branch.scenarios.length) return "junk";
 
@@ -283,11 +295,11 @@ export function chooseGukjinHeuristicV3(state, playerKey, deps) {
   return "junk";
 }
 
-export function shouldPresidentStopV3() {
+function shouldPresidentStopV3() {
   return false;
 }
 
-export function shouldGoV3(state, playerKey, deps) {
+function shouldGoV3(state, playerKey, deps) {
   const player = state.players?.[playerKey];
   const opp = otherPlayerKeyFromDeps(playerKey, deps);
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -429,11 +441,11 @@ function selectBestMonthByGain(state, months, deps) {
   return best;
 }
 
-export function selectBombMonthV3(state, _playerKey, bombMonths, deps) {
+function selectBombMonthV3(state, _playerKey, bombMonths, deps) {
   return selectBestMonthByGain(state, bombMonths, deps);
 }
 
-export function shouldBombV3(state, playerKey, bombMonths, deps) {
+function shouldBombV3(state, playerKey, bombMonths, deps) {
   const ctx = deps.analyzeGameContext(state, playerKey);
   const firstTurnPiPlan = deps.getFirstTurnDoublePiPlan(state, playerKey);
   if (firstTurnPiPlan.active) {
@@ -488,7 +500,7 @@ function slowPlayPenaltyV3(immediateGain, comboGain, tempoPressure, ctx) {
   return 0;
 }
 
-export function decideShakingV3(state, playerKey, shakingMonths, deps) {
+function decideShakingV3(state, playerKey, shakingMonths, deps) {
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
 
   const ctx = deps.analyzeGameContext(state, playerKey);

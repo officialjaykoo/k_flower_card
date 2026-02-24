@@ -1,12 +1,31 @@
+﻿export {
+  rankHandCardsV4,
+  chooseMatchHeuristicV4,
+  chooseGukjinHeuristicV4,
+  shouldPresidentStopV4,
+  shouldGoV4,
+  selectBombMonthV4,
+  shouldBombV4,
+  decideShakingV4
+};
+
 function safeNumber(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
 
+// heuristicV4.js
+// Structured rule-based policy with scenario gates.
+
 const GUKJIN_CARD_ID = "I0";
 const DOUBLE_PI_MONTHS = Object.freeze([11, 12, 13]);
 const BONUS_CARD_ID_SET = new Set(["M0", "M1"]);
 const SSANGPI_WITH_GUKJIN_ID_SET = new Set(["K1", "L3", GUKJIN_CARD_ID]);
+
+function otherPlayerKeyFromDeps(playerKey, deps) {
+  if (typeof deps?.otherPlayerKey === "function") return deps.otherPlayerKey(playerKey);
+  return playerKey === "human" ? "ai" : "human";
+}
 
 function hasComboTag(card, tag) {
   return Array.isArray(card?.comboTags) && card.comboTags.includes(tag);
@@ -93,7 +112,7 @@ function getLiveDoublePiMonths(state) {
 }
 
 function getComboHoldMonths(state, playerKey, deps) {
-  const opp = deps.otherPlayerKey(playerKey);
+  const opp = otherPlayerKeyFromDeps(playerKey, deps);
   const selfPlayer = state.players?.[playerKey];
   const oppPlayer = state.players?.[opp];
   const hold = new Set();
@@ -105,18 +124,14 @@ function getComboHoldMonths(state, playerKey, deps) {
 function discardTieOrderScore(card, deps, monthIsLiveDoublePi) {
   if (card?.bonus?.stealPi) return 6;
   if (isDoublePiLike(card, deps) && monthIsLiveDoublePi) return 1;
-  if (card?.category === "five") return 5; // 열
-  if (card?.category === "ribbon") return 4; // 띠
-  if (card?.category === "kwang") return 3; // 광
-  if (card?.category === "junk") return 2; // 피
-  return 2;
+  if (card?.category === "five") return 5; // ??  if (card?.category === "ribbon") return 4; // ??  if (card?.category === "kwang") return 3; // 愿?  if (card?.category === "junk") return 2; // ??  return 2;
 }
 
-export function rankHandCardsV4(state, playerKey, deps) {
+function rankHandCardsV4(state, playerKey, deps) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
 
-  const opp = deps.otherPlayerKey(playerKey);
+  const opp = otherPlayerKeyFromDeps(playerKey, deps);
   const oppPlayer = state.players?.[opp];
   const ctx = deps.analyzeGameContext(state, playerKey);
   const selfPi = safeNumber(ctx.selfPi, deps.capturedCountByCategory(player, "junk"));
@@ -264,11 +279,11 @@ export function rankHandCardsV4(state, playerKey, deps) {
   return ranked;
 }
 
-export function chooseMatchHeuristicV4(state, playerKey, deps) {
+function chooseMatchHeuristicV4(state, playerKey, deps) {
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
 
-  const opp = deps.otherPlayerKey(playerKey);
+  const opp = otherPlayerKeyFromDeps(playerKey, deps);
   const selfPlayer = state.players?.[playerKey];
   const oppPlayer = state.players?.[opp];
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -325,7 +340,7 @@ export function chooseMatchHeuristicV4(state, playerKey, deps) {
   return best?.id ?? null;
 }
 
-export function chooseGukjinHeuristicV4(state, playerKey, deps) {
+function chooseGukjinHeuristicV4(state, playerKey, deps) {
   const ctx = deps.analyzeGameContext(state, playerKey);
   const branch = deps.analyzeGukjinBranches(state, playerKey);
 
@@ -386,7 +401,7 @@ function countUnseenByIdSet(state, playerKey, idSet) {
 }
 
 function opponentComboThreatProfile(state, playerKey, deps) {
-  const oppKey = deps.otherPlayerKey(playerKey);
+  const oppKey = otherPlayerKeyFromDeps(playerKey, deps);
   const selfPlayer = state.players?.[playerKey];
   const oppPlayer = state.players?.[oppKey];
   if (!selfPlayer || !oppPlayer) {
@@ -466,7 +481,7 @@ function hasPiEscapeLine(oppHand, boardByMonth, neededPi, deps) {
 
 function opponentBakEscapeLikely(state, playerKey, deps, ctx) {
   const selfPlayer = state.players?.[playerKey];
-  const oppKey = deps.otherPlayerKey(playerKey);
+  const oppKey = otherPlayerKeyFromDeps(playerKey, deps);
   const oppPlayer = state.players?.[oppKey];
   if (!selfPlayer || !oppPlayer) return false;
 
@@ -522,7 +537,7 @@ function shouldStopForOpponentFourLike(state, playerKey, deps, ctx, options = {}
   return false;
 }
 
-export function shouldPresidentStopV4(state, playerKey, deps) {
+function shouldPresidentStopV4(state, playerKey, deps) {
   const ctx = deps.analyzeGameContext(state, playerKey);
   const player = state.players?.[playerKey];
   if (!player) return true;
@@ -606,7 +621,7 @@ function summarizeOppGukjinCase(branch, oppMode) {
   };
 }
 
-export function shouldGoV4(state, playerKey, deps) {
+function shouldGoV4(state, playerKey, deps) {
   if (deps.canBankruptOpponentByStop(state, playerKey)) return false;
 
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -615,7 +630,7 @@ export function shouldGoV4(state, playerKey, deps) {
   const threat = estimateOpponentOneAwayProbV4(state, playerKey, deps, ctx);
   const lateGame = threat.deckCount <= 10;
   const selfPlayer = state.players?.[playerKey];
-  const oppPlayer = state.players?.[deps.otherPlayerKey(playerKey)];
+  const oppPlayer = state.players?.[otherPlayerKeyFromDeps(playerKey, deps)];
   const oppPiBase = safeNumber(ctx?.oppPi, deps.capturedCountByCategory(oppPlayer, "junk"));
   const selfCombo = comboCounts(selfPlayer);
   const myCertainJokbo =
@@ -720,7 +735,7 @@ function hasOnlyBombMatchOption(state, playerKey, bombMonths, deps) {
 }
 
 function canStealDoublePiFromOpponent(state, playerKey, deps) {
-  const opp = deps.otherPlayerKey(playerKey);
+  const opp = otherPlayerKeyFromDeps(playerKey, deps);
   const oppPlayer = state.players?.[opp];
   if (!oppPlayer) return false;
 
@@ -738,7 +753,7 @@ function canStealDoublePiFromOpponent(state, playerKey, deps) {
   return false;
 }
 
-export function selectBombMonthV4(state, playerKey, bombMonths, deps) {
+function selectBombMonthV4(state, playerKey, bombMonths, deps) {
   if (!Array.isArray(bombMonths) || !bombMonths.length) return null;
 
   let bestMonth = bombMonths[0];
@@ -761,7 +776,7 @@ export function selectBombMonthV4(state, playerKey, bombMonths, deps) {
   return bestMonth;
 }
 
-export function shouldBombV4(state, playerKey, bombMonths, deps) {
+function shouldBombV4(state, playerKey, bombMonths, deps) {
   if (!Array.isArray(bombMonths) || !bombMonths.length) return false;
 
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -774,7 +789,7 @@ export function shouldBombV4(state, playerKey, bombMonths, deps) {
   return onlyBombMatch && canStealDoublePi && scoreIsSeven;
 }
 
-export function decideShakingV4(state, playerKey, shakingMonths, deps) {
+function decideShakingV4(state, playerKey, shakingMonths, deps) {
   if (!Array.isArray(shakingMonths) || !shakingMonths.length) {
     return { allow: false, month: null, score: -Infinity, highImpact: false };
   }

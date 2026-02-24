@@ -20,43 +20,8 @@ if (-not (Test-Path $genomePath)) {
 $runtime = Get-Content $runtimeConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $gate = Get-Content $gateStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
 
-function Test-ApproxEq {
-  param(
-    [double]$A,
-    [double]$B,
-    [double]$Eps = 1e-9
-  )
-  return [math]::Abs($A - $B) -le $Eps
-}
-
-$thresholds = $gate.thresholds
-if ($null -eq $thresholds) {
-  throw "thresholds missing in gate_state: $gateStatePath"
-}
-
-$thresholdsOk = $true
-$thresholdsOk = $thresholdsOk -and ($thresholds.gate_mode -eq "hybrid")
-$thresholdsOk = $thresholdsOk -and (Test-ApproxEq ([double]$thresholds.transition_ema_win_rate) 0.40)
-$thresholdsOk = $thresholdsOk -and (Test-ApproxEq ([double]$thresholds.transition_ema_imitation) 0.60)
-$thresholdsOk = $thresholdsOk -and ([int]$thresholds.transition_streak -eq 3)
-
-$gatePassed = [bool]$gate.transition_ready -and ($null -ne $gate.transition_generation)
-
-if (-not ($thresholdsOk -and $gatePassed)) {
-  $fail = [ordered]@{
-    passed = $false
-    reason = "gate_not_passed"
-    seed = "$Seed"
-    gate_state_path = $gateStatePath
-    transition_ready = [bool]$gate.transition_ready
-    transition_generation = $gate.transition_generation
-    ema_win_rate = $gate.ema_win_rate
-    ema_imitation = $gate.ema_imitation
-    gate_streak = $gate.gate_streak
-  }
-  Write-Output ($fail | ConvertTo-Json -Depth 8)
-  exit 2
-}
+$passMeanGoldMin = 100
+$passWinRateMin = 0.48
 
 $games = 1000
 $seedTag = "phase1_eval_$Seed"
@@ -89,5 +54,44 @@ $savePath = Join-Path $outputDir "phase1_eval_1000.json"
 $enc = New-Object System.Text.UTF8Encoding($true)
 [System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($savePath), $resultJson, $enc)
 
-Write-Output $resultJson
-exit 0
+$r = $resultJson | ConvertFrom-Json
+
+Write-Host ""
+Write-Host "=== Phase1 실전 결과 (Seed=$Seed) ==="
+Write-Host "승률:          $($r.win_rate)"
+Write-Host "골드 평균:     $($r.mean_gold_delta)"
+Write-Host "fitness:       $($r.fitness)"
+Write-Host "play 모방률:   $($r.imitation_play_ratio)"
+Write-Host "match 모방률:  $($r.imitation_match_ratio)"
+Write-Host "option 모방률: $($r.imitation_option_ratio)"
+Write-Host "파산 당한 수:  $($r.bankrupt.my_bankrupt_count)"
+Write-Host "================================"
+
+$passed = ([double]$r.mean_gold_delta -ge $passMeanGoldMin) -and ([double]$r.win_rate -ge $passWinRateMin)
+$passState = [ordered]@{
+  passed = $passed
+  reason = if ($passed) { "eval_gate_passed" } else { "eval_gate_not_passed" }
+  seed = "$Seed"
+  pass_rule = [ordered]@{
+    mean_gold_delta_min = $passMeanGoldMin
+    win_rate_min = $passWinRateMin
+  }
+  win_rate = [double]$r.win_rate
+  mean_gold_delta = [double]$r.mean_gold_delta
+  fitness = [double]$r.fitness
+  eval_result_path = $savePath
+  gate_state_path = $gateStatePath
+  transition_ready = [bool]$gate.transition_ready
+  transition_generation = $gate.transition_generation
+}
+
+$passStatePath = Join-Path $outputDir "phase1_pass_state.json"
+$passStateJson = $passState | ConvertTo-Json -Depth 8
+[System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($passStatePath), $passStateJson, $enc)
+Write-Output $passStateJson
+
+if ($passed) {
+  exit 0
+}
+
+exit 2

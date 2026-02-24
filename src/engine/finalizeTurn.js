@@ -1,5 +1,5 @@
-import { ruleSets } from "./rules.js";
-import { calculateScore, isGukjinCard } from "./scoring.js";
+﻿import { ruleSets } from "./rules.js";
+import { calculateScore, calculateBaseScore, isGukjinCard } from "./scoring.js";
 import { pointsToGold, stealGoldFromOpponent } from "./economy.js";
 import { resolveRound } from "./resolution.js";
 import { findPresidentMonth } from "./opening.js";
@@ -142,6 +142,11 @@ function scoreWithGukjinMode(player, opponent, ruleKey, mode) {
   return calculateScore({ ...player, gukjinMode: mode }, opponent, ruleKey);
 }
 
+function baseWithGukjinMode(player, ruleKey, mode) {
+  const rules = ruleSets[ruleKey];
+  return calculateBaseScore({ ...player, gukjinMode: mode }, rules).base;
+}
+
 function shouldPromptGukjinChoiceAtScoring(state, playerKey) {
   const player = state.players?.[playerKey];
   if (!hasPendingGukjinChoice(player)) return false;
@@ -169,17 +174,19 @@ function shouldPromptGukjinChoiceAtScoring(state, playerKey) {
   const handCount = (player.hand || []).length;
   const lastGoBase = player.lastGoBase || 0;
   const hasGo = (player.goCount || 0) > 0;
-  const isRaisedFive = scoreAsFive.base > lastGoBase;
-  const isRaisedJunk = scoreAsJunk.base > lastGoBase;
+  const baseAsFive = baseWithGukjinMode(player, state.ruleKey, "five");
+  const baseAsJunk = baseWithGukjinMode(player, state.ruleKey, "junk");
+  const isRaisedFive = baseAsFive > lastGoBase;
+  const isRaisedJunk = baseAsJunk > lastGoBase;
 
   const canGoStopAsFive =
     rules.useEarlyStop &&
-    scoreAsFive.base >= rules.goMinScore &&
+    baseAsFive >= rules.goMinScore &&
     isRaisedFive &&
     handCount > 0;
   const canGoStopAsJunk =
     rules.useEarlyStop &&
-    scoreAsJunk.base >= rules.goMinScore &&
+    baseAsJunk >= rules.goMinScore &&
     isRaisedJunk &&
     handCount > 0;
 
@@ -456,25 +463,41 @@ export function continueAfterTurnIfNeeded(state, justPlayedKey) {
   state = clearExpiredReveal(state);
   const opponentKey = justPlayedKey === "human" ? "ai" : "human";
   const rules = ruleSets[state.ruleKey];
-  const scoreInfo = calculateScore(
-    state.players[justPlayedKey],
-    state.players[opponentKey],
-    state.ruleKey
-  );
+  const baseInfo = calculateBaseScore(state.players[justPlayedKey], rules);
+  const currentBase = baseInfo.base;
   const playerAfterTurn = state.players[justPlayedKey];
-  const isRaisedSinceLastGo = scoreInfo.base > playerAfterTurn.lastGoBase;
-  if (state.players[justPlayedKey].goCount > 0 && state.players[justPlayedKey].hand.length === 0) {
-    if (isRaisedSinceLastGo) {
-      // GO 이후 손패 소진 시 마지막 GO 기준점보다 점수가 오르면 자동 종료.
-      return resolveRound(state, justPlayedKey);
-    }
+  const isRaisedSinceLastGo = currentBase > playerAfterTurn.lastGoBase;
+  const handCountAfterTurn = state.players[justPlayedKey].hand.length;
+
+  // Last-hand rule:
+  // If the acting player has no cards left and satisfies Go/Stop scoring condition,
+  // skip prompt and auto-stop the round immediately.
+  if (
+    handCountAfterTurn === 0 &&
+    rules.useEarlyStop &&
+    currentBase >= rules.goMinScore &&
+    isRaisedSinceLastGo
+  ) {
+    return resolveRound(
+      {
+        ...state,
+        players: {
+          ...state.players,
+          [justPlayedKey]: {
+            ...state.players[justPlayedKey],
+            declaredStop: true
+          }
+        }
+      },
+      justPlayedKey
+    );
   }
 
   if (
     rules.useEarlyStop &&
-    scoreInfo.base >= rules.goMinScore &&
+    currentBase >= rules.goMinScore &&
     isRaisedSinceLastGo &&
-    state.players[justPlayedKey].hand.length > 0
+    handCountAfterTurn > 0
   ) {
     return {
       ...state,

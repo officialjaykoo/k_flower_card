@@ -185,9 +185,16 @@ Write-Host "Output:  $([System.IO.Path]::GetFullPath($outputDir))"
 Write-Host "Summary: $([System.IO.Path]::GetFullPath($summaryPath))"
 Write-Host ""
 $displayStandings = $standings | Select-Object `
-  policy, games, wins, losses, draws,
-  @{ Name = "win_rate"; Expression = { "{0:N1}%" -f $_.win_rate_pct } },
-  @{ Name = "mean_gold_delta"; Expression = { "{0:N0}" -f ([Math]::Round($_.mean_gold_delta, 0)) } }, go_count, go_fail_count,
-  @{ Name = "go_fail_rate"; Expression = { "{0:N1}%" -f $_.go_fail_rate_pct } },
-  bankrupt_inflicted, bankrupt_suffered
-Write-Host ($displayStandings | Format-Table -AutoSize | Out-String)
+  policy,
+  @{ Name = "G"; Expression = { $_.games } },
+  @{ Name = "W"; Expression = { $_.wins } },
+  @{ Name = "L"; Expression = { $_.losses } },
+  @{ Name = "DRAWS"; Expression = { $_.draws } },
+  @{ Name = "WIN"; Expression = { "{0:N1}%" -f $_.win_rate_pct } },
+  @{ Name = "GD_DELTA"; Expression = { "{0:N0}" -f ([Math]::Round($_.mean_gold_delta, 0)) } },
+  @{ Name = "GO"; Expression = { $_.go_count } },
+  @{ Name = "GO_FAIL"; Expression = { $_.go_fail_count } },
+  @{ Name = "GO_FAIL_RATE"; Expression = { "{0:N1}%" -f $_.go_fail_rate_pct } },
+  @{ Name = "BNK_INF"; Expression = { $_.bankrupt_inflicted } },
+  @{ Name = "BNK_SUFF"; Expression = { $_.bankrupt_suffered } }
+Write-Host ($displayStandings | Format-Table -AutoSize | Out-String -Width 4096)

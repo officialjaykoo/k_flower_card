@@ -2,7 +2,11 @@
   [Parameter(Mandatory = $true)][string]$PolicyA,
   [Parameter(Mandatory = $true)][string]$PolicyB,
   [string]$Seed = "",
-  [int]$MaxSteps = 600
+  [int]$MaxSteps = 600,
+  [ValidateSet("lean", "full")][string]$KiboDetail = "lean",
+  [string]$KiboOut = "",
+  [string]$DatasetOut = "",
+  [ValidateSet("all", "human", "ai")][string]$DatasetActor = "all"
 )
 
 if ([string]::IsNullOrWhiteSpace($Seed)) {
@@ -18,8 +22,15 @@ $cmd = @(
   "--seed", "$Seed",
   "--max-steps", "$MaxSteps",
   "--first-turn-policy", "alternate",
-  "--continuous-series", "1"
+  "--continuous-series", "1",
+  "--kibo-detail", "$KiboDetail"
 )
+if (-not [string]::IsNullOrWhiteSpace($KiboOut)) {
+  $cmd += @("--kibo-out", "$KiboOut")
+}
+if (-not [string]::IsNullOrWhiteSpace($DatasetOut)) {
+  $cmd += @("--dataset-out", "$DatasetOut", "--dataset-actor", "$DatasetActor")
+}
 
 $resultLines = & node @cmd
 $exitCode = $LASTEXITCODE
@@ -57,6 +68,12 @@ Write-Host "=== Heuristic Duel (1000 games) ==="
 Write-Host "Policy A (human): $($r.policy_a)"
 Write-Host "Policy B (ai):    $($r.policy_b)"
 Write-Host "Seed:             $Seed"
+if ($r.kibo_out) { Write-Host "Kibo Out:         $($r.kibo_out)" }
+if ($r.dataset_out) {
+  Write-Host "Dataset Out:      $($r.dataset_out)"
+  Write-Host "Dataset Actor:    $($r.dataset_actor)"
+  Write-Host "Dataset Rows:     $($r.dataset_rows) (pos=$($r.dataset_positive_rows), decisions=$($r.dataset_decisions), unresolved=$($r.dataset_unresolved_decisions))"
+}
 Write-Host "Wins A/B/Draw:    $($r.wins_a) / $($r.wins_b) / $($r.draws)"
 Write-Host "WinRate A/B:      $($r.win_rate_a) / $($r.win_rate_b)"
 Write-Host "GO count A/B:     $($r.go_count_a) / $($r.go_count_b)"

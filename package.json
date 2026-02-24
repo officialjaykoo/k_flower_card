@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "k_flower_card",
   "version": "1.0.0",
   "description": "Browser-based 2-player (Player vs AI) Matgo demo. Rules follow the actual implementation in src/state.js and src/cards.js. AI decisions are random.",

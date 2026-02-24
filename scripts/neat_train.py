@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gzip
 import json
 import math
 import multiprocessing as mp
 import os
 import pickle
+import random
 import subprocess
+import sys
 import tempfile
+import time
 import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -29,6 +33,7 @@ DEFAULT_RUNTIME = {
     "eval_timeout_sec": 360,
     "max_eval_steps": 600,
     "opponent_policy": "heuristic_v4",
+    "opponent_genome": "",
     "switch_seats": True,
     "checkpoint_every": 50,
     "eval_script": "scripts/neat_eval_worker.mjs",
@@ -42,12 +47,31 @@ DEFAULT_RUNTIME = {
     "gate_ema_window": 5,
     "transition_ema_imitation": 0.60,
     "transition_ema_win_rate": 0.45,
+    "transition_mean_gold_delta_min": None,
+    "transition_best_fitness_min": None,
     "transition_streak": 3,
     "failure_generation_min": 30,
     "failure_ema_win_rate_max": 0.30,
     "failure_imitation_max": None,
     "failure_slope_5_max": 0.005,
     "failure_slope_metric": "win_rate",  # win_rate | imitation
+    # Optional offline teacher dataset (phase1 imitation).
+    "teacher_dataset_path": "",
+    "teacher_kibo_path": "",
+    "teacher_dataset_actor": "all",  # all | human | ai
+    "teacher_dataset_decisions": 0,  # 0 disables offline teacher scoring
+    "teacher_dataset_cache_path": "",
+}
+
+OPTION_CANDIDATE_ALIASES = {
+    "choose_go": "go",
+    "choose_stop": "stop",
+    "choose_shaking_yes": "shaking_yes",
+    "choose_shaking_no": "shaking_no",
+    "choose_president_stop": "president_stop",
+    "choose_president_hold": "president_hold",
+    "choose_five": "five",
+    "choose_junk": "junk",
 }
 
 
@@ -152,6 +176,7 @@ def _load_runtime_config(path: str) -> dict:
         50, _to_int(cfg.get("max_eval_steps"), DEFAULT_RUNTIME["max_eval_steps"])
     )
     cfg["opponent_policy"] = str(cfg.get("opponent_policy") or DEFAULT_RUNTIME["opponent_policy"]).strip()
+    cfg["opponent_genome"] = str(cfg.get("opponent_genome") or "").strip()
     cfg["switch_seats"] = _to_bool(cfg.get("switch_seats"), DEFAULT_RUNTIME["switch_seats"])
     cfg["checkpoint_every"] = max(
         1, _to_int(cfg.get("checkpoint_every"), DEFAULT_RUNTIME["checkpoint_every"])
@@ -181,6 +206,12 @@ def _load_runtime_config(path: str) -> dict:
     cfg["transition_ema_win_rate"] = _to_optional_float(
         cfg.get("transition_ema_win_rate"), DEFAULT_RUNTIME["transition_ema_win_rate"]
     )
+    cfg["transition_mean_gold_delta_min"] = _to_optional_float(
+        cfg.get("transition_mean_gold_delta_min"), DEFAULT_RUNTIME["transition_mean_gold_delta_min"]
+    )
+    cfg["transition_best_fitness_min"] = _to_optional_float(
+        cfg.get("transition_best_fitness_min"), DEFAULT_RUNTIME["transition_best_fitness_min"]
+    )
     cfg["transition_streak"] = max(
         1, _to_int(cfg.get("transition_streak"), DEFAULT_RUNTIME["transition_streak"])
     )
@@ -202,6 +233,26 @@ def _load_runtime_config(path: str) -> dict:
     if failure_slope_metric not in ("win_rate", "imitation"):
         failure_slope_metric = str(DEFAULT_RUNTIME["failure_slope_metric"])
     cfg["failure_slope_metric"] = failure_slope_metric
+
+    teacher_dataset_path = str(cfg.get("teacher_dataset_path") or "").strip()
+    cfg["teacher_dataset_path"] = teacher_dataset_path
+
+    teacher_kibo_path = str(cfg.get("teacher_kibo_path") or "").strip()
+    cfg["teacher_kibo_path"] = teacher_kibo_path
+
+    teacher_actor = str(
+        cfg.get("teacher_dataset_actor") or DEFAULT_RUNTIME["teacher_dataset_actor"]
+    ).strip().lower()
+    if teacher_actor not in ("all", "human", "ai"):
+        teacher_actor = str(DEFAULT_RUNTIME["teacher_dataset_actor"])
+    cfg["teacher_dataset_actor"] = teacher_actor
+
+    cfg["teacher_dataset_decisions"] = max(
+        0, _to_int(cfg.get("teacher_dataset_decisions"), DEFAULT_RUNTIME["teacher_dataset_decisions"])
+    )
+
+    teacher_dataset_cache_path = str(cfg.get("teacher_dataset_cache_path") or "").strip()
+    cfg["teacher_dataset_cache_path"] = teacher_dataset_cache_path
     return cfg
 
 
@@ -211,6 +262,7 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}EVAL_TIMEOUT_SEC"] = str(int(runtime["eval_timeout_sec"]))
     os.environ[f"{ENV_PREFIX}MAX_EVAL_STEPS"] = str(int(runtime["max_eval_steps"]))
     os.environ[f"{ENV_PREFIX}OPPONENT_POLICY"] = str(runtime["opponent_policy"])
+    os.environ[f"{ENV_PREFIX}OPPONENT_GENOME"] = str(runtime.get("opponent_genome") or "")
     os.environ[f"{ENV_PREFIX}SWITCH_SEATS"] = "1" if bool(runtime["switch_seats"]) else "0"
     os.environ[f"{ENV_PREFIX}SEED"] = str(runtime["seed"])
     os.environ[f"{ENV_PREFIX}OUTPUT_DIR"] = os.path.abspath(output_dir)
@@ -218,6 +270,15 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"] = str(float(runtime["fitness_win_weight"]))
     os.environ[f"{ENV_PREFIX}FITNESS_LOSS_WEIGHT"] = str(float(runtime["fitness_loss_weight"]))
     os.environ[f"{ENV_PREFIX}FITNESS_DRAW_WEIGHT"] = str(float(runtime["fitness_draw_weight"]))
+    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_PATH"] = str(runtime.get("teacher_dataset_path") or "")
+    os.environ[f"{ENV_PREFIX}TEACHER_KIBO_PATH"] = str(runtime.get("teacher_kibo_path") or "")
+    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_ACTOR"] = str(runtime.get("teacher_dataset_actor") or "all")
+    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_DECISIONS"] = str(
+        int(runtime.get("teacher_dataset_decisions") or 0)
+    )
+    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_CACHE_PATH"] = str(
+        runtime.get("teacher_dataset_cache_path") or ""
+    )
 
 
 def _runtime_from_env() -> Dict[str, object]:
@@ -238,6 +299,7 @@ def _runtime_from_env() -> Dict[str, object]:
     out["opponent_policy"] = (
         os.environ.get(f"{ENV_PREFIX}OPPONENT_POLICY") or DEFAULT_RUNTIME["opponent_policy"]
     )
+    out["opponent_genome"] = str(os.environ.get(f"{ENV_PREFIX}OPPONENT_GENOME") or "").strip()
     out["switch_seats"] = _to_bool(
         os.environ.get(f"{ENV_PREFIX}SWITCH_SEATS"),
         DEFAULT_RUNTIME["switch_seats"],
@@ -263,7 +325,208 @@ def _runtime_from_env() -> Dict[str, object]:
         os.environ.get(f"{ENV_PREFIX}FITNESS_DRAW_WEIGHT"),
         DEFAULT_RUNTIME["fitness_draw_weight"],
     )
+    out["teacher_dataset_path"] = str(
+        os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_PATH") or ""
+    ).strip()
+    out["teacher_kibo_path"] = str(os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_PATH") or "").strip()
+    teacher_actor = str(
+        os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_ACTOR") or DEFAULT_RUNTIME["teacher_dataset_actor"]
+    ).strip().lower()
+    if teacher_actor not in ("all", "human", "ai"):
+        teacher_actor = str(DEFAULT_RUNTIME["teacher_dataset_actor"])
+    out["teacher_dataset_actor"] = teacher_actor
+    out["teacher_dataset_decisions"] = max(
+        0,
+        _to_int(
+            os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_DECISIONS"),
+            DEFAULT_RUNTIME["teacher_dataset_decisions"],
+        ),
+    )
+    out["teacher_dataset_cache_path"] = str(
+        os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_CACHE_PATH") or ""
+    ).strip()
     return out
+
+
+def _normalize_decision_type(value: object) -> str:
+    dt = str(value or "").strip().lower()
+    if dt in ("play", "match", "option"):
+        return dt
+    return ""
+
+
+def _normalize_candidate_token(decision_type: str, value: object) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    if decision_type == "option":
+        key = token.lower()
+        return OPTION_CANDIDATE_ALIASES.get(key, key)
+    return token
+
+
+def _count_jsonl_records(path: str) -> int:
+    count = 0
+    with open(path, "r", encoding="utf-8-sig") as f:
+        for line in f:
+            if str(line).strip():
+                count += 1
+    return int(count)
+
+
+def _build_teacher_dataset_cache(runtime: dict, output_dir: str) -> None:
+    dataset_path = str(runtime.get("teacher_dataset_path") or "").strip()
+    kibo_path = str(runtime.get("teacher_kibo_path") or "").strip()
+    actor_filter = str(runtime.get("teacher_dataset_actor") or "all").strip().lower()
+    if actor_filter not in ("all", "human", "ai"):
+        actor_filter = "all"
+    runtime["teacher_dataset_actor"] = actor_filter
+    max_decisions = max(0, _to_int(runtime.get("teacher_dataset_decisions"), 0))
+    runtime["teacher_dataset_decisions"] = int(max_decisions)
+
+    runtime["teacher_dataset_cache_path"] = ""
+    runtime["teacher_dataset_decisions_loaded"] = 0
+    runtime["teacher_dataset_rows_scanned"] = 0
+    runtime["teacher_dataset_rows_used"] = 0
+    runtime["teacher_kibo_records"] = 0
+
+    if kibo_path:
+        kibo_abs = os.path.abspath(kibo_path)
+        if not os.path.exists(kibo_abs):
+            raise RuntimeError(f"teacher kibo not found: {kibo_abs}")
+        runtime["teacher_kibo_path"] = kibo_abs
+        runtime["teacher_kibo_records"] = _count_jsonl_records(kibo_abs)
+    else:
+        runtime["teacher_kibo_path"] = ""
+
+    if not dataset_path or max_decisions <= 0:
+        runtime["teacher_dataset_path"] = os.path.abspath(dataset_path) if dataset_path else ""
+        return
+
+    dataset_abs = os.path.abspath(dataset_path)
+    if not os.path.exists(dataset_abs):
+        raise RuntimeError(f"teacher dataset not found: {dataset_abs}")
+    runtime["teacher_dataset_path"] = dataset_abs
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    rows_scanned = 0
+    rows_used = 0
+
+    with open(dataset_abs, "r", encoding="utf-8-sig") as f:
+        for raw_line in f:
+            line = str(raw_line).strip()
+            if not line:
+                continue
+            rows_scanned += 1
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+
+            actor = str(row.get("actor") or "").strip().lower()
+            if actor_filter != "all" and actor != actor_filter:
+                continue
+
+            decision_type = _normalize_decision_type(row.get("decision_type"))
+            if not decision_type:
+                continue
+
+            candidate = _normalize_candidate_token(decision_type, row.get("candidate"))
+            if not candidate:
+                continue
+
+            features_raw = row.get("features")
+            if not isinstance(features_raw, list) or len(features_raw) <= 0:
+                continue
+            features = []
+            feature_ok = True
+            for v in features_raw:
+                fv = _safe_optional_float(v)
+                if fv is None:
+                    feature_ok = False
+                    break
+                features.append(float(fv))
+            if not feature_ok:
+                continue
+
+            seed = str(row.get("seed") or "").strip()
+            game_index = _to_int(row.get("game_index"), -1)
+            step = _to_int(row.get("step"), -1)
+            legal_count = max(1, _to_int(row.get("legal_count"), 1))
+            group_key = (
+                f"{seed}|g={int(game_index)}|s={int(step)}|a={actor}|d={decision_type}|l={int(legal_count)}"
+            )
+
+            group = groups.get(group_key)
+            if group is None:
+                if len(groups) >= max_decisions:
+                    break
+                group = {
+                    "decision_type": decision_type,
+                    "chosen_candidate": "",
+                    "candidates": [],
+                    "candidate_set": set(),
+                }
+                groups[group_key] = group
+
+            if candidate not in group["candidate_set"]:
+                group["candidate_set"].add(candidate)
+                group["candidates"].append({"candidate": candidate, "features": features})
+                rows_used += 1
+
+            chosen_flag = _to_int(row.get("chosen"), 0) == 1
+            if chosen_flag:
+                group["chosen_candidate"] = candidate
+            elif not group["chosen_candidate"]:
+                chosen_candidate = _normalize_candidate_token(decision_type, row.get("chosen_candidate"))
+                if chosen_candidate:
+                    group["chosen_candidate"] = chosen_candidate
+
+    decisions = []
+    for group in groups.values():
+        decision_type = str(group.get("decision_type") or "")
+        chosen_candidate = _normalize_candidate_token(decision_type, group.get("chosen_candidate"))
+        candidates = list(group.get("candidates") or [])
+        if not chosen_candidate or not candidates:
+            continue
+        candidate_set = {str(c.get("candidate") or "") for c in candidates}
+        if chosen_candidate not in candidate_set:
+            continue
+        decisions.append(
+            {
+                "decision_type": decision_type,
+                "chosen_candidate": chosen_candidate,
+                "candidates": candidates,
+            }
+        )
+
+    if not decisions:
+        raise RuntimeError(
+            "teacher dataset cache build failed: no valid teacher decisions were extracted"
+        )
+
+    cache_path = os.path.join(output_dir, "teacher_dataset_cache.json")
+    cache_payload = {
+        "format_version": "teacher_dataset_cache_v1",
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "source_dataset_path": dataset_abs,
+        "source_kibo_path": str(runtime.get("teacher_kibo_path") or ""),
+        "actor_filter": actor_filter,
+        "requested_max_decisions": int(max_decisions),
+        "decisions_loaded": len(decisions),
+        "rows_scanned": int(rows_scanned),
+        "rows_used": int(rows_used),
+        "decisions": decisions,
+    }
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(cache_payload, f, ensure_ascii=False, separators=(",", ":"))
+
+    runtime["teacher_dataset_cache_path"] = cache_path
+    runtime["teacher_dataset_decisions_loaded"] = len(decisions)
+    runtime["teacher_dataset_rows_scanned"] = int(rows_scanned)
+    runtime["teacher_dataset_rows_used"] = int(rows_used)
 
 
 def _append_eval_failure_log(output_dir: str, record: dict) -> None:
@@ -362,6 +625,11 @@ def _quantile(values, q):
 def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1):
     runtime = _runtime_from_env()
     eval_script = str(runtime["eval_script"] or "")
+    opponent_policy = str(runtime.get("opponent_policy") or DEFAULT_RUNTIME["opponent_policy"]).strip()
+    opponent_genome = str(runtime.get("opponent_genome") or "").strip()
+    teacher_dataset_path = str(runtime.get("teacher_dataset_path") or "").strip()
+    teacher_kibo_path = str(runtime.get("teacher_kibo_path") or "").strip()
+    teacher_dataset_cache = str(runtime.get("teacher_dataset_cache_path") or "").strip()
     seed_text = str(seed_override or runtime["seed"])
     failure_meta = {
         "saved_at": datetime.now(timezone.utc).isoformat(),
@@ -378,6 +646,44 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
 
     payload = _export_neat_python_genome(genome, config)
     output_dir = str(runtime.get("output_dir") or os.getcwd())
+
+    if opponent_policy == "genome":
+        if not opponent_genome:
+            _append_eval_failure_log(
+                output_dir,
+                dict(failure_meta, reason="opponent_genome_missing", opponent_policy=opponent_policy),
+            )
+            return {"fitness": -1e9, "seed_used": seed_text, "eval_ok": False}
+        opponent_genome = os.path.abspath(opponent_genome)
+        if not os.path.exists(opponent_genome):
+            _append_eval_failure_log(
+                output_dir,
+                dict(
+                    failure_meta,
+                    reason="opponent_genome_not_found",
+                    opponent_policy=opponent_policy,
+                    opponent_genome=opponent_genome,
+                ),
+            )
+            return {"fitness": -1e9, "seed_used": seed_text, "eval_ok": False}
+
+    if teacher_dataset_cache:
+        teacher_dataset_cache = os.path.abspath(teacher_dataset_cache)
+        if not os.path.exists(teacher_dataset_cache):
+            _append_eval_failure_log(
+                output_dir,
+                dict(
+                    failure_meta,
+                    reason="teacher_dataset_cache_not_found",
+                    teacher_dataset_cache=teacher_dataset_cache,
+                ),
+            )
+            return {"fitness": -1e9, "seed_used": seed_text, "eval_ok": False}
+
+    if teacher_dataset_path:
+        teacher_dataset_path = os.path.abspath(teacher_dataset_path)
+    if teacher_kibo_path:
+        teacher_kibo_path = os.path.abspath(teacher_kibo_path)
 
     try:
         with tempfile.NamedTemporaryFile(
@@ -401,7 +707,7 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             "--max-steps",
             str(int(runtime["max_eval_steps"])),
             "--opponent-policy",
-            str(runtime["opponent_policy"]),
+            opponent_policy,
             "--switch-seats",
             "1" if bool(runtime["switch_seats"]) else "0",
             "--fitness-gold-scale",
@@ -413,6 +719,14 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             "--fitness-draw-weight",
             str(float(runtime["fitness_draw_weight"])),
         ]
+        if opponent_policy == "genome":
+            cmd.extend(["--opponent-genome", opponent_genome])
+        if teacher_dataset_cache:
+            cmd.extend(["--teacher-dataset-cache", teacher_dataset_cache])
+        if teacher_dataset_path:
+            cmd.extend(["--teacher-dataset-path", teacher_dataset_path])
+        if teacher_kibo_path:
+            cmd.extend(["--teacher-kibo-path", teacher_kibo_path])
 
         proc = subprocess.run(
             cmd,
@@ -480,6 +794,14 @@ class LoggedParallelEvaluator:
             runtime.get("transition_ema_win_rate"),
             DEFAULT_RUNTIME["transition_ema_win_rate"],
         )
+        self.transition_mean_gold_delta_min = _to_optional_float(
+            runtime.get("transition_mean_gold_delta_min"),
+            DEFAULT_RUNTIME["transition_mean_gold_delta_min"],
+        )
+        self.transition_best_fitness_min = _to_optional_float(
+            runtime.get("transition_best_fitness_min"),
+            DEFAULT_RUNTIME["transition_best_fitness_min"],
+        )
         self.transition_streak = max(
             1, _to_int(runtime.get("transition_streak"), DEFAULT_RUNTIME["transition_streak"])
         )
@@ -533,6 +855,16 @@ class LoggedParallelEvaluator:
             "transition_ema_win_rate": (
                 float(self.transition_ema_win_rate)
                 if self.transition_ema_win_rate is not None
+                else None
+            ),
+            "transition_mean_gold_delta_min": (
+                float(self.transition_mean_gold_delta_min)
+                if self.transition_mean_gold_delta_min is not None
+                else None
+            ),
+            "transition_best_fitness_min": (
+                float(self.transition_best_fitness_min)
+                if self.transition_best_fitness_min is not None
                 else None
             ),
             "transition_streak": int(self.transition_streak),
@@ -595,6 +927,8 @@ class LoggedParallelEvaluator:
                 "failure_generation": self.failure_generation,
                 "latest_imitation": None,
                 "latest_win_rate": None,
+                "latest_mean_gold_delta": None,
+                "latest_best_fitness": None,
                 "latest_imitation_slope_5": None,
                 "latest_win_rate_slope_5": None,
                 "thresholds": self._thresholds(),
@@ -603,6 +937,8 @@ class LoggedParallelEvaluator:
 
         imitation = _safe_float(best_record.get("imitation_weighted_score"), 0.0)
         win_rate = _safe_float(best_record.get("win_rate"), 0.0)
+        mean_gold_delta = _safe_float(best_record.get("mean_gold_delta"), float("nan"))
+        best_fitness = _safe_float(best_record.get("fitness"), -1e9)
         self.best_imitation_history.append(imitation)
         self.best_win_rate_history.append(win_rate)
 
@@ -612,8 +948,15 @@ class LoggedParallelEvaluator:
         transition_ok = True
         if self.transition_ema_win_rate is not None:
             transition_ok = transition_ok and (self.ema_win_rate >= self.transition_ema_win_rate)
+        if self.transition_mean_gold_delta_min is not None:
+            transition_ok = transition_ok and (
+                mean_gold_delta == mean_gold_delta
+                and mean_gold_delta > self.transition_mean_gold_delta_min
+            )
         if self.gate_mode == "hybrid" and self.transition_ema_imitation is not None:
             transition_ok = transition_ok and (self.ema_imitation >= self.transition_ema_imitation)
+        if self.transition_best_fitness_min is not None:
+            transition_ok = transition_ok and (best_fitness >= self.transition_best_fitness_min)
 
         if transition_ok:
             self.gate_streak += 1
@@ -659,6 +1002,8 @@ class LoggedParallelEvaluator:
             "failure_generation": self.failure_generation,
             "latest_imitation": float(imitation),
             "latest_win_rate": float(win_rate),
+            "latest_mean_gold_delta": float(mean_gold_delta) if mean_gold_delta == mean_gold_delta else None,
+            "latest_best_fitness": float(best_fitness),
             "latest_imitation_slope_5": float(imitation_slope_5),
             "latest_win_rate_slope_5": float(win_rate_slope_5),
             "thresholds": self._thresholds(),
@@ -836,12 +1181,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", default="logs/neat_python", help="Output directory")
     parser.add_argument("--resume", default="", help="Checkpoint file path to resume")
+    parser.add_argument(
+        "--base-generation",
+        type=int,
+        default=0,
+        help="Resume start generation offset for checkpoint naming",
+    )
     parser.add_argument("--generations", type=int, default=0, help="Override generations")
     parser.add_argument("--workers", type=int, default=0, help="Override worker count")
     parser.add_argument("--games-per-genome", type=int, default=0, help="Override games per genome")
     parser.add_argument("--eval-timeout-sec", type=int, default=0, help="Override evaluation timeout seconds")
     parser.add_argument("--max-eval-steps", type=int, default=0, help="Override max game steps per evaluation")
     parser.add_argument("--opponent-policy", default="", help="Override opponent policy")
+    parser.add_argument(
+        "--opponent-genome",
+        default="",
+        help="Path to fixed opponent genome JSON (used when opponent-policy=genome)",
+    )
     parser.add_argument("--checkpoint-every", type=int, default=0, help="Override checkpoint interval")
     parser.add_argument("--seed", default="", help="Override runtime seed")
     parser.add_argument(
@@ -938,6 +1294,103 @@ def _run_dry_eval(population, _config):
         genome.fitness = float(len(genome.connections)) * 0.001 + float(len(genome.nodes)) * 0.0001
 
 
+if neat is not None:
+
+    class OffsetCheckpointer(neat.Checkpointer):
+        def __init__(
+            self,
+            base_generation: int,
+            start_generation: int,
+            total_generations: int,
+            generation_interval: int,
+            filename_prefix: str,
+        ):
+            super().__init__(
+                generation_interval=max(1, int(generation_interval)),
+                filename_prefix=str(filename_prefix),
+            )
+            self.base_generation = int(base_generation)
+            self._start_generation = int(start_generation)
+            self.total_generations = max(1, int(total_generations))
+            self.last_generation_checkpoint = int(start_generation)
+            self._last_saved_display_generation = None
+
+        def _display_from_next_generation(self, next_generation: int) -> int:
+            return int(self.base_generation + (int(next_generation) - self._start_generation))
+
+        def _save_checkpoint_with_display(
+            self,
+            config,
+            population,
+            species_set,
+            state_generation: int,
+            display_generation: int,
+        ) -> None:
+            filename = f"{self.filename_prefix}gen{int(display_generation)}"
+            print(f"Saving checkpoint to {filename}", file=sys.stderr)
+            with gzip.open(filename, "w", compresslevel=5) as f:
+                data = (int(state_generation), config, population, species_set, random.getstate())
+                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            self._last_saved_display_generation = int(display_generation)
+
+        def save_checkpoint(self, config, population, species_set, generation):
+            display_generation = self._display_from_next_generation(int(generation))
+            self._save_checkpoint_with_display(
+                config=config,
+                population=population,
+                species_set=species_set,
+                state_generation=int(generation),
+                display_generation=display_generation,
+            )
+
+        def end_generation(self, config, population, species_set):
+            checkpoint_due = False
+
+            if self.time_interval_seconds is not None:
+                dt = time.time() - self.last_time_checkpoint
+                if dt >= self.time_interval_seconds:
+                    checkpoint_due = True
+
+            next_generation = self.current_generation + 1
+
+            if (not checkpoint_due) and (self.generation_interval is not None):
+                dg = next_generation - self.last_generation_checkpoint
+                if dg >= self.generation_interval:
+                    checkpoint_due = True
+
+            if not checkpoint_due:
+                return
+
+            is_final_generation = (next_generation - self._start_generation) >= self.total_generations
+            if self.base_generation > 0 and is_final_generation:
+                return
+
+            self.save_checkpoint(config, population, species_set, next_generation)
+            self.last_generation_checkpoint = next_generation
+            self.last_time_checkpoint = time.time()
+
+        def save_final_checkpoint(self, config, population, species_set, state_generation: int) -> None:
+            state_generation = int(state_generation)
+            if state_generation <= self._start_generation:
+                return
+
+            if self.base_generation > 0:
+                display_generation = self._display_from_next_generation(state_generation - 1)
+            else:
+                display_generation = self._display_from_next_generation(state_generation)
+
+            if self._last_saved_display_generation == int(display_generation):
+                return
+
+            self._save_checkpoint_with_display(
+                config=config,
+                population=population,
+                species_set=species_set,
+                state_generation=state_generation,
+                display_generation=display_generation,
+            )
+
+
 def main() -> None:
     args = parse_args()
 
@@ -946,6 +1399,9 @@ def main() -> None:
 
     runtime = _load_runtime_config(args.runtime_config)
     applied_overrides = {}
+    base_generation = max(0, int(args.base_generation))
+    if base_generation != 0:
+        applied_overrides["base_generation"] = int(base_generation)
     if args.generations > 0:
         runtime["generations"] = int(args.generations)
         applied_overrides["generations"] = int(args.generations)
@@ -964,6 +1420,9 @@ def main() -> None:
     if args.opponent_policy.strip():
         runtime["opponent_policy"] = args.opponent_policy.strip()
         applied_overrides["opponent_policy"] = str(runtime["opponent_policy"])
+    if args.opponent_genome.strip():
+        runtime["opponent_genome"] = args.opponent_genome.strip()
+        applied_overrides["opponent_genome"] = str(runtime["opponent_genome"])
     if args.checkpoint_every > 0:
         runtime["checkpoint_every"] = max(1, int(args.checkpoint_every))
         applied_overrides["checkpoint_every"] = int(runtime["checkpoint_every"])
@@ -986,11 +1445,20 @@ def main() -> None:
         runtime["fitness_draw_weight"] = float(args.fitness_draw_weight)
         applied_overrides["fitness_draw_weight"] = float(runtime["fitness_draw_weight"])
 
+    if str(runtime.get("opponent_policy") or "").strip() == "genome":
+        opponent_genome = str(runtime.get("opponent_genome") or "").strip()
+        if not opponent_genome:
+            raise RuntimeError("opponent-policy=genome requires opponent_genome path")
+        if not os.path.exists(opponent_genome):
+            raise RuntimeError(f"opponent genome not found: {opponent_genome}")
+
     os.makedirs(args.output_dir, exist_ok=True)
     checkpoints_dir = os.path.join(args.output_dir, "checkpoints")
     models_dir = os.path.join(args.output_dir, "models")
     os.makedirs(checkpoints_dir, exist_ok=True)
     os.makedirs(models_dir, exist_ok=True)
+
+    _build_teacher_dataset_cache(runtime, args.output_dir)
 
     cfg = _build_config(args.config_feedforward)
     if len(cfg.genome_config.output_keys) != 1:
@@ -1002,6 +1470,7 @@ def main() -> None:
         p = neat.Checkpointer.restore_checkpoint(args.resume)
     else:
         p = neat.Population(cfg)
+    start_generation = int(getattr(p, "generation", 0))
 
     # Keep training output quiet by default to reduce terminal I/O overhead.
     if bool(args.verbose):
@@ -1010,12 +1479,14 @@ def main() -> None:
     p.add_reporter(stats)
 
     prefix = os.path.join(checkpoints_dir, "neat-checkpoint-")
-    p.add_reporter(
-        neat.Checkpointer(
-            generation_interval=max(1, int(runtime["checkpoint_every"])),
-            filename_prefix=prefix,
-        )
+    checkpointer = OffsetCheckpointer(
+        base_generation=int(base_generation),
+        start_generation=int(start_generation),
+        total_generations=int(runtime["generations"]),
+        generation_interval=max(1, int(runtime["checkpoint_every"])),
+        filename_prefix=prefix,
     )
+    p.add_reporter(checkpointer)
 
     evaluator = None
 
@@ -1028,6 +1499,7 @@ def main() -> None:
 
     if args.dry_run:
         winner = _run_population(_run_dry_eval)
+        checkpointer.save_final_checkpoint(p.config, p.population, p.species, p.generation)
         mode = "dry_run"
     else:
         evaluator = LoggedParallelEvaluator(
@@ -1037,6 +1509,7 @@ def main() -> None:
         )
         try:
             winner = _run_population(evaluator.evaluate)
+            checkpointer.save_final_checkpoint(p.config, p.population, p.species, p.generation)
             mode = "real_eval"
         finally:
             evaluator.close()

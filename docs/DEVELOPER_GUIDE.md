@@ -22,7 +22,7 @@
 - `scripts/neat_duel_worker.mjs`: 유전체 A/B 대전 결과 계산
 
 ### 2-3. 설정
-- `configs/neat_feedforward.ini`: neat-python 토폴로지/돌연변이 설정
+- `scripts/configs/neat_feedforward.ini`: neat-python 토폴로지/돌연변이 설정 (`num_inputs=47`)
 - `configs/neat_runtime.json`: 기본 런타임 진입점(현재 phase2 i3_w6 확장)
 - `configs/neat_runtime_i3_w6.json`: i3 6워커 프로필
 - `configs/neat_runtime_i3_w7.json`: i3 7워커 비교 프로필
@@ -151,7 +151,7 @@ fitness = (mean_gold_delta / fitness_gold_scale)
 - 평가 실패 반복:
   `logs/neat_python/eval_failures.log` 마지막 레코드의 `reason`, `traceback`을 우선 확인한다.
 - 입력 차원 오류(`feature vector size mismatch`):
-  `configs/neat_feedforward.ini`의 `num_inputs`와 워커 feature 벡터 정의를 동기화한다.
+  `scripts/configs/neat_feedforward.ini`의 `num_inputs`와 워커 feature 벡터 정의를 동기화한다.
 
 ## 12. 변경 체크리스트
 1. `npm run build` 통과
@@ -159,3 +159,61 @@ fitness = (mean_gold_delta / fitness_gold_scale)
 3. `run_summary.json`에 의도한 `runtime_effective` 반영 확인
 4. 게이트 산출물(`gate_state.json`, `generation_metrics.ndjson`) 생성 확인
 5. 문서/스크립트/설정 경로 불일치 없음 확인
+
+## 13. `neat_eval_worker` 47차원 피처 고정 규격
+- `featureVector`는 단일 47차원만 지원한다. (`base/extended` 분기 없음)
+- 설정은 `scripts/configs/neat_feedforward.ini`에서 `num_inputs=47`로 고정한다.
+- `#16`은 `bakTotal`이 아니라 `self_score_total_norm = tanhNorm(scoreSelf.total, 10)`를 사용한다.
+- `#24/#25`는 분리한다.
+  - `#24`: 후보 월 기준 매칭 강도(연속값)
+  - `#25`: 현재 후보 즉시 매칭 가능 여부(이진)
+- `#47 candidate_month_known_ratio`는 공개정보 + 자기 손패만 사용하고 상대 손패는 사용하지 않는다.
+
+### 13-1. 피처 목록 (1~47)
+1. `phase === "playing"`
+2. `phase === "select-match"`
+3. `phase === "go-stop"`
+4. `phase === "president-choice"`
+5. `phase === "gukjin-choice"`
+6. `phase === "shaking-confirm"`
+7. `decisionType === "play"`
+8. `decisionType === "match"`
+9. `decisionType === "option"`
+10. `deck/30`
+11. `self_hand/10`
+12. `opp_hand/10`
+13. `self_goCount/5`
+14. `opp_goCount/5`
+15. `tanhNorm(scoreSelf.total - scoreOpp.total, 10)`
+16. `tanhNorm(scoreSelf.total, 10)` (`self_score_total_norm`)
+17. `legalCount/10`
+18. `candidate.piValue` 정규화
+19. `candidate_is_kwang`
+20. `candidate_is_ribbon`
+21. `candidate_is_five`
+22. `candidate_is_junk`
+23. `candidate_is_double_pi` (`junk&&piValue>=2` 또는 `I0`)
+24. `match_opportunity_density` (후보 월 기준)
+25. `immediate_match_possible`
+26. `optionCode`
+27. `selfGwangCount/5`
+28. `oppGwangCount/5`
+29. `selfPiCount/20`
+30. `oppPiCount/20`
+31. `self_godori_progress/3`
+32. `opp_godori_progress/3`
+33. `self_cheongdan_progress/3`
+34. `opp_cheongdan_progress/3`
+35. `self_hongdan_progress/3`
+36. `opp_hongdan_progress/3`
+37. `self_chodan_progress/3`
+38. `opp_chodan_progress/3`
+39. `self_can_stop` (`scoreSelf.total >= 7`)
+40. `opp_can_stop` (`scoreOpp.total >= 7`)
+41. `has_shake`
+42. `current_multiplier` 정규화
+43. `has_bomb`
+44. `self_pi_bak_risk`
+45. `self_gwang_bak_risk`
+46. `self_mong_bak_risk`
+47. `candidate_month_known_ratio` (공개정보 + 자기 손패, 상대 손패 제외)

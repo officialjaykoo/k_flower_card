@@ -20,5 +20,33 @@ $cmd = @(
   "--profile-name", "phase1_seed$Seed"
 )
 
-& $python @cmd
-exit $LASTEXITCODE
+$result = & $python @cmd | Out-String
+$exitCode = $LASTEXITCODE
+if ($exitCode -ne 0) {
+  if (-not [string]::IsNullOrWhiteSpace($result)) {
+    Write-Host $result.Trim()
+  }
+  exit $exitCode
+}
+
+try {
+  $summary = $result | ConvertFrom-Json
+}
+catch {
+  if (-not [string]::IsNullOrWhiteSpace($result)) {
+    Write-Host $result.Trim()
+  }
+  throw "failed to parse neat_train output as JSON"
+}
+
+Write-Host "=== Phase1 결과 (Seed=$Seed) ==="
+Write-Host "EMA 승률:       $($summary.gate_state.ema_win_rate)"
+Write-Host "EMA 모방:       $($summary.gate_state.ema_imitation)"
+Write-Host "최신 승률:      $($summary.gate_state.latest_win_rate)"
+Write-Host "승률 기울기:    $($summary.gate_state.latest_win_rate_slope_5)"
+Write-Host "전환 준비:      $($summary.gate_state.transition_ready)"
+Write-Host "전환 세대:      $($summary.gate_state.transition_generation)"
+Write-Host "best_fitness:   $($summary.best_fitness)"
+Write-Host "================================"
+
+exit 0

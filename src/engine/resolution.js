@@ -1,4 +1,4 @@
-import { calculateScore, isGukjinCard } from "./scoring.js";
+﻿import { calculateScore, calculateBaseScore, isGukjinCard } from "./scoring.js";
 import { POINT_GOLD_UNIT, settleRoundGold } from "./economy.js";
 import { ruleSets } from "./rules.js";
 
@@ -71,6 +71,8 @@ export function resolveRound(state, stopperKey) {
 
   let humanScore = calculateScore(workingState.players.human, workingState.players.ai, workingState.ruleKey);
   let aiScore = calculateScore(workingState.players.ai, workingState.players.human, workingState.ruleKey);
+  const humanBaseOnly = calculateBaseScore(workingState.players.human, rules).base;
+  const aiBaseOnly = calculateBaseScore(workingState.players.ai, rules).base;
   const humanPpukWin = (workingState.players.human.events.ppuk || 0) >= 3;
   const aiPpukWin = (workingState.players.ai.events.ppuk || 0) >= 3;
 
@@ -100,16 +102,16 @@ export function resolveRound(state, stopperKey) {
     winner = stopperKey;
   }
 
-  const humanFailedGo = isFailedGo(workingState.players.human, humanScore.base);
-  const aiFailedGo = isFailedGo(workingState.players.ai, aiScore.base);
+  const humanFailedGo = isFailedGo(workingState.players.human, humanBaseOnly);
+  const aiFailedGo = isFailedGo(workingState.players.ai, aiBaseOnly);
 
   let unresolvedFailedGo = [];
   if (!humanPpukWin && !aiPpukWin) {
     if (humanFailedGo && !aiFailedGo) {
-      if (aiScore.base >= rules.goMinScore) winner = "ai";
+      if (aiBaseOnly >= rules.goMinScore) winner = "ai";
       else unresolvedFailedGo.push("player");
     } else if (aiFailedGo && !humanFailedGo) {
-      if (humanScore.base >= rules.goMinScore) winner = "human";
+      if (humanBaseOnly >= rules.goMinScore) winner = "human";
       else unresolvedFailedGo.push("ai");
     } else if (humanFailedGo && aiFailedGo) {
       unresolvedFailedGo = ["player", "ai"];

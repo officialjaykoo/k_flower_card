@@ -35,6 +35,13 @@ export const DEFAULT_PARAMS = {
   selfPiWindowMul: 1.5,
   oppPiWindowMul: 1.2,
   doublePiBonus: 5.0,
+  doublePiNoMatchHoldPenalty: 4.2,
+  doublePiMonthPairHoldPenalty: 2.8,
+  doublePiMonthTripleHoldPenalty: 2.2,
+  doublePiPairMonthHoldPenalty: 1.8,
+  doublePiMonthAnchorHoldPenalty: 2.0,
+  doublePiHoldRiskRelease: 8.5,
+  doublePiHoldRiskReleaseMul: 0.45,
   comboOpportunityMul: 4.2,
   blockBase: 5.5,
   blockUrgencyMul: 1.6,
@@ -47,6 +54,14 @@ export const DEFAULT_PARAMS = {
   leadNoMatchTempoPenalty: 2.2,
   endgameSafeDiscardBonus: 1.5,
   endgameUnknownPenalty: 2.2,
+  bonusCardUseBase: 3.6,
+  bonusCardStealPiMul: 1.7,
+  bonusCardExtraTurnTempo: 1.2,
+  bonusCardEarlyHoldBias: 1.0,
+  bonusCardLateUseBonus: 1.4,
+  bonusCardHoldPenaltyMul: 0.12,
+  bonusCardRiskMul: 0.18,
+  bonusCardOppPiEmptyPenalty: 0.6,
 
   // risk
   feedRiskNoMatchMul: 4.8,
@@ -66,6 +81,7 @@ export const DEFAULT_PARAMS = {
   chooseMatchRibbonBonus: 1.8,
   chooseMatchBlockMul: 1.8,
   chooseMatchComboMul: 2.8,
+  chooseMatchOppShakeMonthBonus: 1.05,
 
   // go model
   goMinPi: 4,
@@ -131,6 +147,11 @@ export const DEFAULT_PARAMS = {
   shakeThreshold: 0.7,
   shakeLeadThresholdUp: 0.18,
   shakePressureThresholdUp: 0.15,
+
+  // opponent shaking awareness (small tuning)
+  oppShakeRecentWindow: 8,
+  oppShakeBlockBonus: 1.15,
+  oppShakeNoMatchRiskBonus: 0.45,
 
   // president and gukjin
   presidentStopLead: 3,
@@ -271,6 +292,31 @@ function scoreComboOpportunity(state, playerKey, month, deps) {
   return safeNum(deps.ownComboOpportunityScore?.(state, playerKey, month));
 }
 
+function getRecentOpponentShaking(state, playerKey, deps, recentWindow) {
+  const kibo = state?.kibo || [];
+  if (!Array.isArray(kibo) || kibo.length <= 0) {
+    return { active: false, month: null, delta: Infinity };
+  }
+  const opp = deps.otherPlayerKey(playerKey);
+  const window = Math.max(1, Math.floor(safeNum(recentWindow, 8)));
+  const nowNo = Math.max(0, Math.floor(safeNum(state?.kiboSeq, kibo.length)));
+
+  for (let i = kibo.length - 1; i >= 0; i -= 1) {
+    const e = kibo[i];
+    if (e?.type !== "shaking_declare") continue;
+    if (e?.playerKey !== opp) continue;
+    const month = Number(e?.month);
+    if (!Number.isInteger(month) || month < 1 || month > 12) {
+      return { active: false, month: null, delta: Infinity };
+    }
+    const evtNo = Math.max(0, Math.floor(safeNum(e?.no, nowNo)));
+    const delta = Math.max(0, nowNo - evtNo);
+    if (delta > window) return { active: false, month: null, delta };
+    return { active: true, month, delta };
+  }
+  return { active: false, month: null, delta: Infinity };
+}
+
 function knownMonthCount(month, boardCountByMonth, handCountByMonth, capturedByMonth) {
   return (
     safeNum(boardCountByMonth.get(month)) +
@@ -282,6 +328,11 @@ function knownMonthCount(month, boardCountByMonth, handCountByMonth, capturedByM
 function evaluateCardUtility(state, playerKey, card, deps, P, profile, cache) {
   const matches = cache.boardByMonth.get(card.month) || [];
   const captureGain = matches.reduce((sum, m) => sum + safeNum(deps.cardCaptureValue(m)), 0);
+  const cardIsDoublePi = isDoublePi(card, deps);
+  const bonusStealPi = safeNum(card?.bonus?.stealPi);
+  const isBonusCard = bonusStealPi > 0;
+  const sameMonthInHand = safeNum(cache.handCountByMonth.get(card.month));
+  const sameMonthDoublePiInHand = safeNum(cache.handDoublePiCountByMonth.get(card.month));
   const allCaptured = [card, ...matches];
   const piGain = allCaptured.reduce((sum, c) => sum + piValue(c, deps), 0);
   const selfPi = safeNum(profile.ctx.selfPi, deps.capturedCountByCategory(state.players?.[playerKey], "junk"));
@@ -301,10 +352,16 @@ function evaluateCardUtility(state, playerKey, card, deps, P, profile, cache) {
   if (selfPi >= 7 && selfPi <= 9) immediate += piGain * P.selfPiWindowMul;
   if (oppPi <= 5) immediate += piGain * P.oppPiWindowMul;
   if (matches.length > 0 && allCaptured.some((c) => isDoublePi(c, deps))) immediate += P.doublePiBonus;
+  if (isBonusCard) {
+    immediate += P.bonusCardUseBase + bonusStealPi * P.bonusCardStealPiMul;
+    if (profile.phase === "late" || profile.phase === "end") immediate += P.bonusCardLateUseBonus;
+    if (oppPi <= 0) immediate -= P.bonusCardOppPiEmptyPenalty;
+  }
 
   const comboOpportunity = scoreComboOpportunity(state, playerKey, card.month, deps);
   immediate += comboOpportunity * P.comboOpportunityMul;
 
+  let risk = 0;
   let deny = 0;
   if (cache.blockMonths.has(card.month)) {
     const urgency =
@@ -314,6 +371,19 @@ function evaluateCardUtility(state, playerKey, card, deps, P, profile, cache) {
       );
     deny += P.blockBase + urgency * P.blockUrgencyMul + profile.pressure.threat * P.blockThreatMul;
     if (matches.length === 0) deny -= P.blockNoMatchPenalty;
+  }
+
+  if (cache.recentOppShake.active && cache.recentOppShake.month === card.month) {
+    const freshness = clamp(
+      1 - safeNum(cache.recentOppShake.delta) / Math.max(1, safeNum(P.oppShakeRecentWindow, 8)),
+      0.2,
+      1.0
+    );
+    if (matches.length > 0) {
+      deny += P.oppShakeBlockBonus * freshness;
+    } else {
+      risk += P.oppShakeNoMatchRiskBonus * freshness;
+    }
   }
 
   let tempo = 0;
@@ -328,9 +398,12 @@ function evaluateCardUtility(state, playerKey, card, deps, P, profile, cache) {
     if (known >= 3) tempo += P.endgameSafeDiscardBonus;
     else tempo -= P.endgameUnknownPenalty;
   }
+  if (isBonusCard) {
+    tempo += P.bonusCardExtraTurnTempo;
+    if (profile.phase === "early" && oppPi <= 2) tempo -= P.bonusCardEarlyHoldBias;
+  }
   if (cache.firstTurnPlan.active && cache.firstTurnPlan.months.has(card.month)) tempo += P.firstTurnPlanBonus;
 
-  let risk = 0;
   const feedRisk = safeNum(deps.estimateOpponentImmediateGainIfDiscard(state, playerKey, card.month));
   risk += feedRisk * (matches.length === 0 ? P.feedRiskNoMatchMul : P.feedRiskMatchMul);
 
@@ -371,11 +444,32 @@ function evaluateCardUtility(state, playerKey, card, deps, P, profile, cache) {
   if (pukRisk > 0) risk += pukRisk * P.pukRiskMul;
   else if (pukRisk < 0) immediate += -pukRisk * P.pukOpportunityMul;
 
+  let holdPenalty = 0;
+  if (matches.length === 0) {
+    if (cardIsDoublePi) {
+      holdPenalty += P.doublePiNoMatchHoldPenalty;
+      if (sameMonthInHand >= 2) holdPenalty += P.doublePiMonthPairHoldPenalty;
+      if (sameMonthInHand >= 3) holdPenalty += P.doublePiMonthTripleHoldPenalty;
+    }
+    if (sameMonthDoublePiInHand >= 2) holdPenalty += P.doublePiPairMonthHoldPenalty;
+    if (!cardIsDoublePi && sameMonthInHand >= 2 && sameMonthDoublePiInHand >= 1) {
+      holdPenalty += P.doublePiMonthAnchorHoldPenalty;
+    }
+    if (risk >= P.doublePiHoldRiskRelease) {
+      holdPenalty *= P.doublePiHoldRiskReleaseMul;
+    }
+  }
+  if (isBonusCard) {
+    risk *= P.bonusCardRiskMul;
+    holdPenalty *= P.bonusCardHoldPenaltyMul;
+  }
+
   const score =
     immediate * profile.attack +
     deny * profile.defense +
     tempo * profile.tempo -
-    risk * profile.risk;
+    risk * profile.risk -
+    holdPenalty;
 
   return {
     card,
@@ -398,10 +492,19 @@ export function rankHandCardsV6(state, playerKey, deps, params = DEFAULT_PARAMS)
     boardByMonth: deps.boardMatchesByMonth(state),
     boardCountByMonth: deps.monthCounts(state.board || []),
     handCountByMonth: deps.monthCounts(player.hand || []),
+    handDoublePiCountByMonth: (() => {
+      const out = new Map();
+      for (const c of player.hand || []) {
+        if (!isDoublePi(c, deps)) continue;
+        out.set(c.month, safeNum(out.get(c.month)) + 1);
+      }
+      return out;
+    })(),
     capturedByMonth: deps.capturedMonthCounts(state),
     blockMonths: deps.blockingMonthsAgainst(state.players?.[opp], player),
     blockUrgency: deps.blockingUrgencyByMonth(state.players?.[opp], player),
     firstTurnPlan: deps.getFirstTurnDoublePiPlan(state, playerKey),
+    recentOppShake: getRecentOpponentShaking(state, playerKey, deps, P.oppShakeRecentWindow),
     jokboThreat
   };
 
@@ -437,6 +540,7 @@ export function chooseMatchHeuristicV6(state, playerKey, deps, params = DEFAULT_
   const opp = deps.otherPlayerKey(playerKey);
   const blockMonths = deps.blockingMonthsAgainst(state.players?.[opp], state.players?.[playerKey]);
   const blockUrgency = deps.blockingUrgencyByMonth(state.players?.[opp], state.players?.[playerKey]);
+  const recentOppShake = getRecentOpponentShaking(state, playerKey, deps, P.oppShakeRecentWindow);
 
   let bestId = null;
   let bestScore = -Infinity;
@@ -455,6 +559,14 @@ export function chooseMatchHeuristicV6(state, playerKey, deps, params = DEFAULT_
         safeNum(profile.pressure.monthUrgency.get(card.month)) / 10
       );
       score += (urgency + profile.pressure.threat) * P.chooseMatchBlockMul;
+    }
+    if (recentOppShake.active && recentOppShake.month === card.month) {
+      const freshness = clamp(
+        1 - safeNum(recentOppShake.delta) / Math.max(1, safeNum(P.oppShakeRecentWindow, 8)),
+        0.2,
+        1.0
+      );
+      score += P.chooseMatchOppShakeMonthBonus * freshness;
     }
 
     score += safeNum(deps.monthStrategicPriority?.(card.month)) * 0.22;

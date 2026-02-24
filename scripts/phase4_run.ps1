@@ -8,12 +8,12 @@ if (-not (Test-Path $python)) {
 }
 
 $configFeedforward = "scripts/configs/neat_feedforward.ini"
-$runtimeConfig = "scripts/configs/runtime_phase2.json"
-$resumeCheckpoint = "logs/neat_phase1_seed$Seed/checkpoints/neat-checkpoint-gen20"
-$outputDir = "logs/neat_phase2_seed$Seed"
+$runtimeConfig = "scripts/configs/runtime_phase4.json"
+$resumeCheckpoint = "logs/neat_phase3_seed$Seed/checkpoints/neat-checkpoint-gen199"
+$outputDir = "logs/neat_phase4_seed$Seed"
 
 if (-not (Test-Path $resumeCheckpoint)) {
-  throw "phase1 checkpoint not found: $resumeCheckpoint"
+  throw "phase3 checkpoint not found: $resumeCheckpoint"
 }
 
 $cmd = @(
@@ -22,9 +22,9 @@ $cmd = @(
   "--runtime-config", $runtimeConfig,
   "--output-dir", $outputDir,
   "--resume", $resumeCheckpoint,
-  "--base-generation", "20",
+  "--base-generation", "200",
   "--seed", "$Seed",
-  "--profile-name", "phase2_seed$Seed"
+  "--profile-name", "phase4_seed$Seed"
 )
 
 $result = & $python @cmd | Out-String
@@ -46,7 +46,7 @@ catch {
   throw "failed to parse neat_train output as JSON"
 }
 
-Write-Host "=== Phase2 결과 (Seed=$Seed) ==="
+Write-Host "=== Phase4 결과 (Seed=$Seed) ==="
 Write-Host "EMA 승률:       $($summary.gate_state.ema_win_rate)"
 Write-Host "EMA 모방:       $($summary.gate_state.ema_imitation)"
 Write-Host "최신 승률:      $($summary.gate_state.latest_win_rate)"
