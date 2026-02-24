@@ -1,4 +1,4 @@
-export function rankHandCardsV3(state, playerKey, deps) {
+﻿export function rankHandCardsV3(state, playerKey, deps) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
 
@@ -316,10 +316,19 @@ export function shouldGoV3(state, playerKey, deps) {
   if (deps.canBankruptOpponentByStop(state, playerKey)) return false;
   if (ctx.mode === "DESPERATE_DEFENSE" && !desperateGo) return false;
   if (ctx.nagariDelayMode && !desperateGo) return false;
-  if (selfPi < (desperateGo ? 7 : 8)) return false;
+  if (selfPi < (desperateGo ? 6 : 7)) return false;
   if (selfFive === 0 && oppFive >= 7 && !desperateGo) return false;
   if (selfFive === 0 && oppFive >= 6 && deckCount <= 5 && !desperateGo) return false;
-  if (isSecond && !strongLead && oppJokboEV.oneAwayCount >= 1 && !desperateGo) return false;
+  if (
+    isSecond &&
+    !strongLead &&
+    oppJokboEV.oneAwayCount >= 1 &&
+    deckCount <= 6 &&
+    (oppNextTurnThreat >= 0.35 || oppProgThreat >= 0.5) &&
+    !desperateGo
+  ) {
+    return false;
+  }
   if (!strongLead && deckCount <= 5 && oppJokboEV.oneAwayCount >= 1 && selfJokboEV.oneAwayCount === 0 && !desperateGo) {
     return false;
   }
@@ -346,7 +355,7 @@ export function shouldGoV3(state, playerKey, deps) {
       carryStopBias += 0.22;
     }
   }
-  if (!strongLead && selfPi < (desperateGo ? 7 : 8) && oppPi >= 6) return false;
+  if (!strongLead && selfPi < (desperateGo ? 6 : 7) && oppPi >= 6) return false;
   if (!strongLead && deckCount <= 5 && selfPi < (desperateGo ? 8 : 9)) return false;
   if (
     myScore >= 7 &&
@@ -377,22 +386,33 @@ export function shouldGoV3(state, playerKey, deps) {
     mongDanger * 0.55 +
     oppJokboEV.total * 0.4 +
     oppJokboEV.oneAwayCount * 0.14;
-  let goMargin = isSecond ? 0.28 : 0.12;
+  let goMargin = isSecond ? 0.22 : 0.12;
   if (desperateGo) goMargin -= 0.18;
   if (conservativeGo) goMargin += 0.22;
-  goMargin -= 0.08;
+  goMargin -= 0.16;
+  if (isSecond && !strongLead && myScore < oppScore) goMargin -= 0.04;
   goMargin += carryStopBias;
   goMargin = Math.max(-0.1, goMargin);
   if (!strongLead && myGainPotential < oppGainPotential + goMargin) return false;
-  if (!strongLead && deckCount <= 8 && selfJokboEV.total < 0.45 && !desperateGo) return false;
-  if (isSecond && !strongLead && (oppProgThreat >= 0.4 || oppNextMatchCount > 0) && !desperateGo) return false;
+  const lowDeckGate = isSecond ? 7 : 8;
+  const lowJokboGate = isSecond ? 0.4 : 0.45;
+  if (!strongLead && deckCount <= lowDeckGate && selfJokboEV.total < lowJokboGate && !desperateGo) return false;
+  if (isSecond && !strongLead && (oppProgThreat >= 0.4 && oppNextMatchCount > 0) && !desperateGo) return false;
   if ((oppProgThreat >= 0.5 || oppNextTurnThreat >= 0.35) && !desperateGo) return false;
   if (selfFive === 0 && oppFive >= 6 && !desperateGo) return false;
-  if (oppNextMatchCount > 0 && !strongLead && !desperateGo) return false;
+  if (
+    (oppNextMatchCount >= 2 ||
+      (oppNextMatchCount > 0 &&
+        (oppProgThreat >= 0.45 || oppNextTurnThreat >= 0.3 || jokboThreat.threat >= 0.3))) &&
+    !strongLead &&
+    !desperateGo
+  ) {
+    return false;
+  }
   if (conservativeGo && !strongLead && myGainPotential <= oppGainPotential + goMargin + 0.08) return false;
   if (deps.capturedCountByCategory(state.players?.[opp], "junk") < 6) return !conservativeGo || desperateGo;
   if (oppNextMatchCount === 0 && oppScore <= 4 && deckCount >= (desperateGo ? 4 : 5)) return !conservativeGo || desperateGo;
-  return deckCount > (desperateGo ? 5 : 7) && (!conservativeGo || strongLead);
+  return deckCount > (desperateGo ? 4 : 6) && (!conservativeGo || strongLead);
 }
 
 function selectBestMonthByGain(state, months, deps) {
