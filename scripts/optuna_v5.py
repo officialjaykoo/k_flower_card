@@ -10,7 +10,7 @@ V5 휴리스틱 파라미터를 Optuna로 튜닝하는 스크립트.
 게임 수: 1000 (AGENTS.md 규칙 준수)
 
 사용법:
-  python scripts/optuna_v5.py --trials 9 --workers 4
+  python scripts/optuna_v5.py --trials 0 --workers 4
 
 의존:
   pip install optuna
@@ -48,7 +48,8 @@ GOLD_DELTA_WEIGHT = 0.35
 GOLD_DELTA_SCALE = 500.0   # 골드델타 정규화 기준값
 
 # ── 파라미터 탐색 공간 정의 ────────────────────────────────────────
-PARAM_SPACE = {
+# float 계열 파라미터
+FLOAT_PARAM_SPACE = {
     # 카드 가치
     "kwangWeight":           (4.0, 14.0),
     "fiveWeight":            (2.0, 9.0),
@@ -90,6 +91,72 @@ PARAM_SPACE = {
     "matchFiveBonus":        (2.0, 10.0),
     "matchDoublePiBonus":    (8.0, 22.0),
     "matchMongBakFiveBonus": (25.0, 55.0),
+
+    # V5 native: rank/capture
+    "captureGainMulThree":   (0.8, 1.8),
+    "matchZeroBase":         (-90.0, -10.0),
+    "piGainMul":             (2.0, 9.0),
+    "piGainSelfHighMul":     (0.8, 3.0),
+    "piGainOppLowMul":       (0.6, 3.0),
+    "doublePiMatchBonus":    (8.0, 30.0),
+    "doublePiMatchExtra":    (1.0, 12.0),
+    "doublePiNoMatchPenalty": (4.0, 32.0),
+    "comboBlockBase":        (8.0, 36.0),
+    "comboBlockUrgencyMul":  (0.1, 1.2),
+    "comboBlockNextThreatMul": (1.0, 8.0),
+    "comboFinishBirds":      (8.0, 48.0),
+    "comboFinishRed":        (8.0, 48.0),
+    "comboFinishBlue":       (8.0, 48.0),
+    "comboFinishPlain":      (8.0, 48.0),
+    "comboFinishKwang":      (8.0, 56.0),
+    "ribbonFourBonus":       (8.0, 56.0),
+    "fiveFourBonus":         (8.0, 56.0),
+    "mongBakFiveBonus":      (8.0, 70.0),
+    "mongBakPiPenalty":      (0.0, 28.0),
+    "discardLivePiPenalty":  (6.0, 56.0),
+    "discardLivePiPenaltyLate": (8.0, 72.0),
+    "discardDoublePiLivePenalty": (4.0, 44.0),
+    "discardDoublePiLivePenaltyLate": (6.0, 56.0),
+    "discardDoublePiDeadBonus": (0.0, 24.0),
+    "discardComboHoldPenalty": (8.0, 84.0),
+    "discardComboHoldPenaltyLate": (10.0, 96.0),
+    "discardOneAwayPenalty": (8.0, 84.0),
+    "discardOneAwayPenaltyLate": (10.0, 100.0),
+    "discardBlockMedPenalty": (4.0, 48.0),
+    "discardBlockMedPenaltyLate": (6.0, 64.0),
+    "discardMongBakFivePenalty": (4.0, 64.0),
+    "discardBonusPiBonus":   (0.0, 56.0),
+    "discardKnownMonthBonus": (0.0, 6.0),
+    "discardUnknownMonthPenalty": (0.0, 6.0),
+    "feedRiskNoMatchMul":    (1.0, 12.0),
+    "lockedMonthPenalty":    (0.0, 16.0),
+    "secondMoverGoGateShrink": (0.0, 12.0),
+    "secondMoverBlockBonus": (0.0, 12.0),
+    "secondMoverPiBonus":    (0.0, 6.0),
+    "goBigLeadJokboThresh":  (0.05, 0.8),
+    "goBigLeadNextThresh":   (0.05, 0.8),
+    "goOpp0JokboThresh":     (0.05, 0.9),
+    "goOpp0NextThresh":      (0.05, 0.9),
+    "goOpp12JokboThresh":    (0.05, 0.9),
+    "goOpp12NextThresh":     (0.05, 0.9),
+}
+
+# int 계열 파라미터
+INT_PARAM_SPACE = {
+    "goOppScoreGateLow":     (2, 5),
+    "goOppScoreGateHigh":    (4, 8),
+    "goBigLeadScoreDiff":    (5, 14),
+    "goBigLeadMinScore":     (8, 16),
+    "goBigLeadOneAwayEarly": (12, 48),
+    "goBigLeadOneAwayLate":  (8, 42),
+    "goOneAwayThreshOpp0":   (18, 65),
+    "goOneAwayThreshOpp0Late": (14, 60),
+    "goOneAwayThreshOpp1":   (18, 65),
+    "goOneAwayThreshOpp2":   (18, 65),
+    "goOneAwayThreshOpp3":   (18, 70),
+    "goOneAwayThreshOpp4Early": (14, 60),
+    "goOneAwayThreshOpp4Late": (10, 55),
+    "lateDeckMax":           (5, 16),
 }
 
 # ── 보조 함수 ─────────────────────────────────────────────────────
@@ -97,11 +164,10 @@ PARAM_SPACE = {
 def suggest_params(trial):
     """Optuna trial에서 파라미터 샘플링"""
     p = {}
-    for name, (lo, hi) in PARAM_SPACE.items():
+    for name, (lo, hi) in FLOAT_PARAM_SPACE.items():
         p[name] = trial.suggest_float(name, lo, hi)
-    # 정수 파라미터
-    p["goOppScoreGateLow"] = trial.suggest_int("goOppScoreGateLow", 2, 4)
-    p["goOppScoreGateHigh"] = trial.suggest_int("goOppScoreGateHigh", 4, 7)
+    for name, (lo, hi) in INT_PARAM_SPACE.items():
+        p[name] = trial.suggest_int(name, lo, hi)
     return p
 
 
@@ -206,7 +272,7 @@ def objective(trial, runtime) -> float:
 
 def parse_args():
     p = argparse.ArgumentParser(description="V5 Optuna 튜닝")
-    p.add_argument("--trials",   type=int, default=9,    help="트라이얼 수")
+    p.add_argument("--trials",   type=int, default=0,    help="트라이얼 수")
     p.add_argument("--workers",  type=int, default=1,    help="병렬 워커 수 (sqlite 사용 시)")
     p.add_argument("--db",       type=str, default="",   help="Optuna DB URL (예: sqlite:///logs/optuna_v5.db)")
     p.add_argument("--study",    type=str, default="v5_tuning", help="스터디 이름")

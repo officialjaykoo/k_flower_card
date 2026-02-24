@@ -1,137 +1,330 @@
 ﻿// ============================================================
-// heuristicV5.js  –  Matgo Heuristic V5
+// heuristicV5.js  –  Matgo Heuristic V5  (정밀 재작성)
 // ============================================================
-// 설계 원칙:
-//   1. 모든 수치 상수를 PARAMS 객체로 집약 → Optuna 외부 주입 가능
-//   2. 결정마다 통합 expectedValue 기반 스코어링
-//   3. 게임 페이즈를 덱 수만이 아닌 멀티팩터로 판단
-//   4. V3/V4 대비 분기 단순화, 핵심 로직 명확화
+// V4 대비 개선 포인트:
+//   1. shouldGoV5  : V4 oppScoreRisk 단계 분기 완전 채택 + 후공 패널티
+//   2. rankHandCardsV5 : V4 discard 정책 완전 이식 + 후공 보정 레이어
+//   3. decideShakingV5 : V4 "매치 있으면 흔들기 금지" 규칙 반영
+//   4. DEFAULT_PARAMS : Optuna 주입 가능한 모든 수치 집약
 // ============================================================
 
 // ──────────────────────────────────────────────────────────────
-// DEFAULT PARAMS  (Optuna로 튜닝할 모든 상수)
+// CONSTANTS
+// ──────────────────────────────────────────────────────────────
+const GUKJIN_CARD_ID = "I0";
+const DOUBLE_PI_MONTHS = Object.freeze([11, 12, 13]);
+const BONUS_CARD_ID_SET = Object.freeze(new Set(["M0", "M1"]));
+const SSANGPI_WITH_GUKJIN_ID_SET = Object.freeze(new Set(["K1", "L3", GUKJIN_CARD_ID]));
+const OPTUNA_TRIAL0_PARAMS = Object.freeze({
+  kwangWeight: 4.383881266576942,
+  fiveWeight: 6.490321714386611,
+  ribbonWeight: 7.158029319177128,
+  piWeight: 1.473532659579097,
+  doublePiBonus: 5.887881057780191,
+  matchOneBase: 7.52508904118817,
+  matchTwoBase: 14.795044127401228,
+  matchThreeBase: 12.888576070495166,
+  noMatchPenalty: 4.809596091334999,
+  highValueMatchBonus: 3.7700488763733127,
+  feedRiskMul: 4.514706134196945,
+  feedRiskMatchMul: 1.054557015161309,
+  pukRiskHighMul: 3.9941920096843977,
+  pukRiskNormalMul: 3.3292158162053074,
+  blockingBonus: 19.077065840867128,
+  jokboBlockBonus: 5.089949645091993,
+  firstTurnPiPlanBonus: 7.4553377950190445,
+  comboBaseBonus: 3.4694194760467023,
+  goBaseThreshold: 0.4820388504327037,
+  goOppOneAwayGate: 46.96769063203732,
+  goScoreDiffBonus: 0.06426611755245973,
+  goDeckLowBonus: 0.11698925632759287,
+  goUnseeHighPiPenalty: 0.11803494278340058,
+  bombImpactMinGain: 0.7916592366243914,
+  shakingScoreThreshold: 0.618066666699776,
+  shakingImmediateGainMul: 1.9694771624873533,
+  shakingComboGainMul: 1.2240695476160273,
+  shakingTempoBonusMul: 0.27137723247154383,
+  shakingAheadPenalty: 0.294908533278066,
+  matchPiGainMul: 6.245538153466629,
+  matchKwangBonus: 15.01604247696798,
+  matchRibbonBonus: 10.020582065338775,
+  matchFiveBonus: 9.766933714061619,
+  matchDoublePiBonus: 16.493619158753866,
+  matchMongBakFiveBonus: 33.82945327626024,
+  goOppScoreGateLow: 3,
+  goOppScoreGateHigh: 6,
+});
+
+// ──────────────────────────────────────────────────────────────
+// DEFAULT PARAMS  (Optuna 튜닝 대상 수치 전부)
 // ──────────────────────────────────────────────────────────────
 export const DEFAULT_PARAMS = {
-  // ── 카드 가치 가중치 ──
-  kwangWeight: 8.0,        // 광 기본 가치
-  fiveWeight: 5.0,         // 열 기본 가치
-  ribbonWeight: 4.0,       // 띠 기본 가치
-  piWeight: 1.0,           // 피 기본 가치
-  doublePiBonus: 6.0,      // 쌍피 추가 가치
+  // ── rankHandCards 기본 매치 스코어 ──
+  matchZeroBase: -40.0,
+  matchOneBase: 48.0,
+  matchTwoBase: 56.0,
+  matchThreeBase: 62.0,
+  captureGainMulThree: 1.15,
 
-  // ── rankHandCards 스코어링 ──
-  matchOneBase: 6.0,       // 매치 1장 기본점
-  matchTwoBase: 10.0,      // 매치 2장 기본점
-  matchThreeBase: 14.0,    // 매치 3장+ 기본점
-  noMatchPenalty: 2.5,     // 무매치 패널티
-  highValueMatchBonus: 5.0,// 광/열 매치 시 추가점
-  feedRiskMul: 5.5,        // 무매치 상대 먹이 위험 배율
-  feedRiskMatchMul: 1.3,   // 매치 있어도 상대 먹이 배율
-  pukRiskHighMul: 5.0,     // 뻑 위험 (덱 ≤10) 배율
-  pukRiskNormalMul: 3.5,   // 뻑 위험 (일반) 배율
-  blockingBonus: 20.0,     // 블로킹 월 보너스
-  jokboBlockBonus: 6.0,    // 족보 블로킹 보너스
-  firstTurnPiPlanBonus: 5.5,// 첫턴 쌍피 플랜 보너스
-  comboBaseBonus: 3.5,     // 콤보 완성 기여 보너스
+  // ── 피 가치 ──
+  piGainMul: 4.2,
+  piGainSelfHighMul: 1.8,    // 내 피 7~9구간
+  piGainOppLowMul: 1.4,      // 상대 피 ≤5
+  doublePiMatchBonus: 16.0,
+  doublePiMatchExtra: 6.0,
+  doublePiNoMatchPenalty: 14.0,
 
-  // ── shouldGo 임계값 ──
-  goBaseThreshold: 0.52,   // GO 기본 확률 임계값 (기댓값 기반)
-  goOppScoreGateLow: 3,    // 상대 점수 낮은 게이트
-  goOppScoreGateHigh: 5,   // 상대 점수 높은 게이트 (즉시 STOP)
-  goOppOneAwayGate: 35,    // oppOneAwayProb STOP 게이트 (%)
-  goScoreDiffBonus: 0.06,  // 내 점수 우세당 임계값 완화
-  goDeckLowBonus: 0.05,    // 덱 ≤8 시 추가 완화
-  goUnseeHighPiPenalty: 0.08, // 미확인 고피 2장 이상 시 임계값 강화
+  // ── 콤보 보너스 ──
+  comboFinishBirds: 30.0,
+  comboFinishRed: 27.0,
+  comboFinishBlue: 27.0,
+  comboFinishPlain: 27.0,
+  comboFinishKwang: 32.0,
+  comboBlockBase: 24.0,
+  comboBlockUrgencyMul: 0.35,
+  comboBlockNextThreatMul: 4.5,
+  ribbonFourBonus: 34.0,
+  fiveFourBonus: 36.0,
 
-  // ── shouldBomb 임계값 ──
-  bombImpactMinGain: 1.0,  // 폭탄 유리한 최소 즉시 이득
-  bombHighImpactOverride: true, // highImpact면 무조건 폭탄
+  // ── 몽박 방어 ──
+  mongBakFiveBonus: 40.0,
+  mongBakPiPenalty: 8.0,
 
-  // ── decideShaking 임계값 ──
-  shakingScoreThreshold: 0.60,
-  shakingImmediateGainMul: 1.25,
-  shakingComboGainMul: 1.10,
-  shakingTempoBonusMul: 0.45,
-  shakingRiskPenaltyMul: 1.0,
-  shakingAheadPenalty: 0.20,  // 앞서있을 때 추가 임계 강화
+  // ── 무매치 discard 정책 ──
+  discardLivePiPenalty: 24.0,
+  discardLivePiPenaltyLate: 36.0,
+  discardDoublePiLivePenalty: 16.0,
+  discardDoublePiLivePenaltyLate: 26.0,
+  discardDoublePiDeadBonus: 6.0,
+  discardComboHoldPenalty: 44.0,
+  discardComboHoldPenaltyLate: 56.0,
+  discardOneAwayPenalty: 42.0,
+  discardOneAwayPenaltyLate: 58.0,
+  discardBlockMedPenalty: 20.0,
+  discardBlockMedPenaltyLate: 30.0,
+  discardMongBakFivePenalty: 28.0,
+  discardBonusPiBonus: 26.0,
+  discardKnownMonthBonus: 1.9,
+  discardUnknownMonthPenalty: 1.8,
 
-  // ── chooseMatch 스코어링 ──
-  matchPiGainMul: 4.0,
-  matchKwangBonus: 9.0,
-  matchRibbonBonus: 7.0,
-  matchFiveBonus: 5.0,
-  matchDoublePiBonus: 14.0,
-  matchComboFinishMul: 1.5,
-  matchBlockBonusMul: 1.0,
-  matchMongBakFiveBonus: 42.0, // 몽박 방어 시 열 선택 보너스
+  // ── 먹이/뻑 리스크 ──
+  feedRiskNoMatchMul: 5.0,
+  feedRiskMatchMul: 1.2,
+  pukRiskHighMul: 4.8,
+  pukRiskNormalMul: 3.4,
+
+  // ── 첫턴 쌍피 플랜 ──
+  firstTurnPiPlanBonus: 5.5,
+
+  // ── 잠긴 월 패널티 ──
+  lockedMonthPenalty: 6.0,
+
+  // ── 후공 보정 ──
+  // GO 임계값 강화: oppOneAwayProb 게이트를 N포인트 낮춤 (더 쉽게 STOP)
+  secondMoverGoGateShrink: 4.0,
+  // 카드 선택: 후공 블로킹 추가 점수
+  secondMoverBlockBonus: 2.0,
+  // 카드 선택: 후공 + 뒤질 때 피 수집 추가 가중
+  secondMoverPiBonus: 1.5,
+
+  // ── shouldGo: oppOneAway 임계값 ──
+  goOneAwayThreshOpp0: 37,
+  goOneAwayThreshOpp0Late: 33,
+  goOneAwayThreshOpp1: 34,
+  goOneAwayThreshOpp2: 38,
+  goOneAwayThreshOpp3: 43,
+  goOneAwayThreshOpp4Early: 32,
+  goOneAwayThreshOpp4Late: 28,
+  // 상대 5+ bigLead 조건
+  goBigLeadScoreDiff: 8,
+  goBigLeadMinScore: 11,
+  goBigLeadOneAwayEarly: 25,
+  goBigLeadOneAwayLate: 20,
+  goBigLeadJokboThresh: 0.3,
+  goBigLeadNextThresh: 0.35,
+  // 상대 0 추가 게이트
+  goOpp0JokboThresh: 0.37,
+  goOpp0NextThresh: 0.47,
+  // 상대 1~2 추가 게이트
+  goOpp12JokboThresh: 0.35,
+  goOpp12NextThresh: 0.45,
 
   // ── 페이즈 분류 기준 ──
-  earlyDeckMin: 20,        // 덱 ≥ 이 값이면 초반
-  lateDeckMax: 10,         // 덱 ≤ 이 값이면 후반
-  endgameDeckMax: 5,       // 덱 ≤ 이 값이면 엔드게임
+  lateDeckMax: 10,
+
+  // ── Optuna trial 0 baseline (logs/optuna_v5_best.json) ──
+  ...OPTUNA_TRIAL0_PARAMS,
+
+  // ── trial0 키를 현재 V5 네이티브 키로 매핑 ──
+  matchZeroBase: -safeNum(OPTUNA_TRIAL0_PARAMS.noMatchPenalty) * 10.0,
+  piGainMul: safeNum(OPTUNA_TRIAL0_PARAMS.matchPiGainMul),
+  doublePiMatchBonus: safeNum(OPTUNA_TRIAL0_PARAMS.matchDoublePiBonus),
+  mongBakFiveBonus: safeNum(OPTUNA_TRIAL0_PARAMS.matchMongBakFiveBonus),
+  feedRiskNoMatchMul: safeNum(OPTUNA_TRIAL0_PARAMS.feedRiskMul),
+  feedRiskMatchMul: safeNum(OPTUNA_TRIAL0_PARAMS.feedRiskMatchMul),
+  pukRiskHighMul: safeNum(OPTUNA_TRIAL0_PARAMS.pukRiskHighMul),
+  pukRiskNormalMul: safeNum(OPTUNA_TRIAL0_PARAMS.pukRiskNormalMul),
+  firstTurnPiPlanBonus: safeNum(OPTUNA_TRIAL0_PARAMS.firstTurnPiPlanBonus),
+  comboBlockBase: safeNum(OPTUNA_TRIAL0_PARAMS.blockingBonus),
+  comboBlockUrgencyMul: safeNum(OPTUNA_TRIAL0_PARAMS.jokboBlockBonus) * 0.1,
 };
 
 // ──────────────────────────────────────────────────────────────
 // HELPERS
 // ──────────────────────────────────────────────────────────────
-
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
 
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
+function isSecondMover(state, playerKey) {
+  const first = state?.startingTurnKey;
+  if (first === "human" || first === "ai") return first !== playerKey;
+  return false;
 }
 
-// 게임 페이즈 (멀티팩터)
-function getPhase(state, myScore, oppScore, P) {
-  const deck = safeNum(state.deck?.length);
-  const scoreSum = myScore + oppScore;
-  if (deck >= P.earlyDeckMin && scoreSum <= 4) return "early";
-  if (deck <= P.endgameDeckMax) return "endgame";
-  if (deck <= P.lateDeckMax) return "late";
-  return "mid";
+function hasComboTag(card, tag) {
+  return Array.isArray(card?.comboTags) && card.comboTags.includes(tag);
 }
 
-// 카드 피 가치 (deps 의존)
+function countComboTag(cards, tag) {
+  return (cards || []).reduce((n, c) => (hasComboTag(c, tag) ? n + 1 : n), 0);
+}
+
+function comboCounts(player) {
+  const ribbons = player?.captured?.ribbon || [];
+  const fives   = player?.captured?.five   || [];
+  const kwang   = player?.captured?.kwang  || [];
+  return {
+    red:   countComboTag(ribbons, "redRibbons"),
+    blue:  countComboTag(ribbons, "blueRibbons"),
+    plain: countComboTag(ribbons, "plainRibbons"),
+    birds: countComboTag(fives, "fiveBirds"),
+    kwang: kwang.length,
+  };
+}
+
+function hasCategory(cards, cat) {
+  return (cards || []).some((c) => c?.category === cat);
+}
+
 function piLikeValue(card, deps) {
-  return safeNum(deps.junkPiValue?.(card), card?.category === "junk" ? 1 : 0);
+  if (!card) return 0;
+  if (card.id === GUKJIN_CARD_ID) return 2;
+  if (card.category === "junk") return safeNum(deps.junkPiValue(card), 0);
+  return 0;
 }
 
 function isDoublePiLike(card, deps) {
-  return piLikeValue(card, deps) >= 2;
+  if (!card) return false;
+  if (card.id === GUKJIN_CARD_ID) return true;
+  return card.category === "junk" && safeNum(deps.junkPiValue(card), 0) >= 2;
 }
 
-// 자신 콤보 완성 기여 보너스
-function selfComboBonus(selfPlayer, card, P) {
-  const captured = selfPlayer?.captured || {};
-  const kwangCount = (captured.kwang || []).length;
-  const ribbonCount = (captured.ribbon || []).length;
-  const fiveCount = (captured.five || []).length;
-  let bonus = 0;
-  if (card.category === "kwang") {
-    if (kwangCount >= 2) bonus += P.comboBaseBonus * (kwangCount - 1);
-  }
-  if (card.category === "ribbon") {
-    if (ribbonCount >= 4) bonus += P.comboBaseBonus * 2;
-    else if (ribbonCount >= 3) bonus += P.comboBaseBonus;
-  }
-  if (card.category === "five") {
-    if (fiveCount >= 4) bonus += P.comboBaseBonus * 2;
-    else if (fiveCount >= 3) bonus += P.comboBaseBonus;
-  }
-  return bonus;
+function ownComboFinishBonus(capturedCombo, captureCards, P) {
+  let b = 0;
+  if (capturedCombo.birds  >= 2 && captureCards.some((c) => hasComboTag(c, "fiveBirds")))    b += P.comboFinishBirds;
+  if (capturedCombo.red    >= 2 && captureCards.some((c) => hasComboTag(c, "redRibbons")))   b += P.comboFinishRed;
+  if (capturedCombo.blue   >= 2 && captureCards.some((c) => hasComboTag(c, "blueRibbons")))  b += P.comboFinishBlue;
+  if (capturedCombo.plain  >= 2 && captureCards.some((c) => hasComboTag(c, "plainRibbons"))) b += P.comboFinishPlain;
+  if (capturedCombo.kwang  >= 2 && captureCards.some((c) => c?.category === "kwang"))        b += P.comboFinishKwang;
+  return b;
 }
 
-// 상대 oneAway 확률 추정 (V4 로직 재사용, 단순화)
-function estimateOppOneAwayProb(state, playerKey, deps) {
-  // deps에 opponentThreatScore가 있으면 활용
-  const threat = safeNum(deps.opponentThreatScore?.(state, playerKey));
-  const jokbo = safeNum(deps.checkOpponentJokboProgress?.(state, playerKey)?.threat);
-  const next = safeNum(deps.nextTurnThreatScore?.(state, playerKey));
-  // 0~100 환산
-  return clamp((threat * 40 + jokbo * 35 + next * 25), 0, 100);
+function opponentComboBlockBonus(month, jokboThreat, blockMonths, blockUrgency, nextThreat, P) {
+  let b = 0;
+  const monthUrgency = safeNum(jokboThreat?.monthUrgency?.get(month));
+  if (monthUrgency > 0) b += P.comboBlockBase + monthUrgency * P.comboBlockUrgencyMul;
+  if (blockMonths?.has(month)) {
+    const urgency = safeNum(blockUrgency?.get(month), 2);
+    b += urgency >= 3 ? 18 : 10;
+    b += nextThreat * P.comboBlockNextThreatMul;
+  }
+  return b;
+}
+
+function getCapturedDoublePiMonths(state) {
+  const captured = new Set();
+  for (const key of ["human", "ai"]) {
+    for (const card of state.players?.[key]?.captured?.junk || []) {
+      if (DOUBLE_PI_MONTHS.includes(card?.month) && safeNum(card?.piValue) >= 2) {
+        captured.add(card.month);
+      }
+    }
+  }
+  return captured;
+}
+
+function getLiveDoublePiMonths(state) {
+  const captured = getCapturedDoublePiMonths(state);
+  const live = new Set();
+  for (const m of DOUBLE_PI_MONTHS) { if (!captured.has(m)) live.add(m); }
+  return live;
+}
+
+function getComboHoldMonths(state, playerKey, deps) {
+  const opp = deps.otherPlayerKey(playerKey);
+  const hold = new Set();
+  for (const m of deps.blockingMonthsAgainst(state.players?.[playerKey], state.players?.[opp])) hold.add(m);
+  for (const m of deps.blockingMonthsAgainst(state.players?.[opp], state.players?.[playerKey])) hold.add(m);
+  return hold;
+}
+
+function discardTieOrderScore(card, deps, monthIsLiveDoublePi) {
+  if (card?.bonus?.stealPi) return 6;
+  if (isDoublePiLike(card, deps) && monthIsLiveDoublePi) return 1;
+  if (card?.category === "five")   return 5;
+  if (card?.category === "ribbon") return 4;
+  if (card?.category === "kwang")  return 3;
+  return 2;
+}
+
+function hasCertainJokbo(player) {
+  const c = comboCounts(player);
+  return c.kwang >= 3 || c.birds >= 3 || c.red >= 3 || c.blue >= 3 || c.plain >= 3;
+}
+
+function countUnseenByIdSet(state, _playerKey, idSet) {
+  let seen = 0;
+  for (const key of ["human", "ai"]) {
+    const player = state.players?.[key];
+    for (const cat of ["kwang", "five", "ribbon", "junk"]) {
+      for (const c of player?.captured?.[cat] || []) if (idSet.has(c?.id)) seen++;
+    }
+    for (const c of player?.hand || []) if (idSet.has(c?.id)) seen++;
+  }
+  for (const c of state.board || []) if (idSet.has(c?.id)) seen++;
+  return idSet.size - seen;
+}
+
+// shouldGo 내부 헬퍼
+function _shouldStopForOppFourLike(state, playerKey, deps, bonusThresh, ssangpiThresh) {
+  if (countUnseenByIdSet(state, playerKey, BONUS_CARD_ID_SET) >= bonusThresh) return true;
+  const jokbo = deps.checkOpponentJokboProgress(state, playerKey);
+  // 콤보 위협 존재 시 STOP
+  if (safeNum(jokbo?.threat) >= 0.5) return true;
+  if (countUnseenByIdSet(state, playerKey, SSANGPI_WITH_GUKJIN_ID_SET) >= ssangpiThresh) return true;
+  return false;
+}
+
+function _estimateOppOneAwayProb(state, playerKey, deps) {
+  const deckCount = safeNum(state.deck?.length);
+  const jokbo  = deps.checkOpponentJokboProgress(state, playerKey);
+  const next   = safeNum(deps.nextTurnThreatScore(state, playerKey));
+  const threat = safeNum(deps.opponentThreatScore(state, playerKey));
+
+  let prob = threat * 35 + safeNum(jokbo?.threat) * 30 + next * 20;
+  if (deckCount <= 15) prob += 5;
+  if (deckCount <= 10) prob += 8;
+  if (deckCount <= 6)  prob += 6;
+  if (deckCount <= 3)  prob += 5;
+
+  return {
+    oppOneAwayProb: Math.max(0, Math.min(100, prob)),
+    jokboThreat: safeNum(jokbo?.threat),
+    nextThreat: next,
+    deckCount,
+  };
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -142,112 +335,159 @@ export function rankHandCardsV5(state, playerKey, deps, params = DEFAULT_PARAMS)
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
 
-  const opp = deps.otherPlayerKey(playerKey);
+  const opp       = deps.otherPlayerKey(playerKey);
   const oppPlayer = state.players?.[opp];
-  const ctx = deps.analyzeGameContext(state, playerKey);
-  const phase = getPhase(state, safeNum(ctx.myScore), safeNum(ctx.oppScore), P);
+  const ctx       = deps.analyzeGameContext(state, playerKey);
+  const secondMover = isSecondMover(state, playerKey);
 
-  const deckCount = safeNum(state.deck?.length);
-  const jokbo = deps.checkOpponentJokboProgress(state, playerKey);
-  const blockMonths = deps.blockingMonthsAgainst(oppPlayer, player);
-  const blockUrgency = deps.blockingUrgencyByMonth(oppPlayer, player);
   const selfPi = safeNum(ctx.selfPi, deps.capturedCountByCategory(player, "junk"));
-  const oppPi = safeNum(ctx.oppPi, deps.capturedCountByCategory(oppPlayer, "junk"));
-  const nextThreat = safeNum(deps.nextTurnThreatScore(state, playerKey));
-  const firstTurnPiPlan = deps.getFirstTurnDoublePiPlan(state, playerKey);
-  const boardByMonth = deps.boardMatchesByMonth(state);
+  const oppPi  = safeNum(ctx.oppPi,  deps.capturedCountByCategory(oppPlayer, "junk"));
+  const nextThreat   = safeNum(deps.nextTurnThreatScore(state, playerKey));
+  const jokboThreat  = deps.checkOpponentJokboProgress(state, playerKey);
+  const blockMonths  = deps.blockingMonthsAgainst(oppPlayer, player);
+  const blockUrgency = deps.blockingUrgencyByMonth(oppPlayer, player);
+  const firstTurnPiPlan  = deps.getFirstTurnDoublePiPlan(state, playerKey);
+  const boardByMonth     = deps.boardMatchesByMonth(state);
   const boardCountByMonth = deps.monthCounts(state.board || []);
-  const handCountByMonth = deps.monthCounts(player.hand || []);
-  const capturedByMonth = deps.capturedMonthCounts(state);
-  const lateOrEnd = phase === "late" || phase === "endgame";
+  const handCountByMonth  = deps.monthCounts(player.hand || []);
+  const capturedByMonth   = deps.capturedMonthCounts(state);
+  const deckCount = safeNum(state.deck?.length);
+  const selfCombo       = comboCounts(player);
+  const selfRibbonCount = (player?.captured?.ribbon || []).length;
+  const selfFiveCount   = (player?.captured?.five   || []).length;
+  const mongBakDefenseCritical = safeNum(ctx.selfFive) <= 0 && safeNum(ctx.oppFive) >= 7;
+  const liveDoublePiMonths = getLiveDoublePiMonths(state);
+  const comboHoldMonths    = getComboHoldMonths(state, playerKey, deps);
 
   const ranked = player.hand.map((card) => {
-    const matches = boardByMonth.get(card.month) || [];
-    const captureGain = matches.reduce((sum, c) => sum + safeNum(deps.cardCaptureValue(c)), 0);
-    const selfValue = safeNum(deps.cardCaptureValue(card));
+    const matches      = boardByMonth.get(card.month) || [];
+    const captureCards = [card, ...matches];
+    const captureGain  = matches.reduce((sum, c) => sum + deps.cardCaptureValue(c), 0);
+    const ownValue     = deps.cardCaptureValue(card);
+    const piGain       = captureCards.reduce((sum, c) => sum + piLikeValue(c, deps), 0);
+    const doublePiCount = captureCards.filter((c) => isDoublePiLike(c, deps)).length;
+    const knownMonth   =
+      safeNum(boardCountByMonth.get(card.month)) +
+      safeNum(handCountByMonth.get(card.month)) +
+      safeNum(capturedByMonth.get(card.month));
+    const monthIsLiveDoublePi  = liveDoublePiMonths.has(card.month);
+    const monthIsComboHold     = comboHoldMonths.has(card.month);
+    const monthBlockUrgency    = safeNum(blockUrgency.get(card.month));
+    const monthJokboUrgency    = safeNum(jokboThreat?.monthUrgency?.get(card.month));
+    const monthIsOneAwayThreat = monthBlockUrgency >= 3 || monthJokboUrgency >= 24;
 
     // ── 기본 매치 스코어 ──
     let score = 0;
     if (matches.length === 0) {
-      score = -(P.noMatchPenalty + selfValue * 0.5);
+      score = P.matchZeroBase - ownValue * 0.9;
     } else if (matches.length === 1) {
-      score = P.matchOneBase + captureGain - selfValue * 0.2;
+      score = P.matchOneBase + captureGain - ownValue * 0.1;
     } else if (matches.length === 2) {
-      score = P.matchTwoBase + captureGain - selfValue * 0.1;
+      score = P.matchTwoBase + captureGain;
     } else {
-      score = P.matchThreeBase + captureGain;
+      score = P.matchThreeBase + captureGain * P.captureGainMulThree;
+    }
+    if (matches.some((m) => m?.category === "kwang" || m?.category === "five" || m?.category === "ribbon")) {
+      score += safeNum(P.highValueMatchBonus);
     }
 
-    // 광/열 매치 보너스
-    if (matches.some((m) => m.category === "kwang" || m.category === "five")) {
-      score += P.highValueMatchBonus;
+    // ── 피 가치 ──
+    score += piGain * P.piGainMul;
+    if (selfPi >= 7 && selfPi <= 9) score += piGain * P.piGainSelfHighMul;
+    if (oppPi  <= 5)                 score += piGain * P.piGainOppLowMul;
+
+    // ── 쌍피 보너스/패널티 ──
+    if (doublePiCount > 0) {
+      score += P.doublePiMatchBonus + (doublePiCount - 1) * P.doublePiMatchExtra;
+    }
+    if (matches.length === 0 && isDoublePiLike(card, deps)) {
+      score -= P.doublePiNoMatchPenalty;
     }
 
-    // 자기 카드가 고가치면 매치 없어도 보유 고려
-    if (matches.length === 0 && (card.category === "kwang" || card.category === "five")) {
-      score += selfValue * 0.5; // 패에 있는 것 자체로 부분 가치
+    // ── 콤보 완성 + 블로킹 ──
+    score += ownComboFinishBonus(selfCombo, captureCards, P);
+    score += opponentComboBlockBonus(card.month, jokboThreat, blockMonths, blockUrgency, nextThreat, P);
+
+    // ── 후공 블로킹 추가 가중 ──
+    if (secondMover && blockMonths.has(card.month)) {
+      score += P.secondMoverBlockBonus;
     }
 
-    // ── 상대 먹이 위험 ──
+    // ── 띠/열 4개 이상 ──
+    if (selfRibbonCount >= 4 && hasCategory(captureCards, "ribbon")) score += P.ribbonFourBonus;
+    if (selfFiveCount   >= 4 && hasCategory(captureCards, "five"))   score += P.fiveFourBonus;
+
+    // ── 몽박 방어 ──
+    if (mongBakDefenseCritical) {
+      if (hasCategory(captureCards, "five")) score += P.mongBakFiveBonus;
+      else if (piGain > 0)                   score -= P.mongBakPiPenalty;
+    }
+
+    // ── 무매치 knownMonth 보정 ──
+    if (matches.length === 0) {
+      if (knownMonth >= 3) score += P.discardKnownMonthBonus;
+      else if (knownMonth <= 1) score -= P.discardUnknownMonthPenalty;
+    }
+
+    // ── 잠긴 월 패널티 ──
+    const capCntMonth = safeNum(capturedByMonth.get(card.month));
+    if (matches.length > 0 && doublePiCount === 0 && capCntMonth >= 2 && knownMonth >= 3) {
+      score -= P.lockedMonthPenalty;
+    }
+
+    // ── 무매치 discard 상세 정책 (V4 완전 이식) ──
+    if (matches.length === 0) {
+      let ds = 0;
+      const late = deckCount <= 8;
+
+      if (card?.bonus?.stealPi) ds += P.discardBonusPiBonus;
+
+      if (monthIsLiveDoublePi)
+        ds -= late ? P.discardLivePiPenaltyLate : P.discardLivePiPenalty;
+
+      if (isDoublePiLike(card, deps) && monthIsLiveDoublePi)
+        ds -= late ? P.discardDoublePiLivePenaltyLate : P.discardDoublePiLivePenalty;
+
+      if (isDoublePiLike(card, deps) && !monthIsLiveDoublePi)
+        ds += P.discardDoublePiDeadBonus;
+
+      if (monthIsComboHold)
+        ds -= late ? P.discardComboHoldPenaltyLate : P.discardComboHoldPenalty;
+
+      if (monthIsOneAwayThreat)
+        ds -= late ? P.discardOneAwayPenaltyLate : P.discardOneAwayPenalty;
+      else if (monthBlockUrgency >= 2 || monthJokboUrgency >= 20)
+        ds -= late ? P.discardBlockMedPenaltyLate : P.discardBlockMedPenalty;
+
+      if (mongBakDefenseCritical && card.category === "five") ds -= P.discardMongBakFivePenalty;
+      if (mongBakDefenseCritical && card.category === "junk") ds += 5;
+
+      ds += discardTieOrderScore(card, deps, monthIsLiveDoublePi) * 2.2;
+      score += ds;
+    }
+
+    // ── 먹이/뻑 리스크 ──
     const feedRisk = safeNum(deps.estimateOpponentImmediateGainIfDiscard(state, playerKey, card.month));
-    score -= feedRisk * (matches.length === 0 ? P.feedRiskMul : P.feedRiskMatchMul);
+    score -= feedRisk * (matches.length === 0 ? P.feedRiskNoMatchMul : P.feedRiskMatchMul);
 
-    // ── 뻑 위험 ──
     const pukRisk = safeNum(deps.isRiskOfPuk(state, playerKey, card, boardCountByMonth, handCountByMonth));
-    if (pukRisk > 0) {
-      score -= pukRisk * (deckCount <= 10 ? P.pukRiskHighMul : P.pukRiskNormalMul);
-    } else if (pukRisk < 0) {
-      score += -pukRisk * 1.3;
-    }
-
-    // ── 블로킹 ──
-    if (blockMonths.has(card.month)) {
-      const urgency = safeNum(blockUrgency.get(card.month), 2);
-      const jokboU = safeNum(jokbo.monthUrgency?.get(card.month), 0);
-      const blockScore = Math.max(urgency >= 3 ? P.blockingBonus + 4 : P.blockingBonus, jokboU);
-      score += blockScore + nextThreat * P.jokboBlockBonus + jokbo.threat * P.jokboBlockBonus;
-    }
+    if (pukRisk > 0) score -= pukRisk * (deckCount <= 10 ? P.pukRiskHighMul : P.pukRiskNormalMul);
+    else if (pukRisk < 0) score += -pukRisk * 1.4;
 
     // ── 첫턴 쌍피 플랜 ──
     if (firstTurnPiPlan.active && firstTurnPiPlan.months.has(card.month)) {
       score += P.firstTurnPiPlanBonus;
     }
 
-    // ── 피 전략: 내가 앞서있을 때 늦은 게임에서 쌍피 홀드 ──
-    if (lateOrEnd && isDoublePiLike(card, deps)) {
-      if (selfPi >= 7 && safeNum(ctx.myScore) >= safeNum(ctx.oppScore)) {
-        score += 3.5; // 유리할 때 쌍피 보유 가중
-      }
+    // ── 후공 피 수집 추가 (뒤질 때) ──
+    if (secondMover && safeNum(ctx.myScore) < safeNum(ctx.oppScore) && piGain > 0) {
+      score += piGain * P.secondMoverPiBonus;
     }
 
-    // ── 몽박 방어: 상대가 열 7+ 이고 내가 열 0 ──
-    const selfFive = safeNum(ctx.selfFive);
-    const oppFive = safeNum(ctx.oppFive);
-    if (selfFive === 0 && oppFive >= 7 && card.category === "five" && matches.length > 0) {
-      score += 15.0;
-    }
-
-    // ── 후반 피 긁기: 상대 피가 낮을 때 쌍피/보너스피 우선 ──
-    if (lateOrEnd && oppPi <= 5 && isDoublePiLike(card, deps)) {
-      score += 2.5;
-    }
-
-    // ── 전략 우선순위 타이브레이커 ──
-    const tieBoost = safeNum(deps.monthStrategicPriority?.(card.month)) *
-      (matches.length === 0 ? 0.9 : 0.5);
-    score += tieBoost;
-
-    return { card, score, matches: matches.length, tieBoost };
+    return { card, score, matches: matches.length };
   });
 
   ranked.sort((a, b) => b.score - a.score);
-
-  // 상위 2개 점수 차이 좁을 때 타이브레이커 정밀화
-  if (ranked.length >= 2 && Math.abs(ranked[0].score - ranked[1].score) <= 1.0) {
-    for (const r of ranked) r.score += safeNum(r.tieBoost) * 1.0;
-    ranked.sort((a, b) => b.score - a.score);
-  }
-
   return ranked;
 }
 
@@ -259,206 +499,206 @@ export function chooseMatchHeuristicV5(state, playerKey, deps, params = DEFAULT_
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
 
-  const opp = deps.otherPlayerKey(playerKey);
+  const opp        = deps.otherPlayerKey(playerKey);
   const selfPlayer = state.players?.[playerKey];
-  const oppPlayer = state.players?.[opp];
-  const ctx = deps.analyzeGameContext(state, playerKey);
-  const jokbo = deps.checkOpponentJokboProgress(state, playerKey);
-  const blockMonths = deps.blockingMonthsAgainst(oppPlayer, selfPlayer);
-  const blockUrgency = deps.blockingUrgencyByMonth(oppPlayer, selfPlayer);
-  const nextThreat = safeNum(deps.nextTurnThreatScore(state, playerKey));
+  const oppPlayer  = state.players?.[opp];
+  const ctx   = deps.analyzeGameContext(state, playerKey);
   const selfPi = safeNum(ctx.selfPi, deps.capturedCountByCategory(selfPlayer, "junk"));
-  const oppPi = safeNum(ctx.oppPi, deps.capturedCountByCategory(oppPlayer, "junk"));
-  const selfFive = safeNum(ctx.selfFive);
-  const oppFive = safeNum(ctx.oppFive);
-  const mongBakDefense = selfFive === 0 && oppFive >= 7;
+  const oppPi  = safeNum(ctx.oppPi,  deps.capturedCountByCategory(oppPlayer,  "junk"));
+  const nextThreat   = safeNum(deps.nextTurnThreatScore(state, playerKey));
+  const jokbo        = deps.checkOpponentJokboProgress(state, playerKey);
+  const blockMonths  = deps.blockingMonthsAgainst(oppPlayer, selfPlayer);
+  const blockUrgency = deps.blockingUrgencyByMonth(oppPlayer, selfPlayer);
+  const selfCombo       = comboCounts(selfPlayer);
+  const selfRibbonCount = (selfPlayer?.captured?.ribbon || []).length;
+  const selfFiveCount   = (selfPlayer?.captured?.five   || []).length;
+  const mongBakDefenseCritical = safeNum(ctx.selfFive) <= 0 && safeNum(ctx.oppFive) >= 7;
 
   const candidates = (state.board || []).filter((c) => ids.includes(c.id));
   if (!candidates.length) return null;
 
   let best = candidates[0];
   let bestScore = -Infinity;
-
+  const matchPiGainMul = safeNum(P.matchPiGainMul, 4.0);
+  const matchKwangBonus = safeNum(P.matchKwangBonus, 8.0);
+  const matchRibbonBonus = safeNum(P.matchRibbonBonus, 6.0);
+  const matchFiveBonus = safeNum(P.matchFiveBonus, 4.0);
+  const matchDoublePiBonus = safeNum(P.matchDoublePiBonus, 14.0);
+  const matchMongBakFiveBonus = safeNum(P.matchMongBakFiveBonus, P.mongBakFiveBonus);
   for (const c of candidates) {
     const piGain = piLikeValue(c, deps);
-    let score = safeNum(deps.cardCaptureValue(c)) * 0.8;
+    let score = deps.cardCaptureValue(c) * 0.8;
 
-    score += piGain * P.matchPiGainMul;
-    if (c.category === "kwang") score += P.matchKwangBonus;
-    else if (c.category === "ribbon") score += P.matchRibbonBonus;
-    else if (c.category === "five") score += P.matchFiveBonus;
-
-    // 쌍피 보너스
-    if (isDoublePiLike(c, deps)) score += P.matchDoublePiBonus;
-
-    // 피 구간 보너스
+    score += piGain * matchPiGainMul;
+    if (c.category === "kwang")  score += matchKwangBonus;
+    if (c.category === "ribbon") score += matchRibbonBonus;
+    if (c.category === "five")   score += matchFiveBonus;
     if (selfPi >= 7 && selfPi <= 9) score += piGain * 1.8;
-    if (oppPi <= 5) score += piGain * 1.4;
+    if (oppPi  <= 5)                 score += piGain * 1.4;
+    if (isDoublePiLike(c, deps)) score += matchDoublePiBonus;
 
-    // 콤보 완성
-    score += selfComboBonus(selfPlayer, c, P) * P.matchComboFinishMul;
+    score += ownComboFinishBonus(selfCombo, [c], P);
+    score += opponentComboBlockBonus(c.month, jokbo, blockMonths, blockUrgency, nextThreat, P);
 
-    // 블로킹
-    if (blockMonths.has(c.month)) {
-      const urgency = safeNum(blockUrgency.get(c.month), 2);
-      const jokboU = safeNum(jokbo.monthUrgency?.get(c.month), 0);
-      score += Math.max(urgency >= 3 ? 24 : 20, jokboU) * P.matchBlockBonusMul;
-      score += nextThreat * 4.5;
+    if (selfRibbonCount >= 4 && c.category === "ribbon") score += P.ribbonFourBonus;
+    if (selfFiveCount   >= 4 && c.category === "five")   score += P.fiveFourBonus;
+
+    if (mongBakDefenseCritical) {
+      if (c.category === "five")  score += matchMongBakFiveBonus;
+      else if (piGain > 0)        score -= P.mongBakPiPenalty;
     }
-
-    // 몽박 방어
-    if (mongBakDefense && c.category === "five") score += P.matchMongBakFiveBonus;
-    else if (mongBakDefense && piGain > 0) score -= 8;
 
     score += safeNum(deps.monthStrategicPriority?.(c.month)) * 0.25;
+    if (ctx.mode === "DESPERATE_DEFENSE" && piGain <= 0) score -= 0.45;
 
-    if (score > bestScore) {
-      bestScore = score;
-      best = c;
-    }
+    if (score > bestScore) { bestScore = score; best = c; }
   }
-
   return best?.id ?? null;
 }
 
 // ──────────────────────────────────────────────────────────────
-// 3. shouldGoV5  (기댓값 기반)
+// 3. shouldGoV5
+//    V4 oppScoreRisk 단계 분기 완전 채택 + 후공 패널티
 // ──────────────────────────────────────────────────────────────
 export function shouldGoV5(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
 
-  // 상대 파산 가능 시 STOP
   if (deps.canBankruptOpponentByStop?.(state, playerKey)) return false;
 
-  const ctx = deps.analyzeGameContext(state, playerKey);
-  const myScore = safeNum(ctx.myScore);
-  const oppScore = safeNum(ctx.oppScore);
-  const deckCount = safeNum(state.deck?.length);
-  const lateGame = deckCount <= P.lateDeckMax;
-  const endGame = deckCount <= P.endgameDeckMax;
+  const ctx         = deps.analyzeGameContext(state, playerKey);
+  const myScore     = safeNum(ctx.myScore);
+  const oppScoreBase = safeNum(ctx.oppScore);
+  const threat      = _estimateOppOneAwayProb(state, playerKey, deps);
+  const lateGame    = threat.deckCount <= P.lateDeckMax;
+  const secondMover = isSecondMover(state, playerKey);
+  // 후공 패널티: oppOneAway 임계값을 N포인트 낮춤 → STOP 더 쉽게
+  const secG = secondMover ? P.secondMoverGoGateShrink : 0;
 
-  const opp = deps.otherPlayerKey(playerKey);
-  const oppPlayer = state.players?.[opp];
-  const oppPiBase = safeNum(ctx.oppPi, deps.capturedCountByCategory(oppPlayer, "junk"));
+  const opp        = deps.otherPlayerKey(playerKey);
+  const oppPlayer  = state.players?.[opp];
+  const selfPlayer = state.players?.[playerKey];
+  const oppPiBase  = safeNum(ctx.oppPi, deps.capturedCountByCategory(oppPlayer, "junk"));
+  const certain    = hasCertainJokbo(selfPlayer);
 
-  // Gukjin 브랜치 위험
+  const unseenBonus   = countUnseenByIdSet(state, playerKey, BONUS_CARD_ID_SET);
+  const unseenSsangpi = countUnseenByIdSet(state, playerKey, SSANGPI_WITH_GUKJIN_ID_SET);
+  const unseenHighPi  = unseenSsangpi + unseenBonus;
+
+  // ── Gukjin 최악 케이스 ──
   const gukjinBranch = deps.analyzeGukjinBranches?.(state, playerKey);
-  const worstOppScore = _worstCaseOppScore(gukjinBranch, oppScore);
-  const worstOppPi = _worstCaseOppPi(gukjinBranch, oppPiBase);
-
-  // 즉시 STOP 게이트
-  if (worstOppScore >= P.goOppScoreGateHigh) return false;
-
-  // 미확인 고피 위험
-  const BONUS_IDS = new Set([43, 44]); // 보너스 피 카드 ID (게임마다 다를 수 있음 - 의존성 사용)
-  const SSANGPI_IDS = deps.ssangpiCardIds ? new Set(deps.ssangpiCardIds()) : BONUS_IDS;
-  const unseenHighPi = _countUnseen(state, playerKey, SSANGPI_IDS);
-  const selfComboSure = _hasCertainJokbo(state.players?.[playerKey]);
-  if (unseenHighPi >= 2 && worstOppPi >= 7 && !selfComboSure) return false;
-
-  // 기댓값 기반 GO 판단
-  // 내 기대 이득 = 현 점수차 * carryOver
-  // 상대 위험 = oppOneAway 확률
-  const oppOneAway = estimateOppOneAwayProb(state, playerKey, deps);
-  const scoreDiff = myScore - worstOppScore;
-
-  // 동적 임계값
-  let threshold = P.goBaseThreshold;
-  threshold -= scoreDiff * P.goScoreDiffBonus;       // 앞서있으면 완화
-  if (lateGame) threshold -= P.goDeckLowBonus;       // 후반 완화
-  if (unseenHighPi >= 2) threshold += P.goUnseeHighPiPenalty; // 미확인 고피 경고
-  if (worstOppScore === P.goOppScoreGateLow) threshold += 0.08; // 상대 점수 3 경고
-  if (endGame && scoreDiff <= 0) threshold += 0.10;  // 엔드게임 동점/뒤짐 경고
-
-  // oppOneAway 직접 게이트
-  if (oppOneAway >= P.goOppOneAwayGate) return false;
-
-  // carryOver 멀티플라이어 있으면 GO 선호
-  const carryOver = safeNum(state.carryOverMultiplier, 1);
-  if (carryOver >= 2) threshold -= 0.08;
-
-  // 기댓값 추정: 내가 GO해서 이기는 확률이 threshold 이상이면 GO
-  // 단순 모델: (1 - oppOneAway/100) × 승리확률
-  const winProb = clamp(1 - oppOneAway / 100, 0, 1);
-  return winProb >= threshold;
-}
-
-function _worstCaseOppScore(gukjinBranch, base) {
-  if (!gukjinBranch?.scenarios?.length) return base;
-  return Math.max(base, ...gukjinBranch.scenarios.map((s) => safeNum(s?.oppScore, 0)));
-}
-
-function _worstCaseOppPi(gukjinBranch, base) {
-  if (!gukjinBranch?.scenarios?.length) return base;
-  return Math.max(base, ...gukjinBranch.scenarios.map((s) => safeNum(s?.oppPi, 0)));
-}
-
-function _countUnseen(state, playerKey, idSet) {
-  let seen = 0;
-  for (const key of ["human", "ai"]) {
-    const player = state.players?.[key];
-    for (const cat of ["kwang", "five", "ribbon", "junk"]) {
-      for (const c of player?.captured?.[cat] || []) {
-        if (idSet.has(c?.id)) seen++;
-      }
+  let oppScoreRisk = oppScoreBase;
+  let oppPiRisk    = oppPiBase;
+  if (gukjinBranch?.scenarios?.length) {
+    for (const s of gukjinBranch.scenarios) {
+      oppScoreRisk = Math.max(oppScoreRisk, safeNum(s?.oppScore));
+      oppPiRisk    = Math.max(oppPiRisk,    safeNum(s?.oppPi));
     }
-    for (const c of player?.hand || []) {
-      if (idSet.has(c?.id)) seen++;
+    for (const s of gukjinBranch.scenarios) {
+      const sScore = safeNum(s?.oppScore);
+      const sPi    = safeNum(s?.oppPi);
+      if (sScore >= 6) return false;
+      if (sScore >= 5 && !certain) return false;
+      if (unseenHighPi >= 2 && sPi >= 7 && !certain) return false;
     }
   }
-  for (const c of state.board || []) {
-    if (idSet.has(c?.id)) seen++;
-  }
-  return idSet.size - seen;
-}
 
-function _hasCertainJokbo(player) {
-  const cap = player?.captured || {};
-  const kwang = (cap.kwang || []).length;
-  const birds = (cap.five || []).filter((c) => c?.tags?.includes?.("fiveBirds")).length;
-  const red = (cap.ribbon || []).filter((c) => c?.tags?.includes?.("redRibbons")).length;
-  const blue = (cap.ribbon || []).filter((c) => c?.tags?.includes?.("blueRibbons")).length;
-  const plain = (cap.ribbon || []).filter((c) => c?.tags?.includes?.("plainRibbons")).length;
-  return kwang >= 3 || birds >= 3 || red >= 3 || blue >= 3 || plain >= 3;
+  const scoreDiffRisk = myScore - oppScoreRisk;
+  const oneAwayGateCap = safeNum(P.goOppOneAwayGate, 100);
+  const oppScoreGateLow = Math.max(3, Math.min(5, Math.round(safeNum(P.goOppScoreGateLow, 4))));
+  const oppScoreGateHigh = Math.max(5, Math.min(7, Math.round(safeNum(P.goOppScoreGateHigh, 6))));
+  const quickGoConfidence =
+    0.5 +
+    scoreDiffRisk * safeNum(P.goScoreDiffBonus, 0) +
+    (lateGame ? safeNum(P.goDeckLowBonus, 0) : 0) -
+    unseenHighPi * safeNum(P.goUnseeHighPiPenalty, 0);
+
+  if (threat.oppOneAwayProb >= oneAwayGateCap) return false;
+  if (!certain && quickGoConfidence < safeNum(P.goBaseThreshold, 0)) return false;
+
+  // ── 쌍피 위험 게이트 ──
+  if (unseenHighPi >= 2 && oppPiRisk >= 7 && !certain) return false;
+
+  // ── 1) 상대 6+ → 무조건 STOP ──
+  if (oppScoreRisk >= oppScoreGateHigh) return false;
+
+  // ── 2) 상대 5+ → 기본 STOP (bigLead+lowThreat 예외, 후공이면 예외 없음) ──
+  if (oppScoreRisk >= oppScoreGateHigh - 1) {
+    const shouldStop = _shouldStopForOppFourLike(state, playerKey, deps, 1, 2);
+    if (shouldStop) return false;
+    if (secondMover) return false; // 후공이면 예외 없이 STOP
+    const bigLead  = scoreDiffRisk >= P.goBigLeadScoreDiff && myScore >= P.goBigLeadMinScore;
+    const lowThreat =
+      threat.oppOneAwayProb < (lateGame ? P.goBigLeadOneAwayLate : P.goBigLeadOneAwayEarly) &&
+      threat.jokboThreat    <  P.goBigLeadJokboThresh &&
+      threat.nextThreat     <  P.goBigLeadNextThresh;
+    return bigLead && lowThreat;
+  }
+
+  // ── 3) 상대 4 ──
+  if (oppScoreRisk >= oppScoreGateLow) {
+    const shouldStop = _shouldStopForOppFourLike(state, playerKey, deps, 2, 3);
+    if (shouldStop) return false;
+    const gate = (lateGame ? P.goOneAwayThreshOpp4Late : P.goOneAwayThreshOpp4Early) - secG;
+    if (threat.oppOneAwayProb >= gate) return false;
+    return true;
+  }
+
+  // ── 4) 상대 1~3 ──
+  if (oppScoreRisk >= 1 && oppScoreRisk <= oppScoreGateLow - 1) {
+    if (oppScoreRisk === 3 && threat.jokboThreat >= 0.5) return false;
+    const baseGate =
+      oppScoreRisk === 3 ? P.goOneAwayThreshOpp3 :
+      oppScoreRisk === 2 ? P.goOneAwayThreshOpp2 :
+                           P.goOneAwayThreshOpp1;
+    const gate = baseGate - (lateGame ? 1 : 0) - secG;
+    if (threat.oppOneAwayProb >= gate) return false;
+
+    // 상대 ≤2 추가 위협 게이트
+    if (oppScoreRisk <= 2) {
+      if (
+        threat.jokboThreat >= P.goOpp12JokboThresh ||
+        threat.nextThreat  >= P.goOpp12NextThresh  ||
+        (lateGame && threat.jokboThreat >= 0.4)
+      ) return false;
+    }
+
+    // 후공 + 동점/뒤짐 → gate 추가 강화
+    if (secondMover && scoreDiffRisk <= 0 && threat.oppOneAwayProb >= baseGate - 5 - secG) return false;
+    return true;
+  }
+
+  // ── 5) 상대 0 ──
+  const gate0 = (lateGame ? P.goOneAwayThreshOpp0Late : P.goOneAwayThreshOpp0) - secG;
+  if (threat.oppOneAwayProb >= gate0) return false;
+  if (threat.jokboThreat >= P.goOpp0JokboThresh || threat.nextThreat >= P.goOpp0NextThresh) return false;
+  if (secondMover && scoreDiffRisk < 0) return false; // 후공 + 뒤지면 GO 금지
+  return true;
 }
 
 // ──────────────────────────────────────────────────────────────
-// 4. shouldBombV5
+// 4. shouldBombV5 / selectBombMonthV5
 // ──────────────────────────────────────────────────────────────
 export function shouldBombV5(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   if (!bombMonths?.length) return false;
-
   const ctx = deps.analyzeGameContext(state, playerKey);
   const firstTurnPiPlan = deps.getFirstTurnDoublePiPlan(state, playerKey);
 
-  // 첫턴 쌍피 플랜과 겹치면 항상 폭탄
-  if (firstTurnPiPlan.active) {
-    if ((bombMonths).some((m) => firstTurnPiPlan.months.has(m))) return true;
-  }
+  if (firstTurnPiPlan.active && bombMonths.some((m) => firstTurnPiPlan.months.has(m))) return true;
 
   const bestMonth = _bestBombMonth(state, bombMonths, deps);
   if (bestMonth == null) return false;
-
   const impact = deps.isHighImpactBomb(state, playerKey, bestMonth);
-  const gain = safeNum(deps.monthBoardGain(state, bestMonth));
+  const gain   = safeNum(deps.monthBoardGain(state, bestMonth));
 
-  // highImpact 무조건 폭탄
-  if (P.bombHighImpactOverride && impact.highImpact) return true;
-
-  // 방어 오프닝: highImpact만 허용
-  if (ctx.defenseOpening) return impact.highImpact;
-
-  // 컴백 모드: 관대하게
+  if (impact.highImpact) return true;
+  if (ctx.defenseOpening) return false;
   if (ctx.volatilityComeback) {
-    if (impact.highImpact || safeNum(impact.immediateGain) >= 4) return true;
+    if (safeNum(impact.immediateGain) >= safeNum(P.bombImpactMinGain, 4)) return true;
     return gain >= 0;
   }
-
-  // 나가리 지연 모드: 제한적
-  if (ctx.nagariDelayMode && !impact.highImpact && safeNum(impact.immediateGain) < 6) return false;
-
-  return gain >= P.bombImpactMinGain;
+  if (ctx.nagariDelayMode && safeNum(impact.immediateGain) < 6) return false;
+  return gain >= 1.0;
 }
 
 export function selectBombMonthV5(state, _playerKey, bombMonths, deps) {
@@ -478,154 +718,102 @@ function _bestBombMonth(state, months, deps) {
 
 // ──────────────────────────────────────────────────────────────
 // 5. decideShakingV5
+//    핵심: 매치 있으면 흔들기 금지 (V4 동일)
 // ──────────────────────────────────────────────────────────────
 export function decideShakingV5(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
 
-  const ctx = deps.analyzeGameContext(state, playerKey);
-  const opp = deps.otherPlayerKey(playerKey);
-  const oppPlayer = state.players?.[opp];
-  const firstTurnPiPlan = deps.getFirstTurnDoublePiPlan(state, playerKey);
-  const oppThreat = safeNum(deps.opponentThreatScore(state, playerKey));
-  const jokboThreat = safeNum(deps.checkOpponentJokboProgress(state, playerKey)?.threat);
-  const nextThreat = safeNum(deps.nextTurnThreatScore(state, playerKey));
-  const myScore = safeNum(ctx.myScore);
+  // V4 핵심 규칙: 일반 매치 존재 시 흔들기 불가
+  const boardByMonth = deps.boardMatchesByMonth(state);
+  const player = state.players?.[playerKey];
+  const hasAnyMatch = (player?.hand || []).some(
+    (card) => (boardByMonth.get(card.month) || []).length > 0
+  );
+  if (hasAnyMatch) return { allow: false, month: null, score: -Infinity };
+
+  const ctx      = deps.analyzeGameContext(state, playerKey);
+  const myScore  = safeNum(ctx.myScore);
   const oppScore = safeNum(ctx.oppScore);
-  const aheadOrEven = myScore >= oppScore;
-  const trailingBy = Math.max(0, oppScore - myScore);
-  const deckCount = safeNum(state.deck?.length);
-  const selfPi = safeNum(ctx.selfPi, deps.capturedCountByCategory(state.players?.[playerKey], "junk"));
-  const oppPi = safeNum(ctx.oppPi, deps.capturedCountByCategory(oppPlayer, "junk"));
+  const liveDoublePiMonths = getLiveDoublePiMonths(state);
+  const comboHoldMonths    = getComboHoldMonths(state, playerKey, deps);
+  const firstTurnPiPlan    = deps.getFirstTurnDoublePiPlan(state, playerKey);
 
-  // 템포 압박
-  let tempo = Math.min(2.0, trailingBy * 0.5);
-  if (ctx.mode === "DESPERATE_DEFENSE") tempo += 1.0;
-  if (safeNum(state.carryOverMultiplier, 1) >= 2) tempo += 0.45;
-  if ((oppPlayer?.events?.shaking || 0) + (oppPlayer?.events?.bomb || 0) > 0) tempo += 0.7;
-  if ((oppPlayer?.goCount || 0) > 0) tempo += 0.5;
-  if ((state.players?.[playerKey]?.goCount || 0) > 0 && trailingBy === 0) tempo -= 0.35;
-
-  // 리스크 패널티
-  const riskPenalty = oppThreat * 2.0 + jokboThreat * 1.3 + nextThreat * 1.2;
+  // 상대가 크게 앞서면 흔들기 금지
+  if (oppScore >= 5 && oppScore >= myScore + 2) return { allow: false, month: null, score: -Infinity };
 
   let best = { allow: false, month: null, score: -Infinity, highImpact: false };
 
   for (const month of shakingMonths) {
-    let immGain = safeNum(deps.shakingImmediateGainScore(state, playerKey, month));
-    if (firstTurnPiPlan.active && firstTurnPiPlan.months.has(month)) immGain += 0.45;
-    const comboGain = safeNum(deps.ownComboOpportunityScore(state, playerKey, month));
-    const impact = deps.isHighImpactShaking(state, playerKey, month);
-    if (impact.directThreeGwang) immGain += 0.55;
-    if (impact.hasDoublePiLine) immGain += 0.35;
+    const immediateGain = safeNum(deps.shakingImmediateGainScore(state, playerKey, month));
+    const comboGain     = safeNum(deps.ownComboOpportunityScore(state, playerKey, month));
+    const impact        = deps.isHighImpactShaking(state, playerKey, month);
+    const known         = safeNum(deps.countKnownMonthCards(state, month));
+    const uncertaintyBonus = known <= 2 ? 0.25 : known >= 4 ? -0.1 : 0;
 
-    // 느리게 가는 패널티 (이득 없고 압박도 없는데 흔들기)
-    let slowPenalty = 0;
-    if (immGain < 0.75 && comboGain < 0.9 && tempo < 1.2 && aheadOrEven) slowPenalty = 1.15;
-
-    let score = immGain * P.shakingImmediateGainMul
-              + comboGain * P.shakingComboGainMul
-              + tempo * P.shakingTempoBonusMul
-              - riskPenalty * P.shakingRiskPenaltyMul
-              - slowPenalty;
-
-    if (trailingBy >= 3) score += 0.35;
-    if (ctx.volatilityComeback) {
-      score += 0.45;
-      if (impact.highImpact) score += 0.22;
-    }
+    let score =
+      immediateGain * safeNum(P.shakingImmediateGainMul, 1.35) +
+      comboGain * safeNum(P.shakingComboGainMul, 1.15) +
+      uncertaintyBonus;
+    if (impact?.hasDoublePiLine)  score += 0.35;
+    if (impact?.directThreeGwang) score += 0.3;
+    if (impact?.highImpact)       score += 0.4;
+    if (myScore < oppScore) score += safeNum(P.shakingTempoBonusMul, 0);
+    if (liveDoublePiMonths.has(month) && !comboHoldMonths.has(month)) score += 0.55;
+    if (comboHoldMonths.has(month)) score -= 0.25;
+    if (firstTurnPiPlan.active && firstTurnPiPlan.months.has(month)) score += 0.3;
 
     if (score > best.score) {
-      best = { allow: false, month, score, highImpact: impact.highImpact, immGain, comboGain };
+      best = { allow: false, month, score, highImpact: !!impact?.highImpact };
     }
   }
 
-  // 임계값 결정
-  let threshold = P.shakingScoreThreshold;
-  if (ctx.mode === "DESPERATE_DEFENSE") threshold -= 0.25;
-  if (trailingBy >= 3) threshold -= 0.15;
-  if (myScore >= oppScore + 2) threshold += P.shakingAheadPenalty + 0.2;
-  if (oppThreat >= 0.7 && aheadOrEven) threshold += 0.35;
-  if (deckCount <= 7 && aheadOrEven) threshold += 0.25;
-  if (safeNum(state.carryOverMultiplier, 1) >= 2 && aheadOrEven) threshold += 0.2;
-  if (selfPi >= 9 && aheadOrEven) threshold += 0.35;
-  if (ctx.volatilityComeback) threshold -= 0.3;
-
-  if (best.month != null && firstTurnPiPlan.active && firstTurnPiPlan.months.has(best.month)) {
-    threshold -= 0.15;
-  }
-
-  // 피 완성 윈도우에서 유리하면 흔들기 보류
-  if (selfPi >= 9 && aheadOrEven && best.score < threshold + 0.55) {
-    return { ...best, allow: false };
-  }
-
-  // 방어 오프닝: highImpact + 충분한 이득만 허용
-  if (ctx.defenseOpening && (!best.highImpact || (best.immGain < 1.05 && best.comboGain < 1.35))) {
-    return { ...best, allow: false };
-  }
-  if (ctx.nagariDelayMode && !best.highImpact && best.score < threshold + 0.35) {
-    return { ...best, allow: false };
-  }
-
-  if (ctx.volatilityComeback && best.month != null) {
-    const comebackThreshold = threshold - (best.highImpact ? 0.18 : 0.08);
-    return { ...best, allow: best.score >= comebackThreshold };
-  }
-
-  return { ...best, allow: best.score >= threshold };
+  const preferDoublePiShake =
+    best.month != null &&
+    liveDoublePiMonths.has(best.month) &&
+    !comboHoldMonths.has(best.month);
+  const threshold = safeNum(P.shakingScoreThreshold, 0.65);
+  const aheadPenalty = myScore > oppScore ? safeNum(P.shakingAheadPenalty, 0) : 0;
+  const allow = (myScore > oppScore || preferDoublePiShake) && best.score >= threshold + aheadPenalty;
+  return { ...best, allow };
 }
 
 // ──────────────────────────────────────────────────────────────
 // 6. shouldPresidentStopV5
 // ──────────────────────────────────────────────────────────────
 export function shouldPresidentStopV5(state, playerKey, deps, params = DEFAULT_PARAMS) {
-  // 기본적으로 V4 로직을 유지하되 파라미터화 여지 확보
-  const ctx = deps.analyzeGameContext(state, playerKey);
-  const myScore = safeNum(ctx.myScore);
-  const oppScore = safeNum(ctx.oppScore);
-  const scoreDiff = myScore - oppScore;
-  const carryOver = safeNum(state.carryOverMultiplier, 1);
+  const ctx         = deps.analyzeGameContext(state, playerKey);
+  const scoreDiff   = safeNum(ctx.myScore) - safeNum(ctx.oppScore);
+  const carryOver   = safeNum(state.carryOverMultiplier, 1);
+  const secondMover = isSecondMover(state, playerKey);
 
-  // 크게 앞서있고 carryOver 없으면 STOP (점수 굳히기)
   if (scoreDiff >= 3 && carryOver <= 1) return true;
-  // 뒤지고 있으면 HOLD (역전 기회)
   if (scoreDiff <= -1) return false;
-  // 동점/소폭 앞서면 carryOver 고려
-  if (carryOver >= 2) return false; // 판돈 높으면 계속
-  return scoreDiff >= 1; // 소폭 앞서면 STOP
+  if (secondMover && scoreDiff <= 0) return false;
+  if (carryOver >= 2) return false;
+  return scoreDiff >= 1;
 }
 
 // ──────────────────────────────────────────────────────────────
 // 7. chooseGukjinHeuristicV5
 // ──────────────────────────────────────────────────────────────
 export function chooseGukjinHeuristicV5(state, playerKey, deps, params = DEFAULT_PARAMS) {
-  const ctx = deps.analyzeGameContext(state, playerKey);
+  const ctx    = deps.analyzeGameContext(state, playerKey);
   const branch = deps.analyzeGukjinBranches(state, playerKey);
-  const myScore = safeNum(ctx.myScore);
-  const oppScore = safeNum(ctx.oppScore);
   const selfFive = safeNum(ctx.selfFive);
-  const oppFive = safeNum(ctx.oppFive);
+  const oppFive  = safeNum(ctx.oppFive);
 
-  // 몽박 위험: 상대가 몽박 가능하면 five 선택해 회피
-  const mongBakRisk = selfFive <= 0 && oppFive >= 6;
-  if (mongBakRisk) return "junk"; // five 선택해서 oppFive 위협 상쇄 불가 → 피로
+  if (selfFive <= 0 && oppFive >= 6) return "junk";
+  if (selfFive >= 7 && oppFive <= 0) return "five";
 
-  // 몽박 찬스: 내가 몽박 가능하면 five
-  const mongBakChance = selfFive >= 7 && oppFive <= 0;
-  if (mongBakChance) return "five";
-
-  // 브랜치 분석: five가 더 유리한 시나리오 우선
   if (branch?.enabled && branch.scenarios?.length) {
-    const fiveScenario = branch.scenarios.find((s) => s?.selfMode === "five");
-    const junkScenario = branch.scenarios.find((s) => s?.selfMode === "junk");
-    if (fiveScenario && junkScenario) {
-      const fiveScore = safeNum(fiveScenario.myScore) - safeNum(fiveScenario.oppScore);
-      const junkScore = safeNum(junkScenario.myScore) - safeNum(junkScenario.oppScore);
-      return fiveScore >= junkScore ? "five" : "junk";
+    const fiveSc = branch.scenarios.find((s) => s?.selfMode === "five");
+    const junkSc = branch.scenarios.find((s) => s?.selfMode === "junk");
+    if (fiveSc && junkSc) {
+      const fiveAdv = safeNum(fiveSc.myScore) - safeNum(fiveSc.oppScore);
+      const junkAdv = safeNum(junkSc.myScore) - safeNum(junkSc.oppScore);
+      return fiveAdv >= junkAdv ? "five" : "junk";
     }
   }
-
-  // 기본: 열 개수로 판단
   return selfFive >= 7 ? "five" : "junk";
 }
