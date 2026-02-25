@@ -12,27 +12,28 @@ export const DEFAULT_PARAMS = {
   greedMul: 1.8,
   shakingGreed: 4.0,
   bombGreed: 4.0,
-  goAggression: 0.3,
+  goAggression: 0.48381972889542857,
   lowThreatForceGo: 0.2,
   trailingRiskAppetite: 0.25,
   leadingRiskAppetite: 0.5,
   trailingThreatBuffer: 0.1,
-  lockProfitScore: 8,
+  lockProfitScore: 6,
+  berserkerThreatCap: 0.4,
 
   noMatchBase: -5.0,
-  matchBase: 15.0,
+  matchBase: 24.98345180770014,
   doublePiBonus: 22.0,
   kwangBonus: 25.0,
-  comboBonus: 35.0,
-  denialBonus: 15.0,
-  comboBreakerBonus: 40.0,
+  comboBonus: 59.74066797039472,
+  denialBonus: 18.764075276534694,
+  comboBreakerBonus: 33.89043020824412,
   bonusCardSteal: 30.0,
   piPressureBonus: 12.0,
   piLeakPenalty: 10.0,
-  antiPiBakBonus: 50.0,
+  antiPiBakBonus: 48.113153735502564,
   antiPiBakNoPiPenalty: 14.0,
 
-  riskTolerance: 1.2,
+  riskTolerance: 1.75,
   pukOpportunity: 3.0
 };
 
@@ -263,6 +264,7 @@ export function shouldGoV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const myGold = safeNum(state?.players?.[playerKey]?.gold, 0);
   const oppGold = safeNum(state?.players?.[oppKey]?.gold, 0);
   const trailingGold = myGold < oppGold;
+  const oppPiCount = opponentPiCount(state, playerKey, deps);
 
   const oppJokbo = deps.checkOpponentJokboProgress?.(state, playerKey) || null;
   const oppImminent = isOpponentImminentV7(state, playerKey, oppJokbo);
@@ -281,6 +283,10 @@ export function shouldGoV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
   threatStopThreshold = Math.max(0.2, Math.min(0.72, threatStopThreshold));
 
   if (oppThreat < P.lowThreatForceGo) return true;
+
+  // Berserker mode: when opponent is still in Pi-Bak window and we are leading,
+  // take controlled risk to inflate multiplier and maximize gold extraction.
+  if (oppPiCount < 10 && myScore > oppCurrentScore && oppThreat < P.berserkerThreatCap) return true;
 
   if (!trailingGold && myScore >= P.lockProfitScore && (oppThreat >= 0.16 || oppCurrentScore > 0 || oppImminent)) {
     return false;

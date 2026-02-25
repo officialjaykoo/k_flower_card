@@ -17,7 +17,7 @@
   "gate_mode": "win_rate_only",
   "gate_ema_window": 5,
   "transition_ema_imitation": null,
-  "transition_ema_win_rate": 0.45,
+  "transition_ema_win_rate": 0.40,
   "transition_best_fitness_min": 0.5,
   "transition_streak": 1,
   "failure_generation_min": 20,
