@@ -2,7 +2,7 @@
   [int]$GamesPerMatch = 1000,
   [int]$MaxSteps = 600,
   [string]$OutputTag = "",
-  [string[]]$Policies = @("heuristic_v3", "heuristic_v4", "heuristic_v5", "heuristic_v6")
+  [string[]]$Policies = @("heuristic_v3", "heuristic_v4", "heuristic_v5", "heuristic_v6", "heuristic_v7_gold_digger")
 )
 
 if ($GamesPerMatch -ne 1000) {

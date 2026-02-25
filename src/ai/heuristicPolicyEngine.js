@@ -24,6 +24,7 @@ import {
   POLICY_HEURISTIC_V4,
   POLICY_HEURISTIC_V5,
   POLICY_HEURISTIC_V6,
+  POLICY_HEURISTIC_V7,
   normalizeBotPolicy
 } from "./policies.js";
 import {
@@ -68,6 +69,18 @@ import {
   shouldPresidentStopV6,
   DEFAULT_PARAMS as V6_DEFAULT_PARAMS
 } from "../heuristics/heuristicV6.js";
+import {
+  chooseGukjinHeuristicV7,
+  chooseMatchHeuristicV7,
+  decideShakingV7,
+  rankHandCardsV7,
+  selectBombMonthV7,
+  shouldBombV7,
+  shouldGoV7,
+  shouldPresidentStopV7,
+  DEFAULT_PARAMS as V7_DEFAULT_PARAMS
+} from "../heuristics/heuristicV7.js";
+import { canBankruptOpponentByStopV7 } from "../heuristics/heuristicV7_math.js";
 
 const GWANG_MONTHS = Object.freeze([1, 3, 8, 11, 12]);
 const GOLD_RISK_THRESHOLD_RATIO = 0.1;
@@ -109,12 +122,27 @@ function loadV6Params() {
   return { ...V6_DEFAULT_PARAMS };
 }
 
+function loadV7Params() {
+  try {
+    const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_V7_PARAMS) || "";
+    if (!raw) return { ...V7_DEFAULT_PARAMS };
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { ...V7_DEFAULT_PARAMS, ...parsed };
+    }
+  } catch {
+    // Fall through to defaults on parse/runtime errors.
+  }
+  return { ...V7_DEFAULT_PARAMS };
+}
+
 function ssangpiCardIds() {
   return [...HIGH_PI_CARD_IDS];
 }
 
 const HEURISTIC_V5_PARAMS = Object.freeze(loadV5Params());
 const HEURISTIC_V6_PARAMS = Object.freeze(loadV6Params());
+const HEURISTIC_V7_PARAMS = Object.freeze(loadV7Params());
 
 export {
   BOT_POLICIES,
@@ -122,7 +150,8 @@ export {
   POLICY_HEURISTIC_V3,
   POLICY_HEURISTIC_V4,
   POLICY_HEURISTIC_V5,
-  POLICY_HEURISTIC_V6
+  POLICY_HEURISTIC_V6,
+  POLICY_HEURISTIC_V7
 };
 
 export function botChooseCard(state, playerKey, policy = DEFAULT_BOT_POLICY) {
@@ -533,6 +562,16 @@ function canBankruptOpponentByStop(state, playerKey) {
   return oppGoldAfterStop <= 0;
 }
 
+function canBankruptOpponentByStopV7Proxy(state, playerKey) {
+  const scoreHint = Number(analyzeGameContext(state, playerKey)?.myScore || 0);
+  return canBankruptOpponentByStopV7(state, playerKey, {
+    currentScore: scoreHint,
+    fallbackExact: canBankruptOpponentByStop,
+    defaultBetAmount: 100,
+    safetyMargin: 0.9
+  });
+}
+
 function analyzeGameContext(state, playerKey) {
   const opp = otherPlayerKey(playerKey);
   let myScore = currentScoreTotal(state, playerKey);
@@ -780,6 +819,61 @@ function checkOpponentJokboProgress(state, playerKey) {
   return {
     threat: Math.max(0, Math.min(1, threat)),
     monthUrgency
+  };
+}
+
+function getMissingComboCards(state, playerKey) {
+  const player = state.players?.[playerKey];
+  if (!player) return { ids: [], months: [], imminent: false };
+
+  const blockerKey = otherPlayerKey(playerKey);
+  const blocker = state.players?.[blockerKey];
+  const board = state.board || [];
+  const progress = comboProgress(player);
+  const ids = new Set();
+  const months = new Set();
+  let imminent = false;
+
+  const addRule = (tag, got, sourceCards, requiredCategory) => {
+    if (got < 2) return;
+    const missing = availableMissingMonths(
+      missingComboMonths(sourceCards, tag),
+      requiredCategory,
+      blocker
+    );
+    if (!missing.length) return;
+    if (got >= 3) imminent = true;
+    for (const month of missing) {
+      months.add(month);
+      for (const card of board) {
+        if (card?.month !== month) continue;
+        if (requiredCategory && card?.category !== requiredCategory) continue;
+        ids.add(card.id);
+      }
+    }
+  };
+
+  addRule("redRibbons", progress.redRibbons, player?.captured?.ribbon || [], "ribbon");
+  addRule("blueRibbons", progress.blueRibbons, player?.captured?.ribbon || [], "ribbon");
+  addRule("plainRibbons", progress.plainRibbons, player?.captured?.ribbon || [], "ribbon");
+  addRule("fiveBirds", progress.fiveBirds, player?.captured?.five || [], "five");
+
+  const gwangCount = capturedCountByCategory(player, "kwang");
+  if (gwangCount >= 2) {
+    const missingGwang = availableMissingMonths(missingGwangMonths(player), "kwang", blocker);
+    if (gwangCount >= 3 && missingGwang.length > 0) imminent = true;
+    for (const month of missingGwang) {
+      months.add(month);
+      for (const card of board) {
+        if (card?.month === month && card?.category === "kwang") ids.add(card.id);
+      }
+    }
+  }
+
+  return {
+    ids: [...ids],
+    months: [...months],
+    imminent
   };
 }
 
@@ -1517,6 +1611,7 @@ function boardMatchesByMonth(state) {
 const RANK_HAND_CARD_DEPS = Object.freeze({
   analyzeGameContext,
   checkOpponentJokboProgress,
+  getMissingComboCards,
   blockingMonthsAgainst,
   blockingUrgencyByMonth,
   capturedCountByCategory,
@@ -1652,6 +1747,14 @@ const HEURISTIC_V6_DEPS = Object.freeze({
   rolloutGoStopValueV6
 });
 
+const HEURISTIC_V7_DEPS = Object.freeze({
+  ...HEURISTIC_V5_DEPS,
+  canBankruptOpponentByStop: canBankruptOpponentByStopV7Proxy,
+  estimateDangerMonthRisk,
+  monthBoardGain,
+  opponentThreatScore
+});
+
 function createHeuristicV6FairDeps(observerKey) {
   return Object.freeze({
     ...HEURISTIC_V6_DEPS,
@@ -1692,6 +1795,14 @@ function createHeuristicPublicState(state, playerKey) {
 
 function resolveHeuristicDecisionContext(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   const resolvedPolicy = normalizeBotPolicy(policy);
+  if (resolvedPolicy === POLICY_HEURISTIC_V7) {
+    return {
+      policy: POLICY_HEURISTIC_V7,
+      decisionState: createHeuristicPublicState(state, playerKey),
+      deps: HEURISTIC_V7_DEPS,
+      params: HEURISTIC_V7_PARAMS
+    };
+  }
   if (resolvedPolicy === POLICY_HEURISTIC_V6) {
     const fair = createV6FairDecisionContext(state, playerKey);
     return {
@@ -1728,6 +1839,7 @@ function resolveHeuristicDecisionContext(state, playerKey, policy = DEFAULT_BOT_
 }
 
 function dispatchHeuristicPolicyCall(ctx, handlers) {
+  if (ctx.policy === POLICY_HEURISTIC_V7 && typeof handlers.v7 === "function") return handlers.v7(ctx);
   if (ctx.policy === POLICY_HEURISTIC_V6 && typeof handlers.v6 === "function") return handlers.v6(ctx);
   if (ctx.policy === POLICY_HEURISTIC_V5 && typeof handlers.v5 === "function") return handlers.v5(ctx);
   if (ctx.policy === POLICY_HEURISTIC_V4 && typeof handlers.v4 === "function") return handlers.v4(ctx);
@@ -1737,6 +1849,7 @@ function dispatchHeuristicPolicyCall(ctx, handlers) {
 function chooseGukjinByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
   return dispatchHeuristicPolicyCall(ctx, {
+    v7: ({ decisionState, deps, params }) => chooseGukjinHeuristicV7(decisionState, playerKey, deps, params),
     v6: ({ decisionState, deps, params }) => chooseGukjinHeuristicV6(decisionState, playerKey, deps, params),
     v5: ({ decisionState, deps, params }) => chooseGukjinHeuristicV5(decisionState, playerKey, deps, params),
     v4: ({ decisionState, deps }) => chooseGukjinHeuristicV4(decisionState, playerKey, deps),
@@ -1747,6 +1860,7 @@ function chooseGukjinByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
 function shouldPresidentStopByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
   return dispatchHeuristicPolicyCall(ctx, {
+    v7: ({ decisionState, deps, params }) => shouldPresidentStopV7(decisionState, playerKey, deps, params),
     v6: ({ decisionState, deps, params }) => shouldPresidentStopV6(decisionState, playerKey, deps, params),
     v5: ({ decisionState, deps, params }) => shouldPresidentStopV5(decisionState, playerKey, deps, params),
     v4: ({ decisionState, deps }) => shouldPresidentStopV4(decisionState, playerKey, deps),
@@ -1757,6 +1871,7 @@ function shouldPresidentStopByPolicy(state, playerKey, policy = DEFAULT_BOT_POLI
 function chooseMatchByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
   return dispatchHeuristicPolicyCall(ctx, {
+    v7: ({ decisionState, deps, params }) => chooseMatchHeuristicV7(decisionState, playerKey, deps, params),
     v6: ({ decisionState, deps, params }) => chooseMatchHeuristicV6(decisionState, playerKey, deps, params),
     v5: ({ decisionState, deps, params }) => chooseMatchHeuristicV5(decisionState, playerKey, deps, params),
     v4: ({ decisionState, deps }) => chooseMatchHeuristicV4(decisionState, playerKey, deps),
@@ -1767,6 +1882,7 @@ function chooseMatchByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
 function shouldGoByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
   return dispatchHeuristicPolicyCall(ctx, {
+    v7: ({ decisionState, deps, params }) => shouldGoV7(decisionState, playerKey, deps, params),
     v6: ({ decisionState, deps, params }) => shouldGoV6(decisionState, playerKey, deps, params),
     v5: ({ decisionState, deps, params }) => shouldGoV5(decisionState, playerKey, deps, params),
     v4: ({ decisionState, deps }) => shouldGoV4(decisionState, playerKey, deps),
@@ -1777,6 +1893,7 @@ function shouldGoByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
 function selectBombMonthByPolicy(state, playerKey, bombMonths, policy = DEFAULT_BOT_POLICY) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
   return dispatchHeuristicPolicyCall(ctx, {
+    v7: ({ decisionState, deps }) => selectBombMonthV7(decisionState, playerKey, bombMonths, deps),
     v6: ({ decisionState, deps }) => selectBombMonthV6(decisionState, playerKey, bombMonths, deps),
     v5: ({ decisionState, deps }) => selectBombMonthV5(decisionState, playerKey, bombMonths, deps),
     v4: ({ decisionState, deps }) => selectBombMonthV4(decisionState, playerKey, bombMonths, deps),
@@ -1787,6 +1904,7 @@ function selectBombMonthByPolicy(state, playerKey, bombMonths, policy = DEFAULT_
 function shouldBombByPolicy(state, playerKey, bombMonths, policy = DEFAULT_BOT_POLICY) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
   return dispatchHeuristicPolicyCall(ctx, {
+    v7: ({ decisionState, deps, params }) => shouldBombV7(decisionState, playerKey, bombMonths, deps, params),
     v6: ({ decisionState, deps, params }) => shouldBombV6(decisionState, playerKey, bombMonths, deps, params),
     v5: ({ decisionState, deps, params }) => shouldBombV5(decisionState, playerKey, bombMonths, deps, params),
     v4: ({ decisionState, deps }) => shouldBombV4(decisionState, playerKey, bombMonths, deps),
@@ -1797,6 +1915,7 @@ function shouldBombByPolicy(state, playerKey, bombMonths, policy = DEFAULT_BOT_P
 function decideShakingByPolicy(state, playerKey, shakingMonths, policy = DEFAULT_BOT_POLICY) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
   return dispatchHeuristicPolicyCall(ctx, {
+    v7: ({ decisionState, deps, params }) => decideShakingV7(decisionState, playerKey, shakingMonths, deps, params),
     v6: ({ decisionState, deps, params }) => decideShakingV6(decisionState, playerKey, shakingMonths, deps, params),
     v5: ({ decisionState, deps, params }) => decideShakingV5(decisionState, playerKey, shakingMonths, deps, params),
     v4: ({ decisionState, deps }) => decideShakingV4(decisionState, playerKey, shakingMonths, deps),
@@ -1807,6 +1926,7 @@ function decideShakingByPolicy(state, playerKey, shakingMonths, policy = DEFAULT
 function rankHandCardsByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
   return dispatchHeuristicPolicyCall(ctx, {
+    v7: ({ decisionState, deps, params }) => rankHandCardsV7(decisionState, playerKey, deps, params),
     v6: ({ decisionState, deps, params }) => rankHandCardsV6(decisionState, playerKey, deps, params),
     v5: ({ decisionState, deps, params }) => rankHandCardsV5(decisionState, playerKey, deps, params),
     v4: ({ decisionState, deps }) => rankHandCardsV4(decisionState, playerKey, deps),
