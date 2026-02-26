@@ -6,7 +6,9 @@
   [ValidateSet("lean", "full")][string]$KiboDetail = "lean",
   [string]$KiboOut = "",
   [string]$DatasetOut = "",
-  [ValidateSet("all", "human", "ai")][string]$DatasetActor = "all"
+  [ValidateSet("all", "human", "ai")][string]$DatasetActor = "all",
+  [string]$UnresolvedOut = "",
+  [int]$UnresolvedLimit = 0
 )
 
 if ([string]::IsNullOrWhiteSpace($Seed)) {
@@ -30,6 +32,9 @@ if (-not [string]::IsNullOrWhiteSpace($KiboOut)) {
 }
 if (-not [string]::IsNullOrWhiteSpace($DatasetOut)) {
   $cmd += @("--dataset-out", "$DatasetOut", "--dataset-actor", "$DatasetActor")
+}
+if (-not [string]::IsNullOrWhiteSpace($UnresolvedOut)) {
+  $cmd += @("--unresolved-out", "$UnresolvedOut", "--unresolved-limit", "$UnresolvedLimit")
 }
 
 $resultLines = & node @cmd
@@ -73,6 +78,10 @@ if ($r.dataset_out) {
   Write-Host "Dataset Out:      $($r.dataset_out)"
   Write-Host "Dataset Actor:    $($r.dataset_actor)"
   Write-Host "Dataset Rows:     $($r.dataset_rows) (pos=$($r.dataset_positive_rows), decisions=$($r.dataset_decisions), unresolved=$($r.dataset_unresolved_decisions))"
+}
+if ($r.unresolved_out) {
+  Write-Host "Unresolved Out:   $($r.unresolved_out)"
+  Write-Host "Unresolved Rows:  $($r.unresolved_rows) (decisions=$($r.unresolved_decisions), rate=$($r.unresolved_decision_rate))"
 }
 Write-Host "Wins A/B/Draw:    $($r.wins_a) / $($r.wins_b) / $($r.draws)"
 Write-Host "WinRate A/B:      $($r.win_rate_a) / $($r.win_rate_b)"

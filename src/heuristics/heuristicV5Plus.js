@@ -114,26 +114,23 @@ export const DEFAULT_PARAMS = {
   goZeroOppOneAwayLate: 88,
   goZeroOppOneAwayEarly: 95,
   lateDeckMax: 10,
-  // Upside/Risk 유틸리티 계수 (V5Plus 신규)
-  goUpsideScoreMul: 0.09,       // 현재 점수 upside 가중
-  goUpsidePiMul: 0.055,         // pi 개수 upside 가중
-  goUpsideSelfJokboMul: 0.45,   // 자기 jokbo potential upside
-  goUpsideOneAwayMul: 0.13,     // 자기 one-away 보너스
-  goUpsideTrailBonus: 0.10,     // 뒤처질 때 go 인센티브
-  goUpsideCarryMul: 0.12,       // carry-over가 높을수록 stop 인센티브
-  goRiskPressureMul: 0.30,
-  goRiskOneAwayMul: 0.22,
-  goRiskOppJokboMul: 0.28,
-  goRiskOppOneAwayMul: 0.06,
-  goRiskGoCountMul: 0.05,
-  goRiskLateDeckBonus: 0.07,
-  goRiskSecondMoverMul: 0.08,   // 후공이면 리스크 추가 (V5Plus 신규)
-  stopLeadMul: 0.08,
-  stopCarryMul: 0.10,
-  stopTenBonus: 0.18,
-  goUtilityThreshold: -0.05,    // upside - risk - stopValue 이 임계값 이상이면 GO
-  goUtilityThresholdLead: 0.04, // 리드 중엔 임계값 상향 (더 보수적)
-  goUtilityThresholdTrail: -0.12, // 뒤처질 땐 임계값 하향 (더 공격적)
+  // Upside/Risk 유틸리티 계수 (V5Plus 신규 - GO 억제 방향)
+  goUpsideScoreMul: 0.07,       // 현재 점수 upside
+  goUpsidePiMul: 0.030,         // pi upside (낮게)
+  goUpsideSelfJokboMul: 0.35,   // 자기 jokbo potential
+  goUpsideOneAwayMul: 0.10,     // 자기 one-away 보너스
+  goUpsideCarryMul: 0.10,       // carry-over stop 인센티브
+  goRiskPressureMul: 0.35,      // 위협 리스크 (높게)
+  goRiskOneAwayMul: 0.28,       // one-away 리스크 (높게)
+  goRiskOppJokboMul: 0.30,
+  goRiskOppOneAwayMul: 0.07,
+  goRiskGoCountMul: 0.10,       // go 횟수 리스크 (높게)
+  goRiskLateDeckBonus: 0.08,
+  goRiskSecondMoverMul: 0.12,   // 후공 리스크 추가
+  stopLeadMul: 0.09,
+  stopCarryMul: 0.12,
+  stopTenBonus: 0.20,
+  goUtilityThreshold: 0.10,     // 높은 임계값 = GO 억제 (V5 보다 보수적)
 
   // ── shouldBomb / selectBombMonth ──
   bombMinPiAdvantage: 1,
@@ -304,8 +301,8 @@ function rankHandCardsV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const mongBak = safeNum(ctx.selfFive) <= 0 && safeNum(ctx.oppFive) >= 7;
   const deckCount = safeNum(state.deck?.length);
   const deck = deckCount;
-  const bCnt = deps.monthCounts?.(state.board || []) || new Map();
-  const hCnt = deps.monthCounts?.(player?.hand || []) || new Map();
+  const bCnt = (state.board || []).length;
+  const hCnt = (player?.hand || []).length;
   const lp = getLiveDoublePiMonths(state);
   const plan = deps.getFirstTurnDoublePiPlan(state, playerKey);
   const sec = isSecondMover(state, playerKey);
@@ -542,15 +539,20 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const gL = Math.max(3, Math.min(5, Math.round(safeNum(P.goOppScoreGateLow, 4))));
 
   if (oppScoreRisk >= gH) return false;
+
+  // ── 분기별 즉시 return (V5와 동일 구조) - 유틸리티 체크 이전에 결정 ──
   if (oppScoreRisk >= gH - 1) {
     if (_stopForOppFour(state, playerKey, deps, 1, 2) || sec) return false;
     const bigLead = diff >= P.goBigLeadScoreDiff && myScore >= P.goBigLeadMinScore;
     const lowThreat = tr.oppOneAwayProb < (late ? P.goBigLeadOneAwayLate : P.goBigLeadOneAwayEarly)
       && tr.jokboThreat < P.goBigLeadJokboThresh && tr.nextThreat < P.goBigLeadNextThresh;
+    // V5와 동일: 조건 충족 못하면 즉시 STOP
     if (!bigLead || !lowThreat) return false;
+    // 조건 충족 시 유틸리티 필터로 추가 억제
   } else if (oppScoreRisk >= gL) {
     if (_stopForOppFour(state, playerKey, deps, 2, 3)) return false;
     if (tr.oppOneAwayProb >= (late ? P.goOneAwayThreshOpp4Late : P.goOneAwayThreshOpp4Early) - secG) return false;
+    // 통과 시 유틸리티 필터 적용
   } else if (oppScoreRisk >= 1) {
     if (oppScoreRisk === 3 && tr.jokboThreat >= 0.5) return false;
     const base = oppScoreRisk === 3 ? P.goOneAwayThreshOpp3
@@ -560,15 +562,16 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
       || tr.nextThreat >= P.goOpp12NextThresh
       || (late && tr.jokboThreat >= 0.4))) return false;
     if (sec && diff <= 0 && tr.oppOneAwayProb >= base - 5 - secG) return false;
+    // 통과 시 유틸리티 필터 적용
   } else {
     const zThresh = late ? safeNum(P.goZeroOppOneAwayLate, 88) : safeNum(P.goZeroOppOneAwayEarly, 95);
     if (tr.oppOneAwayProb >= zThresh) return false;
+    // 통과 시 유틸리티 필터 적용
   }
 
-  // ── V5Plus 추가: 유틸리티 비교 모델 ──
-  // 기본 게이트를 통과한 경우, upside vs risk vs stopValue 비교
-  const trailing = diff < 0;
-  const leading = diff > 0;
+  // ── V5Plus 추가: 유틸리티 후처리 필터 ──
+  // V5 게이트를 통과한 GO 결정 중 일부를 추가로 억제한다.
+  // (GO 횟수 감소 방향 - 실패율 개선 목적)
   const carry = safeNum(state.carryOverMultiplier, 1);
   const goCount = safeNum(state.players?.[playerKey]?.goCount, 0);
 
@@ -580,8 +583,7 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
     selfPi * P.goUpsidePiMul +
     safeNum(selfJokbo.total) * P.goUpsideSelfJokboMul +
     safeNum(selfJokbo.oneAwayCount) * P.goUpsideOneAwayMul +
-    (trailing ? P.goUpsideTrailBonus : 0) +
-    (oppPiBase <= 5 ? 0.03 : 0);
+    (oppPiBase <= 5 ? 0.02 : 0);
 
   const oneAwayProbNorm = tr.oppOneAwayProb / 100;
   const risk =
@@ -591,19 +593,16 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
     safeNum(oppJokbo.oneAwayCount) * P.goRiskOppOneAwayMul +
     goCount * P.goRiskGoCountMul +
     (tr.deckCount <= 10 ? P.goRiskLateDeckBonus : 0) +
-    (sec ? safeNum(P.goRiskSecondMoverMul, 0.08) : 0);
+    (sec ? safeNum(P.goRiskSecondMoverMul, 0.12) : 0);
 
   const stopValue =
     Math.max(0, diff) * P.stopLeadMul +
     Math.max(0, carry - 1) * P.stopCarryMul +
     (myScore >= 10 ? P.stopTenBonus : 0);
 
-  // 상황별 임계값 조정
-  let utilityThreshold = safeNum(P.goUtilityThreshold, -0.05);
-  if (leading) utilityThreshold += safeNum(P.goUtilityThresholdLead, 0.04);
-  if (trailing) utilityThreshold -= Math.abs(safeNum(P.goUtilityThresholdTrail, -0.12));
-  // carry-over가 높을수록 stop 인센티브 증가
-  if (carry >= 2) utilityThreshold += carry * safeNum(P.goUpsideCarryMul, 0.12);
+  // carry-over 시 보수적으로
+  let utilityThreshold = safeNum(P.goUtilityThreshold, 0.10);
+  if (carry >= 2) utilityThreshold += carry * safeNum(P.goUpsideCarryMul, 0.10);
 
   const utility = upside - risk - stopValue;
   return utility >= utilityThreshold;

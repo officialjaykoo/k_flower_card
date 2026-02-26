@@ -37,6 +37,8 @@ function parseArgs(argv) {
     kiboOut: "",
     datasetOut: "",
     datasetActor: "all",
+    unresolvedOut: "",
+    unresolvedLimit: 0,
   };
 
   while (args.length > 0) {
@@ -64,6 +66,9 @@ function parseArgs(argv) {
     else if (key === "--kibo-out") out.kiboOut = String(value || "").trim();
     else if (key === "--dataset-out") out.datasetOut = String(value || "").trim();
     else if (key === "--dataset-actor") out.datasetActor = String(value || "all").trim().toLowerCase();
+    else if (key === "--unresolved-out") out.unresolvedOut = String(value || "").trim();
+    else if (key === "--unresolved-limit")
+      out.unresolvedLimit = Math.max(0, Math.floor(Number(value || 0)));
     else throw new Error(`Unknown argument: ${key}`);
   }
 
@@ -94,6 +99,9 @@ function parseArgs(argv) {
   }
   if (out.datasetActor !== "all" && out.datasetActor !== "human" && out.datasetActor !== "ai") {
     throw new Error(`invalid --dataset-actor: ${out.datasetActor} (allowed: all, human, ai)`);
+  }
+  if (!Number.isFinite(out.unresolvedLimit) || out.unresolvedLimit < 0) {
+    throw new Error(`invalid --unresolved-limit: ${out.unresolvedLimit} (expected >= 0)`);
   }
 
   return out;
@@ -459,8 +467,65 @@ function normalizeDecisionCandidate(decisionType, candidate) {
   return String(candidate || "").trim();
 }
 
+function inferCandidateFromKiboTransition(stateBefore, actor, decisionType, candidates, stateAfter) {
+  const beforeLen = Array.isArray(stateBefore?.kibo) ? stateBefore.kibo.length : 0;
+  const afterKibo = Array.isArray(stateAfter?.kibo) ? stateAfter.kibo : [];
+  if (afterKibo.length <= beforeLen) return null;
+
+  const candidateSet = new Set((candidates || []).map((c) => normalizeDecisionCandidate(decisionType, c)));
+  for (let i = afterKibo.length - 1; i >= beforeLen; i -= 1) {
+    const ev = afterKibo[i];
+    if (String(ev?.type || "") !== "turn_end") continue;
+    if (String(ev?.actor || "") !== String(actor || "")) continue;
+    const actionType = String(ev?.action?.type || "").trim().toLowerCase();
+
+    if (decisionType === "play" && actionType === "play") {
+      const playedId = String(ev?.action?.card?.id || "").trim();
+      if (playedId && candidateSet.has(playedId)) return playedId;
+    }
+    if (decisionType === "match" && actionType === "play") {
+      const selectedBoardId = String(ev?.action?.selectedBoardCard?.id || "").trim();
+      if (selectedBoardId && candidateSet.has(selectedBoardId)) return selectedBoardId;
+    }
+    break;
+  }
+  return null;
+}
+
+function inferPlayCandidateFromHandDiff(stateBefore, actor, candidates, stateAfter) {
+  const beforeHand = Array.isArray(stateBefore?.players?.[actor]?.hand) ? stateBefore.players[actor].hand : [];
+  const afterHand = Array.isArray(stateAfter?.players?.[actor]?.hand) ? stateAfter.players[actor].hand : [];
+  const beforeIds = new Set(beforeHand.map((c) => String(c?.id || "")).filter((id) => id.length > 0));
+  const afterIds = new Set(afterHand.map((c) => String(c?.id || "")).filter((id) => id.length > 0));
+  const removed = [];
+  for (const candidate of candidates || []) {
+    const id = String(candidate || "").trim();
+    if (!id) continue;
+    if (beforeIds.has(id) && !afterIds.has(id)) removed.push(id);
+  }
+  if (removed.length === 1) return removed[0];
+  return null;
+}
+
 function inferChosenCandidateFromTransition(stateBefore, actor, decisionType, candidates, stateAfter) {
   if (!stateAfter || !Array.isArray(candidates) || !candidates.length) return null;
+
+  // Prefer explicit action traces over simulation replay when available.
+  const kiboInferred = inferCandidateFromKiboTransition(
+    stateBefore,
+    actor,
+    decisionType,
+    candidates,
+    stateAfter
+  );
+  if (kiboInferred) return normalizeDecisionCandidate(decisionType, kiboInferred);
+
+  // For play decisions, the selected card should disappear from actor hand.
+  if (decisionType === "play") {
+    const handDiffInferred = inferPlayCandidateFromHandDiff(stateBefore, actor, candidates, stateAfter);
+    if (handDiffInferred) return normalizeDecisionCandidate(decisionType, handDiffInferred);
+  }
+
   const target = stateProgressKey(stateAfter);
   for (const candidate of candidates) {
     const simulated = applyAction(stateBefore, actor, decisionType, candidate);
@@ -488,6 +553,57 @@ function randomLegalAction(state, actor, rng) {
   if (!candidates.length) return state;
   const picked = randomChoice(candidates, rng);
   return applyAction(state, actor, decisionType, picked);
+}
+
+function incrementCounter(map, key) {
+  const k = String(key || "");
+  if (!k) return;
+  map[k] = Number(map[k] || 0) + 1;
+}
+
+function cardIdList(cards) {
+  if (!Array.isArray(cards)) return [];
+  return cards.map((c) => String(c?.id || "")).filter((id) => id.length > 0);
+}
+
+function tailKiboEvents(stateBefore, stateAfter) {
+  const beforeLen = Array.isArray(stateBefore?.kibo) ? stateBefore.kibo.length : 0;
+  const afterKibo = Array.isArray(stateAfter?.kibo) ? stateAfter.kibo : [];
+  if (afterKibo.length <= beforeLen) return [];
+  return afterKibo.slice(beforeLen);
+}
+
+function unresolvedTraceRow(decision, stateAfter, gameIndex, seed, firstTurnKey) {
+  const actor = String(decision?.actor || "");
+  const stateBefore = decision?.stateBefore || null;
+  const beforePlayer = stateBefore?.players?.[actor] || {};
+  const afterPlayer = stateAfter?.players?.[actor] || {};
+  return {
+    game_index: gameIndex,
+    seed,
+    first_turn: firstTurnKey,
+    step: Number(decision?.step || 0),
+    actor,
+    actor_policy: String(decision?.policy || ""),
+    action_source: String(decision?.actionSource || ""),
+    decision_type: String(decision?.decisionType || ""),
+    legal_count: Array.isArray(decision?.candidates) ? decision.candidates.length : 0,
+    candidates: Array.isArray(decision?.candidates) ? decision.candidates : [],
+    inferred_candidate: decision?.chosenCandidate || null,
+    phase_before: String(stateBefore?.phase || ""),
+    phase_after: String(stateAfter?.phase || ""),
+    state_key_before: stateProgressKey(stateBefore),
+    state_key_after: stateProgressKey(stateAfter),
+    actor_hand_before: cardIdList(beforePlayer?.hand),
+    actor_hand_after: cardIdList(afterPlayer?.hand),
+    actor_capture_before: cardIdList(beforePlayer?.capture),
+    actor_capture_after: cardIdList(afterPlayer?.capture),
+    pending_match_before: stateBefore?.pendingMatch || null,
+    pending_match_after: stateAfter?.pendingMatch || null,
+    declarable_shaking_months: getDeclarableShakingMonths(stateBefore, actor),
+    declarable_bomb_months: getDeclarableBombMonths(stateBefore, actor),
+    kibo_delta: tailKiboEvents(stateBefore, stateAfter),
+  };
 }
 
 function resolveFirstTurnKey(opts, gameIndex) {
@@ -559,6 +675,7 @@ function playSingleRound(initialState, seed, policyByActor, maxSteps, onDecision
       );
       onDecision({
         stateBefore: state,
+        stateAfter: next,
         actor,
         policy,
         decisionType,
@@ -681,9 +798,23 @@ function main() {
     decisions: 0,
     unresolved_decisions: 0,
   };
+  let unresolvedWriter = null;
+  const unresolvedStats = {
+    decisions: 0,
+    unresolved_decisions: 0,
+    unresolved_rows: 0,
+    by_actor: {},
+    by_policy: {},
+    by_decision_type: {},
+    by_action_source: {},
+  };
   if (opts.datasetOut) {
     mkdirSync(dirname(opts.datasetOut), { recursive: true });
     datasetWriter = createWriteStream(opts.datasetOut, { flags: "w", encoding: "utf8" });
+  }
+  if (opts.unresolvedOut) {
+    mkdirSync(dirname(opts.unresolvedOut), { recursive: true });
+    unresolvedWriter = createWriteStream(opts.unresolvedOut, { flags: "w", encoding: "utf8" });
   }
 
   const actorA = "human";
@@ -736,42 +867,67 @@ function main() {
       policyByActor,
       Math.max(20, Math.floor(opts.maxSteps)),
       (decision) => {
-        if (!datasetWriter) return;
+        if (!datasetWriter && !unresolvedWriter) return;
         if (opts.datasetActor !== "all" && decision.actor !== opts.datasetActor) return;
-        datasetStats.decisions += 1;
+        if (datasetWriter) datasetStats.decisions += 1;
+        unresolvedStats.decisions += 1;
         const legalCount = decision.candidates.length;
         if (legalCount <= 0) return;
         let matched = false;
-        for (const candidate of decision.candidates) {
-          const candidateNorm = normalizeDecisionCandidate(decision.decisionType, candidate);
-          const isChosen = candidateNorm === decision.chosenCandidate ? 1 : 0;
-          if (isChosen) matched = true;
-          const row = {
-            game_index: gi,
-            seed,
-            first_turn: firstTurnKey,
-            step: decision.step,
-            actor: decision.actor,
-            actor_policy: decision.policy,
-            action_source: decision.actionSource,
-            decision_type: decision.decisionType,
-            legal_count: legalCount,
-            candidate: candidateNorm,
-            chosen: isChosen,
-            chosen_candidate: decision.chosenCandidate,
-            features: featureVectorForCandidate(
-              decision.stateBefore,
-              decision.actor,
-              decision.decisionType,
-              candidate,
-              legalCount
-            ),
-          };
-          datasetWriter.write(`${JSON.stringify(row)}\n`);
-          datasetStats.rows += 1;
-          if (isChosen) datasetStats.positive_rows += 1;
+        if (datasetWriter) {
+          for (const candidate of decision.candidates) {
+            const candidateNorm = normalizeDecisionCandidate(decision.decisionType, candidate);
+            const isChosen = candidateNorm === decision.chosenCandidate ? 1 : 0;
+            if (isChosen) matched = true;
+            const row = {
+              game_index: gi,
+              seed,
+              first_turn: firstTurnKey,
+              step: decision.step,
+              actor: decision.actor,
+              actor_policy: decision.policy,
+              action_source: decision.actionSource,
+              decision_type: decision.decisionType,
+              legal_count: legalCount,
+              candidate: candidateNorm,
+              chosen: isChosen,
+              chosen_candidate: decision.chosenCandidate,
+              features: featureVectorForCandidate(
+                decision.stateBefore,
+                decision.actor,
+                decision.decisionType,
+                candidate,
+                legalCount
+              ),
+            };
+            datasetWriter.write(`${JSON.stringify(row)}\n`);
+            datasetStats.rows += 1;
+            if (isChosen) datasetStats.positive_rows += 1;
+          }
+        } else {
+          for (const candidate of decision.candidates) {
+            const candidateNorm = normalizeDecisionCandidate(decision.decisionType, candidate);
+            if (candidateNorm === decision.chosenCandidate) {
+              matched = true;
+              break;
+            }
+          }
         }
-        if (!matched) datasetStats.unresolved_decisions += 1;
+        if (!matched) {
+          if (datasetWriter) datasetStats.unresolved_decisions += 1;
+          unresolvedStats.unresolved_decisions += 1;
+          incrementCounter(unresolvedStats.by_actor, decision.actor);
+          incrementCounter(unresolvedStats.by_policy, decision.policy);
+          incrementCounter(unresolvedStats.by_decision_type, decision.decisionType);
+          incrementCounter(unresolvedStats.by_action_source, decision.actionSource);
+          const withinLimit =
+            opts.unresolvedLimit <= 0 || unresolvedStats.unresolved_rows < opts.unresolvedLimit;
+          if (withinLimit && unresolvedWriter) {
+            const traceRow = unresolvedTraceRow(decision, decision.stateAfter, gi, seed, firstTurnKey);
+            unresolvedWriter.write(`${JSON.stringify(traceRow)}\n`);
+            unresolvedStats.unresolved_rows += 1;
+          }
+        }
       }
     );
     const afterDiffA = goldDiffByActor(endState, actorA);
@@ -845,6 +1001,16 @@ function main() {
     dataset_positive_rows: datasetStats.positive_rows,
     dataset_decisions: datasetStats.decisions,
     dataset_unresolved_decisions: datasetStats.unresolved_decisions,
+    unresolved_out: opts.unresolvedOut || null,
+    unresolved_limit: opts.unresolvedLimit,
+    unresolved_rows: unresolvedStats.unresolved_rows,
+    unresolved_decisions: unresolvedStats.unresolved_decisions,
+    unresolved_decision_rate:
+      unresolvedStats.decisions > 0 ? unresolvedStats.unresolved_decisions / unresolvedStats.decisions : 0,
+    unresolved_by_actor: unresolvedStats.by_actor,
+    unresolved_by_policy: unresolvedStats.by_policy,
+    unresolved_by_decision_type: unresolvedStats.by_decision_type,
+    unresolved_by_action_source: unresolvedStats.by_action_source,
     bankrupt,
     session_rounds: {
       total_rounds: seriesSession.roundsPlayed,
@@ -876,6 +1042,7 @@ function main() {
 
   if (kiboWriter) kiboWriter.end();
   if (datasetWriter) datasetWriter.end();
+  if (unresolvedWriter) unresolvedWriter.end();
 
   process.stdout.write(`${JSON.stringify(summary)}\n`);
 }

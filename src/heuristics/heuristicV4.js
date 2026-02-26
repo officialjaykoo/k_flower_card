@@ -124,7 +124,11 @@ function getComboHoldMonths(state, playerKey, deps) {
 function discardTieOrderScore(card, deps, monthIsLiveDoublePi) {
   if (card?.bonus?.stealPi) return 6;
   if (isDoublePiLike(card, deps) && monthIsLiveDoublePi) return 1;
-  if (card?.category === "five") return 5; // ??  if (card?.category === "ribbon") return 4; // ??  if (card?.category === "kwang") return 3; // 愿?  if (card?.category === "junk") return 2; // ??  return 2;
+  if (card?.category === "five") return 5;
+  if (card?.category === "ribbon") return 4;
+  if (card?.category === "kwang") return 3;
+  if (card?.category === "junk") return 2;
+  return 2;
 }
 
 function rankHandCardsV4(state, playerKey, deps) {
