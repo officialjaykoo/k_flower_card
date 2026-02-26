@@ -2,10 +2,19 @@
 import { POINT_GOLD_UNIT, settleRoundGold } from "./economy.js";
 import { ruleSets } from "./rules.js";
 
+/* ============================================================================
+ * Round resolution pipeline
+ * - score/bak calculation
+ * - STOP/GO-fail/nagari handling
+ * - carry-over and gold settlement
+ * ========================================================================== */
+
+/* 1) Helper predicates */
 function isFailedGo(player, currentBase) {
   return player.goCount > 0 && currentBase <= player.lastGoBase;
 }
 
+/* 2) Gukjin transform helpers (STOP defensive auto-convert) */
 function hasTransformableGukjinFive(player) {
   return (player?.captured?.five || []).some(
     (card) => isGukjinCard(card) && card?.category === "five" && !card?.gukjinTransformed
@@ -47,6 +56,7 @@ export function resolveRound(state, stopperKey) {
   let workingState = state;
   const autoGukjinLogs = [];
 
+  /* 3) STOP-triggered auto gukjin transform (defense against pi-bak) */
   if (hasStopper) {
     const loserKey = stopperKey === "human" ? "ai" : "human";
     const winnerPlayer = workingState.players?.[stopperKey];
@@ -69,6 +79,7 @@ export function resolveRound(state, stopperKey) {
     }
   }
 
+  /* 4) Base score calculation (+ ppuk instant-win override) */
   let humanScore = calculateScore(workingState.players.human, workingState.players.ai, workingState.ruleKey);
   let aiScore = calculateScore(workingState.players.ai, workingState.players.human, workingState.ruleKey);
   const humanBaseOnly = calculateBaseScore(workingState.players.human, rules).base;
@@ -86,6 +97,7 @@ export function resolveRound(state, stopperKey) {
     }
   }
 
+  /* 5) Winner decision (ppuk > stopper override > score) */
   let winner =
     humanPpukWin && !aiPpukWin
       ? "human"
@@ -102,6 +114,7 @@ export function resolveRound(state, stopperKey) {
     winner = stopperKey;
   }
 
+  /* 6) GO-fail adjustments */
   const humanFailedGo = isFailedGo(workingState.players.human, humanBaseOnly);
   const aiFailedGo = isFailedGo(workingState.players.ai, aiBaseOnly);
 
@@ -119,6 +132,7 @@ export function resolveRound(state, stopperKey) {
     }
   }
 
+  /* 7) Nagari detection */
   const nagariReasons = [];
   if (winner === "draw") nagariReasons.push("무승부");
   if (humanScore.base <= 0 && aiScore.base <= 0) nagariReasons.push("양측 무득점");
@@ -132,6 +146,7 @@ export function resolveRound(state, stopperKey) {
   let resolvedWinner = winner;
   let dokbakApplied = false;
 
+  /* 8) Multiplier effects: carry-over / president hold / dokbak */
   if (nagari) {
     nextCarryOverMultiplier = carry * 2;
     resolvedWinner = "draw";
@@ -197,6 +212,7 @@ export function resolveRound(state, stopperKey) {
     }
   }
 
+  /* 9) Gold settlement and round-end log assembly */
   const settled =
     !nagari && (resolvedWinner === "human" || resolvedWinner === "ai")
       ? settleRoundGold(
@@ -223,6 +239,7 @@ export function resolveRound(state, stopperKey) {
     .concat(dokbakApplied ? ["독박 적용: STOP 승리 배상 2배"] : [])
     .concat(nagari ? [`나가리(${nagariReasons.join(", ")}): 다음 판 배수 x${nextCarryOverMultiplier}`] : []);
 
+  /* 10) Final resolution state */
   return {
     ...workingState,
     phase: "resolution",

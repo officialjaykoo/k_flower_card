@@ -9,13 +9,17 @@
   decideShakingV4
 };
 
+/* ============================================================================
+ * Heuristic V4
+ * - stricter rule-gate policy focused on STOP safety and pi/combo threats
+ * - explicit high-risk filters before GO/BOMB/SHAKING decisions
+ * ========================================================================== */
+
+/* 1) Core numeric/card helpers and shared constants */
 function safeNumber(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
-
-// heuristicV4.js
-// Structured rule-based policy with scenario gates.
 
 const GUKJIN_CARD_ID = "I0";
 const DOUBLE_PI_MONTHS = Object.freeze([11, 12, 13]);
@@ -131,6 +135,7 @@ function discardTieOrderScore(card, deps, monthIsLiveDoublePi) {
   return 2;
 }
 
+/* 2) Hand ranking (primary card-play ordering) */
 function rankHandCardsV4(state, playerKey, deps) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
@@ -283,6 +288,7 @@ function rankHandCardsV4(state, playerKey, deps) {
   return ranked;
 }
 
+/* 3) Pending decision handlers (match / gukjin / president) */
 function chooseMatchHeuristicV4(state, playerKey, deps) {
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
@@ -368,6 +374,7 @@ function chooseGukjinHeuristicV4(state, playerKey, deps) {
   return "junk";
 }
 
+/* 4) GO threat-model helpers */
 function isBonusCard(card) {
   return safeNumber(card?.bonus?.stealPi, 0) > 0;
 }
@@ -625,6 +632,7 @@ function summarizeOppGukjinCase(branch, oppMode) {
   };
 }
 
+/* 5) GO decision */
 function shouldGoV4(state, playerKey, deps) {
   if (deps.canBankruptOpponentByStop(state, playerKey)) return false;
 
@@ -721,6 +729,7 @@ function shouldGoV4(state, playerKey, deps) {
   return true;
 }
 
+/* 6) Bomb helpers and decision */
 function hasOnlyBombMatchOption(state, playerKey, bombMonths, deps) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return false;
@@ -793,6 +802,7 @@ function shouldBombV4(state, playerKey, bombMonths, deps) {
   return onlyBombMatch && canStealDoublePi && scoreIsSeven;
 }
 
+/* 7) Shaking decision */
 function decideShakingV4(state, playerKey, shakingMonths, deps) {
   if (!Array.isArray(shakingMonths) || !shakingMonths.length) {
     return { allow: false, month: null, score: -Infinity, highImpact: false };

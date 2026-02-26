@@ -1,6 +1,14 @@
-import readmeRaw from "../../../README.md?raw";
+﻿import readmeRaw from "../../../README.md?raw";
 import { DEFAULT_LANGUAGE, makeTranslator } from "../i18n/i18n.js";
 
+/* ============================================================================
+ * External popup helpers
+ * - card guide popup
+ * - rules popup (README-driven)
+ * - filtered game log popup
+ * ========================================================================== */
+
+/* 1) Basic formatting helpers */
 function escapeHtml(text) {
   return String(text ?? "")
     .replaceAll("&", "&amp;")
@@ -19,6 +27,7 @@ function popupBlockedAlert(t) {
   window.alert(t("popup.blocked"));
 }
 
+/* 2) Card/rules html builders */
 function renderCards(cards) {
   return cards
     .map((card) => {
@@ -121,6 +130,7 @@ function getPopupTranslator(language) {
   return makeTranslator(language || DEFAULT_LANGUAGE);
 }
 
+/* 3) Popup openers */
 export function openCardGuidePopup({ monthCards, bonusCards, language = DEFAULT_LANGUAGE }) {
   const t = getPopupTranslator(language);
   const popup = window.open("", "kflower-card-guide", "width=1080,height=780,resizable=yes,scrollbars=yes");
@@ -244,6 +254,7 @@ function hiddenPatternsForLogs(language = DEFAULT_LANGUAGE) {
   return Array.from(set);
 }
 
+/* 4) Game log popup */
 export function openGameLogPopup({ log = [], language = DEFAULT_LANGUAGE }) {
   const t = getPopupTranslator(language);
   const popup = window.open("", "kflower-game-log", "width=980,height=760,resizable=yes,scrollbars=yes");
@@ -252,8 +263,9 @@ export function openGameLogPopup({ log = [], language = DEFAULT_LANGUAGE }) {
     return;
   }
 
+  const hiddenPatterns = hiddenPatternsForLogs(language);
   const visibleLogs = log.filter(
-    (line) => !hiddenPatternsForLogs(language).some((pattern) => String(line).includes(pattern))
+    (line) => !hiddenPatterns.some((pattern) => String(line).includes(pattern))
   );
   const logsHtml =
     visibleLogs.length > 0

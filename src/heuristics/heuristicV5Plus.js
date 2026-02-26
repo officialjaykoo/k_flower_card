@@ -9,22 +9,21 @@
   decideShakingV5Plus,
 };
 
-// heuristicV5Plus.js – Matgo Heuristic V5Plus
-// Strategy  : V5 framework + 3 targeted upgrades
-//   A) Phase-aware scoring (early / mid / late deck)
-//   B) Utility-comparison go-stop model (upside vs risk vs stop-value)
-//   C) Forward-blocking chooseMatch (prefer combo-blocking captures)
-//
-// Optuna 파라미터는 환경변수 HEURISTIC_V5PLUS_PARAMS 로 덮어쓸 수 있습니다.
+/* ============================================================================
+ * Heuristic V5Plus
+ * - V5 baseline + targeted upgrades:
+ *   1) phase-aware scoring
+ *   2) utility-filtered GO gate
+ *   3) forward-blocking chooseMatch
+ * ========================================================================== */
 
+/* 1) Constants and parameter surface */
 const GUKJIN_CARD_ID = "I0";
 const DOUBLE_PI_MONTHS = Object.freeze([11, 12, 13]);
 const BONUS_CARD_ID_SET = Object.freeze(new Set(["M0", "M1"]));
 const SSANGPI_WITH_GUKJIN_ID_SET = Object.freeze(new Set(["K1", "L3", GUKJIN_CARD_ID]));
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DEFAULT_PARAMS – V5 trial0 기준값 유지 + V5Plus 전용 파라미터 추가
-// ─────────────────────────────────────────────────────────────────────────────
+/* 2) Parameter defaults (V5 base + V5Plus additions) */
 export const DEFAULT_PARAMS = {
   // ── 페이즈 경계 ──
   phaseEarlyDeck: 18,          // 덱이 이 이상이면 early
@@ -144,9 +143,7 @@ export const DEFAULT_PARAMS = {
   shakingAheadPenalty: 0.05,
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 유틸리티 헬퍼
-// ─────────────────────────────────────────────────────────────────────────────
+/* 3) Shared helpers */
 function safeNum(v, def = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : Number.isFinite(def) ? def : 0;
@@ -269,16 +266,14 @@ function discardTieOrder(card, deps, livePi) {
   return { five: 5, ribbon: 4, kwang: 3 }[card?.category] ?? 2;
 }
 
-// 게임 페이즈 판별
+/* Phase resolver */
 function resolvePhase(deckCount, P) {
   if (deckCount >= safeNum(P.phaseEarlyDeck, 18)) return "early";
   if (deckCount >= safeNum(P.phaseMidDeck, 10)) return "mid";
   return "late";
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 1. rankHandCardsV5Plus  (V5 기반 + 페이즈 가중치)
-// ─────────────────────────────────────────────────────────────────────────────
+/* 4) Hand ranking (phase-aware V5 baseline) */
 function rankHandCardsV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   const player = state.players?.[playerKey];
@@ -436,9 +431,7 @@ function rankHandCardsV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   return ranked;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. chooseMatchHeuristicV5Plus  (V5 기반 + 전방 블로킹 우선순위)
-// ─────────────────────────────────────────────────────────────────────────────
+/* 5) Pending match-card selection (forward-blocking) */
 function chooseMatchHeuristicV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   const ids = state.pendingMatch?.boardCardIds || [];
@@ -487,9 +480,7 @@ function chooseMatchHeuristicV5Plus(state, playerKey, deps, params = DEFAULT_PAR
   return best?.id ?? null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 3. shouldGoV5Plus  (유틸리티 비교 모델)
-// ─────────────────────────────────────────────────────────────────────────────
+/* 6) GO/STOP decision (utility-filtered V5 gate) */
 function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
 
@@ -608,9 +599,7 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   return utility >= utilityThreshold;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 4. shouldPresidentStopV5Plus  (V5와 동일)
-// ─────────────────────────────────────────────────────────────────────────────
+/* 7) President/Gukjin decisions */
 function shouldPresidentStopV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const ctx = deps.analyzeGameContext(state, playerKey);
   const diff = safeNum(ctx.myScore) - safeNum(ctx.oppScore);
@@ -621,9 +610,6 @@ function shouldPresidentStopV5Plus(state, playerKey, deps, params = DEFAULT_PARA
   return diff >= 1;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 5. chooseGukjinHeuristicV5Plus  (V5와 동일)
-// ─────────────────────────────────────────────────────────────────────────────
 function chooseGukjinHeuristicV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const ctx = deps.analyzeGameContext(state, playerKey);
   const br = deps.analyzeGukjinBranches(state, playerKey);
@@ -638,9 +624,7 @@ function chooseGukjinHeuristicV5Plus(state, playerKey, deps, params = DEFAULT_PA
   return sf >= 7 ? "five" : "junk";
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 6. selectBombMonthV5Plus  (V5와 동일)
-// ─────────────────────────────────────────────────────────────────────────────
+/* 8) Bomb decision helpers */
 function selectBombMonthV5Plus(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
   if (!bombMonths?.length) return null;
   const months = [...bombMonths];
@@ -648,9 +632,6 @@ function selectBombMonthV5Plus(state, playerKey, bombMonths, deps, params = DEFA
     : months.reduce((b, m) => safeNum(deps.monthBoardGain(state, m)) > safeNum(deps.monthBoardGain(state, b)) ? m : b, months[0]);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 7. shouldBombV5Plus
-// ─────────────────────────────────────────────────────────────────────────────
 function shouldBombV5Plus(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
   if (!bombMonths?.length) return false;
   const P = { ...DEFAULT_PARAMS, ...params };
@@ -670,9 +651,7 @@ function shouldBombV5Plus(state, playerKey, bombMonths, deps, params = DEFAULT_P
   return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 8. decideShakingV5Plus  (V5와 동일)
-// ─────────────────────────────────────────────────────────────────────────────
+/* 9) Shaking decision */
 function decideShakingV5Plus(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };

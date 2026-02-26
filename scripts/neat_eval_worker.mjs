@@ -21,6 +21,41 @@ import {
 import { getActionPlayerKey } from "../src/engine/runner.js";
 import { aiPlay } from "../src/ai/aiPlay.js";
 
+// Pipeline Stage: 2/3 (neat_train.py -> neat_eval_worker.mjs -> heuristic_duel_worker.mjs)
+// Quick Read Map (top-down):
+// 1) main()
+// 2) playSingleRound(): per-game simulation loop
+// 3) pickAction()/forward()/compileGenome(): NEAT inference path
+// 4) featureVector(): input feature construction (47 dims)
+// 5) parseArgs()/state transition helpers
+// 6) teacher dataset imitation helpers
+
+// =============================================================================
+// Section 1. Opponent Tuning + CLI
+// =============================================================================
+const FAST_V6_OPPONENT_POLICY = "heuristic_v6";
+const FAST_V6_HEURISTIC_PARAMS = Object.freeze({
+  rolloutTopK: 1,
+  rolloutSamples: 2,
+  rolloutMaxSteps: 12,
+  rolloutCardWeight: 0.7,
+  rolloutGoWeight: 0.18,
+});
+
+function normalizePolicyName(policy) {
+  return String(policy || "").trim().toLowerCase();
+}
+
+function buildOpponentEvalTuning(opponentPolicy) {
+  const normalized = normalizePolicyName(opponentPolicy);
+  const useV6FastPath = normalized === FAST_V6_OPPONENT_POLICY;
+  return {
+    useV6FastPath,
+    disableImitationReference: useV6FastPath,
+    opponentHeuristicParams: useV6FastPath ? FAST_V6_HEURISTIC_PARAMS : null,
+  };
+}
+
 function parseArgs(argv) {
   const args = [...argv];
   const out = {
@@ -91,6 +126,9 @@ function parseArgs(argv) {
   return out;
 }
 
+// =============================================================================
+// Section 2. Engine Action Helpers + Feature Helpers
+// =============================================================================
 function canonicalOptionAction(action) {
   const a = String(action || "").trim();
   if (!a) return "";
@@ -476,6 +514,9 @@ function featureVector(state, actor, decisionType, candidate, legalCount, inputD
   );
 }
 
+// =============================================================================
+// Section 3. NEAT Genome Compile + Forward Pass
+// =============================================================================
 function normalizeDecisionCandidate(decisionType, candidate) {
   if (decisionType === "option") return canonicalOptionAction(candidate);
   return String(candidate || "").trim();
@@ -689,6 +730,9 @@ function pickAction(state, actor, compiled) {
   return { decisionType, candidate: best, candidates };
 }
 
+// =============================================================================
+// Section 4. Round Simulation + Metrics
+// =============================================================================
 function randomChoice(arr, rng) {
   if (!arr.length) return null;
   const idx = Math.max(0, Math.min(arr.length - 1, Math.floor(Number(rng() || 0) * arr.length)));
@@ -736,8 +780,23 @@ function controlGoldDiff(state, controlActor) {
   return controlGold - oppGold;
 }
 
-function playSingleRound(initialState, compiled, seed, controlActor, opponentPolicy, maxSteps, opponentCompiled) {
+function playSingleRound(
+  initialState,
+  compiled,
+  seed,
+  controlActor,
+  opponentPolicy,
+  maxSteps,
+  opponentCompiled,
+  opponentEvalTuning = null
+) {
   const rng = createSeededRng(`${seed}|rng`);
+  const disableImitationReference = !!opponentEvalTuning?.disableImitationReference;
+  const opponentHeuristicParams =
+    opponentEvalTuning?.opponentHeuristicParams &&
+    typeof opponentEvalTuning.opponentHeuristicParams === "object"
+      ? opponentEvalTuning.opponentHeuristicParams
+      : null;
   let state = initialState;
   const imitation = {
     totals: { play: 0, match: 0, option: 0 },
@@ -755,28 +814,30 @@ function playSingleRound(initialState, compiled, seed, controlActor, opponentPol
     if (actor === controlActor) {
       const picked = pickAction(state, actor, compiled);
       if (picked) {
-        const imitationRefPolicy =
-          String(opponentPolicy || "").trim().toLowerCase() === "genome"
-            ? "heuristic_v4"
-            : opponentPolicy;
-        const refCandidate = heuristicCandidateForDecision(
-          state,
-          actor,
-          picked.decisionType,
-          picked.candidates || [],
-          imitationRefPolicy
-        );
-        if (refCandidate) {
-          const key = picked.decisionType;
-          imitation.totals[key] += 1;
-          const chosen = normalizeDecisionCandidate(picked.decisionType, picked.candidate);
-          if (chosen === refCandidate) {
-            imitation.matches[key] += 1;
+        if (!disableImitationReference) {
+          const imitationRefPolicy =
+            normalizePolicyName(opponentPolicy) === "genome"
+              ? "heuristic_v4"
+              : opponentPolicy;
+          const refCandidate = heuristicCandidateForDecision(
+            state,
+            actor,
+            picked.decisionType,
+            picked.candidates || [],
+            imitationRefPolicy
+          );
+          if (refCandidate) {
+            const key = picked.decisionType;
+            imitation.totals[key] += 1;
+            const chosen = normalizeDecisionCandidate(picked.decisionType, picked.candidate);
+            if (chosen === refCandidate) {
+              imitation.matches[key] += 1;
+            }
           }
         }
         next = applyAction(state, actor, picked.decisionType, picked.candidate);
       }
-    } else if (String(opponentPolicy || "").trim().toLowerCase() === "genome") {
+    } else if (normalizePolicyName(opponentPolicy) === "genome") {
       const picked = opponentCompiled ? pickAction(state, actor, opponentCompiled) : null;
       if (picked) {
         next = applyAction(state, actor, picked.decisionType, picked.candidate);
@@ -785,6 +846,7 @@ function playSingleRound(initialState, compiled, seed, controlActor, opponentPol
       next = aiPlay(state, actor, {
         source: "heuristic",
         heuristicPolicy: opponentPolicy,
+        heuristicParams: opponentHeuristicParams,
       });
     }
 
@@ -845,6 +907,9 @@ function buildImitationMetrics(totals, matches) {
   };
 }
 
+// =============================================================================
+// Section 5. Teacher Dataset Imitation
+// =============================================================================
 function normalizeTeacherDecisionType(value) {
   const dt = String(value || "").trim().toLowerCase();
   if (dt === "play" || dt === "match" || dt === "option") return dt;
@@ -952,6 +1017,9 @@ function evaluateTeacherDatasetImitation(compiled, teacherCache) {
   };
 }
 
+// =============================================================================
+// Section 6. Entrypoint
+// =============================================================================
 function main() {
   const evalStartMs = Date.now();
   const opts = parseArgs(process.argv.slice(2));
@@ -975,6 +1043,7 @@ function main() {
   }
 
   const games = Math.max(1, Math.floor(opts.games));
+  const opponentEvalTuning = buildOpponentEvalTuning(opts.opponentPolicy);
   const controlActor = "ai";
   const opponentActor = "human";
   let wins = 0;
@@ -1015,7 +1084,8 @@ function main() {
       controlActor,
       opts.opponentPolicy,
       Math.max(20, Math.floor(opts.maxSteps)),
-      opponentCompiled
+      opponentCompiled,
+      opponentEvalTuning
     );
     const endState = gameResult?.endState || gameResult;
     const afterGoldDiff = controlGoldDiff(endState, controlActor);
@@ -1111,6 +1181,11 @@ function main() {
     control_actor: controlActor,
     opponent_actor: opponentActor,
     opponent_policy: opts.opponentPolicy,
+    opponent_eval_tuning: {
+      v6_fast_path: !!opponentEvalTuning.useV6FastPath,
+      imitation_reference_enabled: !opponentEvalTuning.disableImitationReference,
+      opponent_heuristic_params: opponentEvalTuning.opponentHeuristicParams,
+    },
     opponent_genome: String(opts.opponentGenomePath || "") || null,
     first_turn_policy: opts.firstTurnPolicy,
     fixed_first_turn: opts.firstTurnPolicy === "fixed" ? opts.fixedFirstTurn : null,

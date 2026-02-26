@@ -9,6 +9,14 @@ import {
 } from "./capturesEvents.js";
 import { clearExpiredReveal, ensurePassCardFor } from "./turnFlow.js";
 
+/* ============================================================================
+ * Turn finalization pipeline
+ * - normalize card zones
+ * - resolve ppuk/steal/economy side effects
+ * - transition to next phase (go-stop / resolution / next turn)
+ * ========================================================================== */
+
+/* 1) Card-zone normalization helpers */
 export function normalizeUniqueCardZones(players, board, deck) {
   const seen = new Set();
 
@@ -93,6 +101,7 @@ export function packCard(card) {
   };
 }
 
+/* 2) Declarable action discovery */
 export function getDeclarableShakingMonths(state, playerKey) {
   if (state.phase !== "playing" || state.currentTurn !== playerKey) return [];
   const player = state.players[playerKey];
@@ -133,6 +142,7 @@ export function getShakingReveal(state, now) {
   return state.shakingReveal;
 }
 
+/* 3) Gukjin scoring-time decision helpers */
 function hasPendingGukjinChoice(player) {
   if (!player || player.gukjinLocked) return false;
   return (player.captured?.five || []).some((card) => isGukjinCard(card) && !card.gukjinTransformed);
@@ -207,6 +217,7 @@ function shouldPromptGukjinChoiceAtScoring(state, playerKey) {
   return false;
 }
 
+/* 4) Main finalize pipeline */
 export function finalizeTurn({
   state,
   currentKey,
@@ -459,6 +470,7 @@ export function finalizeTurn({
   return continueAfterTurnIfNeeded(nextState, currentKey);
 }
 
+/* 5) Post-turn flow gate */
 export function continueAfterTurnIfNeeded(state, justPlayedKey) {
   state = clearExpiredReveal(state);
   const opponentKey = justPlayedKey === "human" ? "ai" : "human";

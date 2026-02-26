@@ -1,5 +1,14 @@
-import { piValue, isGukjinCard, getGukjinMode } from "./scoring.js";
+﻿import { piValue, isGukjinCard, getGukjinMode } from "./scoring.js";
 
+/* ============================================================================
+ * Capture/event helpers
+ * - categorize/append captured cards
+ * - steal logic for pi transfer including gukjin-as-junk mode
+ * ========================================================================== */
+
+const CAPTURE_ZONES = Object.freeze(["kwang", "five", "ribbon", "junk"]);
+
+/* 1) Capture category helpers */
 export function categoryKey(card) {
   switch (card.category) {
     case "kwang":
@@ -14,7 +23,7 @@ export function categoryKey(card) {
 }
 
 function hasCapturedCardId(captured, cardId) {
-  return ["kwang", "five", "ribbon", "junk"].some((k) => (captured[k] || []).some((c) => c.id === cardId));
+  return CAPTURE_ZONES.some((k) => (captured[k] || []).some((c) => c.id === cardId));
 }
 
 export function pushCaptured(captured, card) {
@@ -34,6 +43,7 @@ export function needsChoice(cards) {
   return kind(cards[0]) !== kind(cards[1]);
 }
 
+/* 2) Pi-steal transfer (supports gukjin transfer in junk mode) */
 export function stealPiFromOpponent(players, takerKey, count) {
   const giverKey = takerKey === "human" ? "ai" : "human";
   const taker = { ...players[takerKey], captured: { ...players[takerKey].captured } };
@@ -78,10 +88,10 @@ export function stealPiFromOpponent(players, takerKey, count) {
     if (candidates.length === 0) break;
 
     const stealRank = (x) => {
-      if (x.value === 1) return 1; // 일반피
-      if (x.value === 2 && !x.isGukjin) return 2; // 쌍피
-      if (x.isGukjin) return 3; // 국진
-      if (x.value >= 3) return 4; // 삼피
+      if (x.value === 1) return 1; // ?쇰컲??
+      if (x.value === 2 && !x.isGukjin) return 2; // ?랁뵾
+      if (x.isGukjin) return 3; // 援?쭊
+      if (x.value >= 3) return 4; // ?쇳뵾
       return 9;
     };
 
@@ -101,14 +111,14 @@ export function stealPiFromOpponent(players, takerKey, count) {
         category: "junk",
         piValue: 2,
         gukjinTransformed: true,
-        name: `${gukjinCard.name} (국진피)`
+        name: `${gukjinCard.name} (援?쭊??`
       };
     } else {
       [stolen] = giver.captured.junk.splice(pick.idx, 1);
     }
 
     taker.captured.junk.push(stolen);
-    stealLog.push(`${taker.label}: ${giver.label}에게서 피 1장 강탈 (${stolen.name}, ${piValue(stolen)}피 처리)`);
+    stealLog.push(`${taker.label}: ${giver.label}?먭쾶????1??媛뺥깉 (${stolen.name}, ${piValue(stolen)}??泥섎━)`);
     remaining -= 1;
   }
 

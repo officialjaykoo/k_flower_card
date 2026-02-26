@@ -1,5 +1,12 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Pipeline Stage: Optuna Tuning Wrapper (V6)
+# Quick Read Map:
+# 1) Define search space/constants
+# 2) suggest_params + run_duel helpers
+# 3) objective() scoring
+# 4) main(): study run + artifact export
+
 """
 scripts/optuna_v6.py - V6 Optuna tuner
 target: heuristic_v6 vs heuristic_v5 (1000 games per trial)

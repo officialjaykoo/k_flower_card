@@ -1,4 +1,12 @@
-﻿param(
+﻿# Pipeline Stage: Heuristic Benchmark Wrapper
+# Quick Read Map:
+# 1) Parse params and normalize defaults
+# 2) Build heuristic_duel_worker command
+# 3) Execute worker and parse JSON
+# 4) Save summary artifact
+# 5) Print concise report
+
+param(
   [Parameter(Mandatory = $true)][string]$PolicyA,
   [Parameter(Mandatory = $true)][string]$PolicyB,
   [string]$Seed = "",

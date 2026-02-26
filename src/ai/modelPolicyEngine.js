@@ -14,9 +14,16 @@
   chooseMatch
 } from "../engine/index.js";
 
+/* ============================================================================
+ * NEAT model policy runtime
+ * - compile genome once and cache
+ * - score legal candidates
+ * - convert score to action/state transition
+ * ========================================================================== */
 const NEAT_MODEL_FORMAT = "neat_python_genome_v1";
 const COMPILED_NEAT_CACHE = new WeakMap();
 
+/* 1) Candidate-space normalization */
 function canonicalOptionAction(action) {
   const a = String(action || "").trim();
   if (!a) return "";
@@ -92,6 +99,7 @@ function legalCandidatesForDecision(sp, decisionType) {
   return [];
 }
 
+/* 2) Feature extraction helpers */
 function clamp01(x) {
   const v = Number(x || 0);
   if (v <= 0) return 0;
@@ -354,6 +362,7 @@ function featureVector(state, actor, decisionType, candidate, legalCount, inputD
   throw new Error(`feature vector size mismatch: expected ${inputDim}, supported=${features.length}`);
 }
 
+/* 3) Forward-pass helpers */
 function activation(name, x) {
   const n = String(name || "tanh").trim().toLowerCase();
   const v = Number(x || 0);
@@ -467,6 +476,7 @@ function compileNeatPythonGenome(raw) {
   };
 }
 
+/* 4) Model compilation/cache */
 function isNeatModel(policyModel) {
   return String(policyModel?.format_version || "").trim() === NEAT_MODEL_FORMAT;
 }
@@ -480,6 +490,7 @@ function getCompiledNeatModel(policyModel) {
   return compiled;
 }
 
+/* 5) Scoring/post-processing */
 function forward(compiled, inputVec) {
   const values = new Map();
   for (let i = 0; i < compiled.inputKeys.length; i += 1) {
@@ -536,6 +547,7 @@ function pickBestByScore(candidates, scoreMap) {
   return best;
 }
 
+/* 6) Public APIs */
 export function getModelCandidateProbabilities(state, actor, policyModel, options = {}) {
   const compiled = getCompiledNeatModel(policyModel);
   if (!compiled) return null;

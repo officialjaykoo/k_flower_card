@@ -1,9 +1,17 @@
-import { ruleSets } from "./rules.js";
+﻿import { ruleSets } from "./rules.js";
 import { countComboTag } from "./combos.js";
+
+/* ============================================================================
+ * Scoring engine
+ * - base score and payout multiplier
+ * - bak detection
+ * - pi/gukjin helper utilities
+ * ========================================================================== */
 
 const NON_BRIGHT_KWANG_ID = "L0";
 const GUKJIN_CARD_ID = "I0";
 
+/* 1) Shared card helpers */
 function uniqueCards(cards = []) {
   const seen = new Set();
   return cards.filter((c) => {
@@ -40,6 +48,7 @@ export function calculateScore(player, opponent, ruleKey) {
 }
 
 
+/* 2) Base-score components */
 export function calculateBaseScore(player, rules = ruleSets.A) {
   const kwang = uniqueCards(player.captured.kwang || []);
   const ribbon = uniqueCards(player.captured.ribbon || []);
@@ -94,6 +103,7 @@ function kwangBaseScore(kwangCards) {
   return 15;
 }
 
+/* 3) Bak detection */
 function detectBak(player, opponent, ruleKey) {
   const rules = ruleSets[ruleKey];
   const opponentPi = scoringPiCount(opponent);
@@ -105,7 +115,7 @@ function detectBak(player, opponent, ruleKey) {
     gwang:
       uniqueCards(player.captured.kwang || []).length >= 3 &&
       uniqueCards(opponent.captured.kwang || []).length === 0,
-    // 피박은 고 여부와 무관. 단, 상대 피가 0이면 면박(피박 면제).
+    // ?쇰컯? 怨??щ?? 臾닿?. ?? ?곷? ?쇨? 0?대㈃ 硫대컯(?쇰컯 硫댁젣).
     pi: opponentPi >= 1 && opponentPi <= 7 && playerPi >= 10,
     // User rule: mongBak is checked on win condition context without GO prerequisite.
     mongBak: opponentFiveCount === 0 && playerFiveCount >= 7
@@ -118,6 +128,7 @@ function detectBak(player, opponent, ruleKey) {
   return { ...bak, multiplier };
 }
 
+/* 4) Pi/gukjin helpers */
 export function piValue(card) {
   const explicit = Number(card?.piValue);
   if (Number.isFinite(explicit) && explicit > 0) return explicit;

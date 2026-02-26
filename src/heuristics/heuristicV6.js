@@ -1,8 +1,13 @@
 ﻿// heuristicV6.js - Matgo Heuristic V6
-// Methodology: risk-adjusted expected utility by game phase and pressure index.
-
+/* ============================================================================
+ * Heuristic V6
+ * - risk-adjusted expected utility
+ * - phase profile + pressure model + optional rollout blending
+ * - exported decisions: rank / match / go / bomb / shaking / president / gukjin
+ * ========================================================================== */
 const GUKJIN_CARD_ID = "I0";
 
+/* 1) Tunable parameter set */
 export const DEFAULT_PARAMS = {
   // phase
   phaseEarlyDeck: 15,
@@ -162,6 +167,7 @@ export const DEFAULT_PARAMS = {
   gukjinMongRiskPenalty: 2.2
 };
 
+/* 2) Core numeric/card helpers */
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -199,6 +205,7 @@ function comboTagCount(cards, tag) {
   }, 0);
 }
 
+/* 3) Pressure and phase profile builders */
 function calcOpponentPressure(state, playerKey, deps) {
   const opp = deps.otherPlayerKey(playerKey);
   const jokbo = deps.checkOpponentJokboProgress(state, playerKey);
@@ -325,6 +332,7 @@ function knownMonthCount(month, boardCountByMonth, handCountByMonth, capturedByM
   );
 }
 
+/* 4) Card utility model (single-card evaluation core) */
 function evaluateCardUtility(state, playerKey, card, deps, P, profile, cache) {
   const matches = cache.boardByMonth.get(card.month) || [];
   const captureGain = matches.reduce((sum, m) => sum + safeNum(deps.cardCaptureValue(m)), 0);
@@ -479,6 +487,7 @@ function evaluateCardUtility(state, playerKey, card, deps, P, profile, cache) {
   };
 }
 
+/* 5) Exported policy decisions */
 export function rankHandCardsV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
@@ -531,6 +540,7 @@ export function rankHandCardsV6(state, playerKey, deps, params = DEFAULT_PARAMS)
   return ranked;
 }
 
+/* choose-match policy for pending TWO-match selections */
 export function chooseMatchHeuristicV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
@@ -579,6 +589,7 @@ export function chooseMatchHeuristicV6(state, playerKey, deps, params = DEFAULT_
   return bestId;
 }
 
+/* GO/STOP utility model with optional rollout delta blending */
 export function shouldGoV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = mergedParams(params);
   if (deps.canBankruptOpponentByStop?.(state, playerKey)) return false;
@@ -672,6 +683,7 @@ export function shouldGoV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
   return goValue >= threshold;
 }
 
+/* Bomb month picker + bomb gate */
 export function selectBombMonthV6(state, _playerKey, bombMonths, deps) {
   if (!bombMonths?.length) return null;
   let best = bombMonths[0];
@@ -750,6 +762,7 @@ export function decideShakingV6(state, playerKey, shakingMonths, deps, params = 
   return { ...best, allow: best.score >= threshold };
 }
 
+/* President/Gukjin late decision helpers */
 export function shouldPresidentStopV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = mergedParams(params);
   const ctx = deps.analyzeGameContext(state, playerKey);

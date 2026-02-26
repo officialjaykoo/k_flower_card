@@ -1,6 +1,13 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { buildCardUiAssetPath, DEFAULT_CARD_THEME } from "../../cards.js";
 
+/* ============================================================================
+ * Card renderer
+ * - single card face/back view
+ * - theme-aware fallback image handling
+ * ========================================================================== */
+
+/* 1) Asset path helpers */
 function resolveBackAsset(theme) {
   return buildCardUiAssetPath("back.svg", theme || DEFAULT_CARD_THEME);
 }
@@ -9,6 +16,7 @@ function resolveFallbackAsset(theme) {
   return buildCardUiAssetPath("fallback.svg", theme || DEFAULT_CARD_THEME);
 }
 
+/* 2) Shared card-back element */
 export function cardBackView(theme = DEFAULT_CARD_THEME) {
   return (
     <div className="card card-back">
@@ -17,6 +25,7 @@ export function cardBackView(theme = DEFAULT_CARD_THEME) {
   );
 }
 
+/* 3) Main card component */
 export default function CardView({
   card,
   interactive = false,
@@ -30,6 +39,7 @@ export default function CardView({
   const name = card?.name ?? (t ? t("card.alt.defaultName") : "카드");
   const altText = t ? t("card.alt.format", { month, name }) : `${month}월 ${name}`;
 
+  // Sync source when card/theme/back state changes.
   useEffect(() => {
     setSrc(forceBack ? resolveBackAsset(theme) : card?.asset || resolveFallbackAsset(theme));
   }, [card?.asset, forceBack, theme]);

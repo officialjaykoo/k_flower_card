@@ -1,3 +1,6 @@
+﻿/* ==========================================================================
+   1) Global Foundation
+   ========================================================================== */
 :root {
   --card-w: 40px;
   --card-h: 58px;
@@ -30,6 +33,9 @@ body {
   padding: 6px;
 }
 
+/* ==========================================================================
+   2) Board Layout Shell
+   ========================================================================== */
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -65,9 +71,6 @@ body {
 .table-field {
   position: relative;
   z-index: 1;
-}
-
-.table-field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--side-col-w);
   gap: 8px;
@@ -91,6 +94,49 @@ body {
   max-width: var(--side-col-w);
 }
 
+/* Shared card primitive is defined once, then overridden by contextual selectors. */
+.card {
+  width: 40px;
+  height: 58px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: #10240d;
+  font-size: 10px;
+  line-height: 1.15;
+  text-align: center;
+  padding: 0;
+  transition: transform 100ms ease, box-shadow 100ms ease;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 14px rgba(0, 0, 0, 0.32);
+}
+
+.card-selectable {
+  box-shadow: 0 0 0 2px rgba(255, 227, 127, 0.38);
+}
+
+.card img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  display: block;
+}
+
+.card-back {
+  background: linear-gradient(145deg, #790505, #d91b14 60%, #8d0705);
+}
+
+/* ==========================================================================
+   3) Lanes: Capture / Hand
+   ========================================================================== */
 .lane-row {
   border: 1px solid rgba(220, 255, 186, 0.26);
   border-radius: 10px;
@@ -332,6 +378,9 @@ body {
   padding: 3px 7px;
 }
 
+/* ==========================================================================
+   4) Center Table (Orbit / Deck / Score)
+   ========================================================================== */
 .center-field {
   border: 1px solid rgba(218, 255, 172, 0.24);
   border-radius: 10px;
@@ -452,6 +501,9 @@ body {
   z-index: 6;
 }
 
+/* ==========================================================================
+   5) Opening Pick UI
+   ========================================================================== */
 .opening-pick-wrap {
   border: 1px solid rgba(226, 255, 191, 0.3);
   border-radius: 10px;
@@ -539,6 +591,9 @@ body {
   100% { box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.1); }
 }
 
+/* ==========================================================================
+   6) Side Status / Controls
+   ========================================================================== */
 .status-card {
   background: linear-gradient(180deg, rgba(44, 104, 34, 0.9), rgba(26, 82, 27, 0.9));
   border: 1px solid rgba(187, 255, 156, 0.23);
@@ -696,6 +751,9 @@ body {
   color: #e2ffd1;
 }
 
+/* ==========================================================================
+   7) Replay / Result Overlay
+   ========================================================================== */
 .replay-dock {
   position: relative;
   z-index: 1;
@@ -752,45 +810,3 @@ body {
 .result-panel {
   width: min(520px, 100%);
 }
-
-.card {
-  width: 40px;
-  height: 58px;
-  border-radius: 6px;
-  overflow: hidden;
-  border: 0;
-  background: transparent;
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-  color: #10240d;
-  font-size: 10px;
-  line-height: 1.15;
-  text-align: center;
-  padding: 0;
-  transition: transform 100ms ease, box-shadow 100ms ease;
-}
-
-.card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 14px rgba(0, 0, 0, 0.32);
-}
-
-.card-selectable {
-  box-shadow: 0 0 0 2px rgba(255, 227, 127, 0.38);
-}
-
-.card img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  object-position: center;
-  display: block;
-}
-
-.card-back {
-  background: linear-gradient(145deg, #790505, #d91b14 60%, #8d0705);
-}
-
-
-

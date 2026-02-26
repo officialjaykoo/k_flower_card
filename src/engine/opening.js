@@ -1,6 +1,14 @@
-import { STARTING_GOLD } from "./economy.js";
+﻿import { STARTING_GOLD } from "./economy.js";
 import { pushCaptured } from "./capturesEvents.js";
 
+/* ============================================================================
+ * Opening helpers
+ * - first-turn decision
+ * - initial player template
+ * - opening board/hand normalization
+ * ========================================================================== */
+
+/* 1) First-turn decision */
 export function decideFirstTurn(humanCard, aiCard, rng = Math.random) {
   const hour = new Date().getHours();
   const isNight = hour >= 18 || hour < 6;
@@ -9,23 +17,24 @@ export function decideFirstTurn(humanCard, aiCard, rng = Math.random) {
   let reason = "";
   if (humanCard.month === aiCard.month) {
     winnerKey = rng() < 0.5 ? "human" : "ai";
-    reason = "동월 랜덤";
+    reason = "same month random";
   } else if (isNight) {
     winnerKey = humanCard.month < aiCard.month ? "human" : "ai";
-    reason = "밤일낮장(밤: 낮은 월 선)";
+    reason = "night rule: lower month starts";
   } else {
     winnerKey = humanCard.month > aiCard.month ? "human" : "ai";
-    reason = "밤일낮장(낮: 높은 월 선)";
+    reason = "day rule: higher month starts";
   }
 
-  const winnerLabel = winnerKey === "human" ? "플레이어" : "AI";
+  const winnerLabel = winnerKey === "human" ? "Player" : "AI";
   const log =
-    `선턴 결정 [${isNight ? "밤" : "낮"}]: ` +
-    `플레이어 ${humanCard.month}월 vs AI ${aiCard.month}월 -> ${winnerLabel} 선 (${reason})`;
+    `Starter decided [${isNight ? "night" : "day"}]: ` +
+    `Player ${humanCard.month} vs AI ${aiCard.month} -> ${winnerLabel} (${reason})`;
 
   return { winnerKey, log };
 }
 
+/* 2) Player template */
 export function emptyPlayer(label) {
   return {
     label,
@@ -64,9 +73,10 @@ export function emptyPlayer(label) {
   };
 }
 
+/* 3) Opening normalization */
 export function normalizeOpeningHands(players, remain, initLog) {
-  // 손패 보너스 카드는 시작 시 자동 발동하지 않는다.
-  // 플레이어가 실제로 낼 때 보너스 효과가 적용된다.
+  // Opening bonus cards are not auto-triggered in hand phase.
+  // The effect is applied only when the player actually acquires the card.
   return remain.slice();
 }
 
@@ -81,7 +91,7 @@ export function normalizeOpeningBoard(board, remain, firstPlayer, initLog) {
     changed = true;
     bonus.forEach((card) => {
       pushCaptured(firstPlayer.captured, card);
-      initLog.push(`시작 보정: 바닥 ${card.name}을(를) ${firstPlayer.label}가 획득`);
+      initLog.push(`Opening adjust: ${firstPlayer.label} captures board bonus card ${card.name}`);
     });
     nextBoard = nextBoard.filter((c) => !c.bonus?.stealPi);
     while (nextBoard.length < 8 && nextRemain.length > 0) {
@@ -92,11 +102,12 @@ export function normalizeOpeningBoard(board, remain, firstPlayer, initLog) {
   return { board: nextBoard, remain: nextRemain };
 }
 
+/* 4) Opening special checks */
 export function findPresidentMonth(cards) {
   const counts = {};
   for (const card of cards) {
-    // 대통령은 실제 월패(1~12월)만 대상으로 한다.
-    // pass/dummy 카드(0월)와 보너스 카드(13월)는 제외.
+    // President check only counts normal month cards (1..12).
+    // Excludes pass/dummy (month 0) and bonus cards (month 13).
     if (!card || card.passCard) continue;
     if (card.month < 1 || card.month > 12) continue;
     counts[card.month] = (counts[card.month] || 0) + 1;

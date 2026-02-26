@@ -1,5 +1,12 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Pipeline Stage: Optuna Tuning Wrapper (V7)
+# Quick Read Map:
+# 1) Define search space/constants
+# 2) suggest_params + run_duel helpers
+# 3) objective() scoring
+# 4) main(): study run + artifact export
+
 """
 scripts/optuna_v7.py - V7 Optuna tuner
 

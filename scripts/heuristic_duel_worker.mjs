@@ -22,6 +22,17 @@ import { getActionPlayerKey } from "../src/engine/runner.js";
 import { aiPlay } from "../src/ai/aiPlay.js";
 import { BOT_POLICIES, normalizeBotPolicy } from "../src/ai/policies.js";
 
+// Pipeline Stage: 3/3 (neat_train.py -> neat_eval_worker.mjs -> heuristic_duel_worker.mjs)
+// Quick Read Map (top-down):
+// 1) main()
+// 2) playSingleRound(): duel loop + decision callback
+// 3) featureVectorForCandidate(): dataset feature construction
+// 4) inferChosenCandidateFromTransition(): chosen-label reconstruction
+// 5) parseArgs()/state transition helpers
+
+// =============================================================================
+// Section 1. CLI
+// =============================================================================
 function parseArgs(argv) {
   const args = [...argv];
   const out = {
@@ -107,6 +118,9 @@ function parseArgs(argv) {
   return out;
 }
 
+// =============================================================================
+// Section 2. Engine Action Helpers + Feature Helpers
+// =============================================================================
 function canonicalOptionAction(action) {
   const a = String(action || "").trim();
   if (!a) return "";
@@ -462,6 +476,9 @@ function featureVectorForCandidate(state, actor, decisionType, candidate, legalC
   ];
 }
 
+// =============================================================================
+// Section 3. Chosen Candidate Inference (for dataset labels)
+// =============================================================================
 function normalizeDecisionCandidate(decisionType, candidate) {
   if (decisionType === "option") return canonicalOptionAction(candidate);
   return String(candidate || "").trim();
@@ -606,6 +623,9 @@ function unresolvedTraceRow(decision, stateAfter, gameIndex, seed, firstTurnKey)
   };
 }
 
+// =============================================================================
+// Section 4. Round Simulation + Summary Helpers
+// =============================================================================
 function resolveFirstTurnKey(opts, gameIndex) {
   if (opts.firstTurnPolicy === "fixed") return opts.fixedFirstTurn;
   return gameIndex % 2 === 0 ? "ai" : "human";
@@ -783,6 +803,9 @@ function buildSeatSplitSummary(firstRecord, secondRecord) {
   };
 }
 
+// =============================================================================
+// Section 5. Entrypoint
+// =============================================================================
 function main() {
   const evalStartMs = Date.now();
   const opts = parseArgs(process.argv.slice(2));

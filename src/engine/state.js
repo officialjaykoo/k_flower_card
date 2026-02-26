@@ -29,6 +29,15 @@ import {
 } from "./finalizeTurn.js";
 export { getDeclarableShakingMonths, getDeclarableBombMonths };
 
+/* ============================================================================
+ * Engine state orchestrator
+ * - game setup/restart
+ * - turn/action entry points
+ * - event action handlers
+ * - shared helpers for flip/match resolution
+ * ========================================================================== */
+
+/* i18n helper wrappers */
 function normalizeEngineLanguage(language) {
   return language === "en" ? "en" : DEFAULT_LANGUAGE;
 }
@@ -326,6 +335,7 @@ export function initGame(ruleKey = "A", seedRng = Math.random, options = {}) {
   }
 }
 
+/* Setup/restart helpers */
 function isPlayerKey(key) {
   return key === "human" || key === "ai";
 }
@@ -374,6 +384,7 @@ export function startGameFromState(previousState, seedRng = Math.random, options
   return initGame(ruleKey, seedRng, nextOptions);
 }
 
+/* Simulation wrappers (explicit first turn required for reproducibility) */
 export function initSimulationGame(ruleKey = "A", seedRng = Math.random, options = {}) {
   const nextOptions = { ...options };
   if (!isPlayerKey(nextOptions.firstTurnKey)) {
@@ -391,9 +402,6 @@ export function startSimulationGame(previousState, seedRng = Math.random, option
   if (nextOptions.useCarryOver == null) nextOptions.useCarryOver = true;
   return startGameFromState(previousState, seedRng, nextOptions);
 }
-
-
-
 
 // ============================================================================
 // SECTION 2. CORE ACTIONS
@@ -1181,21 +1189,12 @@ export function chooseGukjinMode(state, playerKey, mode) {
   return continueAfterTurnIfNeeded(nextState, playerKey);
 }
 
-
-
-
-
-
-
-
-
-
-
 // ============================================================================
 // SECTION 4. HELPERS
 // ----------------------------------------------------------------------------
 // Internal helper logic used by core/event actions
 // ============================================================================
+/* Flip draw pipeline (including bonus hold/confirm and match branching) */
 function runFlipPhase(context) {
   let {
     board,
@@ -1431,6 +1430,7 @@ function runFlipPhase(context) {
   };
 }
 
+/* Manual player match choice resolver (TWO-match from hand play) */
 function resolvePlayerMatchChoice(state, boardCardId) {
   const { playerKey, cardId, presidentChainArmed = false } = state.pendingMatch;
   const player = state.players[playerKey];
@@ -1509,6 +1509,7 @@ function resolvePlayerMatchChoice(state, boardCardId) {
   });
 }
 
+/* Manual flip match choice resolver (TWO-match from flipped card) */
 function resolveFlipMatchChoice(state, boardCardId) {
   const { playerKey, context } = state.pendingMatch;
   if (!context) return state;

@@ -1,6 +1,17 @@
 ﻿#!/usr/bin/env python3
 from __future__ import annotations
 
+"""
+Pipeline Stage: 1/3 (neat_train.py -> neat_eval_worker.mjs -> heuristic_duel_worker.mjs)
+
+Quick Read Map (top-down):
+1) main()
+2) LoggedParallelEvaluator
+3) eval_function()
+4) runtime load/env bridge helpers
+5) teacher dataset cache helpers
+"""
+
 import argparse
 import contextlib
 import gzip
@@ -24,6 +35,9 @@ except Exception:
     neat = None
 
 
+# =============================================================================
+# Section 1. Runtime Defaults + Primitive Coercion Helpers
+# =============================================================================
 ENV_PREFIX = "KFC_NEAT_"
 DEFAULT_RUNTIME = {
     "format_version": "neat_runtime_v1",
@@ -159,6 +173,9 @@ def _load_runtime_config_recursive(path: str, cfg: dict, seen: set[str]) -> None
     cfg.update(local)
 
 
+# =============================================================================
+# Section 2. Runtime Config Normalization
+# =============================================================================
 def _load_runtime_config(path: str) -> dict:
     cfg = dict(DEFAULT_RUNTIME)
     if path:
@@ -256,6 +273,9 @@ def _load_runtime_config(path: str) -> dict:
     return cfg
 
 
+# =============================================================================
+# Section 3. Runtime <-> Environment Bridge
+# =============================================================================
 def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}EVAL_SCRIPT"] = os.path.abspath(str(runtime["eval_script"]))
     os.environ[f"{ENV_PREFIX}GAMES_PER_GENOME"] = str(int(runtime["games_per_genome"]))
@@ -348,6 +368,9 @@ def _runtime_from_env() -> Dict[str, object]:
     return out
 
 
+# =============================================================================
+# Section 4. Teacher Dataset Token Normalization
+# =============================================================================
 def _normalize_decision_type(value: object) -> str:
     dt = str(value or "").strip().lower()
     if dt in ("play", "match", "option"):
@@ -374,6 +397,9 @@ def _count_jsonl_records(path: str) -> int:
     return int(count)
 
 
+# =============================================================================
+# Section 5. Teacher Dataset Cache Build
+# =============================================================================
 def _build_teacher_dataset_cache(runtime: dict, output_dir: str) -> None:
     dataset_path = str(runtime.get("teacher_dataset_path") or "").strip()
     kibo_path = str(runtime.get("teacher_kibo_path") or "").strip()
@@ -529,6 +555,9 @@ def _build_teacher_dataset_cache(runtime: dict, output_dir: str) -> None:
     runtime["teacher_dataset_rows_used"] = int(rows_used)
 
 
+# =============================================================================
+# Section 6. Logging + Numeric Utilities
+# =============================================================================
 def _append_eval_failure_log(output_dir: str, record: dict) -> None:
     os.makedirs(output_dir, exist_ok=True)
     log_path = os.path.join(output_dir, "eval_failures.log")
@@ -622,6 +651,9 @@ def _quantile(values, q):
     return vals[idx]
 
 
+# =============================================================================
+# Section 7. Single Genome Evaluation Worker
+# =============================================================================
 def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1):
     runtime = _runtime_from_env()
     eval_script = str(runtime["eval_script"] or "")
@@ -768,6 +800,9 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             pass
 
 
+# =============================================================================
+# Section 8. Parallel Evaluator + Gate Tracking
+# =============================================================================
 class LoggedParallelEvaluator:
     def __init__(self, num_workers: int, output_dir: str, runtime: dict):
         self.num_workers = max(1, int(num_workers))
@@ -1167,6 +1202,9 @@ class LoggedParallelEvaluator:
         return dict(self.gate_state)
 
 
+# =============================================================================
+# Section 9. CLI + Config Bootstrap
+# =============================================================================
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="neat-python training runner for k_flower_card")
     parser.add_argument(
@@ -1391,6 +1429,9 @@ if neat is not None:
             )
 
 
+# =============================================================================
+# Section 10. Entrypoint
+# =============================================================================
 def main() -> None:
     args = parse_args()
 

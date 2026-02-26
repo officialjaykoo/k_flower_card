@@ -6,8 +6,24 @@ import { POINT_GOLD_UNIT } from "../../engine/economy.js";
 import { isGukjinCard } from "../../engine/scoring.js";
 import { buildDeck, buildCardUiAssetPath, DEFAULT_CARD_THEME } from "../../cards.js";
 
-const FIXED_HAND_SLOT_COUNT = 10;
+/* ============================================================================
+ * Main board view
+ * - center orbit/hand/capture rendering
+ * - controls panel composition
+ * - replay dock rendering
+ * ========================================================================== */
 
+const FIXED_HAND_SLOT_COUNT = 10;
+const CARD_CATEGORY_ORDER = Object.freeze({ kwang: 0, five: 1, ribbon: 2, junk: 3 });
+const CAPTURED_TYPES = Object.freeze([{ key: "kwang" }, { key: "five" }, { key: "ribbon" }, { key: "junk" }]);
+const CAPTURE_ZONE_WIDTH = Object.freeze({
+  normal: 230,
+  junk: 430,
+  state: 90
+});
+const CAPTURE_CARD_WIDTH = 44;
+
+/* 1) Fixed-hand slot helpers */
 function buildInitialFixedSlots(hand = []) {
   const slots = Array(FIXED_HAND_SLOT_COUNT).fill(null);
   hand.slice(0, FIXED_HAND_SLOT_COUNT).forEach((card, idx) => {
@@ -83,22 +99,19 @@ export default function GameBoard({
   t,
   supportedLanguages = ["ko", "en"]
 }) {
+  /* 2) Derived board/runtime values */
   const language = ui.language || "ko";
   const cardTheme = ui.cardTheme || DEFAULT_CARD_THEME;
   const allCards = buildDeck(cardTheme);
-  const order = { kwang: 0, five: 1, ribbon: 2, junk: 3 };
   const monthCards = allCards
     .filter((c) => c.month >= 1 && c.month <= 12)
-    .sort((a, b) => a.month - b.month || order[a.category] - order[b.category] || a.id.localeCompare(b.id));
+    .sort(
+      (a, b) =>
+        a.month - b.month ||
+        CARD_CATEGORY_ORDER[a.category] - CARD_CATEGORY_ORDER[b.category] ||
+        a.id.localeCompare(b.id)
+    );
   const bonusCards = allCards.filter((c) => c.month === 13);
-
-  const capturedTypes = [{ key: "kwang" }, { key: "five" }, { key: "ribbon" }, { key: "junk" }];
-  const CAPTURE_ZONE_WIDTH = {
-    normal: 230,
-    junk: 430,
-    state: 90
-  };
-  const CAPTURE_CARD_WIDTH = 44;
 
   const turnRole = (playerKey) =>
     state.startingTurnKey === playerKey ? t("board.turn.first") : t("board.turn.second");
@@ -114,6 +127,7 @@ export default function GameBoard({
   }));
   const lastFixedHandLayoutNonceRef = useRef(ui.handLayoutNonce || 0);
 
+  // Keep fixed slots stable across turns, but rebuild on new-game nonce.
   useEffect(() => {
     if (!ui.fixedHand) return;
     const handLayoutNonce = ui.handLayoutNonce || 0;
@@ -142,6 +156,7 @@ export default function GameBoard({
     });
   }, [ui.fixedHand, ui.handLayoutNonce, state.players.human.hand, state.players.ai.hand, sortCards]);
 
+  /* 3) Render helpers */
   const renderHand = (playerKey, clickable) => {
     const player = state.players[playerKey];
     const cards = player.hand.slice();
@@ -221,7 +236,7 @@ export default function GameBoard({
         "--capture-state-zone-w": `${CAPTURE_ZONE_WIDTH.state}px`
       }}
     >
-      {capturedTypes.map(({ key }) => {
+      {CAPTURED_TYPES.map(({ key }) => {
         const player = state.players[playerKey];
         const baseCards = state.players[playerKey].captured[key];
         const gukjinFromFive =
@@ -427,11 +442,13 @@ export default function GameBoard({
     );
   };
 
+  /* 4) Popup handlers */
   const handleOpenCardGuidePopup = () =>
     openCardGuidePopup({ monthCards, bonusCards, language });
   const handleOpenRulesPopup = () => openRulesPopup({ language });
   const handleOpenGameLogPopup = () => openGameLogPopup({ log: state.log || [], language });
 
+  /* 5) Layout render */
   return (
     <div className="board table-theme">
       <div className="table-field">

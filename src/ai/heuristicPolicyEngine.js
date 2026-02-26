@@ -14,11 +14,10 @@
   scoringFiveCards,
   scoringPiCount
 } from "../engine/index.js";
-import { COMBO_MONTHS, COMBO_MONTH_SETS, countComboTag, missingComboMonths } from "../engine/combos.js";
+import { COMBO_MONTH_SETS, countComboTag, missingComboMonths } from "../engine/combos.js";
 import { STARTING_GOLD } from "../engine/economy.js";
 import { buildDeck } from "../cards.js";
 import {
-  BOT_POLICIES,
   DEFAULT_BOT_POLICY,
   POLICY_HEURISTIC_V3,
   POLICY_HEURISTIC_V4,
@@ -82,6 +81,7 @@ import {
   DEFAULT_PARAMS as V6_DEFAULT_PARAMS
 } from "../heuristics/heuristicV6.js";
 import {
+  canBankruptOpponentByStopV7,
   chooseGukjinHeuristicV7,
   chooseMatchHeuristicV7,
   decideShakingV7,
@@ -92,8 +92,16 @@ import {
   shouldPresidentStopV7,
   DEFAULT_PARAMS as V7_DEFAULT_PARAMS
 } from "../heuristics/heuristicV7.js";
-import { canBankruptOpponentByStopV7 } from "../heuristics/heuristicV7_math.js";
 
+/* ============================================================================
+ * Heuristic policy engine (v3-v7)
+ * Quick reading order:
+ * 1) Runtime params + exported entry points
+ * 2) Shared state/score utilities
+ * 3) Fair-teacher public-state helpers (v6)
+ * 4) Policy dispatch (v3/v4/v5/v5plus/v6/v7)
+ * 5) Rollout helpers used by v6
+ * ========================================================================== */
 const GWANG_MONTHS = Object.freeze([1, 3, 8, 11, 12]);
 const GOLD_RISK_THRESHOLD_RATIO = 0.1;
 const GUKJIN_CARD_ID = "I0";
@@ -106,6 +114,7 @@ const COMBO_REQUIRED_CATEGORY = Object.freeze({
 });
 const HIGH_PI_CARD_IDS = Object.freeze(["M0", "M1", "K1", "L3", GUKJIN_CARD_ID]);
 
+/* 1) Runtime parameter loaders */
 function loadV5Params() {
   try {
     const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_V5_PARAMS) || "";
@@ -162,17 +171,12 @@ function loadV7Params() {
   return { ...V7_DEFAULT_PARAMS };
 }
 
-function ssangpiCardIds() {
-  return [...HIGH_PI_CARD_IDS];
-}
-
 const HEURISTIC_V5_PARAMS = Object.freeze(loadV5Params());
 const HEURISTIC_V5PLUS_PARAMS = Object.freeze(loadV5PlusParams());
 const HEURISTIC_V6_PARAMS = Object.freeze(loadV6Params());
 const HEURISTIC_V7_PARAMS = Object.freeze(loadV7Params());
 
 export {
-  BOT_POLICIES,
   DEFAULT_BOT_POLICY,
   POLICY_HEURISTIC_V3,
   POLICY_HEURISTIC_V4,
@@ -182,10 +186,11 @@ export {
   POLICY_HEURISTIC_V7
 };
 
-export function botChooseCard(state, playerKey, policy = DEFAULT_BOT_POLICY) {
+/* 2) Public entry points */
+export function botChooseCard(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
   const player = state.players[playerKey];
   if (!player || player.hand.length === 0) return null;
-  const ranked = rankHandCardsByPolicy(state, playerKey, policy);
+  const ranked = rankHandCardsByPolicy(state, playerKey, policy, heuristicParams);
   if (ranked.length > 0) {
     return ranked[0].card.id;
   }
@@ -215,14 +220,14 @@ export function getHeuristicCardProbabilities(state, playerKey, policy = DEFAULT
   return probs;
 }
 
-function chooseShakingCardIdForMonth(state, playerKey, month, policy = DEFAULT_BOT_POLICY) {
+function chooseShakingCardIdForMonth(state, playerKey, month, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return null;
   const targetMonth = Number(month);
   const monthCards = player.hand.filter((c) => c && !c.passCard && Number(c.month) === targetMonth);
   if (!monthCards.length) return null;
 
-  const ranked = rankHandCardsByPolicy(state, playerKey, policy);
+  const ranked = rankHandCardsByPolicy(state, playerKey, policy, heuristicParams);
   if (policy === POLICY_HEURISTIC_V6) {
     const v6Picked = chooseShakingDiscardCardIdV6(state, playerKey, monthCards, ranked);
     if (v6Picked) return v6Picked;
@@ -312,35 +317,47 @@ function chooseShakingDiscardCardIdV6(state, playerKey, monthCards, ranked) {
 
 function botPlaySmart(state, playerKey, options = {}) {
   const policy = normalizeBotPolicy(options?.policy);
+  const heuristicParams =
+    options?.heuristicParams && typeof options.heuristicParams === "object"
+      ? options.heuristicParams
+      : null;
   if (state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey === playerKey) {
-    return chooseGukjinMode(state, playerKey, chooseGukjinByPolicy(state, playerKey, policy));
+    return chooseGukjinMode(state, playerKey, chooseGukjinByPolicy(state, playerKey, policy, heuristicParams));
   }
 
   if (state.phase === "president-choice" && state.pendingPresident?.playerKey === playerKey) {
-    const shouldStop = shouldPresidentStopByPolicy(state, playerKey, policy);
+    const shouldStop = shouldPresidentStopByPolicy(state, playerKey, policy, heuristicParams);
     return shouldStop ? choosePresidentStop(state, playerKey) : choosePresidentHold(state, playerKey);
   }
 
   if (state.phase === "select-match" && state.pendingMatch?.playerKey === playerKey) {
-    const choiceId = chooseMatchByPolicy(state, playerKey, policy);
+    const choiceId = chooseMatchByPolicy(state, playerKey, policy, heuristicParams);
     return choiceId ? chooseMatch(state, choiceId) : state;
   }
 
   if (state.phase === "go-stop" && state.pendingGoStop === playerKey) {
-    return shouldGoByPolicy(state, playerKey, policy) ? chooseGo(state, playerKey) : chooseStop(state, playerKey);
+    return shouldGoByPolicy(state, playerKey, policy, heuristicParams)
+      ? chooseGo(state, playerKey)
+      : chooseStop(state, playerKey);
   }
 
   if (state.phase === "playing" && state.currentTurn === playerKey) {
     const bombMonths = getDeclarableBombMonths(state, playerKey);
-    if (bombMonths.length > 0 && shouldBombByPolicy(state, playerKey, bombMonths, policy)) {
-      const month = selectBombMonthByPolicy(state, playerKey, bombMonths, policy);
+    if (bombMonths.length > 0 && shouldBombByPolicy(state, playerKey, bombMonths, policy, heuristicParams)) {
+      const month = selectBombMonthByPolicy(state, playerKey, bombMonths, policy, heuristicParams);
       return declareBomb(state, playerKey, month ?? selectBestMonth(state, bombMonths));
     }
     const shakingMonths = getDeclarableShakingMonths(state, playerKey);
     if (shakingMonths.length > 0) {
-      const shakeDecision = decideShakingByPolicy(state, playerKey, shakingMonths, policy);
+      const shakeDecision = decideShakingByPolicy(state, playerKey, shakingMonths, policy, heuristicParams);
       if (shakeDecision.allow && shakeDecision.month != null) {
-        const shakeCardId = chooseShakingCardIdForMonth(state, playerKey, shakeDecision.month, policy);
+        const shakeCardId = chooseShakingCardIdForMonth(
+          state,
+          playerKey,
+          shakeDecision.month,
+          policy,
+          heuristicParams
+        );
         const declared = declareShaking(state, playerKey, shakeDecision.month);
         if (!declared || declared === state) return state;
         if (!shakeCardId) return declared;
@@ -348,7 +365,7 @@ function botPlaySmart(state, playerKey, options = {}) {
         return played || declared;
       }
     }
-    const cardId = botChooseCard(state, playerKey, policy);
+    const cardId = botChooseCard(state, playerKey, policy, heuristicParams);
     if (!cardId) return state;
     return playTurn(state, cardId);
   }
@@ -356,6 +373,7 @@ function botPlaySmart(state, playerKey, options = {}) {
   return state;
 }
 
+/* 3) Shared tactical/scoring utilities */
 function capturedCountByCategory(player, category) {
   if (!player?.captured) return 0;
   if (category === "junk") {
@@ -1751,8 +1769,7 @@ const HEURISTIC_V5_DEPS = Object.freeze({
   ownComboOpportunityScore,
   boardMatchesByMonth,
   estimateOpponentImmediateGainIfDiscard,
-  shakingImmediateGainScore,
-  ssangpiCardIds
+  shakingImmediateGainScore
 });
 
 const HEURISTIC_V6_DEPS = Object.freeze({
@@ -1789,7 +1806,6 @@ const HEURISTIC_V6_DEPS = Object.freeze({
   ownComboOpportunityScore,
   boardMatchesByMonth,
   shakingImmediateGainScore,
-  ssangpiCardIds,
   rolloutStateUtilityV6,
   rolloutCardValueV6,
   rolloutGoStopValueV6
@@ -1803,6 +1819,7 @@ const HEURISTIC_V7_DEPS = Object.freeze({
   opponentThreatScore
 });
 
+/* 4) Fair-teacher wrapper + decision context builders */
 function createHeuristicV6FairDeps(observerKey) {
   return Object.freeze({
     ...HEURISTIC_V6_DEPS,
@@ -1841,14 +1858,24 @@ function createHeuristicPublicState(state, playerKey) {
   return createPublicState(state, playerKey);
 }
 
-function resolveHeuristicDecisionContext(state, playerKey, policy = DEFAULT_BOT_POLICY) {
+/* 5) Policy dispatch layer */
+function resolveHeuristicDecisionContext(
+  state,
+  playerKey,
+  policy = DEFAULT_BOT_POLICY,
+  heuristicParams = null
+) {
   const resolvedPolicy = normalizeBotPolicy(policy);
+  const paramsOverride =
+    heuristicParams && typeof heuristicParams === "object" && !Array.isArray(heuristicParams)
+      ? heuristicParams
+      : null;
   if (resolvedPolicy === POLICY_HEURISTIC_V7) {
     return {
       policy: POLICY_HEURISTIC_V7,
       decisionState: createHeuristicPublicState(state, playerKey),
       deps: HEURISTIC_V7_DEPS,
-      params: HEURISTIC_V7_PARAMS
+      params: paramsOverride ? { ...HEURISTIC_V7_PARAMS, ...paramsOverride } : HEURISTIC_V7_PARAMS
     };
   }
   if (resolvedPolicy === POLICY_HEURISTIC_V6) {
@@ -1857,7 +1884,7 @@ function resolveHeuristicDecisionContext(state, playerKey, policy = DEFAULT_BOT_
       policy: POLICY_HEURISTIC_V6,
       decisionState: fair.publicState,
       deps: fair.deps,
-      params: HEURISTIC_V6_PARAMS
+      params: paramsOverride ? { ...HEURISTIC_V6_PARAMS, ...paramsOverride } : HEURISTIC_V6_PARAMS
     };
   }
 
@@ -1867,7 +1894,7 @@ function resolveHeuristicDecisionContext(state, playerKey, policy = DEFAULT_BOT_
       policy: POLICY_HEURISTIC_V5PLUS,
       decisionState,
       deps: HEURISTIC_V5_DEPS,
-      params: HEURISTIC_V5PLUS_PARAMS
+      params: paramsOverride ? { ...HEURISTIC_V5PLUS_PARAMS, ...paramsOverride } : HEURISTIC_V5PLUS_PARAMS
     };
   }
   if (resolvedPolicy === POLICY_HEURISTIC_V5) {
@@ -1875,7 +1902,7 @@ function resolveHeuristicDecisionContext(state, playerKey, policy = DEFAULT_BOT_
       policy: POLICY_HEURISTIC_V5,
       decisionState,
       deps: HEURISTIC_V5_DEPS,
-      params: HEURISTIC_V5_PARAMS
+      params: paramsOverride ? { ...HEURISTIC_V5_PARAMS, ...paramsOverride } : HEURISTIC_V5_PARAMS
     };
   }
   if (resolvedPolicy === POLICY_HEURISTIC_V4) {
@@ -1903,8 +1930,8 @@ function dispatchHeuristicPolicyCall(ctx, handlers) {
   return handlers.v3(ctx);
 }
 
-function chooseGukjinByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
+function chooseGukjinByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
+  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
     v7: ({ decisionState, deps, params }) => chooseGukjinHeuristicV7(decisionState, playerKey, deps, params),
     v6: ({ decisionState, deps, params }) => chooseGukjinHeuristicV6(decisionState, playerKey, deps, params),
@@ -1915,8 +1942,8 @@ function chooseGukjinByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   });
 }
 
-function shouldPresidentStopByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
+function shouldPresidentStopByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
+  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
     v7: ({ decisionState, deps, params }) => shouldPresidentStopV7(decisionState, playerKey, deps, params),
     v6: ({ decisionState, deps, params }) => shouldPresidentStopV6(decisionState, playerKey, deps, params),
@@ -1927,8 +1954,8 @@ function shouldPresidentStopByPolicy(state, playerKey, policy = DEFAULT_BOT_POLI
   });
 }
 
-function chooseMatchByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
+function chooseMatchByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
+  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
     v7: ({ decisionState, deps, params }) => chooseMatchHeuristicV7(decisionState, playerKey, deps, params),
     v6: ({ decisionState, deps, params }) => chooseMatchHeuristicV6(decisionState, playerKey, deps, params),
@@ -1939,8 +1966,8 @@ function chooseMatchByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   });
 }
 
-function shouldGoByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
+function shouldGoByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
+  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
     v7: ({ decisionState, deps, params }) => shouldGoV7(decisionState, playerKey, deps, params),
     v6: ({ decisionState, deps, params }) => shouldGoV6(decisionState, playerKey, deps, params),
@@ -1951,8 +1978,14 @@ function shouldGoByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   });
 }
 
-function selectBombMonthByPolicy(state, playerKey, bombMonths, policy = DEFAULT_BOT_POLICY) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
+function selectBombMonthByPolicy(
+  state,
+  playerKey,
+  bombMonths,
+  policy = DEFAULT_BOT_POLICY,
+  heuristicParams = null
+) {
+  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
     v7: ({ decisionState, deps }) => selectBombMonthV7(decisionState, playerKey, bombMonths, deps),
     v6: ({ decisionState, deps }) => selectBombMonthV6(decisionState, playerKey, bombMonths, deps),
@@ -1963,8 +1996,14 @@ function selectBombMonthByPolicy(state, playerKey, bombMonths, policy = DEFAULT_
   });
 }
 
-function shouldBombByPolicy(state, playerKey, bombMonths, policy = DEFAULT_BOT_POLICY) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
+function shouldBombByPolicy(
+  state,
+  playerKey,
+  bombMonths,
+  policy = DEFAULT_BOT_POLICY,
+  heuristicParams = null
+) {
+  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
     v7: ({ decisionState, deps, params }) => shouldBombV7(decisionState, playerKey, bombMonths, deps, params),
     v6: ({ decisionState, deps, params }) => shouldBombV6(decisionState, playerKey, bombMonths, deps, params),
@@ -1975,8 +2014,14 @@ function shouldBombByPolicy(state, playerKey, bombMonths, policy = DEFAULT_BOT_P
   });
 }
 
-function decideShakingByPolicy(state, playerKey, shakingMonths, policy = DEFAULT_BOT_POLICY) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
+function decideShakingByPolicy(
+  state,
+  playerKey,
+  shakingMonths,
+  policy = DEFAULT_BOT_POLICY,
+  heuristicParams = null
+) {
+  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
     v7: ({ decisionState, deps, params }) => decideShakingV7(decisionState, playerKey, shakingMonths, deps, params),
     v6: ({ decisionState, deps, params }) => decideShakingV6(decisionState, playerKey, shakingMonths, deps, params),
@@ -1987,8 +2032,8 @@ function decideShakingByPolicy(state, playerKey, shakingMonths, policy = DEFAULT
   });
 }
 
-function rankHandCardsByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy);
+function rankHandCardsByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
+  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
     v7: ({ decisionState, deps, params }) => rankHandCardsV7(decisionState, playerKey, deps, params),
     v6: ({ decisionState, deps, params }) => rankHandCardsV6(decisionState, playerKey, deps, params),
@@ -1999,6 +2044,7 @@ function rankHandCardsByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY) {
   });
 }
 
+/* 6) Rollout helper block (v6) */
 function monthBoardGain(state, month) {
   const cards = (state.board || []).filter((c) => c.month === month);
   return cards.reduce((sum, c) => sum + cardCaptureValue(c), 0);

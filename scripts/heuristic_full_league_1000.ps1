@@ -1,4 +1,12 @@
-﻿param(
+﻿# Pipeline Stage: Full-League Orchestrator
+# Quick Read Map:
+# 1) Validate policy set / game count
+# 2) Build round-robin matchup list
+# 3) Run each 1000-game matchup
+# 4) Aggregate standings and metrics
+# 5) Save league outputs
+
+param(
   [int]$GamesPerMatch = 1000,
   [int]$MaxSteps = 600,
   [string]$OutputTag = "",

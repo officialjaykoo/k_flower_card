@@ -1,4 +1,11 @@
-﻿param(
+﻿# Pipeline Stage: Phase 4 Eval Wrapper
+# Quick Read Map:
+# 1) Load runtime + gate + winner genome
+# 2) Validate thresholds from gate_state
+# 3) Build neat_eval_worker command
+# 4) Save and print pass/fail summary
+
+param(
   [Parameter(Mandatory = $true)][int]$Seed
 )
 

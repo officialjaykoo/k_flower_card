@@ -9,6 +9,14 @@
   decideShakingV3
 };
 
+/* ============================================================================
+ * Heuristic V3
+ * - conservative risk gating with tactical block bias
+ * - fallback-safe dependency access pattern
+ * - exported decisions: rank / match / go / bomb / shaking
+ * ========================================================================== */
+
+/* 1) Hand ranking (main policy entry for play-card selection) */
 function rankHandCardsV3(state, playerKey, deps) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
@@ -225,12 +233,13 @@ function rankHandCardsV3(state, playerKey, deps) {
   return ranked;
 }
 
-// Shared fallback: keep V3 tolerant even if deps.otherPlayerKey is missing.
+/* 2) Shared helper: tolerant opponent-key lookup */
 function otherPlayerKeyFromDeps(playerKey, deps) {
   if (typeof deps?.otherPlayerKey === "function") return deps.otherPlayerKey(playerKey);
   return playerKey === "human" ? "ai" : "human";
 }
 
+/* 3) Pending decision handlers (match / gukjin / president / go) */
 function chooseMatchHeuristicV3(state, playerKey, deps) {
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
@@ -299,6 +308,7 @@ function shouldPresidentStopV3() {
   return false;
 }
 
+/* GO decision gate: layered risk checks first, utility margin second */
 function shouldGoV3(state, playerKey, deps) {
   const player = state.players?.[playerKey];
   const opp = otherPlayerKeyFromDeps(playerKey, deps);
@@ -427,6 +437,7 @@ function shouldGoV3(state, playerKey, deps) {
   return deckCount > (desperateGo ? 4 : 6) && (!conservativeGo || strongLead);
 }
 
+/* 4) Bomb helpers and decision */
 function selectBestMonthByGain(state, months, deps) {
   if (!months?.length) return null;
   let best = months[0];
@@ -466,6 +477,7 @@ function shouldBombV3(state, playerKey, bombMonths, deps) {
   return bestGain >= 1;
 }
 
+/* 5) Shaking helpers */
 function shakingTempoPressureScoreV3(state, playerKey, ctx, oppThreat, deps) {
   const opp = otherPlayerKeyFromDeps(playerKey, deps);
   const self = state.players?.[playerKey];
@@ -500,6 +512,7 @@ function slowPlayPenaltyV3(immediateGain, comboGain, tempoPressure, ctx) {
   return 0;
 }
 
+/* 6) Shaking decision */
 function decideShakingV3(state, playerKey, shakingMonths, deps) {
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
 

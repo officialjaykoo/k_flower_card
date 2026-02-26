@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_BOT_POLICY,
   MODEL_CATALOG,
@@ -6,26 +6,50 @@ import {
   getModelLabel
 } from "../ai/policies.js";
 import { aiPlay, getAiPlayProbabilities } from "../ai/aiPlay.js";
-import { buildMoeSelectionContext, selectMoeRoleByContext } from "../ai/moePolicy.js";
 import { advanceAutoTurns } from "../engine/runner.js";
 import { DEFAULT_LANGUAGE } from "../ui/i18n/i18n.js";
+
+/* ============================================================================
+ * AI runtime hook
+ * - policy/model selection
+ * - model loading cache
+ * - auto-turn execution
+ * ========================================================================== */
 
 function createEmptyModelSlots() {
   return { single: null, attack: null, defense: null };
 }
 
+async function fetchPolicyModel(path) {
+  if (!path) return null;
+  try {
+    const r = await fetch(path);
+    return r.ok ? await r.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+// Compatibility fallback for legacy policy_model_moe: use fixed priority.
+function pickStaticMoeModel(slotModels) {
+  return slotModels.attack || slotModels.defense || slotModels.single || null;
+}
+
 export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotPlayerFn }) {
+  /* 1) Runtime refs/state */
   const policyModelRef = useRef({
     human: createEmptyModelSlots(),
     ai: createEmptyModelSlots()
   });
   const [modelVersion, setModelVersion] = useState(0);
 
+  /* 2) UI model options */
   const modelOptions = useMemo(
     () => buildModelOptions(ui.language || DEFAULT_LANGUAGE, translateFn),
     [ui.language, translateFn]
   );
 
+  /* 3) Label mapping */
   const applyParticipantLabels = useCallback(
     (gameState, runtimeUi = ui) => {
       const lang = runtimeUi.language || DEFAULT_LANGUAGE;
@@ -57,11 +81,13 @@ export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotP
     [ui, translateFn, participantTypeFn]
   );
 
+  /* 4) Per-player execution option resolver */
   const resolveAiExecutionOptions = useCallback(
     (runtimeUi, playerKey, gameState = state) => {
       const pick = runtimeUi.modelPicks?.[playerKey];
       const cfg = MODEL_CATALOG[pick] || null;
       const slotModels = policyModelRef.current[playerKey] || createEmptyModelSlots();
+
       if (cfg?.kind === "policy_model") {
         return {
           source: "model",
@@ -69,21 +95,15 @@ export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotP
           heuristicPolicy: DEFAULT_BOT_POLICY
         };
       }
+
       if (cfg?.kind === "policy_model_moe") {
-        const role = selectMoeRoleByContext(
-          buildMoeSelectionContext(gameState, playerKey),
-          cfg.moe || {}
-        );
-        const selectedModel =
-          role === "defense"
-            ? slotModels.defense || slotModels.attack || slotModels.single
-            : slotModels.attack || slotModels.defense || slotModels.single;
         return {
           source: "model",
-          model: selectedModel || null,
+          model: pickStaticMoeModel(slotModels),
           heuristicPolicy: DEFAULT_BOT_POLICY
         };
       }
+
       return {
         source: "heuristic",
         model: null,
@@ -93,6 +113,7 @@ export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotP
     [state]
   );
 
+  /* 5) Action executors */
   const chooseBotAction = useCallback(
     (gameState, playerKey, runtimeUi = ui) => {
       const options = resolveAiExecutionOptions(runtimeUi, playerKey, gameState);
@@ -113,17 +134,10 @@ export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotP
     [ui, chooseBotAction, isBotPlayerFn]
   );
 
+  /* 6) Model loading */
   useEffect(() => {
     let mounted = true;
-    const fetchPolicyModel = async (path) => {
-      if (!path) return null;
-      try {
-        const r = await fetch(path);
-        return r.ok ? await r.json() : null;
-      } catch {
-        return null;
-      }
-    };
+
     const loadFor = async (slot) => {
       const pick = ui.modelPicks?.[slot];
       const cfg = MODEL_CATALOG[pick] || null;
@@ -146,6 +160,7 @@ export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotP
       }
       policyModelRef.current[slot] = createEmptyModelSlots();
     };
+
     Promise.all([loadFor("human"), loadFor("ai")])
       .then(() => {
         if (!mounted) return;
@@ -157,11 +172,13 @@ export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotP
         policyModelRef.current.ai = createEmptyModelSlots();
         setModelVersion((v) => v + 1);
       });
+
     return () => {
       mounted = false;
     };
   }, [ui.modelPicks?.human, ui.modelPicks?.ai]);
 
+  /* 7) AI hand probability preview */
   const aiPlayProbMap = useMemo(() => {
     if (state.phase !== "playing") return null;
     if (participantTypeFn(ui, "ai") !== "ai") return null;

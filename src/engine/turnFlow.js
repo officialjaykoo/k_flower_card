@@ -1,5 +1,13 @@
-export const STARTING_HAND_SIZE = 10;
+﻿/* ============================================================================
+ * Turn flow helpers
+ * - reveal cleanup
+ * - pass-card hand normalization per turn
+ * ========================================================================== */
 
+export const STARTING_HAND_SIZE = 10;
+const PLAYER_KEYS = Object.freeze(["human", "ai"]);
+
+/* Remove expired reveal overlays without mutating input state. */
 export function clearExpiredReveal(state, now = Date.now()) {
   const shakingAlive = state.shakingReveal && state.shakingReveal.expiresAt > now;
   const actionAlive = state.actionReveal && state.actionReveal.expiresAt > now;
@@ -21,7 +29,7 @@ function collectExistingCardIds(state) {
 
   push(state.board || []);
   push(state.deck || []);
-  ["human", "ai"].forEach((key) => {
+  PLAYER_KEYS.forEach((key) => {
     const p = state.players?.[key];
     if (!p) return;
     push(p.hand || []);
@@ -60,6 +68,7 @@ function makePassCard(serial) {
   };
 }
 
+/* Ensure expected hand size by trimming/adding pass cards for a player. */
 export function ensurePassCardFor(state, playerKey) {
   const player = state.players[playerKey];
   if (!player) return state;

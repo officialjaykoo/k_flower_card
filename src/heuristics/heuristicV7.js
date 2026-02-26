@@ -1,13 +1,13 @@
-﻿import {
-  computePrudentGoThresholdV7,
-  evaluateGoldPotentialV7,
-  isOpponentImminentV7
-} from "./heuristicV7_math.js";
+﻿// heuristicV7.js - V7.2 (Predatory Counter)
 
-// heuristicV7.js - V7.2 (Predatory Counter)
-
+/* ============================================================================
+ * Heuristic V7 (V7.2 Predatory Counter)
+ * - aggressive denial / pi-pressure policy
+ * - includes inline bankrupt/prudence helper block
+ * ========================================================================== */
 const GUKJIN_CARD_ID = "I0";
 
+/* 1) Parameter surface */
 export const DEFAULT_PARAMS = {
   greedMul: 1.8,
   shakingGreed: 4.0,
@@ -37,6 +37,7 @@ export const DEFAULT_PARAMS = {
   pukOpportunity: 3.0
 };
 
+/* 2) Core helpers */
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -48,6 +49,134 @@ function otherKey(state, playerKey) {
   const keys = Object.keys(state?.players || {});
   if (keys.length === 2) return keys.find((k) => k !== playerKey) || null;
   return null;
+}
+
+/* 3) Bankrupt/prudence helpers */
+function inferCurrentScoreV7(state, playerKey, options = {}) {
+  const fromOption = safeNum(options.currentScore, NaN);
+  if (Number.isFinite(fromOption)) return Math.max(0, fromOption);
+
+  const fromPlayerScore = safeNum(state?.players?.[playerKey]?.score, NaN);
+  if (Number.isFinite(fromPlayerScore)) return Math.max(0, fromPlayerScore);
+
+  const fromPlayerTotal = safeNum(state?.players?.[playerKey]?.totalScore, NaN);
+  if (Number.isFinite(fromPlayerTotal)) return Math.max(0, fromPlayerTotal);
+
+  const fromRootScore = safeNum(state?.score?.[playerKey], NaN);
+  if (Number.isFinite(fromRootScore)) return Math.max(0, fromRootScore);
+
+  return NaN;
+}
+
+function inferMultiplierV7(state, playerKey) {
+  const player = state?.players?.[playerKey] || {};
+  let multiplier = Math.max(1, safeNum(state?.multiplier, 1));
+
+  const carry = Math.max(1, safeNum(state?.carryOverMultiplier, 1));
+  multiplier *= carry;
+
+  const goCount = Math.max(0, Math.floor(safeNum(player?.goCount, 0)));
+  if (goCount === 3) multiplier *= 2;
+  if (goCount === 4) multiplier *= 4;
+  if (goCount >= 5) multiplier *= 8;
+
+  const shakingCount = Math.max(0, Math.floor(safeNum(player?.shakingCount, 0)));
+  if (shakingCount > 0) multiplier *= 2;
+
+  if (player?.isBomb === true || player?.bombDeclared === true) multiplier *= 2;
+  return Math.max(1, multiplier);
+}
+
+export function canBankruptOpponentByStopV7(state, playerKey, options = {}) {
+  if (!state?.players || !state.players[playerKey]) return false;
+  const oppKey = otherKey(state, playerKey);
+  if (!oppKey) return false;
+
+  const oppGold = safeNum(state?.players?.[oppKey]?.gold, 0);
+  if (oppGold <= 0) return true;
+
+  if (state?.phase === "go-stop" && typeof options.fallbackExact === "function") {
+    const exact = !!options.fallbackExact(state, playerKey);
+    if (exact) return true;
+  }
+
+  const score = inferCurrentScoreV7(state, playerKey, options);
+  if (!Number.isFinite(score) || score <= 0) {
+    if (typeof options.fallbackExact === "function") return !!options.fallbackExact(state, playerKey);
+    return false;
+  }
+
+  const betPerScore = Math.max(1, safeNum(state?.betAmount, safeNum(options.defaultBetAmount, 100)));
+  const multiplier = inferMultiplierV7(state, playerKey);
+  const safetyMargin = Math.min(1, Math.max(0.5, safeNum(options.safetyMargin, 0.9)));
+  const expectedDamage = score * betPerScore * multiplier;
+
+  return expectedDamage >= oppGold * safetyMargin;
+}
+
+export function computePrudentGoThresholdV7(options = {}) {
+  let threshold = safeNum(options.base, 0.3);
+  const myScore = safeNum(options.myScore, 0);
+  const deckCount = safeNum(options.deckCount, 0);
+  if (myScore >= 7) threshold += 0.05;
+  if (deckCount < 6) threshold -= 0.05;
+  return Math.max(0.2, Math.min(0.6, threshold));
+}
+
+function countComboTagV7(cards, tag) {
+  let n = 0;
+  for (const card of cards || []) {
+    if (Array.isArray(card?.comboTags) && card.comboTags.includes(tag)) n += 1;
+  }
+  return n;
+}
+
+export function isOpponentImminentV7(state, playerKey, oppProgress = null) {
+  const oppKey = otherKey(state, playerKey);
+  if (!oppKey) return false;
+  const opp = state?.players?.[oppKey];
+  if (!opp) return false;
+
+  const junkCount = (opp?.captured?.junk || []).length;
+  if (junkCount >= 8) return true;
+
+  const ribbons = opp?.captured?.ribbon || [];
+  const fives = opp?.captured?.five || [];
+  const kwang = opp?.captured?.kwang || [];
+  const red = countComboTagV7(ribbons, "redRibbons");
+  const blue = countComboTagV7(ribbons, "blueRibbons");
+  const plain = countComboTagV7(ribbons, "plainRibbons");
+  const birds = countComboTagV7(fives, "fiveBirds");
+  if (red >= 2 || blue >= 2 || plain >= 2 || birds >= 2) return true;
+  if (kwang.length >= 2) return true;
+
+  const threat = safeNum(oppProgress?.threat, 0);
+  if (threat >= 0.32) return true;
+
+  let topUrgency = 0;
+  const monthUrgency = oppProgress?.monthUrgency;
+  if (monthUrgency && typeof monthUrgency.values === "function") {
+    for (const v of monthUrgency.values()) topUrgency = Math.max(topUrgency, safeNum(v, 0));
+  }
+  return topUrgency >= 24;
+}
+
+export function evaluateGoldPotentialV7(_state, _playerKey, candidateCard) {
+  if (!candidateCard) return 0;
+
+  let potential = 0;
+  const junkPiValue = safeNum(candidateCard?.piValue, 0);
+  const isDoublePi =
+    candidateCard?.isDouble === true ||
+    candidateCard?.id === "I0" ||
+    (candidateCard?.category === "junk" && junkPiValue >= 2);
+  const stealPi = safeNum(candidateCard?.bonus?.stealPi, 0);
+
+  if (isDoublePi) potential += 20;
+  if (stealPi > 0 || candidateCard?.bonus === true) potential += 30;
+  if (candidateCard?.category === "kwang") potential += 12;
+  if (candidateCard?.category === "five" || candidateCard?.category === "ribbon") potential += 8;
+  return potential;
 }
 
 function piValue(card, deps) {
@@ -126,6 +255,7 @@ function selfPiCount(state, playerKey, deps) {
   return safeNum(state?.players?.[playerKey]?.captured?.junk?.length, 0);
 }
 
+/* 4) Exported policy decisions */
 export function rankHandCardsV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
@@ -198,6 +328,7 @@ export function rankHandCardsV7(state, playerKey, deps, params = DEFAULT_PARAMS)
   return ranked;
 }
 
+/* choose-match policy for pending TWO-match selections */
 export function chooseMatchHeuristicV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
@@ -245,6 +376,7 @@ export function chooseMatchHeuristicV7(state, playerKey, deps, params = DEFAULT_
   return bestId;
 }
 
+/* GO/STOP policy with gold-pressure and opponent-imminence gate */
 export function shouldGoV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   const oppKey = otherKey(state, playerKey);
@@ -300,6 +432,7 @@ export function shouldGoV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
   return true;
 }
 
+/* Bomb / shaking / president / gukjin decisions */
 export function selectBombMonthV7(state, _playerKey, bombMonths, deps) {
   if (!bombMonths?.length) return null;
   return bombMonths.reduce(

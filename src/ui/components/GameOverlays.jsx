@@ -1,7 +1,61 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import CardView from "./CardView.jsx";
 
 const CHOICE_LIMIT_MS = 10000;
+
+/* ============================================================================
+ * Overlay controller
+ * - timed human choices (match/go-stop/president/gukjin)
+ * - round/reveal modal layers
+ * ========================================================================== */
+
+function isHumanMatchSelection(state, ui, participantType) {
+  return (
+    state.phase === "select-match" &&
+    state.pendingMatch?.playerKey &&
+    participantType(ui, state.pendingMatch.playerKey) === "human"
+  );
+}
+
+function isHumanGoStop(state, ui, participantType) {
+  return (
+    state.phase === "go-stop" &&
+    state.pendingGoStop &&
+    participantType(ui, state.pendingGoStop) === "human"
+  );
+}
+
+function isHumanPresidentChoice(state, ui, participantType) {
+  return (
+    state.phase === "president-choice" &&
+    state.pendingPresident?.playerKey &&
+    participantType(ui, state.pendingPresident.playerKey) === "human"
+  );
+}
+
+function isHumanGukjinChoice(state, ui, participantType) {
+  return (
+    state.phase === "gukjin-choice" &&
+    state.pendingGukjinChoice?.playerKey &&
+    participantType(ui, state.pendingGukjinChoice.playerKey) === "human"
+  );
+}
+
+function buildTimedChoiceKey(state, ui, participantType) {
+  if (isHumanMatchSelection(state, ui, participantType)) {
+    return `match:${state.pendingMatch.playerKey}:${(state.pendingMatch.boardCardIds || []).join(",")}`;
+  }
+  if (isHumanGoStop(state, ui, participantType)) {
+    return `gostop:${state.pendingGoStop}`;
+  }
+  if (isHumanPresidentChoice(state, ui, participantType)) {
+    return `president:${state.pendingPresident.playerKey}:${state.pendingPresident.month}`;
+  }
+  if (isHumanGukjinChoice(state, ui, participantType)) {
+    return `gukjin:${state.pendingGukjinChoice.playerKey}`;
+  }
+  return null;
+}
 
 export default function GameOverlays({
   state,
@@ -20,26 +74,17 @@ export default function GameOverlays({
   onStartRandomGame,
   t
 }) {
-  const timedChoiceKey = useMemo(() => {
-    if (state.phase === "select-match" && state.pendingMatch?.playerKey && participantType(ui, state.pendingMatch.playerKey) === "human") {
-      return `match:${state.pendingMatch.playerKey}:${(state.pendingMatch.boardCardIds || []).join(",")}`;
-    }
-    if (state.phase === "go-stop" && state.pendingGoStop && participantType(ui, state.pendingGoStop) === "human") {
-      return `gostop:${state.pendingGoStop}`;
-    }
-    if (state.phase === "president-choice" && state.pendingPresident?.playerKey && participantType(ui, state.pendingPresident.playerKey) === "human") {
-      return `president:${state.pendingPresident.playerKey}:${state.pendingPresident.month}`;
-    }
-    if (state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey && participantType(ui, state.pendingGukjinChoice.playerKey) === "human") {
-      return `gukjin:${state.pendingGukjinChoice.playerKey}`;
-    }
-    return null;
-  }, [state, ui, participantType]);
+  /* 1) Timed choice bookkeeping */
+  const timedChoiceKey = useMemo(
+    () => buildTimedChoiceKey(state, ui, participantType),
+    [state, ui, participantType]
+  );
 
   const [deadlineAt, setDeadlineAt] = useState(null);
   const [tick, setTick] = useState(Date.now());
   const autoHandledKeyRef = useRef(null);
 
+  // Reset deadline whenever a new timed prompt appears.
   useEffect(() => {
     if (!timedChoiceKey) {
       setDeadlineAt(null);
@@ -48,6 +93,7 @@ export default function GameOverlays({
     setDeadlineAt(Date.now() + CHOICE_LIMIT_MS);
   }, [timedChoiceKey]);
 
+  // Keep countdown fresh while deadline is active.
   useEffect(() => {
     if (!deadlineAt) return;
     const timer = setInterval(() => setTick(Date.now()), 200);
@@ -56,6 +102,7 @@ export default function GameOverlays({
 
   const remainSec = deadlineAt ? Math.max(0, Math.ceil((deadlineAt - tick) / 1000)) : null;
 
+  // Auto-stop only for go/stop timeout.
   useEffect(() => {
     if (!timedChoiceKey) {
       autoHandledKeyRef.current = null;
@@ -78,6 +125,7 @@ export default function GameOverlays({
     ? t("overlay.result.president")
     : t("overlay.result.normal");
 
+  /* 2) Render overlays by phase */
   return (
     <>
       {reveal && (
@@ -98,9 +146,7 @@ export default function GameOverlays({
         </div>
       )}
 
-      {state.phase === "select-match" &&
-        state.pendingMatch?.playerKey &&
-        participantType(ui, state.pendingMatch.playerKey) === "human" && (
+      {isHumanMatchSelection(state, ui, participantType) && (
           <div className="result-overlay result-overlay-match-top">
             <div className="panel result-panel">
               <div className="section-title">{t("overlay.selectCard.title")}</div>
@@ -117,7 +163,7 @@ export default function GameOverlays({
           </div>
         )}
 
-      {state.phase === "go-stop" && state.pendingGoStop && participantType(ui, state.pendingGoStop) === "human" && (
+      {isHumanGoStop(state, ui, participantType) && (
         <div className="result-overlay">
           <div className="panel result-panel">
             <div className="section-title">{t("overlay.goStop.title")}</div>
@@ -130,9 +176,7 @@ export default function GameOverlays({
         </div>
       )}
 
-      {state.phase === "president-choice" &&
-        state.pendingPresident?.playerKey &&
-        participantType(ui, state.pendingPresident.playerKey) === "human" && (
+      {isHumanPresidentChoice(state, ui, participantType) && (
           <div className="result-overlay">
             <div className="panel result-panel">
               <div className="section-title">{t("overlay.president.title")}</div>
@@ -164,9 +208,7 @@ export default function GameOverlays({
           </div>
         )}
 
-      {state.phase === "gukjin-choice" &&
-        state.pendingGukjinChoice?.playerKey &&
-        participantType(ui, state.pendingGukjinChoice.playerKey) === "human" && (
+      {isHumanGukjinChoice(state, ui, participantType) && (
           <div className="result-overlay">
             <div className="panel result-panel">
               <div className="section-title">{t("overlay.gukjin.title")}</div>

@@ -1,4 +1,7 @@
-﻿export const POLICY_HEURISTIC_V3 = "heuristic_v3";
+﻿/* ============================================================================
+ * 1) Bot/Model policy identifiers
+ * ========================================================================== */
+export const POLICY_HEURISTIC_V3 = "heuristic_v3";
 export const POLICY_HEURISTIC_V4 = "heuristic_v4";
 export const POLICY_HEURISTIC_V5 = "heuristic_v5";
 export const POLICY_HEURISTIC_V6 = "heuristic_v6";
@@ -7,6 +10,9 @@ export const POLICY_HEURISTIC_V5PLUS = "heuristic_v5plus";
 export const POLICY_NEAT_PHASE2_SEED9 = "neat_phase2_seed9";
 export const DEFAULT_BOT_POLICY = POLICY_HEURISTIC_V3;
 
+/* ============================================================================
+ * 2) Bot policy whitelist used by runtime validation
+ * ========================================================================== */
 export const BOT_POLICIES = Object.freeze([
   POLICY_HEURISTIC_V3,
   POLICY_HEURISTIC_V4,
@@ -16,6 +22,9 @@ export const BOT_POLICIES = Object.freeze([
   POLICY_HEURISTIC_V7
 ]);
 
+/* ============================================================================
+ * 3) Catalog for UI labels and policy loading config
+ * ========================================================================== */
 export const MODEL_CATALOG = Object.freeze({
   [POLICY_HEURISTIC_V3]: {
     labelKey: "model.heuristicV3",
@@ -56,6 +65,9 @@ export const MODEL_CATALOG = Object.freeze({
 
 const BOT_POLICY_SET = new Set(BOT_POLICIES);
 
+/* ============================================================================
+ * 4) Normalization + UI helpers
+ * ========================================================================== */
 export function normalizeBotPolicy(policy) {
   const normalized = String(policy || "")
     .trim()

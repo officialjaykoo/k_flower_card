@@ -1,47 +1,66 @@
 ﻿import { DEFAULT_LANGUAGE, makeTranslator } from "../i18n/i18n.js";
 import { hydrateCard } from "./common.js";
 
+/* ============================================================================
+ * Replay utilities
+ * - kibo -> replay frame transformation
+ * - replay action/event formatters
+ * ========================================================================== */
+
+function hydrateHands(hands) {
+  return {
+    human: (hands?.human || []).map(hydrateCard),
+    ai: (hands?.ai || []).map(hydrateCard)
+  };
+}
+
+function buildInitialFrame(initial) {
+  return {
+    type: "initial",
+    turnNo: 0,
+    actor: null,
+    action: { type: "initial" },
+    board: (initial.board || []).map(hydrateCard),
+    hands: hydrateHands(initial.hands),
+    deckCount: Array.isArray(initial.deck) ? initial.deck.length : 0,
+    events: null,
+    steals: { pi: 0, gold: 0 }
+  };
+}
+
+function buildTurnEndFrame(entry, idx) {
+  return {
+    type: "turn_end",
+    turnNo: entry.turnNo ?? idx + 1,
+    actor: entry.actor,
+    action: entry.action || null,
+    board: (entry.board || []).map(hydrateCard),
+    hands: hydrateHands(entry.hands),
+    deckCount: entry.deckCount ?? 0,
+    events: entry.events || null,
+    steals: entry.steals || { pi: 0, gold: 0 }
+  };
+}
+
+/* 1) Build replay frames from serialized kibo */
 export function buildReplayFrames(state) {
   const kibo = state.kibo || [];
   const initial = kibo.find((e) => e.type === "initial_deal");
   const frames = [];
+
   if (initial) {
-    frames.push({
-      type: "initial",
-      turnNo: 0,
-      actor: null,
-      action: { type: "initial" },
-      board: (initial.board || []).map(hydrateCard),
-      hands: {
-        human: (initial.hands?.human || []).map(hydrateCard),
-        ai: (initial.hands?.ai || []).map(hydrateCard)
-      },
-      deckCount: Array.isArray(initial.deck) ? initial.deck.length : 0,
-      events: null,
-      steals: { pi: 0, gold: 0 }
-    });
+    frames.push(buildInitialFrame(initial));
   }
 
   const turns = kibo.filter((e) => e.type === "turn_end");
   turns.forEach((e, idx) => {
-    frames.push({
-      type: "turn_end",
-      turnNo: e.turnNo ?? idx + 1,
-      actor: e.actor,
-      action: e.action || null,
-      board: (e.board || []).map(hydrateCard),
-      hands: {
-        human: (e.hands?.human || []).map(hydrateCard),
-        ai: (e.hands?.ai || []).map(hydrateCard)
-      },
-      deckCount: e.deckCount ?? 0,
-      events: e.events || null,
-      steals: e.steals || { pi: 0, gold: 0 }
-    });
+    frames.push(buildTurnEndFrame(e, idx));
   });
+
   return frames;
 }
 
+/* 2) Action/event text formatting */
 export function formatActionText(action, t = null) {
   const tr = t || makeTranslator(DEFAULT_LANGUAGE);
   if (!action) return "-";

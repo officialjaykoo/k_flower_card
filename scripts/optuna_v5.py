@@ -1,5 +1,12 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# Pipeline Stage: Optuna Tuning Wrapper (V5)
+# Quick Read Map:
+# 1) Define search space/constants
+# 2) suggest_params + run_duel helpers
+# 3) objective() scoring
+# 4) main(): study run + artifact export
+
 """
 scripts/optuna_v5.py  –  V5 Optuna 튜닝
 대상: heuristic_v5 vs heuristic_v4 (1000게임/trial)

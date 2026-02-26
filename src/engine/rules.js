@@ -1,7 +1,11 @@
+﻿/* ============================================================================
+ * Rule presets
+ * - `A` is the default rule set used across runtime/training scripts.
+ * ========================================================================== */
 export const ruleSets = {
   A: {
-    name: "통합 단일룰",
-    description: "프로젝트 공통 단일 맞고 룰(7점부터 Go/Stop)",
+    name: "Unified Project Rules",
+    description: "Project default Matgo rules (Go/Stop starts at 7 points)",
     goMinScore: 7,
     bakMultipliers: { gwang: 2, pi: 2, mongBak: 2 },
     useEarlyStop: true

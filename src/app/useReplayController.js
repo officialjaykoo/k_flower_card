@@ -1,30 +1,45 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildReplayFrames } from "../ui/utils/replay.js";
 
+/* ============================================================================
+ * Replay controller hook
+ * - build replay frames from live/loaded source
+ * - playback controls + autoplay timer
+ * ========================================================================== */
+
+function clampReplayIndex(idx, length) {
+  if (!length) return 0;
+  const n = Number(idx);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(length - 1, n));
+}
+
 export function useReplayController({ ui, setUi, state, t }) {
+  /* 1) Local replay source state */
   const [loadedReplay, setLoadedReplay] = useState(null);
   const timerRef = useRef(null);
 
+  /* 2) Derived frames */
   const replaySource = loadedReplay
     ? {
         kibo: loadedReplay.kibo || [],
         players: loadedReplay.players || state.players
       }
     : state;
+
   const replayFrames = useMemo(() => buildReplayFrames(replaySource), [replaySource]);
-  const replayIdx = replayFrames.length
-    ? Math.max(0, Math.min(replayFrames.length - 1, ui.replay.turnIndex))
-    : 0;
+  const replayIdx = clampReplayIndex(ui.replay.turnIndex, replayFrames.length);
   const replayFrame = replayFrames[replayIdx] || null;
 
+  /* 3) Autoplay timer lifecycle */
   useEffect(() => {
     if (!ui.replay.autoPlay || !ui.replay.enabled) return;
-    const frames = replayFrames;
-    if (frames.length <= 1) return;
+    if (replayFrames.length <= 1) return;
+
     timerRef.current = setInterval(() => {
       setUi((nextUi) => {
-        const next = Math.min(frames.length - 1, nextUi.replay.turnIndex + 1);
-        const ended = next >= frames.length - 1;
+        const next = Math.min(replayFrames.length - 1, nextUi.replay.turnIndex + 1);
+        const ended = next >= replayFrames.length - 1;
         return {
           ...nextUi,
           replay: {
@@ -35,12 +50,14 @@ export function useReplayController({ ui, setUi, state, t }) {
         };
       });
     }, ui.replay.intervalMs);
+
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = null;
     };
   }, [ui.replay.autoPlay, ui.replay.enabled, ui.replay.intervalMs, replayFrames, setUi]);
 
+  /* 4) Navigation actions */
   const onReplayToggle = useCallback(() => {
     setUi((nextUi) => ({
       ...nextUi,
@@ -72,11 +89,18 @@ export function useReplayController({ ui, setUi, state, t }) {
     }));
   }, [setUi]);
 
+  /* 5) Settings actions */
   const onReplaySeek = useCallback(
     (idx) => {
-      setUi((nextUi) => ({ ...nextUi, replay: { ...nextUi.replay, turnIndex: Number(idx) } }));
+      setUi((nextUi) => ({
+        ...nextUi,
+        replay: {
+          ...nextUi.replay,
+          turnIndex: clampReplayIndex(idx, replayFrames.length)
+        }
+      }));
     },
-    [setUi]
+    [setUi, replayFrames.length]
   );
 
   const onReplayIntervalChange = useCallback(
@@ -86,6 +110,7 @@ export function useReplayController({ ui, setUi, state, t }) {
     [setUi]
   );
 
+  /* 6) Data source actions */
   const onLoadReplay = useCallback(
     (entry, label = t("replay.loadedSourceDefault")) => {
       setLoadedReplay({
@@ -126,4 +151,3 @@ export function useReplayController({ ui, setUi, state, t }) {
     onClearReplay
   };
 }
-

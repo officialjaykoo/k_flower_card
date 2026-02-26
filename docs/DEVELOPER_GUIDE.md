@@ -3,7 +3,7 @@
 ## 결론
 - 현재 학습/평가 경로는 `neat-python` 단일 경로다.
 - 실행 진입점은 `scripts/run_neat_*.ps1`이며, 코어 러너는 `scripts/neat_train.py`다.
-- 평가/대전 워커는 `scripts/neat_eval_worker.mjs`, `scripts/neat_duel_worker.mjs`를 사용한다.
+- 파일 작업 순서는 `scripts/neat_train.py` → `scripts/neat_eval_worker.mjs` → `scripts/heuristic_duel_worker.mjs`를 기준으로 맞춘다.
 
 ## 1. 문서 범위
 이 문서는 NEAT 도입 이후 개발자가 수정해야 할 파일 경계, 실행 절차, 산출물 해석 기준을 정의한다.
@@ -19,6 +19,7 @@
 ### 2-2. 코어 로직
 - `scripts/neat_train.py`: NEAT 러너, 병렬 평가, 게이트/실패 감지, 로그 저장
 - `scripts/neat_eval_worker.mjs`: 유전체 단일 평가(게임 반복, fitness 계산)
+- `scripts/heuristic_duel_worker.mjs`: 휴리스틱 A/B 1000게임 대전/데이터셋 추출
 - `scripts/neat_duel_worker.mjs`: 유전체 A/B 대전 결과 계산
 
 ### 2-3. 설정

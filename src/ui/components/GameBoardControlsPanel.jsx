@@ -1,4 +1,29 @@
-import { useRef } from "react";
+﻿import { useRef } from "react";
+
+/* ============================================================================
+ * Right-side controls panel
+ * - mode/theme/language settings
+ * - seed/start actions
+ * - replay import/export/reset
+ * ========================================================================== */
+
+const MODE_HVA = "hva";
+const MODE_HVH = "hvh";
+const MODE_AVA = "ava";
+
+function resolveModeValue(ui, participantType) {
+  const humanType = participantType(ui, "human");
+  const aiType = participantType(ui, "ai");
+  if (humanType === "human" && aiType === "human") return MODE_HVH;
+  if (humanType === "ai" && aiType === "ai") return MODE_AVA;
+  return MODE_HVA;
+}
+
+function resolveParticipantsByMode(mode) {
+  if (mode === MODE_HVH) return { human: "human", ai: "human" };
+  if (mode === MODE_AVA) return { human: "ai", ai: "ai" };
+  return { human: "human", ai: "ai" };
+}
 
 export default function GameBoardControlsPanel({
   state,
@@ -17,6 +42,7 @@ export default function GameBoardControlsPanel({
 }) {
   const replayFileInputRef = useRef(null);
 
+  /* 1) Replay file import/export helpers */
   const loadReplayFromFile = (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -73,6 +99,7 @@ export default function GameBoardControlsPanel({
     window.alert(t("controls.alert.resetReplayOnly"));
   };
 
+  /* 2) Render */
   return (
     <div className="panel controls right-controls-panel">
       <input
@@ -102,29 +129,17 @@ export default function GameBoardControlsPanel({
       </div>
       <div className="controls-section">
         <select
-          value={
-            participantType(ui, "human") === "human" && participantType(ui, "ai") === "ai"
-              ? "hva"
-              : participantType(ui, "human") === "human" && participantType(ui, "ai") === "human"
-              ? "hvh"
-              : "ava"
-          }
+          value={resolveModeValue(ui, participantType)}
           onChange={(e) => {
-            const value = e.target.value;
             setUi((u) => ({
               ...u,
-              participants:
-                value === "hvh"
-                  ? { human: "human", ai: "human" }
-                  : value === "ava"
-                  ? { human: "ai", ai: "ai" }
-                  : { human: "human", ai: "ai" }
+              participants: resolveParticipantsByMode(e.target.value)
             }));
           }}
         >
-          <option value="hva">{t("controls.mode.hva")}</option>
-          <option value="hvh">{t("controls.mode.hvh")}</option>
-          <option value="ava">{t("controls.mode.ava")}</option>
+          <option value={MODE_HVA}>{t("controls.mode.hva")}</option>
+          <option value={MODE_HVH}>{t("controls.mode.hvh")}</option>
+          <option value={MODE_AVA}>{t("controls.mode.ava")}</option>
         </select>
       </div>
       <div className="controls-section">

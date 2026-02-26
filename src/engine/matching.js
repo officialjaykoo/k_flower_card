@@ -1,3 +1,9 @@
+﻿/* ============================================================================
+ * Match resolution
+ * - Determine match type by board month count
+ * - Tag events produced by hand/flip context
+ * ========================================================================== */
+
 export function resolveMatch({ card, board, source, isLastHandTurn = false, playedMonth = null }) {
   const matches = board.filter((c) => c.month === card.month);
   const result = {

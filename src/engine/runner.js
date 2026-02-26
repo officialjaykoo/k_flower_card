@@ -1,3 +1,11 @@
+﻿/* ============================================================================
+ * Auto-run helpers
+ * - Resolve actor by phase
+ * - Advance bot-vs-bot turns until stop condition
+ * ========================================================================== */
+
+const DEFAULT_MAX_AUTO_STEPS = 400;
+
 export function getActionPlayerKey(state) {
   if (state.phase === "playing") return state.currentTurn;
   if (state.phase === "go-stop") return state.pendingGoStop || null;
@@ -8,7 +16,7 @@ export function getActionPlayerKey(state) {
   return null;
 }
 
-export function advanceAutoTurns(state, isBotPlayer, playBot, maxSteps = 400) {
+export function advanceAutoTurns(state, isBotPlayer, playBot, maxSteps = DEFAULT_MAX_AUTO_STEPS) {
   let next = state;
   for (let i = 0; i < maxSteps; i += 1) {
     const actor = getActionPlayerKey(next);

@@ -1,4 +1,11 @@
-﻿param(
+﻿# Pipeline Stage: Phase 1 Runner Wrapper
+# Quick Read Map:
+# 1) Resolve python/runtime paths
+# 2) Build neat_train command
+# 3) Execute and parse summary JSON
+# 4) Print gate/eval highlights
+
+param(
   [Parameter(Mandatory = $true)][int]$Seed
 )
 
