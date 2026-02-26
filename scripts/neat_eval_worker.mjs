@@ -1067,10 +1067,16 @@ function main() {
   const go3PlusRate = go3PlusCount / games;
   const myGotBakRate = myGotBakCount / games;
   const drawRate = draws / games;
-  const fitnessGoldScale = 3000.0;
-  const fitnessWinWeight = 0.8;
-  const fitnessLossWeight = 0.6;
-  const fitnessDrawWeight = 0.1;
+  const fitnessGoldScaleRaw = Number(opts.fitnessGoldScale);
+  const fitnessWinWeightRaw = Number(opts.fitnessWinWeight);
+  const fitnessLossWeightRaw = Number(opts.fitnessLossWeight);
+  const fitnessDrawWeightRaw = Number(opts.fitnessDrawWeight);
+  const fitnessGoldScale = Number.isFinite(fitnessGoldScaleRaw) && fitnessGoldScaleRaw > 0
+    ? fitnessGoldScaleRaw
+    : 10000.0;
+  const fitnessWinWeight = Number.isFinite(fitnessWinWeightRaw) ? fitnessWinWeightRaw : 2.5;
+  const fitnessLossWeight = Number.isFinite(fitnessLossWeightRaw) ? fitnessLossWeightRaw : 1.5;
+  const fitnessDrawWeight = Number.isFinite(fitnessDrawWeightRaw) ? fitnessDrawWeightRaw : 0.1;
 
   let fitness =
     (meanGoldDelta / fitnessGoldScale) +
