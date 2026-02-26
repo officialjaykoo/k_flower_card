@@ -1,220 +1,157 @@
 ﻿# K-Flower Card Developer Guide (NEAT)
 
 ## 결론
-- 현재 학습/평가 경로는 `neat-python` 단일 경로다.
-- 실행 진입점은 `scripts/run_neat_*.ps1`이며, 코어 러너는 `scripts/neat_train.py`다.
-- 파일 작업 순서는 `scripts/neat_train.py` → `scripts/neat_eval_worker.mjs` → `scripts/heuristic_duel_worker.mjs`를 기준으로 맞춘다.
+- 현재 학습/평가 기준 파이프라인은 `scripts/neat_train.py -> scripts/neat_eval_worker.mjs -> scripts/model_duel_worker.mjs`다.
+- Phase 1/2 실행·평가는 공통 래퍼(`scripts/phase_run.ps1`, `scripts/phase_eval.ps1`)로 통합되었다.
+- 모든 런타임 설정은 `scripts/configs/runtime_phase*.json`을 단일 기준(Source of Truth)으로 사용한다.
 
 ## 1. 문서 범위
-이 문서는 NEAT 도입 이후 개발자가 수정해야 할 파일 경계, 실행 절차, 산출물 해석 기준을 정의한다.
-레거시 경로(Deep CFR, 커스텀 유전체 포맷)는 활성 런타임 범위에서 제외한다.
+이 문서는 NEAT 기반 학습/평가 운영 기준, 파일 경계, 실행 명령, 산출물 해석 규칙을 정의한다.
+레거시 실행 경로(`run_neat_*`, 루트 `configs/`)는 현재 기준에서 제외한다.
 
-## 2. 단일 기준 파일(SoT)
-### 2-1. 실행 스크립트
-- `scripts/run_neat_train.ps1`: 학습 시작
-- `scripts/run_neat_resume.ps1`: 체크포인트 재개
-- `scripts/run_neat_eval.ps1`: 단일 유전체 평가
-- `scripts/run_neat_duel.ps1`: 유전체 A/B 1000게임 대전
+## 2. 현재 기준 파일 맵 (SoT)
+### 2-1. 오케스트레이션 스크립트 (`scripts/`)
+- `phase_run.ps1`: Phase 1/2 공통 학습 실행 래퍼
+- `phase_eval.ps1`: Phase 1/2 공통 평가 실행 래퍼
+- `phase1_run.ps1`, `phase2_run.ps1`: 공통 학습 래퍼 위임 진입점
+- `phase1_eval.ps1`, `phase2_eval.ps1`: 공통 평가 래퍼 위임 진입점
+- `phase3_run.ps1`, `phase3_eval.ps1`: Phase 3 학습/평가
+- `phase4_run.ps1`, `phase4_eval.ps1`: Phase 4 학습/평가
 
-### 2-2. 코어 로직
-- `scripts/neat_train.py`: NEAT 러너, 병렬 평가, 게이트/실패 감지, 로그 저장
-- `scripts/neat_eval_worker.mjs`: 유전체 단일 평가(게임 반복, fitness 계산)
-- `scripts/heuristic_duel_worker.mjs`: 휴리스틱 A/B 1000게임 대전/데이터셋 추출
-- `scripts/neat_duel_worker.mjs`: 유전체 A/B 대전 결과 계산
+### 2-2. 코어 실행기
+- `neat_train.py`: NEAT 러너, 병렬 평가, 게이트/실패 감지, 체크포인트/요약 저장
+- `neat_eval_worker.mjs`: 단일 유전체 평가(게임 반복, fitness 계산, imitation 계산)
+- `model_duel_worker.mjs`: 휴리스틱/NEAT 모델 공용 대전 실행기 + kibo/dataset 출력
 
-### 2-3. 설정
-- `scripts/configs/neat_feedforward.ini`: neat-python 토폴로지/돌연변이 설정 (`num_inputs=47`)
-- `configs/neat_runtime.json`: 기본 런타임 진입점(현재 phase2 i3_w6 확장)
-- `configs/neat_runtime_i3_w6.json`: i3 6워커 프로필
-- `configs/neat_runtime_i3_w7.json`: i3 7워커 비교 프로필
-- `configs/neat/common.runtime.json`: 공통 런타임 파라미터
-- `configs/neat/phases/phase1.runtime.json`: hybrid 게이트(초기 모방+승률)
-- `configs/neat/phases/phase2.runtime.json`: win-rate only 게이트
-- `configs/neat/phases/phase3.runtime.json`: 강화된 win-rate 게이트
+### 2-3. 설정 (`scripts/configs/`)
+- `neat_feedforward.ini`: NEAT 토폴로지/변이 설정 (`num_inputs=47`)
+- `runtime_phase1.json`
+- `runtime_phase2.json`
+- `runtime_phase3.json`
+- `runtime_phase4.json`
 
-## 3. 환경 준비
-1. Python 가상환경 준비
-2. `neat-python` 설치
+## 3. 파이프라인 흐름
+### 3-1. Phase 1
+1. `phase1_run.ps1 -Seed <N>`
+2. `phase1_eval.ps1 -Seed <N>`
 
-```powershell
-.venv\Scripts\python -m pip install neat-python
-```
+### 3-2. Phase 2
+1. `phase2_run.ps1 -Seed <N>`
+2. `phase2_eval.ps1 -Seed <N>`
 
-3. Node 의존성 준비
+참고:
+- `phase_run.ps1`는 Phase 2 실행 시 Phase 1 체크포인트를 자동 탐색한다.
+- 우선순위: `runtime_phase1.json.generations`에 해당하는 체크포인트 -> 없으면 최신 세대 체크포인트.
 
-```powershell
-npm ci
-```
+### 3-3. Phase 3/4
+- 현재 `phase3_run.ps1`, `phase4_run.ps1`은 resume 체크포인트 세대가 스크립트에 하드코딩되어 있다.
+- Phase 3/4 세대 수 변경 시, 해당 run 스크립트의 resume 세대(`gen99`, `gen199`)와 `--base-generation`을 같이 갱신해야 한다.
 
 ## 4. 실행 명령
-### 4-1. 학습 시작
+### 4-1. 학습
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_neat_train.ps1
+powershell -ExecutionPolicy Bypass -File scripts/phase1_run.ps1 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase2_run.ps1 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase3_run.ps1 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase4_run.ps1 -Seed 9
 ```
 
-### 4-2. 학습 Dry Run (시뮬레이션 없이 배선 확인)
+### 4-2. 평가 (고정 1000게임)
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_neat_train.ps1 -DryRun
+powershell -ExecutionPolicy Bypass -File scripts/phase1_eval.ps1 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase2_eval.ps1 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase3_eval.ps1 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase4_eval.ps1 -Seed 9
 ```
 
-### 4-3. 체크포인트 재개
+### 4-3. 휴리스틱 대전 (고정 1000게임)
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_neat_resume.ps1 -ResumeCheckpoint logs/neat_python/checkpoints/neat-checkpoint-50
+node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --games 1000 --seed v5_vs_phase4s5 --first-turn-policy alternate --continuous-series 1 --max-steps 600
 ```
 
-### 4-4. 단일 유전체 평가
-기본 게임 수는 `1000`이다.
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_neat_eval.ps1 -GenomePath logs/neat_python/models/winner_genome.json
-```
+## 5. 런타임 키 규칙
+### 5-1. 공통 핵심 키
+- `generations`, `eval_workers`, `games_per_genome`
+- `max_eval_steps`, `eval_timeout_sec`
+- `opponent_policy`, (`opponent_genome` when policy=`genome`)
+- `fitness_gold_scale`, `fitness_win_weight`, `fitness_loss_weight`, `fitness_draw_weight`
+- `gate_mode`, `gate_ema_window`, `transition_*`, `failure_*`
 
-### 4-5. 유전체 A/B 대전
-프로젝트 규칙으로 게임 수는 고정 `1000`이다.
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_neat_duel.ps1 -GenomeAPath logs/runA/models/winner_genome.json -GenomeBPath logs/runB/models/winner_genome.json
-```
+### 5-2. Phase 1/2 평가 통과 기준
+`phase_eval.ps1` 우선순위:
+1. `eval_pass_win_rate_min`, `eval_pass_mean_gold_delta_min`
+2. 없으면 `transition_ema_win_rate`, `transition_mean_gold_delta_min`
+3. 없으면 기본값 `win_rate >= 0.48`, `mean_gold_delta >= 100`
 
-## 5. 런타임 오버라이드 규칙
-`run_neat_train.ps1`/`run_neat_resume.ps1`는 아래 핵심 오버라이드를 전달할 수 있다.
+### 5-3. 모순 방지 규칙
+- `failure_generation_min`은 해당 phase `generations`보다 크지 않게 유지한다.
+- `checkpoint_every`는 세대 수 대비 적절히 설정한다(체크포인트 누락 방지).
 
-- `--generations`
-- `--workers` (최소 2)
-- `--games-per-genome`
-- `--eval-timeout-sec`
-- `--max-eval-steps`
-- `--opponent-policy`
-- `--checkpoint-every`
-- `--seed`
-- `--switch-seats` 또는 `--fixed-seats`
-- `--fitness-gold-scale`
-- `--fitness-win-weight`
-- `--fitness-loss-weight`
-- `--fitness-draw-weight`
+## 6. 산출물 디렉터리
+### 6-1. Phase별 출력 루트
+- `logs/neat_phase1_seed<Seed>`
+- `logs/neat_phase2_seed<Seed>`
+- `logs/neat_phase3_seed<Seed>`
+- `logs/neat_phase4_seed<Seed>`
 
-실행 시 실제 적용값은 `logs/neat_python/run_summary.json`의 `runtime_effective`, `applied_overrides`로 확인한다.
-
-## 6. Fitness/평가 지표
-### 6-1. 최종 fitness
-`neat_eval_worker.mjs` 기준:
-
-```text
-fitness = (mean_gold_delta / fitness_gold_scale)
-        + (win_rate * fitness_win_weight)
-        - (loss_rate * fitness_loss_weight)
-        + (draw_rate * fitness_draw_weight)
-```
-
-### 6-2. 보조 지표
-- `win_rate`, `loss_rate`, `draw_rate`
-- `p10/p50/p90_gold_delta`
-- `imitation_play/match/option_ratio`
-- `imitation_weighted_score`
-- `eval_time_ms`
-
-## 7. 게이트/전환/실패 감지
-게이트 상태는 `logs/neat_python/gate_state.json`에 저장된다.
-
-- `gate_mode`: `hybrid` 또는 `win_rate_only`
-- `ema_imitation`, `ema_win_rate`: 전환 판정용 EMA
-- `transition_generation`: 전환 조건 충족 세대
-- `failure_generation`: 실패 조건 충족 세대
-
-세대별 상세는 `logs/neat_python/generation_metrics.ndjson`, 개체별 평가는 `logs/neat_python/eval_metrics.ndjson`에서 분석한다.
-
-## 8. 산출물 디렉터리 기준
-기본 출력 디렉터리: `logs/neat_python`
-
-- `checkpoints/neat-checkpoint-*`
-- `models/winner_genome.pkl`
-- `models/winner_genome.json` (`neat_python_genome_v1`)
+### 6-2. 핵심 산출물
+- `checkpoints/neat-checkpoint-gen*`
+- `models/winner_genome.json`
 - `run_summary.json`
-- `eval_metrics.ndjson`
-- `generation_metrics.ndjson`
 - `gate_state.json`
+- `generation_metrics.ndjson`
+- `eval_metrics.ndjson`
 - `eval_failures.log`
+- `phase*_eval_1000.json` (평가 실행 시)
+- `phase*_pass_state.json` (phase1/2 평가 실행 시)
 
-## 9. 개발 시 필수 제약
-- NEAT 경로 수정 시, 스크립트/설정/문서의 경로 일관성을 같이 갱신한다.
-- `scripts/neat_eval_worker.mjs`와 `scripts/neat_duel_worker.mjs`는 엔진 API(`src/engine/index.js`, `src/engine/runner.js`) 변경에 민감하므로 함께 점검한다.
-- 유전체 JSON 포맷은 `format_version = neat_python_genome_v1`만 지원한다.
-- 저장 인코딩은 UTF-8 BOM을 유지한다.
+## 7. Worker 동작 메모
+### 7-1. `neat_eval_worker.mjs`
+- feature vector는 47차원 고정.
+- `opponent_policy=heuristic_v6`일 때 내부 fast tuning 파라미터를 적용해 평가 시간을 줄인다.
+- teacher dataset cache(`--teacher-dataset-cache`)가 있으면 imitation 계산 소스를 cache로 전환한다.
 
-## 10. 운영 정책 (시뮬레이션/평가)
-- 시뮬레이션은 명시적 요청이 있을 때만 실행한다.
-- 테스트성 시뮬레이션 게임 수는 `1000` 고정이다.
-- 가능하면 멀티 워커 병렬 실행을 기본으로 사용한다.
+### 7-2. `model_duel_worker.mjs`
+- `--games`는 `1000` 이상만 허용된다. (기본값 `1000`)
+- `--kibo-out`, `--dataset-out`으로 추적 파일 저장 가능.
+- `--human`, `--ai` 입력은 정책 키 또는 `phase4_seed5` 형식 모두 지원한다.
 
-## 11. 트러블슈팅
-- `neat-python is not installed`:
-  `neat-python`을 가상환경에 설치한다.
-- `checkpoint not found`:
-  `-ResumeCheckpoint` 경로를 절대경로 또는 작업경로 기준으로 재확인한다.
-- 평가 실패 반복:
-  `logs/neat_python/eval_failures.log` 마지막 레코드의 `reason`, `traceback`을 우선 확인한다.
-- 입력 차원 오류(`feature vector size mismatch`):
-  `scripts/configs/neat_feedforward.ini`의 `num_inputs`와 워커 feature 벡터 정의를 동기화한다.
+### 7-3. `model_duel_worker.mjs` 옵션 상세
+- 공통 문법: `--key value` 또는 `--key=value` 둘 다 지원.
+- `--human` (필수): human 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase4_seed5`).
+- `--ai` (필수): ai 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase4_seed5`).
+- `--games` (선택, 기본 `1000`): `1000` 이상만 허용.
+- `--seed` (선택, 기본 `model-duel`): 실행 시드 문자열.
+- `--max-steps` (선택, 기본 `600`): 게임당 최대 스텝. 최소값은 `20`.
+- `--first-turn-policy` (선택, 기본 `alternate`): `alternate` 또는 `fixed`.
+- `--fixed-first-turn` (선택, 기본 `human`): `fixed`일 때 `human`만 허용.
+- `--continuous-series` (선택, 기본 `1`): `1=true`, `2=false`.
+- `--kibo-detail` (선택, 기본 `none`): `none|lean|full`.
+- `--kibo-detail`이 `lean/full`이고 `--kibo-out` 미지정이면 `logs/model_duel/kibo/`에 자동 파일 생성.
+- `--kibo-out` (선택): 게임 단위 JSONL 출력 경로. 각 줄에 `game_index`, `seed`, `first_turn`, `human`, `ai`, `winner`, `result`, `kibo_detail`, `kibo` 저장.
+- `--dataset-out` (선택): 의사결정 후보 단위 JSONL 출력 경로. 각 줄은 `actor`, `decision_type`, `candidate`, `chosen`, `chosen_candidate`, `features` 포함.
+- `--dataset-actor` (선택, 기본 `all`): 데이터셋 기록 actor 필터. `all|human|ai`.
+- unresolved는 별도 출력 옵션 없이 dataset 사용 시 내부 통계(`dataset_unresolved_decisions`)로만 계산한다.
+- stdout 결과: 마지막 줄에 summary JSON 1줄 출력. `dataset_rows`, `dataset_decisions`, `dataset_unresolved_decisions`, `unresolved_decision_rate`, `seat_split_a/b` 등이 포함됨.
+- 대표 실행 예시:
+```powershell
+node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --games 1200 --seed v5_vs_phase4s5_1200 --first-turn-policy alternate --continuous-series 1 --max-steps 600 --kibo-detail full --dataset-out logs/model_duel/v5_vs_phase4s5_1200_dataset.jsonl
+```
 
-## 12. 변경 체크리스트
-1. `npm run build` 통과
-2. `scripts/run_neat_train.ps1 -DryRun` 통과
-3. `run_summary.json`에 의도한 `runtime_effective` 반영 확인
-4. 게이트 산출물(`gate_state.json`, `generation_metrics.ndjson`) 생성 확인
-5. 문서/스크립트/설정 경로 불일치 없음 확인
+## 8. 트러블슈팅
+- `python not found: .venv\Scripts\python.exe`
+  - 가상환경 생성/활성화 후 `neat-python` 설치 확인.
+- `phase1 checkpoint not found` (Phase 2)
+  - 먼저 같은 Seed로 Phase 1 학습 결과가 생성되어야 한다.
+- `opponent-policy=genome requires opponent_genome path`
+  - runtime 또는 CLI에 opponent genome 경로를 설정한다.
+- `feature vector size mismatch`
+  - `scripts/configs/neat_feedforward.ini`의 `num_inputs`와 worker feature 정의를 맞춘다.
 
-## 13. `neat_eval_worker` 47차원 피처 고정 규격
-- `featureVector`는 단일 47차원만 지원한다. (`base/extended` 분기 없음)
-- 설정은 `scripts/configs/neat_feedforward.ini`에서 `num_inputs=47`로 고정한다.
-- `#16`은 `bakTotal`이 아니라 `self_score_total_norm = tanhNorm(scoreSelf.total, 10)`를 사용한다.
-- `#24/#25`는 분리한다.
-  - `#24`: 후보 월 기준 매칭 강도(연속값)
-  - `#25`: 현재 후보 즉시 매칭 가능 여부(이진)
-- `#47 candidate_month_known_ratio`는 공개정보 + 자기 손패만 사용하고 상대 손패는 사용하지 않는다.
-
-### 13-1. 피처 목록 (1~47)
-1. `phase === "playing"`
-2. `phase === "select-match"`
-3. `phase === "go-stop"`
-4. `phase === "president-choice"`
-5. `phase === "gukjin-choice"`
-6. `phase === "shaking-confirm"`
-7. `decisionType === "play"`
-8. `decisionType === "match"`
-9. `decisionType === "option"`
-10. `deck/30`
-11. `self_hand/10`
-12. `opp_hand/10`
-13. `self_goCount/5`
-14. `opp_goCount/5`
-15. `tanhNorm(scoreSelf.total - scoreOpp.total, 10)`
-16. `tanhNorm(scoreSelf.total, 10)` (`self_score_total_norm`)
-17. `legalCount/10`
-18. `candidate.piValue` 정규화
-19. `candidate_is_kwang`
-20. `candidate_is_ribbon`
-21. `candidate_is_five`
-22. `candidate_is_junk`
-23. `candidate_is_double_pi` (`junk&&piValue>=2` 또는 `I0`)
-24. `match_opportunity_density` (후보 월 기준)
-25. `immediate_match_possible`
-26. `optionCode`
-27. `selfGwangCount/5`
-28. `oppGwangCount/5`
-29. `selfPiCount/20`
-30. `oppPiCount/20`
-31. `self_godori_progress/3`
-32. `opp_godori_progress/3`
-33. `self_cheongdan_progress/3`
-34. `opp_cheongdan_progress/3`
-35. `self_hongdan_progress/3`
-36. `opp_hongdan_progress/3`
-37. `self_chodan_progress/3`
-38. `opp_chodan_progress/3`
-39. `self_can_stop` (`scoreSelf.total >= 7`)
-40. `opp_can_stop` (`scoreOpp.total >= 7`)
-41. `has_shake`
-42. `current_multiplier` 정규화
-43. `has_bomb`
-44. `self_pi_bak_risk`
-45. `self_gwang_bak_risk`
-46. `self_mong_bak_risk`
-47. `candidate_month_known_ratio` (공개정보 + 자기 손패, 상대 손패 제외)
+## 9. 운영 체크리스트
+1. 경로는 항상 `scripts/` + `scripts/configs/` 기준으로 유지한다.
+2. 시뮬레이션/평가 테스트는 1000게임 규칙을 유지한다.
+3. 설정 변경 시 문서와 phase 래퍼 스크립트를 같이 갱신한다.
+4. 결과 검증은 `run_summary.json`, `gate_state.json`, `phase*_eval_1000.json` 순으로 확인한다.
+5. 풀리그 산출물은 `logs/model_duel/full_league/` 경로에 저장한다.
+6. 저장 인코딩은 UTF-8 BOM을 유지한다.

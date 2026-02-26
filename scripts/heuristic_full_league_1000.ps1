@@ -45,7 +45,7 @@ $tag = if ([string]::IsNullOrWhiteSpace($OutputTag)) {
   "full_league_${ts}_$(Sanitize-FilePart $OutputTag)"
 }
 
-$outputDir = Join-Path "logs/heuristic_duel/full_league" $tag
+$outputDir = Join-Path "logs/model_duel/full_league" $tag
 New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 
 $enc = New-Object System.Text.UTF8Encoding($true)
@@ -58,9 +58,9 @@ for ($i = 0; $i -lt $policyList.Count - 1; $i += 1) {
     $seed = "full_league_${ts}_${policyA}_vs_${policyB}_$((Get-Random -Minimum 100000 -Maximum 999999))"
 
     $cmd = @(
-      "scripts/heuristic_duel_worker.mjs",
-      "--policy-a", $policyA,
-      "--policy-b", $policyB,
+      "scripts/model_duel_worker.mjs",
+      "--human", $policyA,
+      "--ai", $policyB,
       "--games", "$GamesPerMatch",
       "--seed", "$seed",
       "--max-steps", "$MaxSteps",
@@ -83,9 +83,11 @@ for ($i = 0; $i -lt $policyList.Count - 1; $i += 1) {
     [System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($savePath), $resultJson, $enc)
 
     $obj = $resultJson | ConvertFrom-Json
+    $humanKey = if ($null -ne $obj.human -and -not [string]::IsNullOrWhiteSpace([string]$obj.human)) { [string]$obj.human } else { [string]$obj.policy_a }
+    $aiKey = if ($null -ne $obj.ai -and -not [string]::IsNullOrWhiteSpace([string]$obj.ai)) { [string]$obj.ai } else { [string]$obj.policy_b }
     $matchSummaries += [PSCustomObject]@{
-      policy_a         = [string]$obj.policy_a
-      policy_b         = [string]$obj.policy_b
+      policy_a         = $humanKey
+      policy_b         = $aiKey
       games            = [int]$obj.games
       wins_a           = [int]$obj.wins_a
       wins_b           = [int]$obj.wins_b

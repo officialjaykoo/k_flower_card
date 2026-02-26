@@ -37,7 +37,7 @@ except ImportError:
 
 SELF_POLICY = "heuristic_v7_gold_digger"
 OPPONENT_POLICY = "heuristic_v5"
-DUEL_SCRIPT = "scripts/heuristic_duel_worker.mjs"
+DUEL_SCRIPT = "scripts/model_duel_worker.mjs"
 
 GAMES = 1000
 SEED = "optuna-v7"

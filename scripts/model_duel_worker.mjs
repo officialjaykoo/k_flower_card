@@ -16,13 +16,13 @@
   choosePresidentHold,
   chooseGukjinMode,
 } from "../src/engine/index.js";
-import { createWriteStream, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { getActionPlayerKey } from "../src/engine/runner.js";
 import { aiPlay } from "../src/ai/aiPlay.js";
 import { BOT_POLICIES, normalizeBotPolicy } from "../src/ai/policies.js";
 
-// Pipeline Stage: 3/3 (neat_train.py -> neat_eval_worker.mjs -> heuristic_duel_worker.mjs)
+// Pipeline Stage: 3/3 (neat_train.py -> neat_eval_worker.mjs -> model_duel_worker.mjs)
 // Quick Read Map (top-down):
 // 1) main()
 // 2) playSingleRound(): duel loop + decision callback
@@ -36,20 +36,19 @@ import { BOT_POLICIES, normalizeBotPolicy } from "../src/ai/policies.js";
 function parseArgs(argv) {
   const args = [...argv];
   const out = {
-    policyA: "",
-    policyB: "",
+    humanSpecRaw: "",
+    aiSpecRaw: "",
     games: 1000,
-    seed: "heuristic-duel",
+    seed: "model-duel",
     maxSteps: 600,
     firstTurnPolicy: "alternate",
     fixedFirstTurn: "human",
     continuousSeries: true,
-    kiboDetail: "lean",
+    kiboDetail: "none",
     kiboOut: "",
+    resultOut: "",
     datasetOut: "",
     datasetActor: "all",
-    unresolvedOut: "",
-    unresolvedLimit: 0,
   };
 
   while (args.length > 0) {
@@ -65,57 +64,132 @@ function parseArgs(argv) {
       value = String(args.shift() || "");
     }
 
-    if (key === "--policy-a") out.policyA = String(value || "").trim().toLowerCase();
-    else if (key === "--policy-b") out.policyB = String(value || "").trim().toLowerCase();
+    if (key === "--human") out.humanSpecRaw = String(value || "").trim().toLowerCase();
+    else if (key === "--ai") out.aiSpecRaw = String(value || "").trim().toLowerCase();
+    else if (key === "--policy-a" || key === "--policy-b") {
+      throw new Error(`deprecated option: ${key} (use --human and --ai)`);
+    }
     else if (key === "--games") out.games = Math.max(1, Number(value || 1000));
-    else if (key === "--seed") out.seed = String(value || "heuristic-duel");
+    else if (key === "--seed") out.seed = String(value || "model-duel");
     else if (key === "--max-steps") out.maxSteps = Math.max(20, Number(value || 600));
     else if (key === "--first-turn-policy") out.firstTurnPolicy = String(value || "alternate").trim().toLowerCase();
     else if (key === "--fixed-first-turn") out.fixedFirstTurn = String(value || "human").trim().toLowerCase();
-    else if (key === "--continuous-series") out.continuousSeries = !(String(value || "1").trim() === "0");
-    else if (key === "--kibo-detail") out.kiboDetail = String(value || "lean").trim().toLowerCase();
+    else if (key === "--continuous-series") out.continuousSeries = parseContinuousSeriesValue(value);
+    else if (key === "--kibo-detail") out.kiboDetail = String(value || "none").trim().toLowerCase();
     else if (key === "--kibo-out") out.kiboOut = String(value || "").trim();
+    else if (key === "--result-out") out.resultOut = String(value || "").trim();
     else if (key === "--dataset-out") out.datasetOut = String(value || "").trim();
     else if (key === "--dataset-actor") out.datasetActor = String(value || "all").trim().toLowerCase();
-    else if (key === "--unresolved-out") out.unresolvedOut = String(value || "").trim();
-    else if (key === "--unresolved-limit")
-      out.unresolvedLimit = Math.max(0, Math.floor(Number(value || 0)));
     else throw new Error(`Unknown argument: ${key}`);
   }
 
-  if (!out.policyA) throw new Error("--policy-a is required");
-  if (!out.policyB) throw new Error("--policy-b is required");
-  if (!BOT_POLICIES.includes(out.policyA)) {
-    throw new Error(`invalid --policy-a: ${out.policyA} (allowed: ${BOT_POLICIES.join(", ")})`);
+  if (!out.humanSpecRaw) throw new Error("--human is required");
+  if (!out.aiSpecRaw) throw new Error("--ai is required");
+  if (Math.floor(out.games) < 1000) {
+    throw new Error("this worker requires --games >= 1000");
   }
-  if (!BOT_POLICIES.includes(out.policyB)) {
-    throw new Error(`invalid --policy-b: ${out.policyB} (allowed: ${BOT_POLICIES.join(", ")})`);
-  }
-  out.policyA = normalizeBotPolicy(out.policyA);
-  out.policyB = normalizeBotPolicy(out.policyB);
-
-  if (Math.floor(out.games) !== 1000) {
-    throw new Error("this worker is fixed to --games 1000");
-  }
-  out.games = 1000;
+  out.games = Math.floor(out.games);
 
   if (out.firstTurnPolicy !== "alternate" && out.firstTurnPolicy !== "fixed") {
     throw new Error(`invalid --first-turn-policy: ${out.firstTurnPolicy}`);
   }
-  if (out.fixedFirstTurn !== "human" && out.fixedFirstTurn !== "ai") {
-    throw new Error(`invalid --fixed-first-turn: ${out.fixedFirstTurn}`);
+  if (out.fixedFirstTurn !== "human") {
+    throw new Error("--fixed-first-turn is locked to human");
   }
-  if (out.kiboDetail !== "lean" && out.kiboDetail !== "full") {
-    throw new Error(`invalid --kibo-detail: ${out.kiboDetail} (allowed: lean, full)`);
+  if (out.kiboDetail !== "none" && out.kiboDetail !== "lean" && out.kiboDetail !== "full") {
+    throw new Error(`invalid --kibo-detail: ${out.kiboDetail} (allowed: none, lean, full)`);
   }
   if (out.datasetActor !== "all" && out.datasetActor !== "human" && out.datasetActor !== "ai") {
     throw new Error(`invalid --dataset-actor: ${out.datasetActor} (allowed: all, human, ai)`);
   }
-  if (!Number.isFinite(out.unresolvedLimit) || out.unresolvedLimit < 0) {
-    throw new Error(`invalid --unresolved-limit: ${out.unresolvedLimit} (expected >= 0)`);
-  }
 
   return out;
+}
+
+function parseContinuousSeriesValue(value) {
+  const raw = String(value ?? "1").trim();
+  if (raw === "" || raw === "1") return true;
+  if (raw === "2") return false;
+  throw new Error(`invalid --continuous-series: ${raw} (allowed: 1=true, 2=false)`);
+}
+
+function sanitizeFilePart(text) {
+  return String(text || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function dateTag() {
+  const now = new Date();
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}`;
+}
+
+function resolvePlayerSpec(rawSpec, sideLabel) {
+  const token = String(rawSpec || "").trim().toLowerCase();
+  if (!token) throw new Error(`empty player spec: ${sideLabel}`);
+
+  if (BOT_POLICIES.includes(token)) {
+    return {
+      input: token,
+      kind: "heuristic",
+      key: normalizeBotPolicy(token),
+      label: normalizeBotPolicy(token),
+      model: null,
+      modelPath: null,
+      phase: null,
+      seed: null,
+    };
+  }
+
+  const m = token.match(/^phase([1-4])_seed(\d+)$/i);
+  if (!m) {
+    throw new Error(`invalid ${sideLabel} spec: ${token} (use policy key or phase4_seed5)`);
+  }
+  const phase = Number(m[1]);
+  const seed = Number(m[2]);
+  const modelPath = resolve(`logs/neat_phase${phase}_seed${seed}/models/winner_genome.json`);
+  if (!existsSync(modelPath)) {
+    throw new Error(`model not found for ${token}: ${modelPath}`);
+  }
+
+  let model = null;
+  try {
+    const raw = String(readFileSync(modelPath, "utf8") || "").replace(/^\uFEFF/, "");
+    model = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`failed to parse model JSON (${token}): ${modelPath} (${String(err)})`);
+  }
+  if (String(model?.format_version || "").trim() !== "neat_python_genome_v1") {
+    throw new Error(`invalid model format for ${token}: expected neat_python_genome_v1`);
+  }
+
+  return {
+    input: token,
+    kind: "model",
+    key: `phase${phase}_seed${seed}`,
+    label: `phase${phase}_seed${seed}`,
+    model,
+    modelPath,
+    phase,
+    seed,
+  };
+}
+
+function buildAutoOutputDir(humanLabel, aiLabel) {
+  const duelKey = `${sanitizeFilePart(humanLabel)}_vs_${sanitizeFilePart(aiLabel)}_${dateTag()}`;
+  const outDir = resolve(join("logs", "model_duel", duelKey));
+  mkdirSync(outDir, { recursive: true });
+  return outDir;
+}
+
+function buildAutoArtifactPath(outDir, seed, suffix) {
+  const stem = sanitizeFilePart(seed) || "model-duel";
+  return join(outDir, `${stem}_${suffix}`);
 }
 
 // =============================================================================
@@ -578,51 +652,6 @@ function incrementCounter(map, key) {
   map[k] = Number(map[k] || 0) + 1;
 }
 
-function cardIdList(cards) {
-  if (!Array.isArray(cards)) return [];
-  return cards.map((c) => String(c?.id || "")).filter((id) => id.length > 0);
-}
-
-function tailKiboEvents(stateBefore, stateAfter) {
-  const beforeLen = Array.isArray(stateBefore?.kibo) ? stateBefore.kibo.length : 0;
-  const afterKibo = Array.isArray(stateAfter?.kibo) ? stateAfter.kibo : [];
-  if (afterKibo.length <= beforeLen) return [];
-  return afterKibo.slice(beforeLen);
-}
-
-function unresolvedTraceRow(decision, stateAfter, gameIndex, seed, firstTurnKey) {
-  const actor = String(decision?.actor || "");
-  const stateBefore = decision?.stateBefore || null;
-  const beforePlayer = stateBefore?.players?.[actor] || {};
-  const afterPlayer = stateAfter?.players?.[actor] || {};
-  return {
-    game_index: gameIndex,
-    seed,
-    first_turn: firstTurnKey,
-    step: Number(decision?.step || 0),
-    actor,
-    actor_policy: String(decision?.policy || ""),
-    action_source: String(decision?.actionSource || ""),
-    decision_type: String(decision?.decisionType || ""),
-    legal_count: Array.isArray(decision?.candidates) ? decision.candidates.length : 0,
-    candidates: Array.isArray(decision?.candidates) ? decision.candidates : [],
-    inferred_candidate: decision?.chosenCandidate || null,
-    phase_before: String(stateBefore?.phase || ""),
-    phase_after: String(stateAfter?.phase || ""),
-    state_key_before: stateProgressKey(stateBefore),
-    state_key_after: stateProgressKey(stateAfter),
-    actor_hand_before: cardIdList(beforePlayer?.hand),
-    actor_hand_after: cardIdList(afterPlayer?.hand),
-    actor_capture_before: cardIdList(beforePlayer?.capture),
-    actor_capture_after: cardIdList(afterPlayer?.capture),
-    pending_match_before: stateBefore?.pendingMatch || null,
-    pending_match_after: stateAfter?.pendingMatch || null,
-    declarable_shaking_months: getDeclarableShakingMonths(stateBefore, actor),
-    declarable_bomb_months: getDeclarableBombMonths(stateBefore, actor),
-    kibo_delta: tailKiboEvents(stateBefore, stateAfter),
-  };
-}
-
 // =============================================================================
 // Section 4. Round Simulation + Summary Helpers
 // =============================================================================
@@ -654,7 +683,14 @@ function goldDiffByActor(state, actor) {
   return selfGold - oppGold;
 }
 
-function playSingleRound(initialState, seed, policyByActor, maxSteps, onDecision = null) {
+function buildAiPlayOptions(playerSpec) {
+  if (playerSpec?.kind === "model" && playerSpec?.model) {
+    return { source: "model", model: playerSpec.model };
+  }
+  return { source: "heuristic", heuristicPolicy: String(playerSpec?.key || "") };
+}
+
+function playSingleRound(initialState, seed, playerByActor, maxSteps, onDecision = null) {
   const rng = createSeededRng(`${seed}|rng`);
   let state = initialState;
   let steps = 0;
@@ -670,12 +706,11 @@ function playSingleRound(initialState, seed, policyByActor, maxSteps, onDecision
     const options = sp.options || null;
     const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
     const candidates = decisionType ? legalCandidatesForDecision(sp, decisionType) : [];
-    const policy = policyByActor[actor];
+    const playerSpec = playerByActor[actor];
+    const policy = String(playerSpec?.label || "");
     let actionSource = "heuristic";
-    let next = aiPlay(state, actor, {
-      source: "heuristic",
-      heuristicPolicy: policy,
-    });
+    let next = aiPlay(state, actor, buildAiPlayOptions(playerSpec));
+    if (playerSpec?.kind === "model") actionSource = "model";
 
     if (!next || stateProgressKey(next) === before) {
       actionSource = "fallback_random";
@@ -803,12 +838,74 @@ function buildSeatSplitSummary(firstRecord, secondRecord) {
   };
 }
 
+function buildConsoleSummary(report) {
+  return {
+    games: Number(report?.games || 0),
+    human: String(report?.human || ""),
+    ai: String(report?.ai || ""),
+    first_turn_policy: String(report?.first_turn_policy || ""),
+    fixed_first_turn: report?.fixed_first_turn ?? null,
+    continuous_series: !!report?.continuous_series,
+    kibo_detail: String(report?.kibo_detail || "none"),
+    result_out: report?.result_out || null,
+    kibo_out: report?.kibo_out || null,
+    dataset_out: report?.dataset_out || null,
+    dataset_actor: String(report?.dataset_actor || "all"),
+    wins_a: Number(report?.wins_a || 0),
+    losses_a: Number(report?.losses_a || 0),
+    wins_b: Number(report?.wins_b || 0),
+    losses_b: Number(report?.losses_b || 0),
+    draws: Number(report?.draws || 0),
+    win_rate_a: Number(report?.win_rate_a || 0),
+    win_rate_b: Number(report?.win_rate_b || 0),
+    draw_rate: Number(report?.draw_rate || 0),
+    mean_gold_delta_a: Number(report?.mean_gold_delta_a || 0),
+    p10_gold_delta_a: Number(report?.p10_gold_delta_a || 0),
+    p50_gold_delta_a: Number(report?.p50_gold_delta_a || 0),
+    p90_gold_delta_a: Number(report?.p90_gold_delta_a || 0),
+    go_count_a: Number(report?.go_count_a || 0),
+    go_count_b: Number(report?.go_count_b || 0),
+    go_games_a: Number(report?.go_games_a || 0),
+    go_games_b: Number(report?.go_games_b || 0),
+    go_fail_count_a: Number(report?.go_fail_count_a || 0),
+    go_fail_count_b: Number(report?.go_fail_count_b || 0),
+    go_fail_rate_a: Number(report?.go_fail_rate_a || 0),
+    go_fail_rate_b: Number(report?.go_fail_rate_b || 0),
+    dataset_rows: Number(report?.dataset_rows || 0),
+    dataset_positive_rows: Number(report?.dataset_positive_rows || 0),
+    dataset_decisions: Number(report?.dataset_decisions || 0),
+    dataset_unresolved_decisions: Number(report?.dataset_unresolved_decisions || 0),
+    unresolved_decision_rate: Number(report?.unresolved_decision_rate || 0),
+    bankrupt: report?.bankrupt || { a_bankrupt_count: 0, b_bankrupt_count: 0 },
+    eval_time_ms: Number(report?.eval_time_ms || 0),
+  };
+}
+
 // =============================================================================
 // Section 5. Entrypoint
 // =============================================================================
-function main() {
+export function runModelDuelCli(argv = process.argv.slice(2)) {
   const evalStartMs = Date.now();
-  const opts = parseArgs(process.argv.slice(2));
+  const opts = parseArgs(argv);
+  const humanPlayer = resolvePlayerSpec(opts.humanSpecRaw, "human");
+  const aiPlayer = resolvePlayerSpec(opts.aiSpecRaw, "ai");
+  const autoOutputDir = buildAutoOutputDir(humanPlayer.label, aiPlayer.label);
+
+  if (!opts.resultOut) {
+    opts.resultOut = buildAutoArtifactPath(autoOutputDir, opts.seed, "result.json");
+  }
+
+  if (opts.kiboDetail === "none" && opts.kiboOut) {
+    opts.kiboDetail = "lean";
+  }
+  if (opts.kiboDetail !== "none" && !opts.kiboOut) {
+    opts.kiboOut = buildAutoArtifactPath(autoOutputDir, opts.seed, "kibo.jsonl");
+  }
+  if (opts.datasetOut === "auto") {
+    opts.datasetOut = buildAutoArtifactPath(autoOutputDir, opts.seed, "dataset.jsonl");
+  }
+  const effectiveKiboDetail = opts.kiboDetail === "none" ? "lean" : opts.kiboDetail;
+
   let kiboWriter = null;
   if (opts.kiboOut) {
     mkdirSync(dirname(opts.kiboOut), { recursive: true });
@@ -821,11 +918,9 @@ function main() {
     decisions: 0,
     unresolved_decisions: 0,
   };
-  let unresolvedWriter = null;
   const unresolvedStats = {
     decisions: 0,
     unresolved_decisions: 0,
-    unresolved_rows: 0,
     by_actor: {},
     by_policy: {},
     by_decision_type: {},
@@ -835,16 +930,12 @@ function main() {
     mkdirSync(dirname(opts.datasetOut), { recursive: true });
     datasetWriter = createWriteStream(opts.datasetOut, { flags: "w", encoding: "utf8" });
   }
-  if (opts.unresolvedOut) {
-    mkdirSync(dirname(opts.unresolvedOut), { recursive: true });
-    unresolvedWriter = createWriteStream(opts.unresolvedOut, { flags: "w", encoding: "utf8" });
-  }
 
   const actorA = "human";
   const actorB = "ai";
-  const policyByActor = {
-    [actorA]: opts.policyA,
-    [actorB]: opts.policyB,
+  const playerByActor = {
+    [actorA]: humanPlayer,
+    [actorB]: aiPlayer,
   };
 
   let winsA = 0;
@@ -879,77 +970,66 @@ function main() {
 
     const roundStart = opts.continuousSeries
       ? seriesSession.previousEndState
-        ? continueRound(seriesSession.previousEndState, seed, firstTurnKey, opts.kiboDetail)
-        : startRound(seed, firstTurnKey, opts.kiboDetail)
-      : startRound(seed, firstTurnKey, opts.kiboDetail);
+        ? continueRound(seriesSession.previousEndState, seed, firstTurnKey, effectiveKiboDetail)
+        : startRound(seed, firstTurnKey, effectiveKiboDetail)
+      : startRound(seed, firstTurnKey, effectiveKiboDetail);
 
     const beforeDiffA = goldDiffByActor(roundStart, actorA);
     const endState = playSingleRound(
       roundStart,
       seed,
-      policyByActor,
+      playerByActor,
       Math.max(20, Math.floor(opts.maxSteps)),
       (decision) => {
-        if (!datasetWriter && !unresolvedWriter) return;
+        if (!datasetWriter) return;
         if (opts.datasetActor !== "all" && decision.actor !== opts.datasetActor) return;
-        if (datasetWriter) datasetStats.decisions += 1;
+        datasetStats.decisions += 1;
         unresolvedStats.decisions += 1;
         const legalCount = decision.candidates.length;
         if (legalCount <= 0) return;
-        let matched = false;
-        if (datasetWriter) {
-          for (const candidate of decision.candidates) {
-            const candidateNorm = normalizeDecisionCandidate(decision.decisionType, candidate);
-            const isChosen = candidateNorm === decision.chosenCandidate ? 1 : 0;
-            if (isChosen) matched = true;
-            const row = {
-              game_index: gi,
-              seed,
-              first_turn: firstTurnKey,
-              step: decision.step,
-              actor: decision.actor,
-              actor_policy: decision.policy,
-              action_source: decision.actionSource,
-              decision_type: decision.decisionType,
-              legal_count: legalCount,
-              candidate: candidateNorm,
-              chosen: isChosen,
-              chosen_candidate: decision.chosenCandidate,
-              features: featureVectorForCandidate(
-                decision.stateBefore,
-                decision.actor,
-                decision.decisionType,
-                candidate,
-                legalCount
-              ),
-            };
-            datasetWriter.write(`${JSON.stringify(row)}\n`);
-            datasetStats.rows += 1;
-            if (isChosen) datasetStats.positive_rows += 1;
-          }
-        } else {
-          for (const candidate of decision.candidates) {
-            const candidateNorm = normalizeDecisionCandidate(decision.decisionType, candidate);
-            if (candidateNorm === decision.chosenCandidate) {
-              matched = true;
-              break;
-            }
-          }
+        const normalizedCandidates = decision.candidates.map((candidate) =>
+          normalizeDecisionCandidate(decision.decisionType, candidate)
+        );
+        const matched = normalizedCandidates.some(
+          (candidateNorm) => candidateNorm === decision.chosenCandidate
+        );
+        const unresolvedFlag = matched ? 0 : 1;
+        for (const candidate of decision.candidates) {
+          const candidateNorm = normalizeDecisionCandidate(decision.decisionType, candidate);
+          const isChosen = candidateNorm === decision.chosenCandidate ? 1 : 0;
+          const row = {
+            game_index: gi,
+            seed,
+            first_turn: firstTurnKey,
+            step: decision.step,
+            actor: decision.actor,
+            actor_policy: decision.policy,
+            action_source: decision.actionSource,
+            decision_type: decision.decisionType,
+            legal_count: legalCount,
+            candidate: candidateNorm,
+            chosen: isChosen,
+            chosen_candidate: decision.chosenCandidate,
+            unresolved: unresolvedFlag,
+            features: featureVectorForCandidate(
+              decision.stateBefore,
+              decision.actor,
+              decision.decisionType,
+              candidate,
+              legalCount
+            ),
+          };
+          datasetWriter.write(`${JSON.stringify(row)}\n`);
+          datasetStats.rows += 1;
+          if (isChosen) datasetStats.positive_rows += 1;
         }
         if (!matched) {
-          if (datasetWriter) datasetStats.unresolved_decisions += 1;
+          datasetStats.unresolved_decisions += 1;
           unresolvedStats.unresolved_decisions += 1;
           incrementCounter(unresolvedStats.by_actor, decision.actor);
           incrementCounter(unresolvedStats.by_policy, decision.policy);
           incrementCounter(unresolvedStats.by_decision_type, decision.decisionType);
           incrementCounter(unresolvedStats.by_action_source, decision.actionSource);
-          const withinLimit =
-            opts.unresolvedLimit <= 0 || unresolvedStats.unresolved_rows < opts.unresolvedLimit;
-          if (withinLimit && unresolvedWriter) {
-            const traceRow = unresolvedTraceRow(decision, decision.stateAfter, gi, seed, firstTurnKey);
-            unresolvedWriter.write(`${JSON.stringify(traceRow)}\n`);
-            unresolvedStats.unresolved_rows += 1;
-          }
         }
       }
     );
@@ -978,11 +1058,11 @@ function main() {
         game_index: gi,
         seed,
         first_turn: firstTurnKey,
-        policy_a: opts.policyA,
-        policy_b: opts.policyB,
+        human: humanPlayer.label,
+        ai: aiPlayer.label,
         winner,
         result: endState?.result || null,
-        kibo_detail: endState?.kiboDetail || opts.kiboDetail,
+        kibo_detail: endState?.kiboDetail || effectiveKiboDetail,
         kibo: Array.isArray(endState?.kibo) ? endState.kibo : [],
       };
       kiboWriter.write(`${JSON.stringify(kiboRecord)}\n`);
@@ -1008,15 +1088,28 @@ function main() {
 
   const summary = {
     games,
-    actor_a: actorA,
-    actor_b: actorB,
-    policy_a: opts.policyA,
-    policy_b: opts.policyB,
+    actor_human: actorA,
+    actor_ai: actorB,
+    human: humanPlayer.label,
+    ai: aiPlayer.label,
+    player_human: {
+      input: humanPlayer.input,
+      kind: humanPlayer.kind,
+      key: humanPlayer.key,
+      model_path: humanPlayer.modelPath,
+    },
+    player_ai: {
+      input: aiPlayer.input,
+      kind: aiPlayer.kind,
+      key: aiPlayer.key,
+      model_path: aiPlayer.modelPath,
+    },
     first_turn_policy: opts.firstTurnPolicy,
     fixed_first_turn: opts.firstTurnPolicy === "fixed" ? opts.fixedFirstTurn : null,
     first_turn_counts: firstTurnCounts,
     continuous_series: !!opts.continuousSeries,
     kibo_detail: opts.kiboDetail,
+    result_out: opts.resultOut || null,
     kibo_out: opts.kiboOut || null,
     dataset_out: opts.datasetOut || null,
     dataset_actor: opts.datasetActor,
@@ -1024,9 +1117,9 @@ function main() {
     dataset_positive_rows: datasetStats.positive_rows,
     dataset_decisions: datasetStats.decisions,
     dataset_unresolved_decisions: datasetStats.unresolved_decisions,
-    unresolved_out: opts.unresolvedOut || null,
-    unresolved_limit: opts.unresolvedLimit,
-    unresolved_rows: unresolvedStats.unresolved_rows,
+    unresolved_out: null,
+    unresolved_limit: null,
+    unresolved_rows: unresolvedStats.unresolved_decisions,
     unresolved_decisions: unresolvedStats.unresolved_decisions,
     unresolved_decision_rate:
       unresolvedStats.decisions > 0 ? unresolvedStats.unresolved_decisions / unresolvedStats.decisions : 0,
@@ -1065,13 +1158,16 @@ function main() {
 
   if (kiboWriter) kiboWriter.end();
   if (datasetWriter) datasetWriter.end();
-  if (unresolvedWriter) unresolvedWriter.end();
 
-  process.stdout.write(`${JSON.stringify(summary)}\n`);
+  const reportLine = `${JSON.stringify(summary)}\n`;
+  const consoleLine = `${JSON.stringify(buildConsoleSummary(summary))}\n`;
+  mkdirSync(dirname(opts.resultOut), { recursive: true });
+  writeFileSync(opts.resultOut, reportLine, { encoding: "utf8" });
+  process.stdout.write(consoleLine);
 }
 
 try {
-  main();
+  runModelDuelCli(process.argv.slice(2));
 } catch (err) {
   const msg = err && err.stack ? err.stack : String(err);
   process.stderr.write(`${msg}\n`);
