@@ -88,10 +88,10 @@ export function stealPiFromOpponent(players, takerKey, count) {
     if (candidates.length === 0) break;
 
     const stealRank = (x) => {
-      if (x.value === 1) return 1; // ?쇰컲??
-      if (x.value === 2 && !x.isGukjin) return 2; // ?랁뵾
-      if (x.isGukjin) return 3; // 援?쭊
-      if (x.value >= 3) return 4; // ?쇳뵾
+      if (x.value === 1) return 1; // one-pi
+      if (x.value === 2 && !x.isGukjin) return 2; // double-pi
+      if (x.isGukjin) return 3; // gukjin
+      if (x.value >= 3) return 4; // high-pi
       return 9;
     };
 
@@ -111,14 +111,16 @@ export function stealPiFromOpponent(players, takerKey, count) {
         category: "junk",
         piValue: 2,
         gukjinTransformed: true,
-        name: `${gukjinCard.name} (援?쭊??`
+        name: `${gukjinCard.name} (Gukjin Pi)`
       };
     } else {
       [stolen] = giver.captured.junk.splice(pick.idx, 1);
     }
 
     taker.captured.junk.push(stolen);
-    stealLog.push(`${taker.label}: ${giver.label}?먭쾶????1??媛뺥깉 (${stolen.name}, ${piValue(stolen)}??泥섎━)`);
+    stealLog.push(
+      `${taker.label}: stole 1 pi from ${giver.label} (${stolen.name}, value ${piValue(stolen)})`
+    );
     remaining -= 1;
   }
 

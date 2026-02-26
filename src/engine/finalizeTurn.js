@@ -273,7 +273,7 @@ export function finalizeTurn({
 
   const applyPpukEat = (ownerKey) => {
     const ownerIsSelf = ownerKey === currentKey;
-    const ownerLabel = ownerIsSelf ? "자뻑" : "상대뻑";
+    const ownerLabel = ownerIsSelf ? "self-ppuk" : "opponent-ppuk";
     const ownerHeldBonus = ownerIsSelf
       ? nextHeldBonus
       : (state.players[ownerKey]?.heldBonusCards || []).slice();
@@ -282,14 +282,14 @@ export function finalizeTurn({
     // Unified rule: self-ppuk eat and opponent-ppuk eat are treated identically.
     nextEvents.jabbeok = (nextEvents.jabbeok || 0) + 1;
     extraSteal += 1;
-    nextLog.push(`${prevPlayer.label}: ${ownerLabel} 먹기 성공 (상대 피 1장 강탈 예약)`);
+    nextLog.push(`${prevPlayer.label}: ${ownerLabel} conversion succeeded (reserve steal 1 pi)`);
 
     if (ownerHeldBonus.length > 0) {
       ownerHeldBonus.forEach((b) => pushCaptured(captured, b));
       const bonusSteal = ownerHeldBonus.reduce((sum, c) => sum + (c.bonus?.stealPi || 0), 0);
       extraSteal += bonusSteal;
       nextLog.push(
-        `${prevPlayer.label}: 뻑 보류 보너스 ${ownerHeldBonus.length}장 회수 (추가 강탈 ${bonusSteal})`
+        `${prevPlayer.label}: recovered ${ownerHeldBonus.length} held ppuk bonus cards (extra steal ${bonusSteal})`
       );
     }
 
@@ -320,14 +320,14 @@ export function finalizeTurn({
     const turnCount = prevPlayer.turnCount || 0;
     if (turnCount === 0) {
       goldSteal += pointsToGold(7);
-      nextLog.push(`${prevPlayer.label}: 첫뻑 보상(7점, ${pointsToGold(7)}골드)`);
+      nextLog.push(`${prevPlayer.label}: first ppuk reward (7 points, ${pointsToGold(7)} gold)`);
     } else if (turnCount === 1 && nextStreak >= 2) {
       goldSteal += pointsToGold(14);
-      nextLog.push(`${prevPlayer.label}: 2연뻑 보상(14점, ${pointsToGold(14)}골드)`);
+      nextLog.push(`${prevPlayer.label}: two-ppuk streak reward (14 points, ${pointsToGold(14)} gold)`);
       nextEvents.yeonPpuk = (nextEvents.yeonPpuk || 0) + 1;
     } else if (turnCount === 2 && nextStreak >= 3) {
       goldSteal += pointsToGold(21);
-      nextLog.push(`${prevPlayer.label}: 3연뻑 보상(21점, ${pointsToGold(21)}골드)`);
+      nextLog.push(`${prevPlayer.label}: three-ppuk streak reward (21 points, ${pointsToGold(21)} gold)`);
       nextEvents.yeonPpuk = (nextEvents.yeonPpuk || 0) + 1;
     }
   } else {
@@ -344,7 +344,7 @@ export function finalizeTurn({
   if (!isLastHandTurn && board.length === 0 && capturedAny) {
     nextEvents.ssul = (nextEvents.ssul || 0) + 1;
     extraSteal += 1;
-    nextLog.push(`${prevPlayer.label}: 판쓸 발생 (상대 피 1장 강탈 예약)`);
+    nextLog.push(`${prevPlayer.label}: board sweep triggered (reserve steal 1 pi)`);
   }
 
   let nextPlayers = {
@@ -462,7 +462,7 @@ export function finalizeTurn({
       phase: "gukjin-choice",
       pendingGukjinChoice: { playerKey: currentKey },
       log: nextState.log.concat(
-        `${nextState.players[currentKey].label}: 국진(9월 열) 점수 판정 시점 선택`
+        `${nextState.players[currentKey].label}: choose gukjin (September five) scoring mode`
       )
     };
   }
@@ -526,7 +526,8 @@ export function continueAfterTurnIfNeeded(state, justPlayedKey) {
     return resolveRound(state, justPlayedKey);
   }
 
-  // 자기 첫 턴 시작 시 손패 대통령(동월 4장)이면 즉시 선언/선택 단계로 진입.
+  // On the actor's first turn, if hand president condition (4 cards same month) is met,
+  // enter the president-choice phase immediately.
   const actorKey = state.currentTurn;
   const actor = state.players[actorKey];
   if (
@@ -543,7 +544,7 @@ export function continueAfterTurnIfNeeded(state, justPlayedKey) {
         phase: "president-choice",
         pendingPresident: { playerKey: actorKey, month },
         log: state.log.concat(
-          `${actor.label}: 첫 턴 손패 대통령(${month}월 4장) - 10점 종료/들고치기 선택`
+          `${actor.label}: first-turn hand president (${month} month x4) - choose 10-point stop or hold`
         )
       };
     }

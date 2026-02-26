@@ -25,11 +25,11 @@ const SSANGPI_WITH_GUKJIN_ID_SET = Object.freeze(new Set(["K1", "L3", GUKJIN_CAR
 
 /* 2) Parameter defaults (V5 base + V5Plus additions) */
 export const DEFAULT_PARAMS = {
-  // ── 페이즈 경계 ──
-  phaseEarlyDeck: 18,          // 덱이 이 이상이면 early
-  phaseMidDeck: 10,            // 덱이 이 이상이면 mid, 미만이면 late
+  // ── phase boundaries ──
+  phaseEarlyDeck: 18,          // deck >= this => early
+  phaseMidDeck: 10,            // deck >= this => mid, otherwise late
 
-  // ── rankHandCards (V5와 동일 기본값) ──
+  // ── rankHandCards (same baseline as V5) ──
   matchZeroBase: -48.1,
   matchOneBase: 7.53,
   matchTwoBase: 14.80,
@@ -66,30 +66,30 @@ export const DEFAULT_PARAMS = {
   lockedMonthPenalty: 6.0,
   secondMoverGoGateShrink: 4.0,  secondMoverBlockBonus: 2.0,  secondMoverPiBonus: 1.5,
 
-  // ── Phase 보정 배율 (V5Plus 신규) ──
-  // early 페이즈: 콤보 구축에 더 집중
-  phaseEarlyComboMul: 1.20,     // 콤보 점수 배율 상승
-  phaseEarlyBlockMul: 0.90,     // 블로킹은 살짝 완화 (아직 많이 남음)
-  phaseEarlyFeedMul: 0.85,      // 먹이 리스크 완화 (아직 여유)
-  // mid 페이즈: 기본값
-  // late 페이즈: 수비 강화, 기댓값 확보 우선
-  phaseLateComboMul: 0.85,      // 콤보 완성이 어려우면 포기
-  phaseLateBlockMul: 1.35,      // 블로킹 강화
-  phaseLateFeedMul: 1.40,       // 먹이 리스크 증가
-  phaseLateDoublePiMul: 1.50,   // 쌍피 가치 증가
+  // ── phase multipliers (V5Plus additions) ──
+  // early phase: bias toward combo building
+  phaseEarlyComboMul: 1.20,     // increase combo score
+  phaseEarlyBlockMul: 0.90,     // slightly relax blocking pressure
+  phaseEarlyFeedMul: 0.85,      // relax feed risk
+  // mid phase: defaults
+  // late phase: stronger defense and safer value
+  phaseLateComboMul: 0.85,      // de-prioritize hard combo completion
+  phaseLateBlockMul: 1.35,      // strengthen blocking
+  phaseLateFeedMul: 1.40,       // increase feed risk cost
+  phaseLateDoublePiMul: 1.50,   // increase double-pi value
 
-  // ── chooseMatch (V5와 동일 기본값) ──
+  // ── chooseMatch (same baseline as V5) ──
   matchPiGainMul: 6.25,
   matchKwangBonus: 15.02,
   matchRibbonBonus: 10.02,
   matchFiveBonus: 8.0,
   matchDoublePiBonus: 18.0,
   matchMongBakFiveBonus: 33.83,
-  // chooseMatch 전방 블로킹 (V5Plus 신규)
-  matchFwdBlockMul: 1.45,       // 상대 콤보 차단 선택 시 보너스 배율
+  // chooseMatch forward blocking (V5Plus addition)
+  matchFwdBlockMul: 1.45,       // bonus multiplier when blocking opponent combo lines
 
-  // ── shouldGo (V5Plus: 유틸리티 비교 모델) ──
-  // 기본 게이트 (V5와 유사)
+  // ── shouldGo (V5Plus utility model) ──
+  // Base gate (close to V5)
   goOppOneAwayGate: 100,
   goScoreDiffBonus: 0.055,
   goDeckLowBonus: 0.08,
@@ -113,23 +113,23 @@ export const DEFAULT_PARAMS = {
   goZeroOppOneAwayLate: 88,
   goZeroOppOneAwayEarly: 95,
   lateDeckMax: 10,
-  // Upside/Risk 유틸리티 계수 (V5Plus 신규 - GO 억제 방향)
-  goUpsideScoreMul: 0.07,       // 현재 점수 upside
-  goUpsidePiMul: 0.030,         // pi upside (낮게)
-  goUpsideSelfJokboMul: 0.35,   // 자기 jokbo potential
-  goUpsideOneAwayMul: 0.10,     // 자기 one-away 보너스
-  goUpsideCarryMul: 0.10,       // carry-over stop 인센티브
-  goRiskPressureMul: 0.35,      // 위협 리스크 (높게)
-  goRiskOneAwayMul: 0.28,       // one-away 리스크 (높게)
+  // Upside/risk utility weights (V5Plus addition, GO suppression direction)
+  goUpsideScoreMul: 0.07,       // current score upside
+  goUpsidePiMul: 0.030,         // pi upside
+  goUpsideSelfJokboMul: 0.35,   // own jokbo potential
+  goUpsideOneAwayMul: 0.10,     // own one-away bonus
+  goUpsideCarryMul: 0.10,       // carry-over stop incentive
+  goRiskPressureMul: 0.35,      // pressure risk
+  goRiskOneAwayMul: 0.28,       // one-away risk
   goRiskOppJokboMul: 0.30,
   goRiskOppOneAwayMul: 0.07,
-  goRiskGoCountMul: 0.10,       // go 횟수 리스크 (높게)
+  goRiskGoCountMul: 0.10,       // accumulated go-count risk
   goRiskLateDeckBonus: 0.08,
-  goRiskSecondMoverMul: 0.12,   // 후공 리스크 추가
+  goRiskSecondMoverMul: 0.12,   // extra second-mover risk
   stopLeadMul: 0.09,
   stopCarryMul: 0.12,
   stopTenBonus: 0.20,
-  goUtilityThreshold: 0.10,     // 높은 임계값 = GO 억제 (V5 보다 보수적)
+  goUtilityThreshold: 0.10,     // higher threshold => fewer GO decisions
 
   // ── shouldBomb / selectBombMonth ──
   bombMinPiAdvantage: 1,
@@ -304,7 +304,7 @@ function rankHandCardsV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const late = deck <= P.lateDeckMax;
   const phase = resolvePhase(deckCount, P);
 
-  // 페이즈 배율 계산
+  // Resolve phase multipliers.
   const comboMul = phase === "early" ? safeNum(P.phaseEarlyComboMul, 1.20)
     : phase === "late" ? safeNum(P.phaseLateComboMul, 0.85) : 1.0;
   const blockMul = phase === "early" ? safeNum(P.phaseEarlyBlockMul, 0.90)
@@ -337,14 +337,14 @@ function rankHandCardsV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
       score += P.highValueMatchBonus;
     }
 
-    // 피 가치
+    // Pi value weighting
     let piGain = pi * P.piGainMul;
     if (selfPi >= 7 && selfPi <= 9) piGain *= P.piGainSelfHighMul;
     if (oppPi <= 5) piGain *= P.piGainOppLowMul;
     if (isDpi) {
       if (matchCnt > 0) {
         piGain += P.doublePiMatchBonus + (lp.has(month) ? P.doublePiMatchExtra : 0);
-        // late 페이즈에서 쌍피 더 중요
+        // Double-pi matters more in late phase.
         if (phase === "late") piGain *= dpiLateBonus;
       } else {
         piGain -= P.doublePiNoMatchPenalty;
@@ -352,28 +352,28 @@ function rankHandCardsV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
     }
     score += piGain;
 
-    // 콤보 완성 (페이즈 배율 적용)
+    // Combo completion (phase-scaled)
     const cfBonus = ownComboFinishBonus(sc, matchCnt > 0 ? [card, ...matches] : [card], P);
     score += cfBonus * comboMul;
 
-    // 콤보 블로킹 (페이즈 배율 적용)
+    // Combo blocking (phase-scaled)
     const cbBonus = opponentComboBlockBonus(month, jokbo, blkM, blkU, nextT, P);
     score += cbBonus * blockMul;
 
-    // 광/열/띠 추가 보너스
+    // Extra category bonuses
     if (matchCnt > 0) {
       if (card.category === "kwang" && sc.kwang >= 2) score += P.comboFinishKwang;
       if (rCnt >= 4 && card.category === "ribbon") score += P.ribbonFourBonus;
       if (fCnt >= 4 && card.category === "five") score += P.fiveFourBonus;
     }
 
-    // 몽박
+    // Mong-bak pressure
     if (mongBak) {
       if (card.category === "five" && matchCnt > 0) score += P.mongBakFiveBonus;
       else if (pi > 0 && matchCnt > 0) score -= P.mongBakPiPenalty;
     }
 
-    // 무매치 버리기 페널티
+    // No-match discard penalties
     if (matchCnt === 0) {
       const livePiCard = isDpi && lp.has(month);
       if (livePiCard) {
@@ -401,27 +401,27 @@ function rankHandCardsV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
       score += discardTieOrder(card, deps, lp) * 2.2;
     }
 
-    // 먹이 리스크 (페이즈 배율 적용)
+    // Feed risk (phase-scaled)
     const feed = safeNum(deps.estimateOpponentImmediateGainIfDiscard(state, playerKey, month));
     score -= feed * (matchCnt === 0 ? P.feedRiskNoMatchMul : P.feedRiskMatchMul) * feedMul;
 
-    // 뻑 리스크
+    // Puk risk
     const puk = safeNum(deps.isRiskOfPuk(state, playerKey, card, bCnt, hCnt));
     if (puk > 0) score -= puk * (deck <= 10 ? P.pukRiskHighMul : P.pukRiskNormalMul);
     else if (puk < 0) score += -puk * 1.4;
 
-    // 첫 턴 계획 보너스
+    // First-turn plan bonus
     if (plan.active && plan.months.has(month)) score += P.firstTurnPiPlanBonus;
 
-    // 후공 추격 보너스
+    // Second-mover catch-up bonus
     if (sec && myScore < oppScore && pi > 0) score += pi * P.secondMoverPiBonus;
 
-    // 알려진 월 보너스
+    // Known-month bonus
     const knownCnt = safeNum(deps.countKnownMonthCards?.(state, month));
     if (knownCnt >= 3) score += P.discardKnownMonthBonus;
     else if (knownCnt === 0) score -= P.discardUnknownMonthPenalty;
 
-    // 보너스카드 피 훔치기 카드
+    // Bonus-card steal-pi effect
     if (card.bonus?.stealPi) score += P.discardBonusPiBonus;
 
     return { card, score, matches: matchCnt };
@@ -464,7 +464,7 @@ function chooseMatchHeuristicV5Plus(state, playerKey, deps, params = DEFAULT_PAR
     if (oppPi <= 5) score += pi * 1.4;
     if (isDoublePiLike(c, deps)) score += P.matchDoublePiBonus;
     score += ownComboFinishBonus(sc, [c], P);
-    // 전방 블로킹: 상대 콤보를 막는 카드 선택 시 가중치 증가
+    // Forward blocking: increase weight when move blocks opponent combo lines.
     const cbBonus = opponentComboBlockBonus(c.month, jokbo, blkM, blkU, nextT, P);
     score += cbBonus * blockMul * safeNum(P.matchFwdBlockMul, 1.45);
     if (rCnt >= 4 && c.category === "ribbon") score += P.ribbonFourBonus;
@@ -484,7 +484,7 @@ function chooseMatchHeuristicV5Plus(state, playerKey, deps, params = DEFAULT_PAR
 function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
 
-  // 즉시 STOP 조건: 상대 파산 가능
+  // Immediate STOP: if STOP can bankrupt opponent.
   if (deps.canBankruptOpponentByStop?.(state, playerKey)) return false;
 
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -518,7 +518,7 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   if (unseenHi >= 2 && oppPiRisk >= 7 && !certain) return false;
   if (tr.oppOneAwayProb >= safeNum(P.goOppOneAwayGate, 100)) return false;
 
-  // 기본 게이트 통과 여부 (V5와 동일 구조)
+  // Base gate pass/fail (same branching structure as V5)
   if (!certain) {
     const conf = 0.5 + diff * safeNum(P.goScoreDiffBonus)
       + (late ? safeNum(P.goDeckLowBonus) : 0)
@@ -531,19 +531,19 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
 
   if (oppScoreRisk >= gH) return false;
 
-  // ── 분기별 즉시 return (V5와 동일 구조) - 유틸리티 체크 이전에 결정 ──
+  // ── Branch-level early returns (same as V5) before utility filter ──
   if (oppScoreRisk >= gH - 1) {
     if (_stopForOppFour(state, playerKey, deps, 1, 2) || sec) return false;
     const bigLead = diff >= P.goBigLeadScoreDiff && myScore >= P.goBigLeadMinScore;
     const lowThreat = tr.oppOneAwayProb < (late ? P.goBigLeadOneAwayLate : P.goBigLeadOneAwayEarly)
       && tr.jokboThreat < P.goBigLeadJokboThresh && tr.nextThreat < P.goBigLeadNextThresh;
-    // V5와 동일: 조건 충족 못하면 즉시 STOP
+    // Same as V5: fail these checks => immediate STOP.
     if (!bigLead || !lowThreat) return false;
-    // 조건 충족 시 유틸리티 필터로 추가 억제
+    // If passed, utility filter may still block GO.
   } else if (oppScoreRisk >= gL) {
     if (_stopForOppFour(state, playerKey, deps, 2, 3)) return false;
     if (tr.oppOneAwayProb >= (late ? P.goOneAwayThreshOpp4Late : P.goOneAwayThreshOpp4Early) - secG) return false;
-    // 통과 시 유틸리티 필터 적용
+    // If passed, apply utility filter.
   } else if (oppScoreRisk >= 1) {
     if (oppScoreRisk === 3 && tr.jokboThreat >= 0.5) return false;
     const base = oppScoreRisk === 3 ? P.goOneAwayThreshOpp3
@@ -553,16 +553,16 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
       || tr.nextThreat >= P.goOpp12NextThresh
       || (late && tr.jokboThreat >= 0.4))) return false;
     if (sec && diff <= 0 && tr.oppOneAwayProb >= base - 5 - secG) return false;
-    // 통과 시 유틸리티 필터 적용
+    // If passed, apply utility filter.
   } else {
     const zThresh = late ? safeNum(P.goZeroOppOneAwayLate, 88) : safeNum(P.goZeroOppOneAwayEarly, 95);
     if (tr.oppOneAwayProb >= zThresh) return false;
-    // 통과 시 유틸리티 필터 적용
+    // If passed, apply utility filter.
   }
 
-  // ── V5Plus 추가: 유틸리티 후처리 필터 ──
-  // V5 게이트를 통과한 GO 결정 중 일부를 추가로 억제한다.
-  // (GO 횟수 감소 방향 - 실패율 개선 목적)
+  // ── V5Plus addition: post-gate utility filter ──
+  // Suppress a subset of GO decisions that already passed V5-style gates.
+  // Goal: reduce GO frequency and improve GO failure rate.
   const carry = safeNum(state.carryOverMultiplier, 1);
   const goCount = safeNum(state.players?.[playerKey]?.goCount, 0);
 
@@ -591,7 +591,7 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
     Math.max(0, carry - 1) * P.stopCarryMul +
     (myScore >= 10 ? P.stopTenBonus : 0);
 
-  // carry-over 시 보수적으로
+  // Be more conservative when carry-over is active.
   let utilityThreshold = safeNum(P.goUtilityThreshold, 0.10);
   if (carry >= 2) utilityThreshold += carry * safeNum(P.goUpsideCarryMul, 0.10);
 
@@ -639,14 +639,14 @@ function shouldBombV5Plus(state, playerKey, bombMonths, deps, params = DEFAULT_P
   const myScore = safeNum(ctx.myScore);
   const oppScore = safeNum(ctx.oppScore);
   const jokbo = deps.checkOpponentJokboProgress(state, playerKey);
-  // 상대 콤보가 위협적이고 폭탄으로 차단 가능하면 폭탄 선언
+  // Use bomb when opponent combo pressure is high and bomb can block it.
   if (safeNum(jokbo?.threat) >= safeNum(P.bombOpponentJokboBlock, 0.4)) {
     const opp = otherPlayerKeyFromDeps(playerKey, deps);
     const oppPi = deps.capturedCountByCategory(state.players?.[opp], "junk");
     const selfPi = deps.capturedCountByCategory(state.players?.[playerKey], "junk");
     if (selfPi - oppPi >= safeNum(P.bombMinPiAdvantage, 1)) return true;
   }
-  // 크게 앞서고 있으면 폭탄으로 빠른 종료
+  // If clearly ahead, allow bomb to close out quickly.
   if (myScore - oppScore >= 3 && myScore >= 7) return true;
   return false;
 }

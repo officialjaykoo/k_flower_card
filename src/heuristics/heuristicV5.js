@@ -30,24 +30,24 @@ export const DEFAULT_PARAMS = {
   matchThreeBase: 12.89,       // trial0
   captureGainMulThree: 1.15,
   highValueMatchBonus: 3.77,   // trial0
-  // 피 가치
+  // Pi value weighting
   piGainMul: 6.25,             // trial0: matchPiGainMul
   piGainSelfHighMul: 1.8,
   piGainOppLowMul: 1.4,
   doublePiMatchBonus: 16.49,   // trial0: matchDoublePiBonus
   doublePiMatchExtra: 6.0,
   doublePiNoMatchPenalty: 14.0,
-  // 콤보
+  // Combo pressure
   comboFinishBirds: 30.0,  comboFinishRed: 27.0,  comboFinishBlue: 27.0,
   comboFinishPlain: 27.0,  comboFinishKwang: 32.0,
   comboBlockBase: 19.08,       // trial0: blockingBonus
   comboBlockUrgencyMul: 0.51,  // trial0: jokboBlockBonus*0.1
   comboBlockNextThreatMul: 4.5,
   ribbonFourBonus: 34.0, fiveFourBonus: 36.0,
-  // 몽박
+  // Mong-bak pressure
   mongBakFiveBonus: 33.83,     // trial0: matchMongBakFiveBonus
   mongBakPiPenalty: 8.0,
-  // 무매치 discard
+  // No-match discard penalties
   discardLivePiPenalty: 24.0,       discardLivePiPenaltyLate: 36.0,
   discardDoublePiLivePenalty: 16.0, discardDoublePiLivePenaltyLate: 26.0,
   discardDoublePiDeadBonus: 6.0,
@@ -56,14 +56,14 @@ export const DEFAULT_PARAMS = {
   discardBlockMedPenalty: 20.0,     discardBlockMedPenaltyLate: 30.0,
   discardMongBakFivePenalty: 28.0,  discardBonusPiBonus: 26.0,
   discardKnownMonthBonus: 1.9,      discardUnknownMonthPenalty: 1.8,
-  // 먹이/뻑
+  // Feed and puk risk
   feedRiskNoMatchMul: 4.51,    // trial0: feedRiskMul
   feedRiskMatchMul: 1.05,      // trial0
   pukRiskHighMul: 3.99,        // trial0
   pukRiskNormalMul: 3.33,      // trial0
   firstTurnPiPlanBonus: 7.46,  // trial0
   lockedMonthPenalty: 6.0,
-  // 후공 보정
+  // Second-mover adjustments
   secondMoverGoGateShrink: 4.0, secondMoverBlockBonus: 2.0, secondMoverPiBonus: 1.5,
   // chooseMatch
   matchPiGainMul: 6.25,        // trial0

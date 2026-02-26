@@ -39,7 +39,7 @@ function transformGukjinFiveToJunk(player) {
     category: "junk",
     piValue: 2,
     gukjinTransformed: true,
-    name: `${gukjinCard.name} (국진피)`
+    name: `${gukjinCard.name} (Gukjin Pi)`
   });
   return {
     ...player,
@@ -73,7 +73,7 @@ export function resolveRound(state, stopperKey) {
               [loserKey]: switchedLoser
             }
           };
-          autoGukjinLogs.push(`${loserPlayer.label}: STOP 피박 방어로 국진을 자동 쌍피 처리`);
+          autoGukjinLogs.push(`${loserPlayer.label}: auto-converted gukjin to double-pi to defend against pi-bak`);
         }
       }
     }
@@ -109,7 +109,7 @@ export function resolveRound(state, stopperKey) {
       ? "human"
       : "ai";
 
-  // STOP 선언으로 끝난 판은 동점/근소차 여부와 무관하게 선언자가 이긴다.
+  // If the round ended by STOP declaration, the stopper wins regardless of tie/close-score state.
   if (!humanPpukWin && !aiPpukWin && hasStopper) {
     winner = stopperKey;
   }
@@ -134,10 +134,10 @@ export function resolveRound(state, stopperKey) {
 
   /* 7) Nagari detection */
   const nagariReasons = [];
-  if (winner === "draw") nagariReasons.push("무승부");
-  if (humanScore.base <= 0 && aiScore.base <= 0) nagariReasons.push("양측 무득점");
-  if (unresolvedFailedGo.includes("player")) nagariReasons.push("플레이어 GO 실패");
-  if (unresolvedFailedGo.includes("ai")) nagariReasons.push("AI GO 실패");
+  if (winner === "draw") nagariReasons.push("draw");
+  if (humanScore.base <= 0 && aiScore.base <= 0) nagariReasons.push("no score on both sides");
+  if (unresolvedFailedGo.includes("player")) nagariReasons.push("player GO failed");
+  if (unresolvedFailedGo.includes("ai")) nagariReasons.push("AI GO failed");
   if (humanPpukWin || aiPpukWin) nagariReasons.length = 0;
   const nagari = nagariReasons.length > 0;
 
@@ -187,7 +187,7 @@ export function resolveRound(state, stopperKey) {
       }
     }
 
-    // 독박: 고한 플레이어가 다시 고/스톱 전에 상대 STOP으로 지면 2배 배상.
+    // Dokbak: if a player who already declared GO loses by opponent STOP before next go/stop, pay double.
     if (resolvedWinner !== "draw" && hasStopper) {
       const loserKey = resolvedWinner === "human" ? "ai" : "human";
       const loserPlayer = workingState.players[loserKey];
@@ -226,18 +226,20 @@ export function resolveRound(state, stopperKey) {
 
   const log = (workingState.log || [])
     .concat(autoGukjinLogs)
-    .concat(`라운드 정산: 플레이어 점수 ${humanScore.total} / AI 점수 ${aiScore.total} (승자: ${resolvedWinner})`)
-    .concat(`정산 포인트: 플레이어 ${humanScore.payoutTotal || humanScore.total} / AI ${aiScore.payoutTotal || aiScore.total}`)
+    .concat(`Round settle: Player score ${humanScore.total} / AI score ${aiScore.total} (winner: ${resolvedWinner})`)
+    .concat(
+      `Settle points: Player ${humanScore.payoutTotal || humanScore.total} / AI ${aiScore.payoutTotal || aiScore.total}`
+    )
     .concat(
       !nagari && (resolvedWinner === "human" || resolvedWinner === "ai")
         ? [
-            `라운드 정산(골드): ${workingState.players[resolvedWinner].label} 요구 ${settled.requested}골드 / 수령 ${settled.paid}골드`
+            `Round settle (gold): ${workingState.players[resolvedWinner].label} requested ${settled.requested} gold / received ${settled.paid} gold`
           ]
         : []
     )
     .concat(settled.log)
-    .concat(dokbakApplied ? ["독박 적용: STOP 승리 배상 2배"] : [])
-    .concat(nagari ? [`나가리(${nagariReasons.join(", ")}): 다음 판 배수 x${nextCarryOverMultiplier}`] : []);
+    .concat(dokbakApplied ? ["Dokbak applied: STOP win compensation x2"] : [])
+    .concat(nagari ? [`Nagari (${nagariReasons.join(", ")}): next round multiplier x${nextCarryOverMultiplier}`] : []);
 
   /* 10) Final resolution state */
   return {

@@ -36,8 +36,8 @@ export default function CardView({
 }) {
   const [src, setSrc] = useState(forceBack ? resolveBackAsset(theme) : card?.asset || resolveFallbackAsset(theme));
   const month = card?.month ?? "?";
-  const name = card?.name ?? (t ? t("card.alt.defaultName") : "카드");
-  const altText = t ? t("card.alt.format", { month, name }) : `${month}월 ${name}`;
+  const name = card?.name ?? (t ? t("card.alt.defaultName") : "Card");
+  const altText = t ? t("card.alt.format", { month, name }) : `${month} ${name}`;
 
   // Sync source when card/theme/back state changes.
   useEffect(() => {

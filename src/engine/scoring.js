@@ -115,7 +115,7 @@ function detectBak(player, opponent, ruleKey) {
     gwang:
       uniqueCards(player.captured.kwang || []).length >= 3 &&
       uniqueCards(opponent.captured.kwang || []).length === 0,
-    // ?쇰컯? 怨??щ?? 臾닿?. ?? ?곷? ?쇨? 0?대㈃ 硫대컯(?쇰컯 硫댁젣).
+    // Pi-bak applies only when opponent pi is in [1, 7]; 0 pi is explicitly excluded.
     pi: opponentPi >= 1 && opponentPi <= 7 && playerPi >= 10,
     // User rule: mongBak is checked on win condition context without GO prerequisite.
     mongBak: opponentFiveCount === 0 && playerFiveCount >= 7
