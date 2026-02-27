@@ -659,8 +659,8 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, 
     return b.score - a.score;
   };
 
-  const topDefense = defensePool.sort(sortDefense).slice(0, 3);
-  const topAttack = attackPool.sort(sortAttack).slice(0, 3);
+  const topDefense = defensePool.sort(sortDefense);
+  const topAttack = attackPool.sort(sortAttack);
 
   const finalize = (list, channel) => {
     const evMassDen = list.reduce((acc, s) => acc + Math.max(0, s.netDecisionEvDelta), 0);
@@ -701,10 +701,14 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, 
   const defense = finalize(topDefense, "defense");
   const attack = finalize(topAttack, "attack");
   const combined = [...defense, ...attack]
-    .sort((a, b) => b.net_decision_ev_delta - a.net_decision_ev_delta)
-    .slice(0, 6);
+    .sort((a, b) => b.net_decision_ev_delta - a.net_decision_ev_delta);
 
-  return { combined, defense, attack };
+  return {
+    combined,
+    defense,
+    attack,
+    minNetDecisionEvDelta: MIN_NET_DECISION_EV_DELTA
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -742,12 +746,12 @@ function buildSummaryText(payload) {
     )}, EV=${round(payload.metrics.stop.ev, 2)}, breakEven=${pct(payload.metrics.stop.breakEvenRate)}`
   );
   lines.push("");
-  lines.push("Top Risk Zones (GO):");
-  const topZones = payload.risk_zones.slice(0, 3);
-  if (topZones.length <= 0) {
+  lines.push("Risk Zones (GO):");
+  const zones = Array.isArray(payload.risk_zones) ? payload.risk_zones : [];
+  if (zones.length <= 0) {
     lines.push("- (none)");
   } else {
-    for (const z of topZones) {
+    for (const z of zones) {
       lines.push(
         `- ${z.label}: n=${z.n}, fail=${pct(z.failRate)}, EV=${round(z.ev, 2)}, EV gap=${round(z.evGap, 2)}`
       );
@@ -761,28 +765,54 @@ function buildSummaryText(payload) {
   if (combined.length <= 0) {
     lines.push("- (no positive-ROI recommendation in current data)");
   } else {
-    const t = combined[0];
-    lines.push(`- channel: ${t.channel}, param: ${t.param} (${t.current} -> ${t.suggested})`);
+    const games = Number(payload?.game_gold?.games || 0);
+    const agg = combined.reduce(
+      (acc, r) => {
+        acc.expected_total_gold_delta += Number(r.expected_total_gold_delta || 0);
+        acc.expected_go_delta_count += Number(r.expected_go_delta_count || 0);
+        acc.expected_fail_delta_count += Number(r.expected_fail_delta_count || 0);
+        acc.expected_win_delta += Number(r.expected_win_delta || 0);
+        acc.expected_win_delta_gold_based += Number(r.expected_win_delta_gold_based || 0);
+        return acc;
+      },
+      {
+        expected_total_gold_delta: 0,
+        expected_go_delta_count: 0,
+        expected_fail_delta_count: 0,
+        expected_win_delta: 0,
+        expected_win_delta_gold_based: 0
+      }
+    );
+    const failReduced = Math.max(0, -agg.expected_fail_delta_count);
+    const goCutPerFailReduced =
+      agg.expected_go_delta_count < 0 && failReduced > 1e-9
+        ? Math.abs(agg.expected_go_delta_count) / failReduced
+        : 0;
+    const expectedWinRateDelta = games > 0 ? agg.expected_win_delta / games : 0;
+    const paramList = combined.map((x) => `${x.param}(${x.current}->${x.suggested})`).join(", ");
+    lines.push(`- apply all recommendations: ${combined.length} params`);
+    lines.push(`- params: ${paramList}`);
     lines.push(
-      `- expected gold: total ${round(t.expected_total_gold_delta, 2)}, per game ${round(
-        payload.game_gold.games > 0 ? t.expected_total_gold_delta / payload.game_gold.games : 0,
+      `- expected gold: total ${round(agg.expected_total_gold_delta, 2)}, per game ${round(
+        games > 0 ? agg.expected_total_gold_delta / games : 0,
         3
       )}`
     );
     lines.push(
-      `- fail/GO tradeoff: fail change ${round(t.expected_fail_delta_count, 3)}, GO change ${round(
-        t.expected_go_delta_count,
+      `- fail/GO tradeoff: fail change ${round(agg.expected_fail_delta_count, 3)}, GO change ${round(
+        agg.expected_go_delta_count,
         3
-      )}, GO cut per 1 fail reduced ${round(t.go_cut_per_1_fail_reduced, 3)}`
+      )}, GO cut per 1 fail reduced ${round(goCutPerFailReduced, 3)}`
     );
     lines.push(
-      `- expected wins: ${round(t.expected_win_delta, 3)} wins (win rate delta ${pct(
-        t.expected_win_rate_delta
-      )}, gold-based raw ${round(t.expected_win_delta_gold_based, 3)})`
+      `- expected wins: ${round(agg.expected_win_delta, 3)} wins (win rate delta ${pct(
+        expectedWinRateDelta
+      )}, gold-based raw ${round(agg.expected_win_delta_gold_based, 3)})`
     );
   }
   lines.push("");
-  lines.push("Defense Top 3 Param Suggestions:");
+  const minNetEv = Number(payload?.recommendation_threshold?.min_net_decision_ev_delta || 1);
+  lines.push(`Defense Param Suggestions (netEV>=${round(minNetEv, 3)}):`);
   if (defense.length <= 0) {
     lines.push("- (no positive-ROI recommendation in current data)");
   } else {
@@ -800,7 +830,7 @@ function buildSummaryText(payload) {
     }
   }
   lines.push("");
-  lines.push("Attack Top 3 Param Suggestions:");
+  lines.push(`Attack Param Suggestions (netEV>=${round(minNetEv, 3)}):`);
   if (attack.length <= 0) {
     lines.push("- (no positive-ROI recommendation in current data)");
   } else {
@@ -994,7 +1024,10 @@ const payload = {
   })),
   recommendations: suggestionSet.combined,
   recommendations_defense: suggestionSet.defense,
-  recommendations_attack: suggestionSet.attack
+  recommendations_attack: suggestionSet.attack,
+  recommendation_threshold: {
+    min_net_decision_ev_delta: suggestionSet.minNetDecisionEvDelta
+  }
 };
 
 const summaryPath = join(runDir, "go_stop_summary.txt");
