@@ -89,7 +89,7 @@ export const DEFAULT_PARAMS = {
   chooseMatchOppShakeMonthBonus: 1.05,
 
   // go model
-  goMinPi: 4,
+  goMinPi: 3,
   goMinPiDesperate: 7,
   goMinPiSecondTrailingDelta: 2,
   goHardThreatCut: 1.0,
@@ -114,7 +114,7 @@ export const DEFAULT_PARAMS = {
   stopLeadMul: 0.06,
   stopCarryMul: 0.10,
   stopTenBonus: 0.16,
-  goBaseThreshold: 0.010155494771391926,
+  goBaseThreshold: 0.00015549477139192607,
   goThresholdLeadUp: 0.0797009468794747,
   goThresholdTrailDown: 0.1231700196104433,
   goThresholdPressureUp: 0.12701873017352877,

@@ -203,10 +203,10 @@ Yes.
 
 ## 7. Recommended Command
 ```powershell
-node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --games 1000 --seed v5_vs_phase4s5 --kibo-detail lean --dataset-out auto
+node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase3_seed5 --games 1000 --seed v5_vs_phase3s5 --kibo-detail lean --dataset-out auto
 ```
 
 Generated files example:
-- `logs/model_duel/heuristic_v5_vs_phase4_seed5_20260226/v5_vs_phase4s5_result.json`
-- `logs/model_duel/heuristic_v5_vs_phase4_seed5_20260226/v5_vs_phase4s5_kibo.jsonl`
-- `logs/model_duel/heuristic_v5_vs_phase4_seed5_20260226/v5_vs_phase4s5_dataset.jsonl`
+- `logs/model_duel/heuristic_v5_vs_phase3_seed5_20260226/v5_vs_phase3s5_result.json`
+- `logs/model_duel/heuristic_v5_vs_phase3_seed5_20260226/v5_vs_phase3s5_kibo.jsonl`
+- `logs/model_duel/heuristic_v5_vs_phase3_seed5_20260226/v5_vs_phase3s5_dataset.jsonl`

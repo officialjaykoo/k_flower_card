@@ -76,3 +76,27 @@ These rules are mandatory for this repository.
     - `후공: 승률 <...>, 평균 골드델타 <...>`
   - Final line:
     - `핵심 한줄: <single-sentence conclusion>`
+
+10. `neat_eval_worker.mjs` result summary lock
+- After a `scripts/neat_eval_worker.mjs` run completes, always present the result in the compact duel block format first.
+- Use this exact header/body order:
+  - `=== Model Duel (<Model A> vs <Model B>, games=<N>) ===`
+  - `Win/Loss/Draw(A):  <...> / <...> / <...>  (WR=<...>)`
+  - `Win/Loss/Draw(B):  <...> / <...> / <...>  (WR=<...>)`
+  - `Seat A first:      WR=<...>, mean_gold_delta=<...>`
+  - `Seat A second:     WR=<...>, mean_gold_delta=<...>`
+  - `Seat B first:      WR=<...>, mean_gold_delta=<...>`
+  - `Seat B second:     WR=<...>, mean_gold_delta=<...>`
+  - `Gold delta(A):     mean=<...>, p10=<...>, p50=<...>, p90=<...>`
+  - `GO A:              count=<...>, games=<...>, fail=<...>, fail_rate=<...>`
+  - `GO B:              count=<...>, games=<...>, fail=<...>, fail_rate=<...>`
+  - `Bankrupt:          A=<...>, B=<...>`
+  - `Eval time:         <...>s`
+  - `===========================================================`
+- After the block, add one short Korean conclusion line.
+
+11. Fail-fast execution principle
+- Prefer fail-fast over compatibility fallbacks in all runtime/evaluation scripts.
+- If behavior is ambiguous, throw an explicit error instead of guessing.
+- If a result is uncertain or validation fails, do not mark the run as success.
+- Do not silently swallow action-resolution failures; surface context in the error (`seed`, `step`, `actor`, `phase`).

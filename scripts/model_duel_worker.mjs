@@ -228,9 +228,9 @@ function resolvePlayerSpec(rawSpec, sideLabel) {
     };
   }
 
-  const m = token.match(/^phase([1-4])_seed(\d+)$/i);
+  const m = token.match(/^phase([0-3])_seed(\d+)$/i);
   if (!m) {
-    throw new Error(`invalid ${sideLabel} spec: ${token} (use policy key or phase4_seed5)`);
+    throw new Error(`invalid ${sideLabel} spec: ${token} (use policy key or phase0_seed9)`);
   }
   const phase = Number(m[1]);
   const seed = Number(m[2]);
@@ -812,7 +812,9 @@ function playSingleRound(initialState, seed, playerByActor, maxSteps, onDecision
       next = randomLegalAction(state, actor, rng);
     }
     if (!next || stateProgressKey(next) === before) {
-      break;
+      throw new Error(
+        `action resolution failed after fallback: seed=${seed}, step=${steps}, actor=${actor}, phase=${String(state?.phase || "")}, policy=${policy}, source=${actionSource}`
+      );
     }
 
     if (typeof onDecision === "function" && decisionType && candidates.length > 0) {

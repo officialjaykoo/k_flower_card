@@ -15,6 +15,7 @@ Quick Read Map (top-down):
 import argparse
 import contextlib
 import gzip
+import hashlib
 import json
 import math
 import multiprocessing as mp
@@ -47,15 +48,17 @@ DEFAULT_RUNTIME = {
     "eval_timeout_sec": 360,
     "max_eval_steps": 600,
     "opponent_policy": "H-V4",
+    "opponent_policy_mix": [],
     "opponent_genome": "",
     "switch_seats": True,
     "checkpoint_every": 50,
     "eval_script": "scripts/neat_eval_worker.mjs",
     "seed": 13,
-    "fitness_gold_scale": 10000.0,
-    "fitness_win_weight": 2.5,
-    "fitness_loss_weight": 1.5,
-    "fitness_draw_weight": 0.1,
+    # Evaluator maps these to win/gold/go component weights.
+    "fitness_gold_scale": 2500.0,
+    "fitness_win_weight": 0.35,
+    "fitness_loss_weight": 0.50,
+    "fitness_draw_weight": 0.15,
     # Gate / transition controls (can be phase-specific via runtime config)
     "gate_mode": "win_rate_only",  # win_rate_only | hybrid
     "gate_ema_window": 5,
@@ -72,6 +75,7 @@ DEFAULT_RUNTIME = {
     # Optional offline teacher dataset (phase1 imitation).
     "teacher_dataset_path": "",
     "teacher_kibo_path": "",
+    "teacher_kibo_count_records": False,
     "teacher_dataset_actor": "all",  # all | human | ai
     "teacher_dataset_decisions": 0,  # 0 disables offline teacher scoring
     "teacher_dataset_cache_path": "",
@@ -144,6 +148,79 @@ def _resolve_runtime_path(base_path: str, child_path: str) -> str:
     return os.path.normpath(os.path.join(base_dir, child_path))
 
 
+def _parse_weighted_policy_entry(item: object) -> Optional[Dict[str, Any]]:
+    policy = ""
+    weight = 0.0
+    if isinstance(item, dict):
+        policy = str(item.get("policy") or item.get("opponent_policy") or "").strip()
+        weight = _to_float(item.get("weight"), 0.0)
+    else:
+        token = str(item or "").strip()
+        if not token:
+            return None
+        if ":" in token:
+            left, right = token.rsplit(":", 1)
+            policy = str(left or "").strip()
+            weight = _to_float(right, 0.0)
+        else:
+            policy = token
+            weight = 1.0
+
+    if not policy:
+        return None
+    if (not math.isfinite(weight)) or float(weight) <= 0.0:
+        return None
+    return {"policy": policy, "weight": float(weight)}
+
+
+def _parse_opponent_policy_mix(raw_value: object) -> list:
+    if raw_value is None:
+        return []
+
+    source = []
+    if isinstance(raw_value, list):
+        source = raw_value
+    elif isinstance(raw_value, dict):
+        source = [raw_value]
+    else:
+        text = str(raw_value).strip()
+        if not text:
+            return []
+        if text.startswith("[") or text.startswith("{"):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    source = parsed
+                elif isinstance(parsed, dict):
+                    source = [parsed]
+                else:
+                    source = []
+            except Exception:
+                source = []
+        else:
+            source = [x.strip() for x in text.split(",") if str(x).strip()]
+
+    merged: Dict[str, float] = {}
+    ordered_policies = []
+    for item in source:
+        parsed = _parse_weighted_policy_entry(item)
+        if not parsed:
+            continue
+        policy = str(parsed["policy"]).strip()
+        weight = float(parsed["weight"])
+        if policy not in merged:
+            ordered_policies.append(policy)
+            merged[policy] = 0.0
+        merged[policy] += weight
+
+    out = []
+    for policy in ordered_policies:
+        weight = float(merged.get(policy, 0.0))
+        if weight > 0.0:
+            out.append({"policy": policy, "weight": weight})
+    return out
+
+
 def _load_runtime_config_recursive(path: str, cfg: dict, seen: set[str]) -> None:
     abs_path = os.path.abspath(path)
     if abs_path in seen:
@@ -180,7 +257,11 @@ def _load_runtime_config(path: str) -> dict:
     cfg = dict(DEFAULT_RUNTIME)
     if path:
         _load_runtime_config_recursive(path, cfg, set())
+    return _normalize_runtime_values(cfg)
 
+
+def _normalize_runtime_values(cfg: dict) -> dict:
+    cfg = dict(cfg or {})
     cfg["generations"] = max(1, _to_int(cfg.get("generations"), DEFAULT_RUNTIME["generations"]))
     cfg["eval_workers"] = max(2, _to_int(cfg.get("eval_workers"), DEFAULT_RUNTIME["eval_workers"]))
     cfg["games_per_genome"] = max(
@@ -193,6 +274,7 @@ def _load_runtime_config(path: str) -> dict:
         50, _to_int(cfg.get("max_eval_steps"), DEFAULT_RUNTIME["max_eval_steps"])
     )
     cfg["opponent_policy"] = str(cfg.get("opponent_policy") or DEFAULT_RUNTIME["opponent_policy"]).strip()
+    cfg["opponent_policy_mix"] = _parse_opponent_policy_mix(cfg.get("opponent_policy_mix"))
     cfg["opponent_genome"] = str(cfg.get("opponent_genome") or "").strip()
     cfg["switch_seats"] = _to_bool(cfg.get("switch_seats"), DEFAULT_RUNTIME["switch_seats"])
     cfg["checkpoint_every"] = max(
@@ -212,6 +294,7 @@ def _load_runtime_config(path: str) -> dict:
     cfg["fitness_draw_weight"] = _to_float(
         cfg.get("fitness_draw_weight"), DEFAULT_RUNTIME["fitness_draw_weight"]
     )
+
     gate_mode = str(cfg.get("gate_mode") or DEFAULT_RUNTIME["gate_mode"]).strip().lower()
     if gate_mode not in ("win_rate_only", "hybrid"):
         gate_mode = str(DEFAULT_RUNTIME["gate_mode"])
@@ -251,11 +334,12 @@ def _load_runtime_config(path: str) -> dict:
         failure_slope_metric = str(DEFAULT_RUNTIME["failure_slope_metric"])
     cfg["failure_slope_metric"] = failure_slope_metric
 
-    teacher_dataset_path = str(cfg.get("teacher_dataset_path") or "").strip()
-    cfg["teacher_dataset_path"] = teacher_dataset_path
-
-    teacher_kibo_path = str(cfg.get("teacher_kibo_path") or "").strip()
-    cfg["teacher_kibo_path"] = teacher_kibo_path
+    cfg["teacher_dataset_path"] = str(cfg.get("teacher_dataset_path") or "").strip()
+    cfg["teacher_kibo_path"] = str(cfg.get("teacher_kibo_path") or "").strip()
+    cfg["teacher_kibo_count_records"] = _to_bool(
+        cfg.get("teacher_kibo_count_records"),
+        DEFAULT_RUNTIME["teacher_kibo_count_records"],
+    )
 
     teacher_actor = str(
         cfg.get("teacher_dataset_actor") or DEFAULT_RUNTIME["teacher_dataset_actor"]
@@ -263,13 +347,13 @@ def _load_runtime_config(path: str) -> dict:
     if teacher_actor not in ("all", "human", "ai"):
         teacher_actor = str(DEFAULT_RUNTIME["teacher_dataset_actor"])
     cfg["teacher_dataset_actor"] = teacher_actor
-
     cfg["teacher_dataset_decisions"] = max(
         0, _to_int(cfg.get("teacher_dataset_decisions"), DEFAULT_RUNTIME["teacher_dataset_decisions"])
     )
+    cfg["teacher_dataset_cache_path"] = str(cfg.get("teacher_dataset_cache_path") or "").strip()
 
-    teacher_dataset_cache_path = str(cfg.get("teacher_dataset_cache_path") or "").strip()
-    cfg["teacher_dataset_cache_path"] = teacher_dataset_cache_path
+    if "output_dir" in cfg:
+        cfg["output_dir"] = str(cfg.get("output_dir") or "").strip()
     return cfg
 
 
@@ -282,6 +366,11 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}EVAL_TIMEOUT_SEC"] = str(int(runtime["eval_timeout_sec"]))
     os.environ[f"{ENV_PREFIX}MAX_EVAL_STEPS"] = str(int(runtime["max_eval_steps"]))
     os.environ[f"{ENV_PREFIX}OPPONENT_POLICY"] = str(runtime["opponent_policy"])
+    os.environ[f"{ENV_PREFIX}OPPONENT_POLICY_MIX"] = json.dumps(
+        runtime.get("opponent_policy_mix") or [],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     os.environ[f"{ENV_PREFIX}OPPONENT_GENOME"] = str(runtime.get("opponent_genome") or "")
     os.environ[f"{ENV_PREFIX}SWITCH_SEATS"] = "1" if bool(runtime["switch_seats"]) else "0"
     os.environ[f"{ENV_PREFIX}SEED"] = str(runtime["seed"])
@@ -292,6 +381,9 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}FITNESS_DRAW_WEIGHT"] = str(float(runtime["fitness_draw_weight"]))
     os.environ[f"{ENV_PREFIX}TEACHER_DATASET_PATH"] = str(runtime.get("teacher_dataset_path") or "")
     os.environ[f"{ENV_PREFIX}TEACHER_KIBO_PATH"] = str(runtime.get("teacher_kibo_path") or "")
+    os.environ[f"{ENV_PREFIX}TEACHER_KIBO_COUNT_RECORDS"] = (
+        "1" if bool(runtime.get("teacher_kibo_count_records")) else "0"
+    )
     os.environ[f"{ENV_PREFIX}TEACHER_DATASET_ACTOR"] = str(runtime.get("teacher_dataset_actor") or "all")
     os.environ[f"{ENV_PREFIX}TEACHER_DATASET_DECISIONS"] = str(
         int(runtime.get("teacher_dataset_decisions") or 0)
@@ -302,70 +394,39 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
 
 
 def _runtime_from_env() -> Dict[str, object]:
-    out: Dict[str, object] = {}
-    out["eval_script"] = os.environ.get(f"{ENV_PREFIX}EVAL_SCRIPT") or ""
-    out["games_per_genome"] = _to_int(
-        os.environ.get(f"{ENV_PREFIX}GAMES_PER_GENOME"),
-        DEFAULT_RUNTIME["games_per_genome"],
-    )
-    out["eval_timeout_sec"] = _to_int(
-        os.environ.get(f"{ENV_PREFIX}EVAL_TIMEOUT_SEC"),
-        DEFAULT_RUNTIME["eval_timeout_sec"],
-    )
-    out["max_eval_steps"] = _to_int(
-        os.environ.get(f"{ENV_PREFIX}MAX_EVAL_STEPS"),
-        DEFAULT_RUNTIME["max_eval_steps"],
-    )
-    out["opponent_policy"] = (
-        os.environ.get(f"{ENV_PREFIX}OPPONENT_POLICY") or DEFAULT_RUNTIME["opponent_policy"]
-    )
-    out["opponent_genome"] = str(os.environ.get(f"{ENV_PREFIX}OPPONENT_GENOME") or "").strip()
-    out["switch_seats"] = _to_bool(
-        os.environ.get(f"{ENV_PREFIX}SWITCH_SEATS"),
-        DEFAULT_RUNTIME["switch_seats"],
-    )
-    out["seed"] = _to_seed(os.environ.get(f"{ENV_PREFIX}SEED"), DEFAULT_RUNTIME["seed"])
-    out["output_dir"] = os.environ.get(f"{ENV_PREFIX}OUTPUT_DIR") or os.getcwd()
-    out["fitness_gold_scale"] = max(
-        1.0,
-        _to_float(
-            os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_SCALE"),
-            DEFAULT_RUNTIME["fitness_gold_scale"],
-        ),
-    )
-    out["fitness_win_weight"] = _to_float(
-        os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"),
-        DEFAULT_RUNTIME["fitness_win_weight"],
-    )
-    out["fitness_loss_weight"] = _to_float(
-        os.environ.get(f"{ENV_PREFIX}FITNESS_LOSS_WEIGHT"),
-        DEFAULT_RUNTIME["fitness_loss_weight"],
-    )
-    out["fitness_draw_weight"] = _to_float(
-        os.environ.get(f"{ENV_PREFIX}FITNESS_DRAW_WEIGHT"),
-        DEFAULT_RUNTIME["fitness_draw_weight"],
-    )
-    out["teacher_dataset_path"] = str(
-        os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_PATH") or ""
-    ).strip()
-    out["teacher_kibo_path"] = str(os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_PATH") or "").strip()
-    teacher_actor = str(
-        os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_ACTOR") or DEFAULT_RUNTIME["teacher_dataset_actor"]
-    ).strip().lower()
-    if teacher_actor not in ("all", "human", "ai"):
-        teacher_actor = str(DEFAULT_RUNTIME["teacher_dataset_actor"])
-    out["teacher_dataset_actor"] = teacher_actor
-    out["teacher_dataset_decisions"] = max(
-        0,
-        _to_int(
-            os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_DECISIONS"),
-            DEFAULT_RUNTIME["teacher_dataset_decisions"],
-        ),
-    )
-    out["teacher_dataset_cache_path"] = str(
-        os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_CACHE_PATH") or ""
-    ).strip()
-    return out
+    raw: Dict[str, object] = {
+        "eval_script": os.environ.get(f"{ENV_PREFIX}EVAL_SCRIPT") or "",
+        "games_per_genome": os.environ.get(f"{ENV_PREFIX}GAMES_PER_GENOME"),
+        "eval_timeout_sec": os.environ.get(f"{ENV_PREFIX}EVAL_TIMEOUT_SEC"),
+        "max_eval_steps": os.environ.get(f"{ENV_PREFIX}MAX_EVAL_STEPS"),
+        "opponent_policy": os.environ.get(f"{ENV_PREFIX}OPPONENT_POLICY"),
+        "opponent_policy_mix": os.environ.get(f"{ENV_PREFIX}OPPONENT_POLICY_MIX"),
+        "opponent_genome": os.environ.get(f"{ENV_PREFIX}OPPONENT_GENOME"),
+        "switch_seats": os.environ.get(f"{ENV_PREFIX}SWITCH_SEATS"),
+        "seed": os.environ.get(f"{ENV_PREFIX}SEED"),
+        "output_dir": os.environ.get(f"{ENV_PREFIX}OUTPUT_DIR") or os.getcwd(),
+        "fitness_gold_scale": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_SCALE"),
+        "fitness_win_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"),
+        "fitness_loss_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_LOSS_WEIGHT"),
+        "fitness_draw_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_DRAW_WEIGHT"),
+        "teacher_dataset_path": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_PATH") or "",
+        "teacher_kibo_path": os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_PATH") or "",
+        "teacher_kibo_count_records": os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_COUNT_RECORDS") or "0",
+        "teacher_dataset_actor": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_ACTOR"),
+        "teacher_dataset_decisions": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_DECISIONS"),
+        "teacher_dataset_cache_path": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_CACHE_PATH") or "",
+    }
+    return _normalize_runtime_values(raw)
+
+
+_RUNTIME_FROM_ENV_CACHE: Optional[Dict[str, object]] = None
+
+
+def _runtime_from_env_cached(force_reload: bool = False) -> Dict[str, object]:
+    global _RUNTIME_FROM_ENV_CACHE
+    if force_reload or _RUNTIME_FROM_ENV_CACHE is None:
+        _RUNTIME_FROM_ENV_CACHE = _runtime_from_env()
+    return _RUNTIME_FROM_ENV_CACHE
 
 
 # =============================================================================
@@ -421,7 +482,8 @@ def _build_teacher_dataset_cache(runtime: dict, output_dir: str) -> None:
         if not os.path.exists(kibo_abs):
             raise RuntimeError(f"teacher kibo not found: {kibo_abs}")
         runtime["teacher_kibo_path"] = kibo_abs
-        runtime["teacher_kibo_records"] = _count_jsonl_records(kibo_abs)
+        if bool(runtime.get("teacher_kibo_count_records")):
+            runtime["teacher_kibo_records"] = _count_jsonl_records(kibo_abs)
     else:
         runtime["teacher_kibo_path"] = ""
 
@@ -651,23 +713,71 @@ def _quantile(values, q):
     return vals[idx]
 
 
+def _stable_unit_float(token: str) -> float:
+    raw = str(token or "").encode("utf-8")
+    digest = hashlib.sha256(raw).digest()
+    value = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    return float(value) / float((1 << 64) - 1)
+
+
+def _select_opponent_policy(runtime: dict, seed_text: str, generation: int, genome_key: int) -> str:
+    fallback = str(runtime.get("opponent_policy") or DEFAULT_RUNTIME["opponent_policy"]).strip()
+    mix = runtime.get("opponent_policy_mix") or []
+    if not isinstance(mix, list) or len(mix) <= 0:
+        return fallback
+
+    weighted = []
+    total = 0.0
+    for item in mix:
+        if not isinstance(item, dict):
+            continue
+        policy = str(item.get("policy") or "").strip()
+        weight = _to_float(item.get("weight"), 0.0)
+        if not policy:
+            continue
+        if (not math.isfinite(weight)) or weight <= 0.0:
+            continue
+        ww = float(weight)
+        weighted.append((policy, ww))
+        total += ww
+
+    if total <= 0.0 or len(weighted) <= 0:
+        return fallback
+
+    needle = _stable_unit_float(
+        f"{seed_text}|gen={int(generation)}|genome={int(genome_key)}|opponent_policy_mix"
+    ) * total
+    acc = 0.0
+    for policy, weight in weighted:
+        acc += weight
+        if needle <= acc:
+            return policy
+    return weighted[-1][0]
+
+
 # =============================================================================
 # Section 7. Single Genome Evaluation Worker
 # =============================================================================
 def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1):
-    runtime = _runtime_from_env()
+    runtime = _runtime_from_env_cached()
     eval_script = str(runtime["eval_script"] or "")
-    opponent_policy = str(runtime.get("opponent_policy") or DEFAULT_RUNTIME["opponent_policy"]).strip()
+    seed_text = str(seed_override or runtime["seed"])
+    opponent_policy = _select_opponent_policy(
+        runtime=runtime,
+        seed_text=seed_text,
+        generation=int(generation),
+        genome_key=int(genome_key),
+    )
     opponent_genome = str(runtime.get("opponent_genome") or "").strip()
     teacher_dataset_path = str(runtime.get("teacher_dataset_path") or "").strip()
     teacher_kibo_path = str(runtime.get("teacher_kibo_path") or "").strip()
     teacher_dataset_cache = str(runtime.get("teacher_dataset_cache_path") or "").strip()
-    seed_text = str(seed_override or runtime["seed"])
     failure_meta = {
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "generation": int(generation),
         "genome_key": int(genome_key),
         "seed_used": seed_text,
+        "opponent_policy": opponent_policy,
     }
     if not eval_script or not os.path.exists(eval_script):
         _append_eval_failure_log(
@@ -816,51 +926,19 @@ class LoggedParallelEvaluator:
         self.gate_state_path = os.path.join(self.output_dir, "gate_state.json")
 
         self.generation = -1
-        self.gate_mode = str(runtime.get("gate_mode") or DEFAULT_RUNTIME["gate_mode"]).strip().lower()
-        if self.gate_mode not in ("win_rate_only", "hybrid"):
-            self.gate_mode = str(DEFAULT_RUNTIME["gate_mode"])
-        self.ema_window = max(2, _to_int(runtime.get("gate_ema_window"), DEFAULT_RUNTIME["gate_ema_window"]))
+        self.gate_mode = str(runtime["gate_mode"])
+        self.ema_window = int(runtime["gate_ema_window"])
         self.ema_alpha = 2.0 / (float(self.ema_window) + 1.0)
-        self.transition_ema_imitation = _to_optional_float(
-            runtime.get("transition_ema_imitation"),
-            DEFAULT_RUNTIME["transition_ema_imitation"],
-        )
-        self.transition_ema_win_rate = _to_optional_float(
-            runtime.get("transition_ema_win_rate"),
-            DEFAULT_RUNTIME["transition_ema_win_rate"],
-        )
-        self.transition_mean_gold_delta_min = _to_optional_float(
-            runtime.get("transition_mean_gold_delta_min"),
-            DEFAULT_RUNTIME["transition_mean_gold_delta_min"],
-        )
-        self.transition_best_fitness_min = _to_optional_float(
-            runtime.get("transition_best_fitness_min"),
-            DEFAULT_RUNTIME["transition_best_fitness_min"],
-        )
-        self.transition_streak = max(
-            1, _to_int(runtime.get("transition_streak"), DEFAULT_RUNTIME["transition_streak"])
-        )
-        self.failure_generation_min = max(
-            1,
-            _to_int(runtime.get("failure_generation_min"), DEFAULT_RUNTIME["failure_generation_min"]),
-        )
-        self.failure_ema_win_rate_max = _to_optional_float(
-            runtime.get("failure_ema_win_rate_max"),
-            DEFAULT_RUNTIME["failure_ema_win_rate_max"],
-        )
-        self.failure_imitation_max = _to_optional_float(
-            runtime.get("failure_imitation_max"),
-            DEFAULT_RUNTIME["failure_imitation_max"],
-        )
-        self.failure_slope_5_max = _to_float(
-            runtime.get("failure_slope_5_max"),
-            DEFAULT_RUNTIME["failure_slope_5_max"],
-        )
-        self.failure_slope_metric = str(
-            runtime.get("failure_slope_metric") or DEFAULT_RUNTIME["failure_slope_metric"]
-        ).strip().lower()
-        if self.failure_slope_metric not in ("win_rate", "imitation"):
-            self.failure_slope_metric = str(DEFAULT_RUNTIME["failure_slope_metric"])
+        self.transition_ema_imitation = runtime.get("transition_ema_imitation")
+        self.transition_ema_win_rate = runtime.get("transition_ema_win_rate")
+        self.transition_mean_gold_delta_min = runtime.get("transition_mean_gold_delta_min")
+        self.transition_best_fitness_min = runtime.get("transition_best_fitness_min")
+        self.transition_streak = int(runtime["transition_streak"])
+        self.failure_generation_min = int(runtime["failure_generation_min"])
+        self.failure_ema_win_rate_max = runtime.get("failure_ema_win_rate_max")
+        self.failure_imitation_max = runtime.get("failure_imitation_max")
+        self.failure_slope_5_max = float(runtime["failure_slope_5_max"])
+        self.failure_slope_metric = str(runtime["failure_slope_metric"])
         self.ema_imitation = None
         self.ema_win_rate = None
         self.gate_streak = 0
@@ -1443,51 +1521,61 @@ def main() -> None:
     base_generation = max(0, int(args.base_generation))
     if base_generation != 0:
         applied_overrides["base_generation"] = int(base_generation)
+    override_keys = []
     if args.generations > 0:
-        runtime["generations"] = int(args.generations)
-        applied_overrides["generations"] = int(args.generations)
+        runtime["generations"] = args.generations
+        override_keys.append("generations")
     if args.workers > 0:
-        runtime["eval_workers"] = max(2, int(args.workers))
-        applied_overrides["eval_workers"] = int(runtime["eval_workers"])
+        runtime["eval_workers"] = args.workers
+        override_keys.append("eval_workers")
     if args.games_per_genome > 0:
-        runtime["games_per_genome"] = max(1, int(args.games_per_genome))
-        applied_overrides["games_per_genome"] = int(runtime["games_per_genome"])
+        runtime["games_per_genome"] = args.games_per_genome
+        override_keys.append("games_per_genome")
     if args.eval_timeout_sec > 0:
-        runtime["eval_timeout_sec"] = max(10, int(args.eval_timeout_sec))
-        applied_overrides["eval_timeout_sec"] = int(runtime["eval_timeout_sec"])
+        runtime["eval_timeout_sec"] = args.eval_timeout_sec
+        override_keys.append("eval_timeout_sec")
     if args.max_eval_steps > 0:
-        runtime["max_eval_steps"] = max(50, int(args.max_eval_steps))
-        applied_overrides["max_eval_steps"] = int(runtime["max_eval_steps"])
+        runtime["max_eval_steps"] = args.max_eval_steps
+        override_keys.append("max_eval_steps")
     if args.opponent_policy.strip():
         runtime["opponent_policy"] = args.opponent_policy.strip()
-        applied_overrides["opponent_policy"] = str(runtime["opponent_policy"])
+        override_keys.append("opponent_policy")
     if args.opponent_genome.strip():
         runtime["opponent_genome"] = args.opponent_genome.strip()
-        applied_overrides["opponent_genome"] = str(runtime["opponent_genome"])
+        override_keys.append("opponent_genome")
     if args.checkpoint_every > 0:
-        runtime["checkpoint_every"] = max(1, int(args.checkpoint_every))
-        applied_overrides["checkpoint_every"] = int(runtime["checkpoint_every"])
+        runtime["checkpoint_every"] = args.checkpoint_every
+        override_keys.append("checkpoint_every")
     if str(args.seed).strip():
         runtime["seed"] = str(args.seed).strip()
-        applied_overrides["seed"] = str(runtime["seed"])
+        override_keys.append("seed")
     if args.switch_seats is not None:
         runtime["switch_seats"] = bool(args.switch_seats)
-        applied_overrides["switch_seats"] = bool(runtime["switch_seats"])
+        override_keys.append("switch_seats")
     if args.fitness_gold_scale > 0:
-        runtime["fitness_gold_scale"] = max(1.0, float(args.fitness_gold_scale))
-        applied_overrides["fitness_gold_scale"] = float(runtime["fitness_gold_scale"])
+        runtime["fitness_gold_scale"] = args.fitness_gold_scale
+        override_keys.append("fitness_gold_scale")
     if args.fitness_win_weight == args.fitness_win_weight:
-        runtime["fitness_win_weight"] = float(args.fitness_win_weight)
-        applied_overrides["fitness_win_weight"] = float(runtime["fitness_win_weight"])
+        runtime["fitness_win_weight"] = args.fitness_win_weight
+        override_keys.append("fitness_win_weight")
     if args.fitness_loss_weight == args.fitness_loss_weight:
-        runtime["fitness_loss_weight"] = float(args.fitness_loss_weight)
-        applied_overrides["fitness_loss_weight"] = float(runtime["fitness_loss_weight"])
+        runtime["fitness_loss_weight"] = args.fitness_loss_weight
+        override_keys.append("fitness_loss_weight")
     if args.fitness_draw_weight == args.fitness_draw_weight:
-        runtime["fitness_draw_weight"] = float(args.fitness_draw_weight)
-        applied_overrides["fitness_draw_weight"] = float(runtime["fitness_draw_weight"])
+        runtime["fitness_draw_weight"] = args.fitness_draw_weight
+        override_keys.append("fitness_draw_weight")
 
-    if str(runtime.get("opponent_policy") or "").strip() == "genome":
-        opponent_genome = str(runtime.get("opponent_genome") or "").strip()
+    runtime = _normalize_runtime_values(runtime)
+    for key in override_keys:
+        applied_overrides[key] = runtime.get(key)
+
+    opponent_genome = str(runtime.get("opponent_genome") or "").strip()
+    requires_genome_path = str(runtime.get("opponent_policy") or "").strip().lower() == "genome"
+    for item in runtime.get("opponent_policy_mix") or []:
+        if isinstance(item, dict) and str(item.get("policy") or "").strip().lower() == "genome":
+            requires_genome_path = True
+            break
+    if requires_genome_path:
         if not opponent_genome:
             raise RuntimeError("opponent-policy=genome requires opponent_genome path")
         if not os.path.exists(opponent_genome):

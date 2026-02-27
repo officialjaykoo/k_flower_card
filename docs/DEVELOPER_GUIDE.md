@@ -16,7 +16,6 @@
 - `phase1_run.ps1`, `phase2_run.ps1`: 공통 학습 래퍼 위임 진입점
 - `phase1_eval.ps1`, `phase2_eval.ps1`: 공통 평가 래퍼 위임 진입점
 - `phase3_run.ps1`, `phase3_eval.ps1`: Phase 3 학습/평가
-- `phase4_run.ps1`, `phase4_eval.ps1`: Phase 4 학습/평가
 
 ### 2-2. 코어 실행기
 - `neat_train.py`: NEAT 러너, 병렬 평가, 게이트/실패 감지, 체크포인트/요약 저장
@@ -28,7 +27,6 @@
 - `runtime_phase1.json`
 - `runtime_phase2.json`
 - `runtime_phase3.json`
-- `runtime_phase4.json`
 
 ## 3. 파이프라인 흐름
 ### 3-1. Phase 1
@@ -43,17 +41,16 @@
 - `phase_run.ps1`는 Phase 2 실행 시 Phase 1 체크포인트를 자동 탐색한다.
 - 우선순위: `runtime_phase1.json.generations`에 해당하는 체크포인트 -> 없으면 최신 세대 체크포인트.
 
-### 3-3. Phase 3/4
-- 현재 `phase3_run.ps1`, `phase4_run.ps1`은 resume 체크포인트 세대가 스크립트에 하드코딩되어 있다.
-- Phase 3/4 세대 수 변경 시, 해당 run 스크립트의 resume 세대(`gen99`, `gen199`)와 `--base-generation`을 같이 갱신해야 한다.
+### 3-3. Phase 3
+- `phase3_run.ps1`는 phase2 체크포인트 디렉터리에서 최신 체크포인트를 자동 선택한다.
+- 세대 수는 `-Generations` 인자로 조정한다.
 
 ## 4. 실행 명령
 ### 4-1. 학습
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/phase1_run.ps1 -Seed 9
 powershell -ExecutionPolicy Bypass -File scripts/phase2_run.ps1 -Seed 9
-powershell -ExecutionPolicy Bypass -File scripts/phase3_run.ps1 -Seed 9
-powershell -ExecutionPolicy Bypass -File scripts/phase4_run.ps1 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase3_run.ps1 -Seed 9 -Generations 25
 ```
 
 ### 4-2. 평가 (고정 1000게임)
@@ -61,12 +58,11 @@ powershell -ExecutionPolicy Bypass -File scripts/phase4_run.ps1 -Seed 9
 powershell -ExecutionPolicy Bypass -File scripts/phase1_eval.ps1 -Seed 9
 powershell -ExecutionPolicy Bypass -File scripts/phase2_eval.ps1 -Seed 9
 powershell -ExecutionPolicy Bypass -File scripts/phase3_eval.ps1 -Seed 9
-powershell -ExecutionPolicy Bypass -File scripts/phase4_eval.ps1 -Seed 9
 ```
 
 ### 4-3. 휴리스틱 대전 (고정 1000게임)
 ```powershell
-node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --games 1000 --seed v5_vs_phase4s5 --first-turn-policy alternate --continuous-series 1 --max-steps 600
+node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase3_seed5 --games 1000 --seed v5_vs_phase3s5 --first-turn-policy alternate --continuous-series 1 --max-steps 600
 ```
 
 ## 5. 런타임 키 규칙
@@ -92,7 +88,6 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --game
 - `logs/NEAT/neat_phase1_seed<Seed>`
 - `logs/NEAT/neat_phase2_seed<Seed>`
 - `logs/NEAT/neat_phase3_seed<Seed>`
-- `logs/NEAT/neat_phase4_seed<Seed>`
 
 ### 6-2. 핵심 산출물
 - `checkpoints/neat-checkpoint-gen*`
@@ -119,12 +114,12 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --game
 - 결과 report(`result.json`)는 항상 1개 저장된다.
 - 기본 출력 폴더는 `logs/model_duel/<human>_vs_<ai>_<YYYYMMDD>/` 규칙을 따른다.
 - kibo/dataset은 옵션으로만 저장된다.
-- `--human`, `--ai` 입력은 정책 키 또는 `phase4_seed5` 형식 모두 지원한다.
+- `--human`, `--ai` 입력은 정책 키 또는 `phase3_seed5` 형식 모두 지원한다.
 
 ### 7-3. `model_duel_worker.mjs` 옵션 상세
 - 공통 문법: `--key value` 또는 `--key=value` 둘 다 지원.
-- `--human` (필수): human 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase4_seed5`).
-- `--ai` (필수): ai 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase4_seed5`).
+- `--human` (필수): human 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase3_seed5`).
+- `--ai` (필수): ai 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase3_seed5`).
 - `--games` (선택, 기본 `1000`): `1000` 이상만 허용.
 - `--seed` (선택, 기본 `model-duel`): 실행 시드 문자열.
 - `--max-steps` (선택, 기본 `600`): 게임당 최대 스텝. 최소값은 `20`.
@@ -155,7 +150,7 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --game
   - 상세 지표(`seat_split_*`, unresolved 상세 분포 등)는 `result_out` 파일에서 확인한다.
 - 대표 실행 예시:
 ```powershell
-node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --games 1200 --seed v5_vs_phase4s5_1200 --first-turn-policy alternate --continuous-series 1 --max-steps 600 --kibo-detail full --dataset-out auto
+node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase3_seed5 --games 1000 --seed v5_vs_phase3s5_1000 --first-turn-policy alternate --continuous-series 1 --max-steps 600 --kibo-detail full --dataset-out auto
 ```
 
 ## 8. 트러블슈팅
