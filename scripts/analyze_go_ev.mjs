@@ -325,19 +325,73 @@ function isTunableParam(currentParams, referencedParamKeys, key) {
 // 2) failMass
 // 3) roi
 // 4) score (tie-breaker)
-function buildSuggestions(currentParams, referencedParamKeys, goRecs, goStats, stopStats, zones, zoneDefs, gameGoldStats) {
+function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, goStats, stopStats, zones, zoneDefs, gameGoldStats) {
   const MIN_NET_DECISION_EV_DELTA = 1.0;
+  const ATTACK_FLIP_RATE = 0.35;
+  const ATTACK_MAX_FAIL_PER_ADDED_GO = 0.22;
   const zoneByKey = new Map(zones.map((z) => [z.key, z]));
   const suggestions = [];
   const optionN = Math.max(1, goStats.n + stopStats.n);
   const goRate = goStats.n / optionN;
   const stopRate = stopStats.n / optionN;
   const decisionEvBase = goRate * goStats.ev + stopRate * stopStats.ev;
+
   const add = (entry) => {
     if (!entry) return;
     if (!Number.isFinite(entry.current) || !Number.isFinite(entry.suggested)) return;
     if (round(entry.current, 6) === round(entry.suggested, 6)) return;
     suggestions.push(entry);
+  };
+
+  const addAggressiveExpansionCandidate = (cfg) => {
+    if (!isTunableParam(currentParams, referencedParamKeys, cfg.param)) return;
+    const zoneFn = zoneDefs[cfg.zoneKey];
+    const zGo = zoneByKey.get(cfg.zoneKey);
+    if (!zoneFn || !zGo || zGo.n < 8) return;
+    const stopZone = stopRecs.filter(zoneFn);
+    const zStop = calcStats(stopZone);
+    if (zStop.n < 6) return;
+    if (zGo.ev <= zStop.ev) return;
+    if (zGo.failRate > ATTACK_MAX_FAIL_PER_ADDED_GO) return;
+
+    const goDeltaCount = zStop.n * ATTACK_FLIP_RATE;
+    const goRateDelta = optionN > 0 ? goDeltaCount / optionN : 0;
+    const failDeltaCount = goDeltaCount * zGo.failRate;
+    const predictedGoCount = goStats.n + goDeltaCount;
+    const predictedFailCount = goStats.fails + failDeltaCount;
+    const predictedFailRate = predictedGoCount > 1e-9 ? predictedFailCount / predictedGoCount : goStats.failRate;
+    const failRateDelta = predictedFailRate - goStats.failRate;
+    const expectedTotalGoldDelta = goDeltaCount * (zGo.ev - zStop.ev);
+    const netDecisionEvDelta = optionN > 0 ? expectedTotalGoldDelta / optionN : 0;
+    const score = netDecisionEvDelta * 10 + Math.max(0, goStats.failRate - zGo.failRate) * 30;
+
+    add({
+      param: cfg.param,
+      mode: "aggressive_expand",
+      current: cfg.current,
+      suggested: cfg.suggested,
+      score,
+      affectedN: zStop.n,
+      estimatedEvDeltaPerGo: zGo.ev - zStop.ev,
+      estimatedFailRateDelta: failRateDelta,
+      goRateDeltaDirect: goRateDelta,
+      goDeltaCountDirect: goDeltaCount,
+      failDeltaCountDirect: failDeltaCount,
+      netDecisionEvDeltaDirect: netDecisionEvDelta,
+      expectedTotalGoldDeltaDirect: expectedTotalGoldDelta,
+      reason: cfg.reason,
+      expected_impact: cfg.impact,
+      evidence: {
+        zone_key: cfg.zoneKey,
+        zone_label: zGo.label,
+        zone_go_n: zGo.n,
+        zone_go_fail_rate: round(zGo.failRate, 4),
+        zone_go_ev: round(zGo.ev, 2),
+        zone_stop_n: zStop.n,
+        zone_stop_ev: round(zStop.ev, 2),
+        flip_rate: ATTACK_FLIP_RATE
+      }
+    });
   };
 
   const zFirstGoLow = zoneByKey.get("first_go_low_edge");
@@ -367,37 +421,6 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, goStats, s
     });
   }
 
-  const zGo3Strong = zoneByKey.get("go3plus_strong");
-  if (
-    isTunableParam(currentParams, referencedParamKeys, "goRiskGoCountMul") &&
-    zGo3Strong &&
-    zGo3Strong.n >= 6 &&
-    zGo3Strong.ev > goStats.ev &&
-    zGo3Strong.failRate <= goStats.failRate
-  ) {
-    const current = asNum(currentParams.goRiskGoCountMul, 0.11);
-    const zShare = goStats.n > 0 ? zGo3Strong.n / goStats.n : 0;
-    const zEvGain = (zGo3Strong.ev - goStats.ev) * zShare;
-    const zFailDelta = (zGo3Strong.failRate - goStats.failRate) * zShare;
-    add({
-      param: "goRiskGoCountMul",
-      mode: "aggressive_expand",
-      current,
-      suggested: Math.max(0.04, current - 0.02),
-      score: Math.max(0, zGo3Strong.ev - goStats.ev) / 10 + (goStats.failRate - zGo3Strong.failRate) * 80,
-      affectedN: zGo3Strong.n,
-      estimatedEvDeltaPerGo: zEvGain,
-      estimatedFailRateDelta: zFailDelta,
-      reason: "High-quality GO3+ zone shows strong EV, so multi-GO risk penalty can be softened.",
-      expected_impact: "Preserve high-EV multi-GO opportunities to recover average gold.",
-      evidence: {
-        zone_n: zGo3Strong.n,
-        zone_fail_rate: round(zGo3Strong.failRate, 4),
-        zone_ev: round(zGo3Strong.ev, 2)
-      }
-    });
-  }
-
   const zFirstPiLow = zoneByKey.get("first_go_pi_low");
   if (isTunableParam(currentParams, referencedParamKeys, "goBaseThreshold") && zFirstPiLow && zFirstPiLow.n >= 6) {
     const d = blockDelta(goRecs, zoneDefs.first_go_pi_low);
@@ -421,7 +444,6 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, goStats, s
     });
   }
 
-  // Weight-tuning candidate: increase score-diff sensitivity to avoid weak early GO.
   if (isTunableParam(currentParams, referencedParamKeys, "goScoreDiffBonus") && zFirstPiLow && zFirstPiLow.n >= 6) {
     const d = blockDelta(goRecs, zoneDefs.first_go_pi_low);
     const current = asNum(currentParams.goScoreDiffBonus, 0.05);
@@ -445,7 +467,6 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, goStats, s
   }
 
   const zLateAll = zoneByKey.get("late_all");
-  // Weight-tuning candidate: reduce late-deck GO encouragement when late zone is low quality.
   if (isTunableParam(currentParams, referencedParamKeys, "goDeckLowBonus") && zLateAll && zLateAll.n >= 10) {
     const d = blockDelta(goRecs, zoneDefs.late_all);
     const current = asNum(currentParams.goDeckLowBonus, 0.08);
@@ -468,7 +489,6 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, goStats, s
     });
   }
 
-  // Weight-tuning candidate: increase unseen-high-pi penalty when weak 1GO failures cluster.
   if (isTunableParam(currentParams, referencedParamKeys, "goUnseeHighPiPenalty") && zFirstGoLow && zFirstGoLow.n >= 8) {
     const d = blockDelta(goRecs, zoneDefs.first_go_low_edge);
     const current = asNum(currentParams.goUnseeHighPiPenalty, 0.08);
@@ -491,48 +511,109 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, goStats, s
     });
   }
 
-  const bestByParam = new Map();
+  addAggressiveExpansionCandidate({
+    param: "goBaseThreshold",
+    current: asNum(currentParams.goBaseThreshold, 0.03),
+    suggested: Math.max(-0.2, asNum(currentParams.goBaseThreshold, 0.03) - 0.01),
+    zoneKey: "go2plus",
+    reason: "GO2+ zone is high-EV and stable; lower GO threshold slightly to unlock profitable GO opportunities.",
+    impact: "Increase GO volume in proven strong contexts while keeping fail risk bounded."
+  });
+  addAggressiveExpansionCandidate({
+    param: "goMinPi",
+    current: asNum(currentParams.goMinPi, 6),
+    suggested: Math.max(4, asNum(currentParams.goMinPi, 6) - 1),
+    zoneKey: "go2plus",
+    reason: "Strong multi-GO contexts can tolerate lower pi gate.",
+    impact: "Allow additional GO entries with positive expected value."
+  });
+  addAggressiveExpansionCandidate({
+    param: "goUnseeHighPiPenalty",
+    current: asNum(currentParams.goUnseeHighPiPenalty, 0.08),
+    suggested: Math.max(0, asNum(currentParams.goUnseeHighPiPenalty, 0.08) - 0.01),
+    zoneKey: "go2plus",
+    reason: "Current hidden-risk penalty may be too strict in already validated high-EV zones.",
+    impact: "Recover missed high-quality GO chances."
+  });
+  addAggressiveExpansionCandidate({
+    param: "goDeckLowBonus",
+    current: asNum(currentParams.goDeckLowBonus, 0.08),
+    suggested: Math.min(0.2, asNum(currentParams.goDeckLowBonus, 0.08) + 0.01),
+    zoneKey: "go2plus",
+    reason: "Late/high-confidence multi-GO states are profitable in this match.",
+    impact: "Increase profitable late GO continuation."
+  });
+  addAggressiveExpansionCandidate({
+    param: "goScoreDiffBonus",
+    current: asNum(currentParams.goScoreDiffBonus, 0.05),
+    suggested: Math.max(0, asNum(currentParams.goScoreDiffBonus, 0.05) - 0.005),
+    zoneKey: "go2plus",
+    reason: "Score gap gate can be relaxed slightly in zones with strong empirical EV.",
+    impact: "Expand GO entries without broad policy distortion."
+  });
+  addAggressiveExpansionCandidate({
+    param: "goRiskGoCountMul",
+    current: asNum(currentParams.goRiskGoCountMul, 0.11),
+    suggested: Math.max(0.04, asNum(currentParams.goRiskGoCountMul, 0.11) - 0.02),
+    zoneKey: "go3plus_strong",
+    reason: "GO3+ high-diff zone has strong EV and manageable fail rate.",
+    impact: "Permit more profitable high-order GO continuation."
+  });
+
+  const bestByParamMode = new Map();
   for (const s of suggestions) {
-    const prev = bestByParam.get(s.param);
-    if (!prev || s.score > prev.score) bestByParam.set(s.param, s);
+    const key = `${s.mode}:${s.param}`;
+    const prev = bestByParamMode.get(key);
+    if (!prev || s.score > prev.score) bestByParamMode.set(key, s);
   }
 
-  const ranked = [...bestByParam.values()].map((s) => {
+  const ranked = [...bestByParamMode.values()].map((s) => {
     const affectedN = Number.isFinite(Number(s.affectedN)) ? Number(s.affectedN) : 0;
     const affectedShareGo = goStats.n > 0 ? affectedN / goStats.n : 0;
     const affectedShareDecision = goRate * affectedShareGo;
     const evDelta = asNum(s.estimatedEvDeltaPerGo, 0);
-    const failDelta = asNum(s.estimatedFailRateDelta, 0);
     const mode = String(s.mode || "conservative_block");
 
     let netDecisionEvDelta = goRate * evDelta;
     let goRateDelta = 0;
-    // Conservative candidates usually reduce GO volume in risky slices.
-    // Aggressive candidates keep GO volume and improve GO quality where EV is high.
+    let predictedGoCount = goStats.n;
+    let predictedFailCount = goStats.fails;
+
     if (mode === "conservative_block") {
+      const failRateDeltaBlocked = asNum(s.estimatedFailRateDelta, 0);
       netDecisionEvDelta =
         goRate * ((1 - affectedShareGo) * evDelta + affectedShareGo * (stopStats.ev - goStats.ev));
       goRateDelta = -affectedShareDecision;
+      predictedGoCount = Math.max(0, goStats.n + goRateDelta * optionN);
+      const predictedFailRate = clamp(goStats.failRate + failRateDeltaBlocked, 0, 1);
+      predictedFailCount = predictedGoCount * predictedFailRate;
+    } else if (
+      Number.isFinite(s.netDecisionEvDeltaDirect) &&
+      Number.isFinite(s.goRateDeltaDirect) &&
+      Number.isFinite(s.failDeltaCountDirect)
+    ) {
+      netDecisionEvDelta = Number(s.netDecisionEvDeltaDirect);
+      goRateDelta = Number(s.goRateDeltaDirect);
+      predictedGoCount = Math.max(0, goStats.n + Number(s.goDeltaCountDirect || 0));
+      predictedFailCount = Math.max(0, goStats.fails + Number(s.failDeltaCountDirect));
     }
 
-    const failMass = Math.max(0, -failDelta) * affectedShareDecision;
-    const roi = Math.abs(goRateDelta) > 1e-9 ? netDecisionEvDelta / Math.abs(goRateDelta) : netDecisionEvDelta;
-    const goDeltaCount = goRateDelta * optionN;
-    const predictedGoCount = Math.max(0, goStats.n + goDeltaCount);
-    const predictedFailRate = clamp(goStats.failRate + failDelta, 0, 1);
-    const predictedFailCount = predictedGoCount * predictedFailRate;
+    const goDeltaCount = predictedGoCount - goStats.n;
+    const predictedFailRate = predictedGoCount > 1e-9 ? predictedFailCount / predictedGoCount : goStats.failRate;
+    const failDelta = predictedFailRate - goStats.failRate;
     const failDeltaCount = predictedFailCount - goStats.fails;
     const failReducedCount = Math.max(0, -failDeltaCount);
     const goCutPerFailReduced =
       goDeltaCount < 0 && failReducedCount > 1e-9 ? Math.abs(goDeltaCount) / failReducedCount : 0;
-    const expectedTotalGoldDelta = netDecisionEvDelta * optionN;
+    const failMass = Math.max(0, -failDelta) * Math.max(0, goRate + Math.min(0, goRateDelta));
+    const roi = Math.abs(goRateDelta) > 1e-9 ? netDecisionEvDelta / Math.abs(goRateDelta) : netDecisionEvDelta;
+    const expectedTotalGoldDelta = Number.isFinite(s.expectedTotalGoldDeltaDirect)
+      ? Number(s.expectedTotalGoldDeltaDirect)
+      : netDecisionEvDelta * optionN;
     const expectedWinDeltaGoldBased =
       asNum(gameGoldStats?.perWinSwing, 0) > 1e-9 ? expectedTotalGoldDelta / asNum(gameGoldStats.perWinSwing, 0) : 0;
-    // Cap win projection by fail-reduction upper bound to avoid unrealistic inflation.
-    const expectedWinDelta =
-      failReducedCount > 0
-        ? Math.min(Math.max(0, expectedWinDeltaGoldBased), failReducedCount)
-        : Math.max(0, expectedWinDeltaGoldBased);
+    const winCapByEvents = Math.max(0, failReducedCount + Math.max(0, goDeltaCount));
+    const expectedWinDelta = Math.min(Math.max(0, expectedWinDeltaGoldBased), winCapByEvents);
     const expectedWinRateDelta = asNum(gameGoldStats?.games, 0) > 0 ? expectedWinDelta / gameGoldStats.games : 0;
 
     return {
@@ -558,48 +639,72 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, goStats, s
   });
 
   const positive = ranked.filter((s) => s.netDecisionEvDelta >= MIN_NET_DECISION_EV_DELTA);
-  const top = positive
-    .sort((a, b) => {
-      if (b.netDecisionEvDelta !== a.netDecisionEvDelta) return b.netDecisionEvDelta - a.netDecisionEvDelta;
-      if (b.failMass !== a.failMass) return b.failMass - a.failMass;
-      if (b.roi !== a.roi) return b.roi - a.roi;
-      return b.score - a.score;
-    })
-    .slice(0, 3);
+  const defensePool = positive.filter((s) => s.mode === "conservative_block");
+  const attackPool = positive.filter((s) => (
+    s.mode === "aggressive_expand" &&
+    s.goDeltaCount > 0 &&
+    s.failDeltaCount <= s.goDeltaCount * ATTACK_MAX_FAIL_PER_ADDED_GO
+  ));
 
-  const evMassDen = top.reduce((acc, s) => acc + Math.max(0, s.netDecisionEvDelta), 0);
+  const sortDefense = (a, b) => {
+    if (b.netDecisionEvDelta !== a.netDecisionEvDelta) return b.netDecisionEvDelta - a.netDecisionEvDelta;
+    if (b.failMass !== a.failMass) return b.failMass - a.failMass;
+    if (b.roi !== a.roi) return b.roi - a.roi;
+    return b.score - a.score;
+  };
+  const sortAttack = (a, b) => {
+    if (b.netDecisionEvDelta !== a.netDecisionEvDelta) return b.netDecisionEvDelta - a.netDecisionEvDelta;
+    if (b.roi !== a.roi) return b.roi - a.roi;
+    if (a.failDeltaCount !== b.failDeltaCount) return a.failDeltaCount - b.failDeltaCount;
+    return b.score - a.score;
+  };
 
-  return top.map((s, idx) => {
-    const weight = evMassDen > 0 ? Math.max(0, s.netDecisionEvDelta) / evMassDen : 1 / Math.max(top.length, 1);
-    return {
-      rank: idx + 1,
-      param: s.param,
-      current: round(s.current, 6),
-      suggested: round(s.suggested, 6),
-      priority_percent: round(weight * 100, 1),
-      affected_n: s.affectedN,
-      affected_share: round(s.affectedShareGo, 6),
-      affected_share_decision: round(s.affectedShareDecision, 6),
-      estimated_ev_delta_per_go: round(s.evDelta, 3),
-      estimated_fail_rate_delta: round(s.failDelta, 6),
-      estimated_go_rate_delta: round(s.goRateDelta, 6),
-      expected_go_delta_count: round(s.goDeltaCount, 3),
-      expected_fail_delta_count: round(s.failDeltaCount, 3),
-      expected_fail_reduced_count: round(s.failReducedCount, 3),
-      go_cut_per_1_fail_reduced: round(s.goCutPerFailReduced, 3),
-      net_decision_ev_delta: round(s.netDecisionEvDelta, 6),
-      expected_total_gold_delta: round(s.expectedTotalGoldDelta, 3),
-      expected_win_delta_gold_based: round(s.expectedWinDeltaGoldBased, 3),
-      expected_win_delta: round(s.expectedWinDelta, 3),
-      expected_win_rate_delta: round(s.expectedWinRateDelta, 6),
-      roi_per_go_rate: round(s.roi, 6),
-      decision_ev_base: round(decisionEvBase, 6),
-      fail_mass: round(s.failMass, 6),
-      reason: s.reason,
-      expected_impact: s.expected_impact,
-      evidence: s.evidence
-    };
-  });
+  const topDefense = defensePool.sort(sortDefense).slice(0, 3);
+  const topAttack = attackPool.sort(sortAttack).slice(0, 3);
+
+  const finalize = (list, channel) => {
+    const evMassDen = list.reduce((acc, s) => acc + Math.max(0, s.netDecisionEvDelta), 0);
+    return list.map((s, idx) => {
+      const weight = evMassDen > 0 ? Math.max(0, s.netDecisionEvDelta) / evMassDen : 1 / Math.max(list.length, 1);
+      return {
+        rank: idx + 1,
+        channel,
+        param: s.param,
+        current: round(s.current, 6),
+        suggested: round(s.suggested, 6),
+        priority_percent: round(weight * 100, 1),
+        affected_n: s.affectedN,
+        affected_share: round(s.affectedShareGo, 6),
+        affected_share_decision: round(s.affectedShareDecision, 6),
+        estimated_ev_delta_per_go: round(s.evDelta, 3),
+        estimated_fail_rate_delta: round(s.failDelta, 6),
+        estimated_go_rate_delta: round(s.goRateDelta, 6),
+        expected_go_delta_count: round(s.goDeltaCount, 3),
+        expected_fail_delta_count: round(s.failDeltaCount, 3),
+        expected_fail_reduced_count: round(s.failReducedCount, 3),
+        go_cut_per_1_fail_reduced: round(s.goCutPerFailReduced, 3),
+        net_decision_ev_delta: round(s.netDecisionEvDelta, 6),
+        expected_total_gold_delta: round(s.expectedTotalGoldDelta, 3),
+        expected_win_delta_gold_based: round(s.expectedWinDeltaGoldBased, 3),
+        expected_win_delta: round(s.expectedWinDelta, 3),
+        expected_win_rate_delta: round(s.expectedWinRateDelta, 6),
+        roi_per_go_rate: round(s.roi, 6),
+        decision_ev_base: round(decisionEvBase, 6),
+        fail_mass: round(s.failMass, 6),
+        reason: s.reason,
+        expected_impact: s.expected_impact,
+        evidence: s.evidence
+      };
+    });
+  };
+
+  const defense = finalize(topDefense, "defense");
+  const attack = finalize(topAttack, "attack");
+  const combined = [...defense, ...attack]
+    .sort((a, b) => b.net_decision_ev_delta - a.net_decision_ev_delta)
+    .slice(0, 6);
+
+  return { combined, defense, attack };
 }
 
 // ---------------------------------------------------------------------------
@@ -650,11 +755,14 @@ function buildSummaryText(payload) {
   }
   lines.push("");
   lines.push("Top1 Quick Forecast:");
-  if (!Array.isArray(payload.recommendations) || payload.recommendations.length <= 0) {
+  const combined = Array.isArray(payload.recommendations) ? payload.recommendations : [];
+  const defense = Array.isArray(payload.recommendations_defense) ? payload.recommendations_defense : [];
+  const attack = Array.isArray(payload.recommendations_attack) ? payload.recommendations_attack : [];
+  if (combined.length <= 0) {
     lines.push("- (no positive-ROI recommendation in current data)");
   } else {
-    const t = payload.recommendations[0];
-    lines.push(`- param: ${t.param} (${t.current} -> ${t.suggested})`);
+    const t = combined[0];
+    lines.push(`- channel: ${t.channel}, param: ${t.param} (${t.current} -> ${t.suggested})`);
     lines.push(
       `- expected gold: total ${round(t.expected_total_gold_delta, 2)}, per game ${round(
         payload.game_gold.games > 0 ? t.expected_total_gold_delta / payload.game_gold.games : 0,
@@ -674,11 +782,29 @@ function buildSummaryText(payload) {
     );
   }
   lines.push("");
-  lines.push("Top 3 Param Suggestions:");
-  if (!Array.isArray(payload.recommendations) || payload.recommendations.length <= 0) {
+  lines.push("Defense Top 3 Param Suggestions:");
+  if (defense.length <= 0) {
     lines.push("- (no positive-ROI recommendation in current data)");
   } else {
-    for (const s of payload.recommendations) {
+    for (const s of defense) {
+      lines.push(
+        `- #${s.rank} ${s.param}: ${s.current} -> ${s.suggested} | weight=${s.priority_percent}% | scope(go)=${pct(
+          s.affected_share
+        )} | scope(all)=${pct(s.affected_share_decision)} | EVd(go)=${round(
+          s.estimated_ev_delta_per_go,
+          2
+        )} | netEV=${round(s.net_decision_ev_delta, 3)} | ROI=${round(s.roi_per_go_rate, 3)}`
+      );
+      lines.push(`  reason: ${s.reason}`);
+      lines.push(`  impact: ${s.expected_impact}`);
+    }
+  }
+  lines.push("");
+  lines.push("Attack Top 3 Param Suggestions:");
+  if (attack.length <= 0) {
+    lines.push("- (no positive-ROI recommendation in current data)");
+  } else {
+    for (const s of attack) {
       lines.push(
         `- #${s.rank} ${s.param}: ${s.current} -> ${s.suggested} | weight=${s.priority_percent}% | scope(go)=${pct(
           s.affected_share
@@ -788,10 +914,11 @@ const referencedParamKeys = extractReferencedParamKeys(cfg.paramsFile);
 if (referencedParamKeys.size === 0) {
   throw new Error(`no parameter references found in params file: ${cfg.paramsFile}`);
 }
-const recommendations = buildSuggestions(
+const suggestionSet = buildSuggestions(
   currentParams,
   referencedParamKeys,
   goRecs,
+  stopRecs,
   goStats,
   stopStats,
   zones,
@@ -865,7 +992,9 @@ const payload = {
     evGap: round(z.evGap, 3),
     riskScore: round(z.riskScore, 3)
   })),
-  recommendations
+  recommendations: suggestionSet.combined,
+  recommendations_defense: suggestionSet.defense,
+  recommendations_attack: suggestionSet.attack
 };
 
 const summaryPath = join(runDir, "go_stop_summary.txt");

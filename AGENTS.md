@@ -52,3 +52,27 @@ These rules are mandatory for this repository.
   - `-Policies "H-V4,H-V5,H-V5P,H-V6"`
 - Do not use array/repeated variants such as `-Policies @(...)` or multiple `-Policies` bindings.
 - If the input format is wrong, fail fast with a clear error message instead of adding fallback parsing branches.
+
+9. Result reporting format lock
+- When reporting duel or league results, use this structure for readability:
+  - Reference file line
+  - Compact comparison table
+  - Seat split summary for the focus model
+  - One-line core conclusion
+- Preferred template:
+  - `기준 파일: <result.json>`
+  - Table headers: `항목 | <Model A> | <Model B>`
+  - Required rows:
+    - `전적`
+    - `승률`
+    - `평균 골드델타`
+    - `GO 횟수`
+    - `GO 발생 게임 수`
+    - `GO 실패 수`
+    - `GO 실패율`
+  - Seat split block:
+    - `좌석별(<Focus Model>):`
+    - `선공: 승률 <...>, 평균 골드델타 <...>`
+    - `후공: 승률 <...>, 평균 골드델타 <...>`
+  - Final line:
+    - `핵심 한줄: <single-sentence conclusion>`
