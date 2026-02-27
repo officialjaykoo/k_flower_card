@@ -2,6 +2,12 @@
 // Fixed outputs:
 // 1) go_stop_summary.txt
 // 2) go_stop_param_suggestions.json
+//
+// Validation rule (must follow):
+// - Do not optimize or score the analyzer itself.
+// - Analyzer numbers are directional hints only.
+// - Final decisions must be validated by real match reruns (1000 games).
+// - If analyzer forecast and real rerun conflict, trust real rerun results.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -70,6 +76,39 @@ function clamp(x, lo, hi) {
   return Math.max(lo, Math.min(hi, x));
 }
 
+function atanhSafe(x) {
+  const c = clamp(Number(x) || 0, -0.999999, 0.999999);
+  return 0.5 * Math.log((1 + c) / (1 - c));
+}
+
+function quantileSorted(sorted, q) {
+  if (!Array.isArray(sorted) || sorted.length <= 0) return 0;
+  if (!Number.isFinite(q)) return sorted[0];
+  const qq = clamp(q, 0, 1);
+  const pos = (sorted.length - 1) * qq;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return sorted[lo];
+  const t = pos - lo;
+  return sorted[lo] * (1 - t) + sorted[hi] * t;
+}
+
+// Wilson interval for Bernoulli proportion.
+function wilsonBounds(successes, n, z = 1.96) {
+  const nn = Math.max(0, Number(n) || 0);
+  if (nn <= 0) return { lower: 0, upper: 1 };
+  const ss = clamp(Number(successes) || 0, 0, nn);
+  const p = ss / nn;
+  const z2 = z * z;
+  const den = 1 + z2 / nn;
+  const center = (p + z2 / (2 * nn)) / den;
+  const spread = (z / den) * Math.sqrt((p * (1 - p)) / nn + z2 / (4 * nn * nn));
+  return {
+    lower: clamp(center - spread, 0, 1),
+    upper: clamp(center + spread, 0, 1)
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Core metric helpers
 // ---------------------------------------------------------------------------
@@ -82,8 +121,12 @@ function calcStats(records) {
       fails: 0,
       winRate: 0,
       failRate: 0,
+      failRateCiLow: 0,
+      failRateCiHigh: 1,
       avgWin: 0,
       avgLoss: 0,
+      avgLossAbs: 0,
+      lossP90Abs: 0,
       ev: 0,
       totalGold: 0,
       breakEvenRate: 0
@@ -92,18 +135,29 @@ function calcStats(records) {
   const wins = records.filter((r) => Number(r.gold) > 0);
   const fails = records.filter((r) => Number(r.gold) <= 0);
   const totalGold = records.reduce((acc, r) => acc + Number(r.gold || 0), 0);
+  const lossAbsSorted = fails
+    .map((r) => Math.abs(Number(r.gold || 0)))
+    .filter((v) => Number.isFinite(v))
+    .sort((a, b) => a - b);
   const avgWin = wins.length ? wins.reduce((acc, r) => acc + Number(r.gold || 0), 0) / wins.length : 0;
   const avgLoss = fails.length ? fails.reduce((acc, r) => acc + Number(r.gold || 0), 0) / fails.length : 0;
+  const avgLossAbs = Math.abs(avgLoss);
+  const lossP90Abs = lossAbsSorted.length > 0 ? quantileSorted(lossAbsSorted, 0.9) : 0;
   const den = avgWin - avgLoss;
   const breakEvenRate = den !== 0 ? -avgLoss / den : 0;
+  const failCi = wilsonBounds(fails.length, n);
   return {
     n,
     wins: wins.length,
     fails: fails.length,
     winRate: wins.length / n,
     failRate: fails.length / n,
+    failRateCiLow: failCi.lower,
+    failRateCiHigh: failCi.upper,
     avgWin,
     avgLoss,
+    avgLossAbs,
+    lossP90Abs,
     ev: totalGold / n,
     totalGold,
     breakEvenRate
@@ -215,10 +269,35 @@ function decodeFeatures(f) {
   const goCount = Math.round((Number(f?.[12]) || 0) * 5) + 1;
   const selfPi = Math.round((Number(f?.[28]) || 0) * 20);
   const oppPi = Math.round((Number(f?.[29]) || 0) * 20);
+  const scoreDiff = atanhSafe(Number(f?.[14]) || 0) * 10.0;
+  const selfScore = Math.max(0, atanhSafe(Number(f?.[15]) || 0) * 10.0);
+  const oppScore = Math.max(0, selfScore - scoreDiff);
+  const oppGwang = Math.round((Number(f?.[27]) || 0) * 5);
+  const oppGodori = Math.round((Number(f?.[31]) || 0) * 3);
+  const oppCheongdan = Math.round((Number(f?.[33]) || 0) * 3);
+  const oppHongdan = Math.round((Number(f?.[35]) || 0) * 3);
+  const oppChodan = Math.round((Number(f?.[37]) || 0) * 3);
+  const oppComboNearCount = [oppGodori, oppCheongdan, oppHongdan, oppChodan].filter((x) => x >= 2).length;
+  const oppBurstThreatSignals =
+    (oppGwang >= 2 ? 1 : 0) +
+    (oppComboNearCount > 0 ? 1 : 0) +
+    (oppScore >= 6 ? 1 : 0);
+
   return {
     deck,
     goCount,
     piDiff: selfPi - oppPi,
+    scoreDiff,
+    selfScore,
+    oppScore,
+    oppGwang,
+    oppGodori,
+    oppCheongdan,
+    oppHongdan,
+    oppChodan,
+    oppComboNearCount,
+    oppBurstThreatSignals,
+    selfCanStop: Number(f?.[38]) > 0.5,
     oppCanStop: Number(f?.[39]) > 0.5
   };
 }
@@ -243,24 +322,63 @@ function collectChosenGoStop(dataset, actor, actorPolicy) {
     }));
 }
 
+function summarizeThreatIndicators(records) {
+  const n = Array.isArray(records) ? records.length : 0;
+  if (n <= 0) {
+    return {
+      n: 0,
+      opp_can_stop_rate: 0,
+      opp_combo_near_rate: 0,
+      opp_burst_signal_rate: 0,
+      avg_opp_score: 0,
+      avg_score_diff: 0
+    };
+  }
+  const oppCanStopN = records.filter((r) => r.oppCanStop).length;
+  const oppComboNearN = records.filter((r) => Number(r.oppComboNearCount || 0) >= 1).length;
+  const oppBurstN = records.filter((r) => Number(r.oppBurstThreatSignals || 0) >= 2).length;
+  const avgOppScore = records.reduce((acc, r) => acc + Number(r.oppScore || 0), 0) / n;
+  const avgScoreDiff = records.reduce((acc, r) => acc + Number(r.scoreDiff || 0), 0) / n;
+  return {
+    n,
+    opp_can_stop_rate: oppCanStopN / n,
+    opp_combo_near_rate: oppComboNearN / n,
+    opp_burst_signal_rate: oppBurstN / n,
+    avg_opp_score: avgOppScore,
+    avg_score_diff: avgScoreDiff
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Zone diagnostics and impact estimation
 // ---------------------------------------------------------------------------
 function zoneStats(records, key, label, fn, baseline) {
   const sub = records.filter(fn);
   const s = calcStats(sub);
-  const failLift = s.failRate - baseline.failRate;
+  // Confidence-adjusted fail lift to avoid overreacting on tiny samples.
+  const failLift = s.failRateCiLow - baseline.failRateCiHigh;
   const evDrop = baseline.ev - s.ev;
-  const riskScore =
-    Math.max(0, failLift) * 100 + Math.max(0, evDrop) / 10 + (s.n >= 5 ? Math.min(1.5, s.n / 100) : 0);
+  // Opportunity-cost severity: large downside zones are prioritized.
+  const lossSeverityRatio =
+    baseline.avgLossAbs > 1e-9 ? s.avgLossAbs / baseline.avgLossAbs : 1;
+  const tailSeverityRatio =
+    baseline.lossP90Abs > 1e-9 ? s.lossP90Abs / baseline.lossP90Abs : 1;
+  const severityMul = clamp(Math.max(lossSeverityRatio, tailSeverityRatio), 0.6, 2.2);
+  const riskScoreBase = Math.max(0, failLift) * 100 + Math.max(0, evDrop) / 10;
+  const riskScore = riskScoreBase * severityMul + (s.n >= 5 ? Math.min(1.5, s.n / 100) : 0);
   return {
     key,
     label,
     n: s.n,
     failRate: s.failRate,
+    failRateCiLow: s.failRateCiLow,
+    failRateCiHigh: s.failRateCiHigh,
     ev: s.ev,
     winRate: s.winRate,
     evGap: s.ev - baseline.ev,
+    avgLossAbs: s.avgLossAbs,
+    lossP90Abs: s.lossP90Abs,
+    opportunityCostRatio: round(severityMul, 6),
     riskScore
   };
 }
@@ -276,6 +394,8 @@ function blockDelta(records, fn) {
     blockedN: b.n,
     blockedFailRate: b.failRate,
     blockedEV: b.ev,
+    blockedAvgLossAbs: b.avgLossAbs,
+    blockedLossP90Abs: b.lossP90Abs,
     keptN: k.n,
     keptFailRate: k.failRate,
     keptEV: k.ev,
@@ -335,12 +455,39 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, 
   const goRate = goStats.n / optionN;
   const stopRate = stopStats.n / optionN;
   const decisionEvBase = goRate * goStats.ev + stopRate * stopStats.ev;
+  const stopCertaintyEv = Math.max(0, asNum(stopStats.ev, 0));
 
   const add = (entry) => {
     if (!entry) return;
     if (!Number.isFinite(entry.current) || !Number.isFinite(entry.suggested)) return;
     if (round(entry.current, 6) === round(entry.suggested, 6)) return;
     suggestions.push(entry);
+  };
+
+  const hasReliableRiskSignal = (z) => {
+    if (!z) return false;
+    if (z.n >= 20) return true;
+    return Number(z.failRateCiLow) > Number(goStats.failRateCiHigh || goStats.failRate);
+  };
+
+  const hasReliableAttackSignal = (z) => {
+    if (!z) return false;
+    if (z.n >= 20) return true;
+    return Number(z.failRateCiHigh) <= Number(goStats.failRateCiLow || goStats.failRate);
+  };
+
+  const opportunityCostFromBlock = (d) => {
+    const p90Loss = Math.max(0, asNum(d?.blockedLossP90Abs, 0));
+    const avgLoss = Math.max(0, asNum(d?.blockedAvgLossAbs, 0));
+    const ratioP90 = stopCertaintyEv > 1e-9 ? p90Loss / stopCertaintyEv : 0;
+    const ratioAvg = stopCertaintyEv > 1e-9 ? avgLoss / stopCertaintyEv : 0;
+    return {
+      stop_certainty_ev: round(stopCertaintyEv, 3),
+      blocked_avg_loss_abs: round(avgLoss, 3),
+      blocked_p90_loss_abs: round(p90Loss, 3),
+      stop_vs_loss_ratio_avg: round(ratioAvg, 3),
+      stop_vs_loss_ratio_p90: round(ratioP90, 3)
+    };
   };
 
   const addAggressiveExpansionCandidate = (cfg) => {
@@ -351,6 +498,7 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, 
     const stopZone = stopRecs.filter(zoneFn);
     const zStop = calcStats(stopZone);
     if (zStop.n < 6) return;
+    if (!hasReliableAttackSignal(zGo)) return;
     if (zGo.ev <= zStop.ev) return;
     if (zGo.failRate > ATTACK_MAX_FAIL_PER_ADDED_GO) return;
 
@@ -395,7 +543,12 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, 
   };
 
   const zFirstGoLow = zoneByKey.get("first_go_low_edge");
-  if (isTunableParam(currentParams, referencedParamKeys, "goMinPi") && zFirstGoLow && zFirstGoLow.n >= 8) {
+  if (
+    isTunableParam(currentParams, referencedParamKeys, "goMinPi") &&
+    zFirstGoLow &&
+    zFirstGoLow.n >= 8 &&
+    hasReliableRiskSignal(zFirstGoLow)
+  ) {
     const d = blockDelta(goRecs, zoneDefs.first_go_low_edge);
     const current = asNum(currentParams.goMinPi, 6);
     add({
@@ -416,13 +569,19 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, 
         zone_n: zFirstGoLow.n,
         zone_fail_rate: round(zFirstGoLow.failRate, 4),
         zone_ev: round(zFirstGoLow.ev, 2),
-        blocked_n: d.blockedN
+        blocked_n: d.blockedN,
+        ...opportunityCostFromBlock(d)
       }
     });
   }
 
   const zFirstPiLow = zoneByKey.get("first_go_pi_low");
-  if (isTunableParam(currentParams, referencedParamKeys, "goBaseThreshold") && zFirstPiLow && zFirstPiLow.n >= 6) {
+  if (
+    isTunableParam(currentParams, referencedParamKeys, "goBaseThreshold") &&
+    zFirstPiLow &&
+    zFirstPiLow.n >= 6 &&
+    hasReliableRiskSignal(zFirstPiLow)
+  ) {
     const d = blockDelta(goRecs, zoneDefs.first_go_pi_low);
     const current = asNum(currentParams.goBaseThreshold, 0.03);
     add({
@@ -439,12 +598,18 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, 
       evidence: {
         zone_n: zFirstPiLow.n,
         zone_fail_rate: round(zFirstPiLow.failRate, 4),
-        zone_ev: round(zFirstPiLow.ev, 2)
+        zone_ev: round(zFirstPiLow.ev, 2),
+        ...opportunityCostFromBlock(d)
       }
     });
   }
 
-  if (isTunableParam(currentParams, referencedParamKeys, "goScoreDiffBonus") && zFirstPiLow && zFirstPiLow.n >= 6) {
+  if (
+    isTunableParam(currentParams, referencedParamKeys, "goScoreDiffBonus") &&
+    zFirstPiLow &&
+    zFirstPiLow.n >= 6 &&
+    hasReliableRiskSignal(zFirstPiLow)
+  ) {
     const d = blockDelta(goRecs, zoneDefs.first_go_pi_low);
     const current = asNum(currentParams.goScoreDiffBonus, 0.05);
     add({
@@ -461,13 +626,19 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, 
       evidence: {
         zone_n: zFirstPiLow.n,
         zone_fail_rate: round(zFirstPiLow.failRate, 4),
-        zone_ev: round(zFirstPiLow.ev, 2)
+        zone_ev: round(zFirstPiLow.ev, 2),
+        ...opportunityCostFromBlock(d)
       }
     });
   }
 
   const zLateAll = zoneByKey.get("late_all");
-  if (isTunableParam(currentParams, referencedParamKeys, "goDeckLowBonus") && zLateAll && zLateAll.n >= 10) {
+  if (
+    isTunableParam(currentParams, referencedParamKeys, "goDeckLowBonus") &&
+    zLateAll &&
+    zLateAll.n >= 10 &&
+    hasReliableRiskSignal(zLateAll)
+  ) {
     const d = blockDelta(goRecs, zoneDefs.late_all);
     const current = asNum(currentParams.goDeckLowBonus, 0.08);
     add({
@@ -484,12 +655,18 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, 
       evidence: {
         zone_n: zLateAll.n,
         zone_fail_rate: round(zLateAll.failRate, 4),
-        zone_ev: round(zLateAll.ev, 2)
+        zone_ev: round(zLateAll.ev, 2),
+        ...opportunityCostFromBlock(d)
       }
     });
   }
 
-  if (isTunableParam(currentParams, referencedParamKeys, "goUnseeHighPiPenalty") && zFirstGoLow && zFirstGoLow.n >= 8) {
+  if (
+    isTunableParam(currentParams, referencedParamKeys, "goUnseeHighPiPenalty") &&
+    zFirstGoLow &&
+    zFirstGoLow.n >= 8 &&
+    hasReliableRiskSignal(zFirstGoLow)
+  ) {
     const d = blockDelta(goRecs, zoneDefs.first_go_low_edge);
     const current = asNum(currentParams.goUnseeHighPiPenalty, 0.08);
     add({
@@ -506,7 +683,8 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, 
       evidence: {
         zone_n: zFirstGoLow.n,
         zone_fail_rate: round(zFirstGoLow.failRate, 4),
-        zone_ev: round(zFirstGoLow.ev, 2)
+        zone_ev: round(zFirstGoLow.ev, 2),
+        ...opportunityCostFromBlock(d)
       }
     });
   }
@@ -745,6 +923,16 @@ function buildSummaryText(payload) {
       payload.metrics.stop.failRate
     )}, EV=${round(payload.metrics.stop.ev, 2)}, breakEven=${pct(payload.metrics.stop.breakEvenRate)}`
   );
+  if (payload?.threat_snapshot?.n > 0) {
+    lines.push(
+      `Threat snapshot(GO): oppCanStop=${pct(payload.threat_snapshot.opp_can_stop_rate)}, oppComboNear=${pct(
+        payload.threat_snapshot.opp_combo_near_rate
+      )}, oppBurstSignals>=2=${pct(payload.threat_snapshot.opp_burst_signal_rate)}, avgOppScore=${round(
+        payload.threat_snapshot.avg_opp_score,
+        2
+      )}, avgScoreDiff=${round(payload.threat_snapshot.avg_score_diff, 2)}`
+    );
+  }
   lines.push("");
   lines.push("Risk Zones (GO):");
   const zones = Array.isArray(payload.risk_zones) ? payload.risk_zones : [];
@@ -753,7 +941,9 @@ function buildSummaryText(payload) {
   } else {
     for (const z of zones) {
       lines.push(
-        `- ${z.label}: n=${z.n}, fail=${pct(z.failRate)}, EV=${round(z.ev, 2)}, EV gap=${round(z.evGap, 2)}`
+        `- ${z.label}: n=${z.n}, fail=${pct(z.failRate)} (CI ${pct(z.failRateCiLow)}~${pct(
+          z.failRateCiHigh
+        )}), EV=${round(z.ev, 2)}, EV gap=${round(z.evGap, 2)}, oppCost=${round(z.opportunityCostRatio, 2)}x`
       );
     }
   }
@@ -916,12 +1106,15 @@ const goRecs = allRecs.filter((r) => r.action === "go");
 const stopRecs = allRecs.filter((r) => r.action === "stop");
 const goStats = calcStats(goRecs);
 const stopStats = calcStats(stopRecs);
+const goThreatSnapshot = summarizeThreatIndicators(goRecs);
 
 const zoneDefs = {
   first_go_low_edge: (r) => r.goCount === 1 && (r.deck <= 4 || r.piDiff < 5),
   first_go_deck_low: (r) => r.goCount === 1 && r.deck <= 4,
   first_go_pi_low: (r) => r.goCount === 1 && r.piDiff < 5,
   opp_can_stop: (r) => r.oppCanStop,
+  opp_combo_near: (r) => r.oppComboNearCount >= 1,
+  opp_burst_risk: (r) => r.oppBurstThreatSignals >= 2,
   go2plus: (r) => r.goCount >= 2,
   go3plus_strong: (r) => r.goCount >= 3 && r.piDiff >= 10,
   late_all: (r) => r.deck <= 4
@@ -932,6 +1125,8 @@ const zones = [
   zoneStats(goRecs, "first_go_deck_low", "1GO && deck<=4", zoneDefs.first_go_deck_low, goStats),
   zoneStats(goRecs, "first_go_pi_low", "1GO && piDiff<5", zoneDefs.first_go_pi_low, goStats),
   zoneStats(goRecs, "opp_can_stop", "oppCanStop", zoneDefs.opp_can_stop, goStats),
+  zoneStats(goRecs, "opp_combo_near", "oppComboNear>=1", zoneDefs.opp_combo_near, goStats),
+  zoneStats(goRecs, "opp_burst_risk", "oppBurstSignals>=2", zoneDefs.opp_burst_risk, goStats),
   zoneStats(goRecs, "go2plus", "GO2+", zoneDefs.go2plus, goStats),
   zoneStats(goRecs, "go3plus_strong", "GO3+ && piDiff>=10", zoneDefs.go3plus_strong, goStats),
   zoneStats(goRecs, "late_all", "deck<=4", zoneDefs.late_all, goStats)
@@ -1012,14 +1207,27 @@ const payload = {
       ev: round(stopStats.ev, 3)
     }
   },
+  threat_snapshot: {
+    n: goThreatSnapshot.n,
+    opp_can_stop_rate: round(goThreatSnapshot.opp_can_stop_rate, 6),
+    opp_combo_near_rate: round(goThreatSnapshot.opp_combo_near_rate, 6),
+    opp_burst_signal_rate: round(goThreatSnapshot.opp_burst_signal_rate, 6),
+    avg_opp_score: round(goThreatSnapshot.avg_opp_score, 3),
+    avg_score_diff: round(goThreatSnapshot.avg_score_diff, 3)
+  },
   risk_zones: zones.map((z) => ({
     key: z.key,
     label: z.label,
     n: z.n,
     failRate: round(z.failRate, 6),
+    failRateCiLow: round(z.failRateCiLow, 6),
+    failRateCiHigh: round(z.failRateCiHigh, 6),
     winRate: round(z.winRate, 6),
     ev: round(z.ev, 3),
     evGap: round(z.evGap, 3),
+    avgLossAbs: round(z.avgLossAbs, 3),
+    lossP90Abs: round(z.lossP90Abs, 3),
+    opportunityCostRatio: round(z.opportunityCostRatio, 6),
     riskScore: round(z.riskScore, 3)
   })),
   recommendations: suggestionSet.combined,
