@@ -11,7 +11,7 @@ param(
   [int]$MaxSteps = 600,
   [string]$OutputTag = "",
   [string]$ResumeFrom = "",
-  [string[]]$Policies = @("H-V4", "H-V5", "H-V5P", "H-V6", "H-V7")
+  [string]$Policies = "H-V4,H-V5,H-V5P,H-V6,H-V7"
 )
 
 if ($GamesPerMatch -ne 1000) {
@@ -30,6 +30,21 @@ function Ensure-UniqueLowerPolicies {
   foreach ($p in ($InputPolicies | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
     $v = Normalize-PolicyKey $p
     if ($seen.Add($v)) { $out += $v }
+  }
+  return $out
+}
+
+function Parse-PoliciesCsv {
+  param([string]$CsvText)
+  if ([string]::IsNullOrWhiteSpace($CsvText)) {
+    return @()
+  }
+  $out = @()
+  foreach ($part in $CsvText.Split(",")) {
+    $token = ([string]$part).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($token)) {
+      $out += $token
+    }
   }
   return $out
 }
@@ -176,7 +191,12 @@ function Upsert-LatestMatchSummary {
   }
 }
 
-$policyList = Ensure-UniqueLowerPolicies -InputPolicies $Policies
+$policyInputs = Parse-PoliciesCsv -CsvText $Policies
+if ($policyInputs.Count -lt 2) {
+  throw "Policies must be one comma-separated string with at least two policies. Example: -Policies ""H-V4,H-V5,H-V5P,H-V6"""
+}
+
+$policyList = Ensure-UniqueLowerPolicies -InputPolicies $policyInputs
 if ($policyList.Count -lt 2) {
   throw "At least two distinct policies are required."
 }

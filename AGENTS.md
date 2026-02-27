@@ -45,3 +45,10 @@ These rules are mandatory for this repository.
 - For rollout/simulation, Information Set Resampling is mandatory: unknown cards (opponent hand + deck) must be reshuffled/reassigned per sample before evaluation.
 - GO decisions must reintroduce rollout contribution with a small weight (recommended range: `0.2` to `0.4`) to reflect probabilistic future value without freezing GO behavior.
 - Any logic that directly relies on hidden opponent/deck card identities for decision-making is prohibited in fair-teacher mode.
+
+8. CLI list-argument single-format rule
+- For list-type CLI inputs, use exactly one canonical format only. Do not support multiple calling styles for compatibility.
+- `scripts/heuristic_full_league_1000.ps1` must receive policies as one CSV string:
+  - `-Policies "H-V4,H-V5,H-V5P,H-V6"`
+- Do not use array/repeated variants such as `-Policies @(...)` or multiple `-Policies` bindings.
+- If the input format is wrong, fail fast with a clear error message instead of adding fallback parsing branches.
