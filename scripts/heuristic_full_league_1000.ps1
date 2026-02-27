@@ -18,23 +18,23 @@ if ($GamesPerMatch -ne 1000) {
   throw "Full-league benchmark is locked to 1000 games per matchup."
 }
 
-function Sanitize-FilePart {
+function ConvertTo-SafeFilePart {
   param([string]$Text)
   return (($Text -replace "[^A-Za-z0-9._-]", "_").Trim("_"))
 }
 
-function Ensure-UniqueLowerPolicies {
+function ConvertTo-UniqueLowerPolicies {
   param([string[]]$InputPolicies)
   $out = @()
   $seen = New-Object System.Collections.Generic.HashSet[string]
   foreach ($p in ($InputPolicies | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
-    $v = Normalize-PolicyKey $p
+    $v = ConvertTo-PolicyKey $p
     if ($seen.Add($v)) { $out += $v }
   }
   return $out
 }
 
-function Parse-PoliciesCsv {
+function ConvertFrom-PoliciesCsv {
   param([string]$CsvText)
   if ([string]::IsNullOrWhiteSpace($CsvText)) {
     return @()
@@ -88,7 +88,7 @@ function Convert-PolicyAliasToCanonical {
   return $k
 }
 
-function Normalize-PolicyKey {
+function ConvertTo-PolicyKey {
   param([AllowNull()][string]$Text)
   return (Convert-PolicyAliasToCanonical ([string]$Text))
 }
@@ -98,8 +98,8 @@ function Get-MatchupKey {
     [string]$PolicyA,
     [string]$PolicyB
   )
-  $a = Normalize-PolicyKey $PolicyA
-  $b = Normalize-PolicyKey $PolicyB
+  $a = ConvertTo-PolicyKey $PolicyA
+  $b = ConvertTo-PolicyKey $PolicyB
   if ([string]::IsNullOrWhiteSpace($a) -or [string]::IsNullOrWhiteSpace($b)) {
     return ""
   }
@@ -128,8 +128,8 @@ function Convert-DuelResultToMatchSummary {
     [string]$ResultObject.policy_b
   }
 
-  $humanKey = Normalize-PolicyKey $humanKey
-  $aiKey = Normalize-PolicyKey $aiKey
+  $humanKey = ConvertTo-PolicyKey $humanKey
+  $aiKey = ConvertTo-PolicyKey $aiKey
   if ([string]::IsNullOrWhiteSpace($humanKey) -or [string]::IsNullOrWhiteSpace($aiKey)) {
     return $null
   }
@@ -165,7 +165,7 @@ function Get-FileLastWriteUtcTicks {
   }
 }
 
-function Upsert-LatestMatchSummary {
+function Set-LatestMatchSummary {
   param(
     [hashtable]$Map,
     [string]$MatchKey,
@@ -191,12 +191,12 @@ function Upsert-LatestMatchSummary {
   }
 }
 
-$policyInputs = Parse-PoliciesCsv -CsvText $Policies
+$policyInputs = ConvertFrom-PoliciesCsv -CsvText $Policies
 if ($policyInputs.Count -lt 2) {
   throw "Policies must be one comma-separated string with at least two policies. Example: -Policies ""H-V4,H-V5,H-V5P,H-V6"""
 }
 
-$policyList = Ensure-UniqueLowerPolicies -InputPolicies $policyInputs
+$policyList = ConvertTo-UniqueLowerPolicies -InputPolicies $policyInputs
 if ($policyList.Count -lt 2) {
   throw "At least two distinct policies are required."
 }
@@ -215,7 +215,7 @@ if ([string]::IsNullOrWhiteSpace($ResumeFrom)) {
   $tag = if ([string]::IsNullOrWhiteSpace($OutputTag)) {
     "full_league_$ts"
   } else {
-    "full_league_${ts}_$(Sanitize-FilePart $OutputTag)"
+    "full_league_${ts}_$(ConvertTo-SafeFilePart $OutputTag)"
   }
   $outputDir = Join-Path "logs/full_league" $tag
   New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
@@ -247,7 +247,7 @@ if ([string]::IsNullOrWhiteSpace($ResumeFrom)) {
       $matchKey = Get-MatchupKey $summary.policy_a $summary.policy_b
       if ([string]::IsNullOrWhiteSpace($matchKey)) { continue }
       $allMatchSummaries += $summary
-      Upsert-LatestMatchSummary -Map $latestMatchSummaries -MatchKey $matchKey -Summary $summary -SourceTicks ([int64]$f.LastWriteTimeUtc.Ticks)
+      Set-LatestMatchSummary -Map $latestMatchSummaries -MatchKey $matchKey -Summary $summary -SourceTicks ([int64]$f.LastWriteTimeUtc.Ticks)
       [void]$existingMatchupKeys.Add($matchKey)
     } catch {
       Write-Warning ("Skip invalid resume file: {0} ({1})" -f $f.FullName, $_.Exception.Message)
@@ -268,7 +268,7 @@ for ($i = 0; $i -lt $policyList.Count - 1; $i += 1) {
     }
     $ts = Get-Date -Format "yyyyMMdd_HHmmss"
     $seed = "full_league_${ts}_${policyA}_vs_${policyB}_$((Get-Random -Minimum 100000 -Maximum 999999))"
-    $saveName = "{0}_vs_{1}_{2}.json" -f (Sanitize-FilePart $policyA), (Sanitize-FilePart $policyB), $GamesPerMatch
+    $saveName = "{0}_vs_{1}_{2}.json" -f (ConvertTo-SafeFilePart $policyA), (ConvertTo-SafeFilePart $policyB), $GamesPerMatch
     $savePath = Join-Path $outputDir $saveName
 
     $cmd = @(
@@ -301,7 +301,7 @@ for ($i = 0; $i -lt $policyList.Count - 1; $i += 1) {
     }
     $allMatchSummaries += $summary
     $summaryTicks = Get-FileLastWriteUtcTicks -Path $savePath
-    Upsert-LatestMatchSummary -Map $latestMatchSummaries -MatchKey $pairKey -Summary $summary -SourceTicks $summaryTicks
+    Set-LatestMatchSummary -Map $latestMatchSummaries -MatchKey $pairKey -Summary $summary -SourceTicks $summaryTicks
     [void]$existingMatchupKeys.Add($pairKey)
 
     Write-Host ("Saved matchup: {0}" -f [System.IO.Path]::GetFullPath($savePath))
