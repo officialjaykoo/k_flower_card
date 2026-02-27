@@ -16,9 +16,9 @@ if (-not (Test-Path $python)) {
 
 $configFeedforward = "scripts/configs/neat_feedforward.ini"
 $runtimeConfig = "scripts/configs/runtime_phase3.json"
-$resumeCheckpoint = "logs/neat_phase2_seed$Seed/checkpoints/neat-checkpoint-gen99"
-$opponentGenome = "logs/neat_phase2_seed$Seed/models/winner_genome.json"
-$outputDir = "logs/neat_phase3_seed$Seed"
+$resumeCheckpoint = "logs/NEAT/neat_phase2_seed$Seed/checkpoints/neat-checkpoint-gen99"
+$opponentGenome = "logs/NEAT/neat_phase2_seed$Seed/models/winner_genome.json"
+$outputDir = "logs/NEAT/neat_phase3_seed$Seed"
 
 if (-not (Test-Path $runtimeConfig)) {
   throw "runtime config not found: $runtimeConfig"

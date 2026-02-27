@@ -61,6 +61,19 @@ INT_PARAMS = {
 }
 
 
+def sanitize_file_part(text):
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return "run"
+    out = []
+    for ch in raw:
+        if ch.isalnum() or ch in "._-":
+            out.append(ch)
+        else:
+            out.append("_")
+    return "".join(out).strip("_") or "run"
+
+
 def suggest_params(trial):
     params = {}
     for name, (lo, hi) in FLOAT_PARAMS.items():
@@ -83,6 +96,11 @@ def run_duel(params, seed_suffix="", runtime=None):
     env["HEURISTIC_V7_PARAMS"] = json.dumps(params)
 
     seed = f"{runtime.get('seed', SEED)}|{seed_suffix}" if seed_suffix else runtime.get("seed", SEED)
+    result_dir = runtime.get("result_dir", os.path.join("logs", "optuna"))
+    os.makedirs(result_dir, exist_ok=True)
+    seed_tag = sanitize_file_part(runtime.get("seed", SEED))
+    trial_tag = sanitize_file_part(seed_suffix or "base")
+    result_out = os.path.join(result_dir, f"{seed_tag}_{trial_tag}_result.json")
     cmd = [
         "node",
         DUEL_SCRIPT,
@@ -100,6 +118,8 @@ def run_duel(params, seed_suffix="", runtime=None):
         "alternate",
         "--continuous-series",
         "1",
+        "--result-out",
+        result_out,
     ]
 
     try:
@@ -163,7 +183,8 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     parser.add_argument("--db", type=str, default="")
     parser.add_argument("--study", type=str, default="v7_tuning")
-    parser.add_argument("--output", type=str, default="logs/optuna_v7_best.json")
+    parser.add_argument("--output", type=str, default="logs/optuna/optuna_v7_best.json")
+    parser.add_argument("--result-dir", type=str, default="")
     parser.add_argument("--timeout", type=int, default=0)
     parser.add_argument("--seed", type=str, default=SEED)
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS)
@@ -187,7 +208,10 @@ def main():
         "seed": args.seed or SEED,
         "max_steps": max(20, args.max_steps),
         "trial_timeout_sec": max(60, args.trial_timeout),
+        "result_dir": args.result_dir
+        or os.path.join("logs", "optuna", sanitize_file_part(args.study or "v7_tuning")),
     }
+    os.makedirs(runtime["result_dir"], exist_ok=True)
 
     sampler = optuna.samplers.TPESampler(
         n_startup_trials=max(1, args.startup_trials),
@@ -208,6 +232,7 @@ def main():
     print(f"  trials={args.trials}  workers={max(1, args.workers)}  games/trial={GAMES}")
     print(f"  params={len(FLOAT_PARAMS) + len(INT_PARAMS)}  seed={runtime['seed']}")
     print(f"  db={args.db or 'memory'}")
+    print(f"  trial_result_dir={runtime['result_dir']}")
     print("  objective=(win_rate*2.0) + (gold_delta/1000.0)")
     print("  penalties: win_rate<0.45, go_fail_rate>0.08, gold_delta<0\n")
 

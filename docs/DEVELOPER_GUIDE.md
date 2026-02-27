@@ -89,10 +89,10 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --game
 
 ## 6. 산출물 디렉터리
 ### 6-1. Phase별 출력 루트
-- `logs/neat_phase1_seed<Seed>`
-- `logs/neat_phase2_seed<Seed>`
-- `logs/neat_phase3_seed<Seed>`
-- `logs/neat_phase4_seed<Seed>`
+- `logs/NEAT/neat_phase1_seed<Seed>`
+- `logs/NEAT/neat_phase2_seed<Seed>`
+- `logs/NEAT/neat_phase3_seed<Seed>`
+- `logs/NEAT/neat_phase4_seed<Seed>`
 
 ### 6-2. 핵심 산출물
 - `checkpoints/neat-checkpoint-gen*`
@@ -133,6 +133,8 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --game
 - `--continuous-series` (선택, 기본 `1`): `1=true`, `2=false`.
 - `--result-out` (선택): report JSON 저장 경로. 미지정 시 자동 생성.
 - `--kibo-detail` (선택, 기본 `none`): `none|lean|full`.
+  - `lean`: 턴별 카드 배열 대신 `handsCount/boardCount/deckCount` 중심으로 기록(파일 작음, 대량 실험 권장).
+  - `full`: 턴별 `hands/board/deck` 카드 배열까지 기록(리플레이 분석용, 파일 큼).
 - `--kibo-detail`이 `none`이고 `--kibo-out`만 지정되면 내부적으로 `lean`으로 동작한다.
 - `--kibo-detail`이 `lean/full`이고 `--kibo-out` 미지정이면 report 폴더 아래 `<seed>_kibo.jsonl` 자동 생성.
 - `--kibo-out` (선택): 게임 단위 JSONL 출력 경로. 각 줄에 `game_index`, `seed`, `first_turn`, `human`, `ai`, `winner`, `result`, `kibo_detail`, `kibo` 저장.
@@ -140,6 +142,13 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --game
   - `auto`를 주면 report 폴더 아래 `<seed>_dataset.jsonl` 자동 생성.
   - 명시 경로를 주면 해당 경로로 저장.
 - `--dataset-actor` (선택, 기본 `all`): 데이터셋 기록 actor 필터. `all|human|ai`.
+- `--dataset-decision-types` (선택, 기본 `all`): 데이터셋 기록 decision_type 필터. `all|play|match|option` 또는 CSV(`play,option`).
+- `--dataset-option-candidates` (선택, 기본 `all`): `decision_type=option`에서 후보 action 필터.
+  - 허용값: `all` 또는 CSV(`go,stop,shaking_yes,shaking_no,president_stop,president_hold,five,junk`)
+  - 별칭: `go-stop` (`go,stop`과 동일)
+  - 이 옵션 지정 시 내부적으로 `option` decision만 dataset에 기록.
+- GO/STOP만 dataset으로 수집하려면:
+  - `--dataset-decision-types option --dataset-option-candidates go-stop`
 - unresolved는 별도 출력 옵션 없이 dataset 사용 시 내부 통계(`dataset_unresolved_decisions`)로만 계산한다.
 - report JSON의 `result_out`, `kibo_out`, `dataset_out` 경로 필드는 상대경로(`logs/...`)로 기록된다.
 - stdout 결과: 마지막 줄에 고정 스키마의 compact summary JSON 1줄만 출력된다.

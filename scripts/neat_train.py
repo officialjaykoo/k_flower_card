@@ -1217,7 +1217,7 @@ def parse_args() -> argparse.Namespace:
         default="scripts/configs/runtime_phase1.json",
         help="Path to runtime JSON (workers/games/checkpoint interval)",
     )
-    parser.add_argument("--output-dir", default="logs/neat_python", help="Output directory")
+    parser.add_argument("--output-dir", default="logs/NEAT/neat_python", help="Output directory")
     parser.add_argument("--resume", default="", help="Checkpoint file path to resume")
     parser.add_argument(
         "--base-generation",

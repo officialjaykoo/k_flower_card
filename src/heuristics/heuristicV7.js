@@ -1,49 +1,43 @@
-﻿// heuristicV7.js - V7.2 (Predatory Counter)
+﻿// heuristicV7.js - V7 "The Negotiator"
 
 /* ============================================================================
- * Heuristic V7 (V7.2 Predatory Counter)
- * - aggressive denial / pi-pressure policy
- * - includes inline bankrupt/prudence helper block
+ * Heuristic V7 (Negotiator)
+ * - Adversarial card ranking with opponent counter-value penalty
+ * - Phase-adaptive scoring (early resource gain / late denial and safety)
+ * - Conservative GO gate when opponent threat is meaningful
  * ========================================================================== */
+
 const GUKJIN_CARD_ID = "I0";
 
-/* 1) Parameter surface */
 export const DEFAULT_PARAMS = {
-  greedMul: 1.8,
-  shakingGreed: 4.0,
-  bombGreed: 4.0,
-  goAggression: 0.48381972889542857,
-  lowThreatForceGo: 0.2,
-  trailingRiskAppetite: 0.25,
-  leadingRiskAppetite: 0.5,
-  trailingThreatBuffer: 0.1,
-  lockProfitScore: 6,
-  berserkerThreatCap: 0.4,
+  // Phase boundaries
+  earlyPhaseLimit: 15,
+  latePhaseLimit: 7,
 
-  noMatchBase: -5.0,
-  matchBase: 24.98345180770014,
-  doublePiBonus: 22.0,
-  kwangBonus: 25.0,
-  comboBonus: 59.74066797039472,
-  denialBonus: 18.764075276534694,
-  comboBreakerBonus: 33.89043020824412,
-  bonusCardSteal: 30.0,
-  piPressureBonus: 12.0,
-  piLeakPenalty: 10.0,
-  antiPiBakBonus: 48.113153735502564,
-  antiPiBakNoPiPenalty: 14.0,
+  // Core utility
+  baseUtility: 10.0,
+  opponentOpportunityCost: 1.5,
+  synergyWeight: 12.0,
+  matchDenyBonus: 6.0,
+  noMatchPenalty: 100,
 
-  riskTolerance: 1.75,
-  pukOpportunity: 3.0
+  // GO/STOP
+  stopLeadThreshold: 5,
+  threatMultiplier: 2.0,
+
+  // Bomb/Shaking/President fallbacks
+  bombMinMonthGain: 0.5,
+  shakingAllowThreshold: 1.4,
+  presidentStopDiff: 2
 };
 
-/* 2) Core helpers */
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
 
-function otherKey(state, playerKey) {
+function getOtherPlayerKey(state, playerKey, deps) {
+  if (typeof deps?.otherPlayerKey === "function") return deps.otherPlayerKey(playerKey);
   if (playerKey === "human") return "ai";
   if (playerKey === "ai") return "human";
   const keys = Object.keys(state?.players || {});
@@ -51,7 +45,67 @@ function otherKey(state, playerKey) {
   return null;
 }
 
-/* 3) Bankrupt/prudence helpers */
+function getDeckCount(state) {
+  return safeNum(state?.deck?.length, safeNum(state?.deckCount, 0));
+}
+
+function getBoardMatchesByMonth(state, deps) {
+  if (typeof deps?.boardMatchesByMonth === "function") return deps.boardMatchesByMonth(state);
+  const out = new Map();
+  for (const card of state?.board || []) {
+    if (!out.has(card.month)) out.set(card.month, []);
+    out.get(card.month).push(card);
+  }
+  return out;
+}
+
+function getPiCount(state, playerKey, category, deps) {
+  const viaDeps = safeNum(deps?.capturedCountByCategory?.(state?.players?.[playerKey], category), NaN);
+  if (Number.isFinite(viaDeps)) return viaDeps;
+  return safeNum(state?.players?.[playerKey]?.captured?.[category]?.length, 0);
+}
+
+function getContext(state, playerKey, deps) {
+  const raw = deps?.analyzeGameContext?.(state, playerKey) || {};
+  const oppKey = getOtherPlayerKey(state, playerKey, deps);
+  return {
+    myScore: safeNum(raw?.myScore, safeNum(state?.players?.[playerKey]?.score, 0)),
+    oppScore: safeNum(raw?.oppScore, safeNum(state?.players?.[oppKey]?.score, 0)),
+    selfPi: safeNum(raw?.selfPi, getPiCount(state, playerKey, "junk", deps)),
+    oppPi: safeNum(raw?.oppPi, getPiCount(state, oppKey, "junk", deps))
+  };
+}
+
+function captureUtility(card, params, deps) {
+  if (!card) return 0;
+  let value = safeNum(params.baseUtility, 10);
+  const id = String(card.id || "");
+  if (card.category === "kwang" || id.includes("K") || id === GUKJIN_CARD_ID) value += 15;
+  if (card.category === "ribbon" || card.category === "five") value += 8;
+  if (safeNum(card?.bonus?.stealPi) > 0) value += 10;
+  if (card.category === "junk") value += safeNum(deps?.junkPiValue?.(card), safeNum(card?.piValue, 1)) * 2;
+  return value;
+}
+
+function comboPotentialScore(state, playerKey, month, deps, params) {
+  const ownCombo = safeNum(deps?.ownComboOpportunityScore?.(state, playerKey, month), NaN);
+  if (Number.isFinite(ownCombo)) return ownCombo * safeNum(params.synergyWeight, 12);
+  const legacyCombo = safeNum(deps?.analyzeComboPotential?.(state, playerKey, month), 0);
+  return legacyCombo * safeNum(params.synergyWeight, 12);
+}
+
+function estimateOpponentCounterValue(state, playerKey, month, deps) {
+  const sameMonthOnBoard = (state?.board || []).filter((c) => c?.month === month).length;
+  const immediateGain = safeNum(deps?.estimateOpponentImmediateGainIfDiscard?.(state, playerKey, month), 0);
+  return sameMonthOnBoard * 10 + immediateGain * 4;
+}
+
+function deniedMonthSet(state, playerKey, deps) {
+  const oppKey = getOtherPlayerKey(state, playerKey, deps);
+  if (!oppKey || typeof deps?.blockingMonthsAgainst !== "function") return new Set();
+  return deps.blockingMonthsAgainst(state?.players?.[oppKey], state?.players?.[playerKey]) || new Set();
+}
+
 function inferCurrentScoreV7(state, playerKey, options = {}) {
   const fromOption = safeNum(options.currentScore, NaN);
   if (Number.isFinite(fromOption)) return Math.max(0, fromOption);
@@ -89,7 +143,7 @@ function inferMultiplierV7(state, playerKey) {
 
 export function canBankruptOpponentByStopV7(state, playerKey, options = {}) {
   if (!state?.players || !state.players[playerKey]) return false;
-  const oppKey = otherKey(state, playerKey);
+  const oppKey = getOtherPlayerKey(state, playerKey, null);
   if (!oppKey) return false;
 
   const oppGold = safeNum(state?.players?.[oppKey]?.gold, 0);
@@ -114,213 +168,29 @@ export function canBankruptOpponentByStopV7(state, playerKey, options = {}) {
   return expectedDamage >= oppGold * safetyMargin;
 }
 
-export function computePrudentGoThresholdV7(options = {}) {
-  let threshold = safeNum(options.base, 0.3);
-  const myScore = safeNum(options.myScore, 0);
-  const deckCount = safeNum(options.deckCount, 0);
-  if (myScore >= 7) threshold += 0.05;
-  if (deckCount < 6) threshold -= 0.05;
-  return Math.max(0.2, Math.min(0.6, threshold));
-}
-
-function countComboTagV7(cards, tag) {
-  let n = 0;
-  for (const card of cards || []) {
-    if (Array.isArray(card?.comboTags) && card.comboTags.includes(tag)) n += 1;
-  }
-  return n;
-}
-
-export function isOpponentImminentV7(state, playerKey, oppProgress = null) {
-  const oppKey = otherKey(state, playerKey);
-  if (!oppKey) return false;
-  const opp = state?.players?.[oppKey];
-  if (!opp) return false;
-
-  const junkCount = (opp?.captured?.junk || []).length;
-  if (junkCount >= 8) return true;
-
-  const ribbons = opp?.captured?.ribbon || [];
-  const fives = opp?.captured?.five || [];
-  const kwang = opp?.captured?.kwang || [];
-  const red = countComboTagV7(ribbons, "redRibbons");
-  const blue = countComboTagV7(ribbons, "blueRibbons");
-  const plain = countComboTagV7(ribbons, "plainRibbons");
-  const birds = countComboTagV7(fives, "fiveBirds");
-  if (red >= 2 || blue >= 2 || plain >= 2 || birds >= 2) return true;
-  if (kwang.length >= 2) return true;
-
-  const threat = safeNum(oppProgress?.threat, 0);
-  if (threat >= 0.32) return true;
-
-  let topUrgency = 0;
-  const monthUrgency = oppProgress?.monthUrgency;
-  if (monthUrgency && typeof monthUrgency.values === "function") {
-    for (const v of monthUrgency.values()) topUrgency = Math.max(topUrgency, safeNum(v, 0));
-  }
-  return topUrgency >= 24;
-}
-
-export function evaluateGoldPotentialV7(_state, _playerKey, candidateCard) {
-  if (!candidateCard) return 0;
-
-  let potential = 0;
-  const junkPiValue = safeNum(candidateCard?.piValue, 0);
-  const isDoublePi =
-    candidateCard?.isDouble === true ||
-    candidateCard?.id === "I0" ||
-    (candidateCard?.category === "junk" && junkPiValue >= 2);
-  const stealPi = safeNum(candidateCard?.bonus?.stealPi, 0);
-
-  if (isDoublePi) potential += 20;
-  if (stealPi > 0 || candidateCard?.bonus === true) potential += 30;
-  if (candidateCard?.category === "kwang") potential += 12;
-  if (candidateCard?.category === "five" || candidateCard?.category === "ribbon") potential += 8;
-  return potential;
-}
-
-function piValue(card, deps) {
-  if (!card) return 0;
-  if (card.id === GUKJIN_CARD_ID) return 2;
-  if (card.category !== "junk") return 0;
-  return safeNum(deps.junkPiValue?.(card), 1);
-}
-
-function isDoublePi(card, deps) {
-  return piValue(card, deps) >= 2;
-}
-
-function monthUrgencyScore(oppProgress, month) {
-  return safeNum(oppProgress?.monthUrgency?.get?.(month), 0);
-}
-
-function normalizeComboTargets(raw) {
-  const ids = new Set();
-  const months = new Set();
-  let imminent = false;
-
-  const ingest = (value) => {
-    if (value == null) return;
-    if (typeof value === "string") {
-      ids.add(value);
-      return;
-    }
-    if (Number.isInteger(value)) {
-      months.add(value);
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const v of value) ingest(v);
-      return;
-    }
-    if (typeof value === "object") {
-      if (typeof value.id === "string") ids.add(value.id);
-      if (Number.isInteger(value.month)) months.add(value.month);
-      if (value.imminent) imminent = true;
-      if (Array.isArray(value.ids)) for (const id of value.ids) ingest(id);
-      if (Array.isArray(value.months)) for (const month of value.months) ingest(month);
-      if (Array.isArray(value.cards)) for (const card of value.cards) ingest(card);
-    }
-  };
-
-  ingest(raw);
-  return { ids, months, imminent };
-}
-
-function resolveComboBreakerTargets(state, playerKey, deps, oppProgress) {
-  const oppKey = otherKey(state, playerKey);
-  const rawMissing = oppKey ? deps.getMissingComboCards?.(state, oppKey) : null;
-  const normalized = normalizeComboTargets(rawMissing);
-  const monthUrgency = oppProgress?.monthUrgency;
-  if (monthUrgency && typeof monthUrgency.entries === "function") {
-    for (const [month, urgency] of monthUrgency.entries()) {
-      if (safeNum(urgency) >= 20) normalized.months.add(month);
-      if (safeNum(urgency) >= 28) normalized.imminent = true;
-    }
-  }
-  return normalized;
-}
-
-function opponentPiCount(state, playerKey, deps) {
-  const oppKey = otherKey(state, playerKey);
-  if (!oppKey) return 0;
-  const viaDeps = safeNum(deps.capturedCountByCategory?.(state?.players?.[oppKey], "junk"), NaN);
-  if (Number.isFinite(viaDeps)) return viaDeps;
-  return safeNum(state?.players?.[oppKey]?.captured?.junk?.length, 0);
-}
-
-function selfPiCount(state, playerKey, deps) {
-  const viaDeps = safeNum(deps.capturedCountByCategory?.(state?.players?.[playerKey], "junk"), NaN);
-  if (Number.isFinite(viaDeps)) return viaDeps;
-  return safeNum(state?.players?.[playerKey]?.captured?.junk?.length, 0);
-}
-
-/* 4) Exported policy decisions */
 export function rankHandCardsV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
-  const player = state.players?.[playerKey];
+  const player = state?.players?.[playerKey];
   if (!player?.hand?.length) return [];
 
   const P = { ...DEFAULT_PARAMS, ...params };
-  const boardByMonth =
-    typeof deps.boardMatchesByMonth === "function" ? deps.boardMatchesByMonth(state) : new Map();
-  const oppProgress = deps.checkOpponentJokboProgress?.(state, playerKey) || null;
-  const comboBreaker = resolveComboBreakerTargets(state, playerKey, deps, oppProgress);
-  const oppPi = opponentPiCount(state, playerKey, deps);
-  const myPi = selfPiCount(state, playerKey, deps);
-  const deckCount = safeNum(state?.deck?.length, 0);
-  const antiPiBakMode = myPi < 7 && deckCount < 10;
-  const piPressureWindow = oppPi >= 5 && oppPi <= 7;
+  const deckCount = getDeckCount(state);
+  const isEarly = deckCount > P.earlyPhaseLimit;
+  const boardByMonth = getBoardMatchesByMonth(state, deps);
+  const deniedMonths = deniedMonthSet(state, playerKey, deps);
 
   const ranked = player.hand.map((card) => {
     const matches = boardByMonth.get(card.month) || [];
-    const allCaptured = [card, ...matches];
-    const isBonusCard = safeNum(card?.bonus?.stealPi) > 0;
+    if (matches.length === 0) return { card, score: -Math.abs(P.noMatchPenalty), matches: 0 };
 
-    let score = matches.length > 0 ? P.matchBase : P.noMatchBase;
+    const myGain = matches.reduce((acc, m) => acc + captureUtility(m, P, deps), 0);
+    const synergy = comboPotentialScore(state, playerKey, card.month, deps, P);
+    const oppCounter = estimateOpponentCounterValue(state, playerKey, card.month, deps);
 
-    // Denial: prioritize months opponent is close to completing.
-    const urgency = monthUrgencyScore(oppProgress, card.month);
-    if (urgency >= 20) score += P.denialBonus;
-    if (comboBreaker.ids.has(card.id) || comboBreaker.months.has(card.month)) {
-      score += P.comboBreakerBonus;
-    }
-    if (comboBreaker.imminent && comboBreaker.months.has(card.month)) {
-      score += P.comboBreakerBonus * 0.35;
-    }
+    let score = isEarly
+      ? (myGain + synergy) - oppCounter * 0.5
+      : (myGain * 0.8) - oppCounter * P.opponentOpportunityCost;
 
-    const piGain = allCaptured.reduce((sum, c) => sum + piValue(c, deps), 0);
-    score += piGain * 10 * P.greedMul;
-
-    if (matches.length > 0 && allCaptured.some((c) => isDoublePi(c, deps))) {
-      score += P.doublePiBonus;
-    }
-
-    if (isBonusCard) score += P.bonusCardSteal;
-    if (piPressureWindow && (piGain > 0 || isBonusCard)) score += P.piPressureBonus;
-    if (piPressureWindow && matches.length === 0 && piValue(card, deps) > 0) {
-      score -= P.piLeakPenalty * Math.max(1, piValue(card, deps));
-    }
-    if (antiPiBakMode) {
-      if (piGain > 0 || isBonusCard) {
-        score += P.antiPiBakBonus + piGain * 5.0;
-      } else {
-        score -= P.antiPiBakNoPiPenalty;
-      }
-    }
-
-    for (const c of allCaptured) {
-      if (c.category === "kwang") score += P.kwangBonus;
-      if (c.category === "five" || c.category === "ribbon") score += P.comboBonus;
-    }
-
-    score += evaluateGoldPotentialV7(state, playerKey, card) * 0.35;
-
-    const danger = safeNum(
-      deps.estimateDangerMonthRisk?.(state, playerKey, card.month, new Map(), new Map(), new Map())
-    );
-    const feedRisk = safeNum(deps.estimateOpponentImmediateGainIfDiscard?.(state, playerKey, card.month));
-    score -= (danger + feedRisk * 0.8) * P.riskTolerance;
-
+    if (deniedMonths.has(card.month)) score += P.matchDenyBonus;
     return { card, score, matches: matches.length };
   });
 
@@ -328,44 +198,30 @@ export function rankHandCardsV7(state, playerKey, deps, params = DEFAULT_PARAMS)
   return ranked;
 }
 
-/* choose-match policy for pending TWO-match selections */
 export function chooseMatchHeuristicV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
-  const ids = state.pendingMatch?.boardCardIds || [];
+  const ids = state?.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
 
   const P = { ...DEFAULT_PARAMS, ...params };
-  const oppProgress = deps.checkOpponentJokboProgress?.(state, playerKey) || null;
-  const comboBreaker = resolveComboBreakerTargets(state, playerKey, deps, oppProgress);
-  const oppPi = opponentPiCount(state, playerKey, deps);
-  const myPi = selfPiCount(state, playerKey, deps);
-  const deckCount = safeNum(state?.deck?.length, 0);
-  const antiPiBakMode = myPi < 7 && deckCount < 10;
-  const piPressureWindow = oppPi >= 5 && oppPi <= 7;
+  const deckCount = getDeckCount(state);
+  const isEarly = deckCount > P.earlyPhaseLimit;
+  const deniedMonths = deniedMonthSet(state, playerKey, deps);
+  const candidates = (state?.board || []).filter((c) => ids.includes(c?.id));
+  if (!candidates.length) return null;
+
   let bestId = null;
   let bestScore = -Infinity;
 
-  for (const card of (state.board || []).filter((c) => ids.includes(c.id))) {
-    let score = safeNum(deps.cardCaptureValue(card)) * 2.0;
-    const pi = piValue(card, deps);
+  for (const card of candidates) {
+    const myGain = captureUtility(card, P, deps);
+    const oppCounter = estimateOpponentCounterValue(state, playerKey, card.month, deps);
 
-    score += pi * 15 * P.greedMul;
-    if (card.category === "kwang") score += P.kwangBonus;
-    if (card.category === "five" || card.category === "ribbon") score += P.comboBonus;
-    if (isDoublePi(card, deps)) score += P.doublePiBonus;
+    let score = isEarly
+      ? myGain - oppCounter * 0.4
+      : (myGain * 0.85) - oppCounter * P.opponentOpportunityCost;
 
-    const urgency = monthUrgencyScore(oppProgress, card.month);
-    if (urgency >= 20) score += P.denialBonus;
-    if (comboBreaker.ids.has(card.id) || comboBreaker.months.has(card.month)) {
-      score += P.comboBreakerBonus;
-    }
-    if (piPressureWindow && (card.category === "junk" || safeNum(card?.bonus?.stealPi) > 0)) {
-      score += P.piPressureBonus;
-    }
-    if (antiPiBakMode) {
-      const pi = piValue(card, deps);
-      if (pi > 0 || safeNum(card?.bonus?.stealPi) > 0) score += P.antiPiBakBonus + pi * 4.0;
-      else score -= P.antiPiBakNoPiPenalty;
-    }
+    if (deniedMonths.has(card.month)) score += P.matchDenyBonus;
+    if (card.id === GUKJIN_CARD_ID) score += 8;
 
     if (score > bestScore) {
       bestScore = score;
@@ -376,115 +232,102 @@ export function chooseMatchHeuristicV7(state, playerKey, deps, params = DEFAULT_
   return bestId;
 }
 
-/* GO/STOP policy with gold-pressure and opponent-imminence gate */
 export function shouldGoV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
-  const oppKey = otherKey(state, playerKey);
-  if (!oppKey) return false;
+  const ctx = getContext(state, playerKey, deps);
+  const deckCount = getDeckCount(state);
+  const scoreDiff = ctx.myScore - ctx.oppScore;
+  const oppThreat = safeNum(
+    deps?.opponentThreatScore?.(state, playerKey),
+    safeNum(deps?.analyzeOpponentThreat?.(state, playerKey), 0)
+  );
 
-  const willBankruptNow = !!deps.canBankruptOpponentByStop?.(state, playerKey);
-  const goldAnalysis = deps.analyzeGoldPotential?.(state, playerKey) || {
-    willBankrupt: willBankruptNow
-  };
-  if (goldAnalysis.willBankrupt) return false;
+  if (deps?.canBankruptOpponentByStop?.(state, playerKey)) return false;
 
-  const ctx = deps.analyzeGameContext?.(state, playerKey) || {};
-  const myScore = safeNum(ctx.myScore, safeNum(state?.players?.[playerKey]?.score, 0));
-  const oppCurrentScore = safeNum(ctx.oppScore, safeNum(state?.players?.[oppKey]?.score, 0));
-  const oppThreat = safeNum(deps.opponentThreatScore?.(state, playerKey));
-  const deckCount = safeNum(state?.deck?.length, 0);
-  const myGold = safeNum(state?.players?.[playerKey]?.gold, 0);
-  const oppGold = safeNum(state?.players?.[oppKey]?.gold, 0);
-  const trailingGold = myGold < oppGold;
-  const oppPiCount = opponentPiCount(state, playerKey, deps);
+  if (ctx.myScore >= 7 && oppThreat * P.threatMultiplier > scoreDiff) return false;
 
-  const oppJokbo = deps.checkOpponentJokboProgress?.(state, playerKey) || null;
-  const oppImminent = isOpponentImminentV7(state, playerKey, oppJokbo);
+  if (ctx.oppPi < 5 && ctx.selfPi >= 10 && deckCount > 5) return true;
 
-  const prudentThreshold = computePrudentGoThresholdV7({
-    base: P.goAggression,
-    myScore,
-    deckCount
-  });
-  const riskAppetite = trailingGold ? P.trailingRiskAppetite : P.leadingRiskAppetite;
-  // Lower appetite value means "take more volatility" in this model.
-  const dynamicThreshold = Math.max(0.2, Math.min(0.65, 0.75 - safeNum(riskAppetite, 0.4)));
-  let threatStopThreshold = trailingGold
-    ? Math.max(prudentThreshold, dynamicThreshold) + P.trailingThreatBuffer
-    : Math.min(prudentThreshold, dynamicThreshold);
-  threatStopThreshold = Math.max(0.2, Math.min(0.72, threatStopThreshold));
+  // Late game lock-in: avoid greed GO when a win is already secured.
+  if (deckCount <= P.latePhaseLimit && ctx.myScore >= 7 && ctx.oppScore < 7) return false;
 
-  if (oppThreat < P.lowThreatForceGo) return true;
-
-  // Berserker mode: when opponent is still in Pi-Bak window and we are leading,
-  // take controlled risk to inflate multiplier and maximize gold extraction.
-  if (oppPiCount < 10 && myScore > oppCurrentScore && oppThreat < P.berserkerThreatCap) return true;
-
-  if (!trailingGold && myScore >= P.lockProfitScore && (oppThreat >= 0.16 || oppCurrentScore > 0 || oppImminent)) {
-    return false;
-  }
-  if (oppImminent && myScore >= 4) return false;
-  if (deckCount <= 4 && myScore >= 5 && oppThreat >= 0.2) return false;
-
-  if (oppThreat > threatStopThreshold && myScore >= 4) return false;
-  if (!trailingGold && oppCurrentScore > 0 && myScore >= 6) return false;
-
-  return true;
+  return ctx.myScore > ctx.oppScore + P.stopLeadThreshold;
 }
 
-/* Bomb / shaking / president / gukjin decisions */
 export function selectBombMonthV7(state, _playerKey, bombMonths, deps) {
   if (!bombMonths?.length) return null;
   return bombMonths.reduce(
-    (best, m) => (safeNum(deps.monthBoardGain(state, m)) > safeNum(deps.monthBoardGain(state, best)) ? m : best),
+    (best, month) =>
+      safeNum(deps?.monthBoardGain?.(state, month)) > safeNum(deps?.monthBoardGain?.(state, best))
+        ? month
+        : best,
     bombMonths[0]
   );
 }
 
-export function shouldBombV7(_state, _playerKey, bombMonths, _deps, _params = DEFAULT_PARAMS) {
-  return bombMonths?.length > 0;
+export function shouldBombV7(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
+  if (!bombMonths?.length) return false;
+  const P = { ...DEFAULT_PARAMS, ...params };
+  const bestMonth = selectBombMonthV7(state, playerKey, bombMonths, deps);
+  if (bestMonth == null) return false;
+
+  const impact = deps?.isHighImpactBomb?.(state, playerKey, bestMonth);
+  if (impact?.highImpact) return true;
+
+  const gain = safeNum(deps?.monthBoardGain?.(state, bestMonth), 0);
+  return gain >= safeNum(P.bombMinMonthGain, 0.5);
 }
 
-export function decideShakingV7(state, playerKey, shakingMonths, deps, _params = DEFAULT_PARAMS) {
+export function decideShakingV7(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
+  const P = { ...DEFAULT_PARAMS, ...params };
 
-  let bestMonth = shakingMonths[0];
-  let bestScore = safeNum(deps.shakingImmediateGainScore(state, playerKey, bestMonth));
+  let bestMonth = null;
+  let bestScore = -Infinity;
+  let bestHighImpact = false;
 
-  for (const month of shakingMonths.slice(1)) {
-    const score = safeNum(deps.shakingImmediateGainScore(state, playerKey, month));
+  for (const month of shakingMonths) {
+    const immediate = safeNum(deps?.shakingImmediateGainScore?.(state, playerKey, month), 0);
+    const combo = safeNum(deps?.ownComboOpportunityScore?.(state, playerKey, month), 0);
+    const impact = deps?.isHighImpactShaking?.(state, playerKey, month);
+    const score = immediate + combo * 0.35 + (impact?.highImpact ? 0.4 : 0);
+
     if (score > bestScore) {
       bestScore = score;
       bestMonth = month;
+      bestHighImpact = !!impact?.highImpact;
     }
   }
 
-  return { allow: true, month: bestMonth, score: bestScore, highImpact: true };
+  const allow = bestHighImpact || bestScore >= P.shakingAllowThreshold;
+  return { allow, month: bestMonth, score: bestScore, highImpact: bestHighImpact };
 }
 
-export function shouldPresidentStopV7(state, playerKey, deps, _params = DEFAULT_PARAMS) {
-  const ctx = deps.analyzeGameContext(state, playerKey);
-  const diff = safeNum(ctx.myScore) - safeNum(ctx.oppScore);
-  return diff >= 4;
+export function shouldPresidentStopV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
+  const P = { ...DEFAULT_PARAMS, ...params };
+  const ctx = getContext(state, playerKey, deps);
+  const diff = ctx.myScore - ctx.oppScore;
+  const carry = safeNum(state?.carryOverMultiplier, 1);
+  if (carry >= 2) return false;
+  return diff >= safeNum(P.presidentStopDiff, 2);
 }
 
 export function chooseGukjinHeuristicV7(state, playerKey, deps, _params = DEFAULT_PARAMS) {
-  const oppKey = otherKey(state, playerKey);
+  const oppKey = getOtherPlayerKey(state, playerKey, deps);
   if (!oppKey) return "junk";
 
-  const oppPiCount = safeNum(
-    deps.capturedCountByCategory?.(state?.players?.[oppKey], "junk"),
-    safeNum(state?.players?.[oppKey]?.captured?.junk?.length, 0)
-  );
-  // If opponent is in Pi-Bak window, keep gukjin as junk to pressure sub-10 pi finish.
-  if (oppPiCount >= 5 && oppPiCount <= 7) return "junk";
+  const oppPiCount = getPiCount(state, oppKey, "junk", deps);
+  if (oppPiCount >= 5 && oppPiCount <= 8) return "junk";
 
-  const myFiveCount = safeNum(
-    deps.capturedCountByCategory?.(state?.players?.[playerKey], "five"),
-    safeNum(state?.players?.[playerKey]?.captured?.five?.length, 0)
-  );
-  // Convert to five only when own five stack is already meaningful.
+  const myFiveCount = getPiCount(state, playerKey, "five", deps);
   if (myFiveCount >= 4) return "five";
 
   return "junk";
 }
+
+export {
+  rankHandCardsV7 as rankHandCards,
+  shouldGoV7 as shouldGo,
+  chooseGukjinHeuristicV7 as chooseGukjin,
+  chooseMatchHeuristicV7 as chooseMatch
+};

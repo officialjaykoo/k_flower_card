@@ -50,6 +50,10 @@ function parseArgs(argv) {
     resultOut: "",
     datasetOut: "",
     datasetActor: "all",
+    datasetDecisionTypesRaw: "all",
+    datasetOptionCandidatesRaw: "all",
+    datasetDecisionTypes: null,
+    datasetOptionCandidates: null,
   };
 
   while (args.length > 0) {
@@ -82,6 +86,12 @@ function parseArgs(argv) {
     else if (key === "--result-out") out.resultOut = String(value || "").trim();
     else if (key === "--dataset-out") out.datasetOut = String(value || "").trim();
     else if (key === "--dataset-actor") out.datasetActor = String(value || "all").trim().toLowerCase();
+    else if (key === "--dataset-decision-types") {
+      out.datasetDecisionTypesRaw = String(value || "all").trim().toLowerCase();
+    }
+    else if (key === "--dataset-option-candidates" || key === "--dataset-option-actions") {
+      out.datasetOptionCandidatesRaw = String(value || "all").trim().toLowerCase();
+    }
     else throw new Error(`Unknown argument: ${key}`);
   }
 
@@ -104,10 +114,76 @@ function parseArgs(argv) {
   if (out.datasetActor !== "all" && out.datasetActor !== "human" && out.datasetActor !== "ai") {
     throw new Error(`invalid --dataset-actor: ${out.datasetActor} (allowed: all, human, ai)`);
   }
+  out.datasetDecisionTypes = parseDatasetDecisionTypes(out.datasetDecisionTypesRaw);
+  out.datasetOptionCandidates = parseDatasetOptionCandidates(out.datasetOptionCandidatesRaw);
+  if (out.datasetOptionCandidates && !out.datasetDecisionTypes) {
+    out.datasetDecisionTypes = new Set(["option"]);
+  }
+  if (out.datasetOptionCandidates && out.datasetDecisionTypes && !out.datasetDecisionTypes.has("option")) {
+    throw new Error(
+      "--dataset-option-candidates requires --dataset-decision-types to include option (or all)"
+    );
+  }
   if (out.stdoutFormat !== "text" && out.stdoutFormat !== "json") {
     throw new Error(`invalid --stdout-format: ${out.stdoutFormat} (allowed: text, json)`);
   }
 
+  return out;
+}
+
+const DATASET_DECISION_TYPES = new Set(["play", "match", "option"]);
+const DATASET_OPTION_CANDIDATES = new Set([
+  "go",
+  "stop",
+  "shaking_yes",
+  "shaking_no",
+  "president_stop",
+  "president_hold",
+  "five",
+  "junk",
+]);
+
+function parseCsvTokens(raw) {
+  const text = String(raw || "").trim().toLowerCase();
+  if (!text || text === "all") return [];
+  return text
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function parseDatasetDecisionTypes(raw) {
+  const items = parseCsvTokens(raw);
+  if (items.length <= 0) return null;
+  const out = new Set();
+  for (const item of items) {
+    if (!DATASET_DECISION_TYPES.has(item)) {
+      throw new Error(
+        `invalid --dataset-decision-types token: ${item} (allowed: all, play, match, option)`
+      );
+    }
+    out.add(item);
+  }
+  return out;
+}
+
+function parseDatasetOptionCandidates(raw) {
+  const text = String(raw || "").trim().toLowerCase();
+  if (!text || text === "all") return null;
+  const normalizedRaw =
+    text === "go-stop" || text === "go_stop" || text === "gostop" ? "go,stop" : text;
+  const items = parseCsvTokens(normalizedRaw);
+  if (items.length <= 0) return null;
+  const out = new Set();
+  for (const item of items) {
+    const canonical = canonicalOptionAction(item);
+    if (!DATASET_OPTION_CANDIDATES.has(canonical)) {
+      throw new Error(
+        `invalid --dataset-option-candidates token: ${item} (allowed: all, go, stop, shaking_yes, shaking_no, president_stop, president_hold, five, junk; alias: go-stop)`
+      );
+    }
+    out.add(canonical);
+  }
   return out;
 }
 
@@ -158,7 +234,7 @@ function resolvePlayerSpec(rawSpec, sideLabel) {
   }
   const phase = Number(m[1]);
   const seed = Number(m[2]);
-  const modelPath = resolve(`logs/neat_phase${phase}_seed${seed}/models/winner_genome.json`);
+  const modelPath = resolve(`logs/NEAT/neat_phase${phase}_seed${seed}/models/winner_genome.json`);
   if (!existsSync(modelPath)) {
     throw new Error(`model not found for ${token}: ${modelPath}`);
   }
@@ -204,6 +280,11 @@ function toReportPath(pathValue) {
   const rel = relative(process.cwd(), resolve(raw));
   const normalized = String(rel || raw).replace(/\\/g, "/");
   return normalized || null;
+}
+
+function setToReportList(setLike) {
+  if (!setLike || !(setLike instanceof Set) || setLike.size <= 0) return "all";
+  return [...setLike].sort();
 }
 
 // =============================================================================
@@ -943,20 +1024,26 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
   const opts = parseArgs(argv);
   const humanPlayer = resolvePlayerSpec(opts.humanSpecRaw, "human");
   const aiPlayer = resolvePlayerSpec(opts.aiSpecRaw, "ai");
-  const autoOutputDir = buildAutoOutputDir(humanPlayer.label, aiPlayer.label);
+  let autoOutputDir = "";
+  const ensureAutoOutputDir = () => {
+    if (!autoOutputDir) {
+      autoOutputDir = buildAutoOutputDir(humanPlayer.label, aiPlayer.label);
+    }
+    return autoOutputDir;
+  };
 
   if (!opts.resultOut) {
-    opts.resultOut = buildAutoArtifactPath(autoOutputDir, opts.seed, "result.json");
+    opts.resultOut = buildAutoArtifactPath(ensureAutoOutputDir(), opts.seed, "result.json");
   }
 
   if (opts.kiboDetail === "none" && opts.kiboOut) {
     opts.kiboDetail = "lean";
   }
   if (opts.kiboDetail !== "none" && !opts.kiboOut) {
-    opts.kiboOut = buildAutoArtifactPath(autoOutputDir, opts.seed, "kibo.jsonl");
+    opts.kiboOut = buildAutoArtifactPath(ensureAutoOutputDir(), opts.seed, "kibo.jsonl");
   }
   if (opts.datasetOut === "auto") {
-    opts.datasetOut = buildAutoArtifactPath(autoOutputDir, opts.seed, "dataset.jsonl");
+    opts.datasetOut = buildAutoArtifactPath(ensureAutoOutputDir(), opts.seed, "dataset.jsonl");
   }
   const effectiveKiboDetail = opts.kiboDetail === "none" ? "lean" : opts.kiboDetail;
 
@@ -1037,18 +1124,26 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
       (decision) => {
         if (!datasetWriter) return;
         if (opts.datasetActor !== "all" && decision.actor !== opts.datasetActor) return;
+        if (opts.datasetDecisionTypes && !opts.datasetDecisionTypes.has(decision.decisionType)) return;
+
+        let candidates = decision.candidates;
+        if (decision.decisionType === "option" && opts.datasetOptionCandidates) {
+          candidates = candidates.filter((candidate) =>
+            opts.datasetOptionCandidates.has(normalizeDecisionCandidate("option", candidate))
+          );
+        }
+        const legalCount = candidates.length;
+        if (legalCount <= 0) return;
         datasetStats.decisions += 1;
         unresolvedStats.decisions += 1;
-        const legalCount = decision.candidates.length;
-        if (legalCount <= 0) return;
-        const normalizedCandidates = decision.candidates.map((candidate) =>
+        const normalizedCandidates = candidates.map((candidate) =>
           normalizeDecisionCandidate(decision.decisionType, candidate)
         );
         const matched = normalizedCandidates.some(
           (candidateNorm) => candidateNorm === decision.chosenCandidate
         );
         const unresolvedFlag = matched ? 0 : 1;
-        for (const candidate of decision.candidates) {
+        for (const candidate of candidates) {
           const candidateNorm = normalizeDecisionCandidate(decision.decisionType, candidate);
           const isChosen = candidateNorm === decision.chosenCandidate ? 1 : 0;
           const row = {
@@ -1167,6 +1262,8 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
     kibo_out: toReportPath(opts.kiboOut),
     dataset_out: toReportPath(opts.datasetOut),
     dataset_actor: opts.datasetActor,
+    dataset_decision_types: setToReportList(opts.datasetDecisionTypes),
+    dataset_option_candidates: setToReportList(opts.datasetOptionCandidates),
     dataset_rows: datasetStats.rows,
     dataset_positive_rows: datasetStats.positive_rows,
     dataset_decisions: datasetStats.decisions,

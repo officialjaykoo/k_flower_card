@@ -16,8 +16,8 @@ if (-not (Test-Path $python)) {
 
 $configFeedforward = "scripts/configs/neat_feedforward.ini"
 $runtimeConfig = "scripts/configs/runtime_phase4.json"
-$resumeCheckpoint = "logs/neat_phase3_seed$Seed/checkpoints/neat-checkpoint-gen199"
-$outputDir = "logs/neat_phase4_seed$Seed"
+$resumeCheckpoint = "logs/NEAT/neat_phase3_seed$Seed/checkpoints/neat-checkpoint-gen199"
+$outputDir = "logs/NEAT/neat_phase4_seed$Seed"
 
 if (-not (Test-Path $resumeCheckpoint)) {
   throw "phase3 checkpoint not found: $resumeCheckpoint"

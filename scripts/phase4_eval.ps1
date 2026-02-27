@@ -10,7 +10,7 @@ param(
 )
 
 $runtimeConfigPath = "scripts/configs/runtime_phase4.json"
-$outputDir = "logs/neat_phase4_seed$Seed"
+$outputDir = "logs/NEAT/neat_phase4_seed$Seed"
 $gateStatePath = Join-Path $outputDir "gate_state.json"
 $genomePath = Join-Path $outputDir "models/winner_genome.json"
 

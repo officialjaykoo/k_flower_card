@@ -71,7 +71,7 @@ if (-not (Test-Path $python)) {
 
 $configFeedforward = "scripts/configs/neat_feedforward.ini"
 $runtimeConfig = "scripts/configs/runtime_phase$Phase.json"
-$outputDir = "logs/neat_phase${Phase}_seed$Seed"
+$outputDir = "logs/NEAT/neat_phase${Phase}_seed$Seed"
 
 if (-not (Test-Path $configFeedforward)) {
   throw "config not found: $configFeedforward"
@@ -93,7 +93,7 @@ if ($Phase -eq "2") {
   $phase1RuntimePath = "scripts/configs/runtime_phase1.json"
   $phase1Runtime = Read-JsonFile -Path $phase1RuntimePath
   $phase1Generations = To-PositiveIntOrDefault -Value $phase1Runtime.generations -DefaultValue 20
-  $phase1CheckpointDir = "logs/neat_phase1_seed$Seed/checkpoints"
+  $phase1CheckpointDir = "logs/NEAT/neat_phase1_seed$Seed/checkpoints"
   $resume = Resolve-Phase1Checkpoint -CheckpointDir $phase1CheckpointDir -PreferredGeneration $phase1Generations
 
   $cmd += @(

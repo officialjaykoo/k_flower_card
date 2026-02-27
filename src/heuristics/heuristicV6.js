@@ -10,8 +10,8 @@ const GUKJIN_CARD_ID = "I0";
 /* 1) Tunable parameter set */
 export const DEFAULT_PARAMS = {
   // phase
-  phaseEarlyDeck: 15,
-  phaseLateDeck: 8,
+  phaseEarlyDeck: 13,
+  phaseLateDeck: 6,
   phaseEndDeck: 4,
 
   // profile weights
@@ -19,26 +19,26 @@ export const DEFAULT_PARAMS = {
   defenseBase: 1.0,
   riskBase: 1.0,
   tempoBase: 1.0,
-  trailingAttackBoost: 0.18,
-  trailingTempoBoost: 0.2,
-  leadingDefenseBoost: 0.12,
-  leadingRiskBoost: 0.15,
-  highPressureDefenseBoost: 0.2,
-  highPressureRiskBoost: 0.22,
+  trailingAttackBoost: 0.008872760195410128,
+  trailingTempoBoost: 0.38505936587117007,
+  leadingDefenseBoost: 0.292593042179272,
+  leadingRiskBoost: 0.2783896824374792,
+  highPressureDefenseBoost: 0.16358117776570796,
+  highPressureRiskBoost: 0.06931772802833831,
   secondMoverTempoBoost: 0.08,
 
   // card utility
-  noMatchBase: -6.5,
-  matchOneBase: 7.0,
-  matchTwoBase: 11.5,
-  matchThreeBase: 13.5,
-  captureGainMul: 1.15,
+  noMatchBase: -10.592066615960226,
+  matchOneBase: 5.501457388987572,
+  matchTwoBase: 12.393813317648963,
+  matchThreeBase: 17.145959227000624,
+  captureGainMul: 1.4262171143895044,
   kwangCaptureBonus: 6.0,
   fiveCaptureBonus: 4.4,
   ribbonCaptureBonus: 2.0,
-  junkPiMul: 4.8,
-  selfPiWindowMul: 1.5,
-  oppPiWindowMul: 1.2,
+  junkPiMul: 3.679603381675657,
+  selfPiWindowMul: 2.3277844490611104,
+  oppPiWindowMul: 1.7806350667132298,
   doublePiBonus: 5.0,
   doublePiNoMatchHoldPenalty: 4.2,
   doublePiMonthPairHoldPenalty: 2.8,
@@ -47,10 +47,10 @@ export const DEFAULT_PARAMS = {
   doublePiMonthAnchorHoldPenalty: 2.0,
   doublePiHoldRiskRelease: 8.5,
   doublePiHoldRiskReleaseMul: 0.45,
-  comboOpportunityMul: 4.2,
-  blockBase: 5.5,
-  blockUrgencyMul: 1.6,
-  blockThreatMul: 3.0,
+  comboOpportunityMul: 5.103301341324105,
+  blockBase: 6.893765969874818,
+  blockUrgencyMul: 1.4392001248555797,
+  blockThreatMul: 1.8404701559048615,
   blockNoMatchPenalty: 4.8,
   firstTurnPlanBonus: 6.5,
   knownMonthSafeBonus: 2.5,
@@ -69,13 +69,13 @@ export const DEFAULT_PARAMS = {
   bonusCardOppPiEmptyPenalty: 0.6,
 
   // risk
-  feedRiskNoMatchMul: 4.8,
-  feedRiskMatchMul: 1.1,
-  dangerNoMatchMul: 2.6,
-  dangerMatchMul: 0.8,
+  feedRiskNoMatchMul: 3.8138224112332004,
+  feedRiskMatchMul: 1.5641229988358645,
+  dangerNoMatchMul: 0.6561346056560479,
+  dangerMatchMul: 0.2625016967096827,
   releaseRiskFloor: 0.6,
-  releaseRiskMul: 8.0,
-  pukRiskMul: 3.5,
+  releaseRiskMul: 2.552031704261033,
+  pukRiskMul: 1.2036440115948506,
   pukOpportunityMul: 1.4,
 
   // choose-match
@@ -89,35 +89,35 @@ export const DEFAULT_PARAMS = {
   chooseMatchOppShakeMonthBonus: 1.05,
 
   // go model
-  goMinPi: 5,
-  goMinPiDesperate: 4,
-  goMinPiSecondTrailingDelta: 1,
+  goMinPi: 6,
+  goMinPiDesperate: 7,
+  goMinPiSecondTrailingDelta: 2,
   goHardThreatCut: 1.0,
   goHardThreatDeckCut: 7,
   goHardOppFiveCut: 7,
-  goHardOppScoreCut: 8,
+  goHardOppScoreCut: 9,
   goHardLateOneAwayCut: 70,
   goHardLateOneAwayDeckCut: 8,
   goHardGoCountCap: 3,
   goHardGoCountThreatCut: 0.72,
-  goUpsideScoreMul: 0.1,
-  goUpsidePiMul: 0.045,
-  goUpsideSelfJokboMul: 0.5,
+  goUpsideScoreMul: 0.13265527008132086,
+  goUpsidePiMul: 0.05925605015660167,
+  goUpsideSelfJokboMul: 0.44243820377938115,
   goUpsideOneAwayMul: 0.12,
-  goUpsideTrailBonus: 0.12,
-  goRiskPressureMul: 0.42,
-  goRiskOneAwayMul: 0.30,
-  goRiskOppJokboMul: 0.34,
-  goRiskOppOneAwayMul: 0.08,
+  goUpsideTrailBonus: 0.15,
+  goRiskPressureMul: 0.17826732852080118,
+  goRiskOneAwayMul: 0.01678201275303764,
+  goRiskOppJokboMul: 0.31040947392931106,
+  goRiskOppOneAwayMul: 0.05117633658380274,
   goRiskGoCountMul: 0.11,
   goRiskLateDeckBonus: 0.12,
-  stopLeadMul: 0.10,
-  stopCarryMul: 0.13,
-  stopTenBonus: 0.22,
-  goBaseThreshold: 0.10,
-  goThresholdLeadUp: 0.10,
-  goThresholdTrailDown: 0.03,
-  goThresholdPressureUp: 0.08,
+  stopLeadMul: 0.06,
+  stopCarryMul: 0.10,
+  stopTenBonus: 0.16,
+  goBaseThreshold: 0.030155494771391927,
+  goThresholdLeadUp: 0.0797009468794747,
+  goThresholdTrailDown: 0.1231700196104433,
+  goThresholdPressureUp: 0.12701873017352877,
   goSecondTrailBonus: 0.05,
   goRallyPiWindowBonus: 0.02,
   goRallySecondBonus: 0.01,
@@ -129,14 +129,36 @@ export const DEFAULT_PARAMS = {
   goSoftTrailHighPiMargin: 0.04,
   goSoftValueMargin: 0.02,
 
-  // rollout (2-ply)
+  // rollout (2-ply, selective)
   rolloutEnabled: 1,
   rolloutTopK: 3,
   rolloutMaxSteps: 28,
   rolloutSamples: 5,
-  rolloutCardWeight: 0.85,
-  rolloutGoWeight: 0.24,
-  rolloutGoDeltaCap: 0.4,
+  rolloutCardWeight: 1.2564898411883223,
+  rolloutGoWeight: 1.3904323579427342,
+  rolloutGoDeltaCap: 0.3,
+  rolloutSelectiveEnabled: 1,
+  rolloutCardScoreGap: 1.25,
+  rolloutCardThreatCut: 0.78,
+  rolloutGoMargin: 0.06,
+  rolloutGoThreatCut: 0.72,
+  rolloutGoOneAwayCut: 60,
+
+  // hard stop gate + lightweight go replacement signals
+  goHardSafeStopEnabled: 1,
+  goHardSafeStopMinScore: 7,
+  goHardSafeStopDeckCut: 7,
+  goHardSafeStopLeadMin: 2,
+  goLiteScoreDiffMul: 0.04,
+  goLiteThreatPenaltyMul: 0.05,
+  goLiteOneAwayPenaltyMul: 0.04,
+  goLiteLatePenalty: 0.015,
+  goLiteOppCanStopPenalty: 0.03,
+  goLiteSelfCanStopPenalty: 0.01,
+  goLiteSafeAttackBonus: 0.06,
+  goLiteSafeAttackThreatCap: 0.58,
+  goLiteSafeAttackOneAwayCap: 45,
+  goLiteSafeAttackDeckMin: 5,
 
   // bomb
   bombImmediateMul: 0.9,
@@ -148,17 +170,17 @@ export const DEFAULT_PARAMS = {
   bombDefenseThreshold: 5.0,
 
   // shaking
-  shakeImmediateMul: 1.4,
-  shakeComboMul: 1.1,
+  shakeImmediateMul: 0.7770168166124757,
+  shakeComboMul: 1.1244576604770598,
   shakeImpactBonus: 0.7,
   shakePiLineBonus: 0.45,
   shakeDirectGwangBonus: 0.45,
   shakeKnownLowBonus: 0.25,
   shakeKnownHighPenalty: 0.2,
-  shakeRiskMul: 0.55,
+  shakeRiskMul: 0.8136178904285073,
   shakeTrailingBonus: 0.22,
   shakeFirstPlanBonus: 0.28,
-  shakeThreshold: 0.7,
+  shakeThreshold: 0.7025090068640703,
   shakeLeadThresholdUp: 0.18,
   shakePressureThresholdUp: 0.15,
 
@@ -530,20 +552,35 @@ export function rankHandCardsV6(state, playerKey, deps, params = DEFAULT_PARAMS)
   ranked.sort((a, b) => b.score - a.score);
 
   if (safeNum(P.rolloutEnabled, 1) > 0 && typeof deps.rolloutCardValueV6 === "function") {
-    const topK = Math.max(1, Math.min(ranked.length, Math.floor(safeNum(P.rolloutTopK, 3))));
-    const baseline =
-      typeof deps.rolloutStateUtilityV6 === "function" ? safeNum(deps.rolloutStateUtilityV6(state, playerKey)) : 0;
-    for (let i = 0; i < topK; i += 1) {
-      const cand = ranked[i];
-      const rv = deps.rolloutCardValueV6(state, playerKey, cand.card?.id, {
-        maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 28)),
-        samples: Math.floor(safeNum(P.rolloutSamples, 5))
-      });
-      if (Number.isFinite(rv)) {
-        cand.score += (rv - baseline) * safeNum(P.rolloutCardWeight, 0.85);
+    const leadGap =
+      ranked.length >= 2 ? Math.abs(safeNum(ranked[0]?.score) - safeNum(ranked[1]?.score)) : Number.POSITIVE_INFINITY;
+    const selectiveOn = safeNum(P.rolloutSelectiveEnabled, 1) > 0;
+    const closeTop = leadGap <= safeNum(P.rolloutCardScoreGap, 1.25);
+    const highThreat =
+      safeNum(profile.pressure?.threat) >= safeNum(P.rolloutCardThreatCut, 0.78) ||
+      profile.phase === "late" ||
+      profile.phase === "end";
+    const shouldRollout = !selectiveOn || closeTop || highThreat;
+
+    if (shouldRollout) {
+      const baseTopK = Math.max(1, Math.floor(safeNum(P.rolloutTopK, 1)));
+      const topK = Math.max(1, Math.min(ranked.length, closeTop ? Math.max(2, baseTopK) : baseTopK));
+      const baseline =
+        typeof deps.rolloutStateUtilityV6 === "function"
+          ? safeNum(deps.rolloutStateUtilityV6(state, playerKey))
+          : 0;
+      for (let i = 0; i < topK; i += 1) {
+        const cand = ranked[i];
+        const rv = deps.rolloutCardValueV6(state, playerKey, cand.card?.id, {
+          maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 12)),
+          samples: Math.floor(safeNum(P.rolloutSamples, 2))
+        });
+        if (Number.isFinite(rv)) {
+          cand.score += (rv - baseline) * safeNum(P.rolloutCardWeight, 0.7);
+        }
       }
+      ranked.sort((a, b) => b.score - a.score);
     }
-    ranked.sort((a, b) => b.score - a.score);
   }
 
   return ranked;
@@ -625,6 +662,19 @@ export function shouldGoV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
   minPi = Math.max(3, minPi);
   if (selfPi < minPi) return false;
 
+  const selfCanStop = myScore >= safeNum(P.goHardSafeStopMinScore, 7);
+  const oppCanStop = oppScore >= safeNum(P.goHardSafeStopMinScore, 7);
+  if (safeNum(P.goHardSafeStopEnabled, 1) > 0 && !desperateGo) {
+    if (
+      selfCanStop &&
+      !oppCanStop &&
+      pressure.deckCount <= safeNum(P.goHardSafeStopDeckCut, 10) &&
+      myScore >= oppScore + safeNum(P.goHardSafeStopLeadMin, 1)
+    ) {
+      return false;
+    }
+  }
+
   if (!desperateGo) {
     if (oppScore >= P.goHardOppScoreCut && myScore <= oppScore + 1) return false;
     if (selfFive === 0 && oppFive >= P.goHardOppFiveCut) return false;
@@ -675,19 +725,38 @@ export function shouldGoV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
   if (profile.trailing) goValue += P.goRallyTrailBonus;
   if (pressure.deckCount <= 6) goValue += P.goRallyEndDeckBonus;
 
+  // Lightweight replacement signals to preserve GO quality with reduced rollout.
+  const scoreDiffNorm = clamp((myScore - oppScore) / 10, -1, 1);
+  goValue += scoreDiffNorm * safeNum(P.goLiteScoreDiffMul, 0.04);
+  goValue -= pressure.threat * safeNum(P.goLiteThreatPenaltyMul, 0.08);
+  goValue -= oneAwayProbNorm * safeNum(P.goLiteOneAwayPenaltyMul, 0.06);
+  if (pressure.deckCount <= P.phaseLateDeck) goValue -= safeNum(P.goLiteLatePenalty, 0.03);
+  if (oppCanStop) goValue -= safeNum(P.goLiteOppCanStopPenalty, 0.05);
+  if (selfCanStop && !profile.trailing) goValue -= safeNum(P.goLiteSelfCanStopPenalty, 0.04);
+  if (
+    selfCanStop &&
+    !oppCanStop &&
+    pressure.threat <= safeNum(P.goLiteSafeAttackThreatCap, 0.58) &&
+    pressure.oneAwayProb <= safeNum(P.goLiteSafeAttackOneAwayCap, 45) &&
+    pressure.deckCount >= safeNum(P.goLiteSafeAttackDeckMin, 5)
+  ) {
+    goValue += safeNum(P.goLiteSafeAttackBonus, 0.06);
+  }
+
   if (safeNum(P.rolloutEnabled, 1) > 0 && typeof deps.rolloutGoStopValueV6 === "function") {
+    // GO/STOP rollout is always evaluated to preserve V6 identity.
     const goRv = deps.rolloutGoStopValueV6(state, playerKey, true, {
-      maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 28)),
+      maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 8)),
       samples: Math.floor(safeNum(P.rolloutSamples, 5))
     });
     const stopRv = deps.rolloutGoStopValueV6(state, playerKey, false, {
-      maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 28)),
+      maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 8)),
       samples: Math.floor(safeNum(P.rolloutSamples, 5))
     });
     if (Number.isFinite(goRv) && Number.isFinite(stopRv)) {
-      const deltaCap = Math.max(0.05, safeNum(P.rolloutGoDeltaCap, 0.4));
+      const deltaCap = Math.max(0.05, safeNum(P.rolloutGoDeltaCap, 0.3));
       const rolloutDelta = clamp(goRv - stopRv, -deltaCap, deltaCap);
-      goValue += rolloutDelta * safeNum(P.rolloutGoWeight, 0.24);
+      goValue += rolloutDelta * safeNum(P.rolloutGoWeight, 0.18);
     }
   }
 

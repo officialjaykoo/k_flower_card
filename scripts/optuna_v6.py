@@ -35,9 +35,11 @@ SEED = "optuna-v6"
 MAX_STEPS = 600
 TRIAL_TIMEOUT_SEC = 600
 DUEL_SCRIPT = "scripts/model_duel_worker.mjs"
-WIN_RATE_WEIGHT = 0.65
-GOLD_DELTA_WEIGHT = 0.35
+WIN_RATE_WEIGHT = 0.35
+GOLD_DELTA_WEIGHT = 0.65
 GOLD_DELTA_SCALE = 500.0
+GOLD_DELTA_MIN_REQUIRED = 1.0
+GOLD_DELTA_FAIL_SCORE = -2.0
 
 FLOAT_PARAMS = {
     # profile and phase
@@ -103,6 +105,19 @@ INT_PARAMS = {
 }
 
 
+def sanitize_file_part(text):
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return "run"
+    out = []
+    for ch in raw:
+        if ch.isalnum() or ch in "._-":
+            out.append(ch)
+        else:
+            out.append("_")
+    return "".join(out).strip("_") or "run"
+
+
 def suggest_params(trial):
     params = {}
     for name, (lo, hi) in FLOAT_PARAMS.items():
@@ -124,6 +139,11 @@ def run_duel(params, seed_suffix="", runtime=None):
     env = os.environ.copy()
     env["HEURISTIC_V6_PARAMS"] = json.dumps(params)
     seed = f"{runtime.get('seed', SEED)}|{seed_suffix}" if seed_suffix else runtime.get("seed", SEED)
+    result_dir = runtime.get("result_dir", os.path.join("logs", "optuna"))
+    os.makedirs(result_dir, exist_ok=True)
+    seed_tag = sanitize_file_part(runtime.get("seed", SEED))
+    trial_tag = sanitize_file_part(seed_suffix or "base")
+    result_out = os.path.join(result_dir, f"{seed_tag}_{trial_tag}_result.json")
     cmd = [
         "node",
         DUEL_SCRIPT,
@@ -141,6 +161,8 @@ def run_duel(params, seed_suffix="", runtime=None):
         "alternate",
         "--continuous-series",
         "1",
+        "--result-out",
+        result_out,
     ]
     try:
         result = subprocess.run(
@@ -168,7 +190,11 @@ def objective(trial, runtime):
     win_rate = float(duel.get("win_rate_a", 0))
     gold_delta = float(duel.get("mean_gold_delta_a", 0))
     gold_norm = max(-1.0, min(1.0, gold_delta / GOLD_DELTA_SCALE))
-    score = win_rate * WIN_RATE_WEIGHT + gold_norm * GOLD_DELTA_WEIGHT
+    if gold_delta <= GOLD_DELTA_MIN_REQUIRED:
+        # Hard requirement: non-positive (or near-zero) gold is unacceptable.
+        score = GOLD_DELTA_FAIL_SCORE + win_rate * 0.05 + gold_norm * 0.05
+    else:
+        score = win_rate * WIN_RATE_WEIGHT + gold_norm * GOLD_DELTA_WEIGHT
 
     print(f"  [trial {trial.number:3d}] win={win_rate:.4f}  gold={gold_delta:+.1f}  score={score:.4f}", flush=True)
     trial.set_user_attr("win_rate", win_rate)
@@ -184,7 +210,8 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--db", type=str, default="")
     parser.add_argument("--study", type=str, default="v6_tuning")
-    parser.add_argument("--output", type=str, default="logs/optuna_v6_best.json")
+    parser.add_argument("--output", type=str, default="logs/optuna/optuna_v6_best.json")
+    parser.add_argument("--result-dir", type=str, default="")
     parser.add_argument("--timeout", type=int, default=0)
     parser.add_argument("--seed", type=str, default=SEED)
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS)
@@ -207,7 +234,10 @@ def main():
         "seed": args.seed or SEED,
         "max_steps": max(20, args.max_steps),
         "trial_timeout_sec": max(60, args.trial_timeout),
+        "result_dir": args.result_dir
+        or os.path.join("logs", "optuna", sanitize_file_part(args.study or "v6_tuning")),
     }
+    os.makedirs(runtime["result_dir"], exist_ok=True)
 
     sampler = optuna.samplers.TPESampler(
         n_startup_trials=max(1, args.startup_trials),
@@ -227,6 +257,7 @@ def main():
     print(f"  trials={args.trials}  opponent={runtime['opponent_policy']}  games/trial={GAMES}")
     print(f"  params={len(FLOAT_PARAMS) + len(INT_PARAMS)}  seed={runtime['seed']}")
     print(f"  db={args.db or 'memory'}")
+    print(f"  trial_result_dir={runtime['result_dir']}")
     print(f"  objective=win_rate*{WIN_RATE_WEIGHT} + gold_delta*{GOLD_DELTA_WEIGHT}\n")
 
     study.optimize(

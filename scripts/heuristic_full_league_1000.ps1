@@ -422,9 +422,9 @@ $displayStandings = $standings | Select-Object `
   @{ Name = "L"; Expression = { $_.losses } },
   @{ Name = "D"; Expression = { $_.draws } },
   @{ Name = "W%"; Expression = { "{0:N1}%" -f $_.win_rate_pct } },
-  @{ Name = "B_INF"; Expression = { $_.bankrupt_inflicted } },
-  @{ Name = "B_SUFF"; Expression = { $_.bankrupt_suffered } },
-  @{ Name = "G_D-TA"; Expression = { "{0:N0}" -f ([Math]::Round($_.mean_gold_delta, 0)) } },
+  @{ Name = "BI"; Expression = { $_.bankrupt_inflicted } },
+  @{ Name = "BS"; Expression = { $_.bankrupt_suffered } },
+  @{ Name = "G_DT"; Expression = { "{0:N0}" -f ([Math]::Round($_.mean_gold_delta, 0)) } },
   @{ Name = "GO"; Expression = { $_.go_count } },
   @{ Name = "GO_F"; Expression = { $_.go_fail_count } },
   @{ Name = "GO_F%"; Expression = { "{0:N1}%" -f $_.go_fail_rate_pct } }

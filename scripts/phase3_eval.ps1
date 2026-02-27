@@ -10,10 +10,10 @@ param(
 )
 
 $runtimeConfigPath = "scripts/configs/runtime_phase3.json"
-$outputDir = "logs/neat_phase3_seed$Seed"
+$outputDir = "logs/NEAT/neat_phase3_seed$Seed"
 $gateStatePath = Join-Path $outputDir "gate_state.json"
 $genomePath = Join-Path $outputDir "models/winner_genome.json"
-$opponentGenomePath = "logs/neat_phase2_seed$Seed/models/winner_genome.json"
+$opponentGenomePath = "logs/NEAT/neat_phase2_seed$Seed/models/winner_genome.json"
 
 if (-not (Test-Path $runtimeConfigPath)) {
   throw "runtime config not found: $runtimeConfigPath"

@@ -59,7 +59,7 @@ function Resolve-EvalGateRule {
 }
 
 $runtimeConfigPath = "scripts/configs/runtime_phase$Phase.json"
-$outputDir = "logs/neat_phase${Phase}_seed$Seed"
+$outputDir = "logs/NEAT/neat_phase${Phase}_seed$Seed"
 $gateStatePath = Join-Path $outputDir "gate_state.json"
 $genomePath = Join-Path $outputDir "models/winner_genome.json"
 

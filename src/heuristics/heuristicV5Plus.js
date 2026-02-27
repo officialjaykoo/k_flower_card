@@ -90,11 +90,12 @@ export const DEFAULT_PARAMS = {
 
   // ── shouldGo (V5 gate + V5Plus first-mover guard) ──
   // Base gate (close to V5)
+  goMinPi: 8,
   goOppOneAwayGate: 100,
   goScoreDiffBonus: 0.055,
   goDeckLowBonus: 0.08,
   goUnseeHighPiPenalty: 0.08,
-  goBaseThreshold: -0.10,
+  goBaseThreshold: -0.08,
   goOppScoreGateHigh: 6,
   goOppScoreGateLow: 4,
   goBigLeadScoreDiff: 4,
@@ -123,7 +124,7 @@ export const DEFAULT_PARAMS = {
   goRiskOneAwayMul: 0.28,
   goRiskOppJokboMul: 0.30,
   goRiskOppOneAwayMul: 0.07,
-  goRiskGoCountMul: 0.10,
+  goRiskGoCountMul: 0.06,
   goRiskLateDeckBonus: 0.08,
   goRiskSecondMoverMul: 0.12,
   stopLeadMul: 0.09,
@@ -132,10 +133,7 @@ export const DEFAULT_PARAMS = {
   goUtilityThreshold: 0.10,
 
   // Additional GO suppression after V5 gate pass (first mover only)
-  plusGoCountCap: 2,
-  plusOppJokboCapThresh: 0.35,
-  plusLateTrailJokboThresh: 0.30,
-  plusLateOneAwayGate: 45,
+  plusFirstGoMinDeck: 7,
 
   // ── shouldBomb / selectBombMonth ──
   bombMinPiAdvantage: 1,
@@ -494,6 +492,7 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
 
   const ctx = deps.analyzeGameContext(state, playerKey);
   const myScore = safeNum(ctx.myScore);
+  const selfPi = safeNum(ctx.selfPi, deps.capturedCountByCategory(state.players?.[playerKey], "junk"));
   const tr = _oppOneAway(state, playerKey, deps);
   const late = tr.deckCount <= P.lateDeckMax;
   const sec = isSecondMover(state, playerKey);
@@ -519,6 +518,7 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   }
 
   const diff = myScore - oppScoreRisk;
+  if (selfPi < safeNum(P.goMinPi, 7)) return false;
   if (unseenHi >= 2 && oppPiRisk >= 7 && !certain) return false;
   if (tr.oppOneAwayProb >= safeNum(P.goOppOneAwayGate, 100)) return false;
 
@@ -531,19 +531,9 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   }
 
   const plusFilter = () => {
-    if (sec || certain) return true;
+    if (certain) return true;
     const goCount = safeNum(state.players?.[playerKey]?.goCount, 0);
-    const oppJokbo = deps.checkOpponentJokboProgress(state, playerKey);
-    const oppJokboThreat = safeNum(oppJokbo?.threat);
-    if (goCount >= safeNum(P.plusGoCountCap, 2) && oppJokboThreat >= safeNum(P.plusOppJokboCapThresh, 0.35)) {
-      return false;
-    }
-    if (late && diff <= 0 && tr.jokboThreat >= safeNum(P.plusLateTrailJokboThresh, 0.30)) {
-      return false;
-    }
-    if (late && tr.oppOneAwayProb >= safeNum(P.plusLateOneAwayGate, 45)) {
-      return false;
-    }
+    if (goCount === 0 && tr.deckCount <= safeNum(P.plusFirstGoMinDeck, 7)) return false;
     return true;
   };
 

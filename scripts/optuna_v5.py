@@ -77,6 +77,19 @@ INT_PARAMS = {
 }
 
 # ── 보조 함수 ─────────────────────────────────────────────────────
+def sanitize_file_part(text):
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return "run"
+    out = []
+    for ch in raw:
+        if ch.isalnum() or ch in "._-":
+            out.append(ch)
+        else:
+            out.append("_")
+    return "".join(out).strip("_") or "run"
+
+
 def suggest_params(trial):
     p = {}
     for name, (lo, hi) in FLOAT_PARAMS.items():
@@ -95,6 +108,11 @@ def run_duel(params, seed_suffix="", rt=None):
     env = os.environ.copy()
     env["HEURISTIC_V5_PARAMS"] = json.dumps(params)
     seed = f"{rt.get('seed', SEED)}|{seed_suffix}" if seed_suffix else rt.get('seed', SEED)
+    result_dir = rt.get("result_dir", os.path.join("logs", "optuna"))
+    os.makedirs(result_dir, exist_ok=True)
+    seed_tag = sanitize_file_part(rt.get("seed", SEED))
+    trial_tag = sanitize_file_part(seed_suffix or "base")
+    result_out = os.path.join(result_dir, f"{seed_tag}_{trial_tag}_result.json")
     cmd = [
         "node", DUEL_SCRIPT,
         "--human", "H-V5",
@@ -104,6 +122,7 @@ def run_duel(params, seed_suffix="", rt=None):
         "--max-steps", str(rt.get("max_steps", MAX_STEPS)),
         "--first-turn-policy", "alternate",
         "--continuous-series", "1",
+        "--result-out", result_out,
     ]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
@@ -141,7 +160,8 @@ def parse_args():
     p.add_argument("--workers",         type=int, default=1)
     p.add_argument("--db",              type=str, default="")
     p.add_argument("--study",           type=str, default="v5_tuning")
-    p.add_argument("--output",          type=str, default="logs/optuna_v5_best.json")
+    p.add_argument("--output",          type=str, default="logs/optuna/optuna_v5_best.json")
+    p.add_argument("--result-dir",      type=str, default="")
     p.add_argument("--timeout",         type=int, default=0)
     p.add_argument("--seed",            type=str, default=SEED)
     p.add_argument("--max-steps",       type=int, default=MAX_STEPS)
@@ -161,7 +181,9 @@ def main():
         "seed":              args.seed or SEED,
         "max_steps":         max(20, args.max_steps),
         "trial_timeout_sec": max(60, args.trial_timeout),
+        "result_dir":        args.result_dir or os.path.join("logs", "optuna", sanitize_file_part(args.study or "v5_tuning")),
     }
+    os.makedirs(rt["result_dir"], exist_ok=True)
     sampler = optuna.samplers.TPESampler(
         n_startup_trials=max(1, args.startup_trials), multivariate=True, seed=42,
     )
@@ -174,6 +196,7 @@ def main():
     print(f"  trials={args.trials}  opponent={rt['opponent_policy']}  games/trial={GAMES}")
     print(f"  params={len(FLOAT_PARAMS)+len(INT_PARAMS)}개  seed={rt['seed']}")
     print(f"  DB: {args.db or '메모리 (비영속)'}")
+    print(f"  trial_result_dir={rt['result_dir']}")
     print(f"  목적: win_rate×{WIN_RATE_WEIGHT} + gold_delta×{GOLD_DELTA_WEIGHT}\n")
 
     study.optimize(
