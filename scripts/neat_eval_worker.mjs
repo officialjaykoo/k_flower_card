@@ -33,7 +33,7 @@ import { aiPlay } from "../src/ai/aiPlay.js";
 // =============================================================================
 // Section 1. Opponent Tuning + CLI
 // =============================================================================
-const FAST_V6_OPPONENT_POLICY = "heuristic_v6";
+const FAST_V6_OPPONENT_POLICY = "h-v6";
 const FAST_V6_HEURISTIC_PARAMS = Object.freeze({
   rolloutTopK: 1,
   rolloutSamples: 2,
@@ -64,7 +64,7 @@ function parseArgs(argv) {
     games: 3,
     seed: "neat-python",
     maxSteps: 600,
-    opponentPolicy: "heuristic_v4",
+    opponentPolicy: "H-V4",
     firstTurnPolicy: "alternate",
     fixedFirstTurn: "human",
     continuousSeries: true,
@@ -95,7 +95,7 @@ function parseArgs(argv) {
     else if (key === "--games") out.games = Math.max(1, Number(value || 0));
     else if (key === "--seed") out.seed = String(value || "neat-python");
     else if (key === "--max-steps") out.maxSteps = Math.max(20, Number(value || 600));
-    else if (key === "--opponent-policy") out.opponentPolicy = String(value || "heuristic_v4").trim();
+    else if (key === "--opponent-policy") out.opponentPolicy = String(value || "H-V4").trim();
     else if (key === "--first-turn-policy") out.firstTurnPolicy = String(value || "alternate").trim().toLowerCase();
     else if (key === "--fixed-first-turn") out.fixedFirstTurn = String(value || "human").trim().toLowerCase();
     else if (key === "--switch-seats") {
@@ -526,7 +526,7 @@ function heuristicCandidateForDecision(state, actor, decisionType, candidates, h
   if (!Array.isArray(candidates) || !candidates.length) return null;
   const nextByHeuristic = aiPlay(state, actor, {
     source: "heuristic",
-    heuristicPolicy: heuristicPolicy || "heuristic_v4",
+    heuristicPolicy: heuristicPolicy || "H-V4",
   });
   if (!nextByHeuristic || stateProgressKey(nextByHeuristic) === stateProgressKey(state)) {
     return null;
@@ -817,7 +817,7 @@ function playSingleRound(
         if (!disableImitationReference) {
           const imitationRefPolicy =
             normalizePolicyName(opponentPolicy) === "genome"
-              ? "heuristic_v4"
+              ? "H-V4"
               : opponentPolicy;
           const refCandidate = heuristicCandidateForDecision(
             state,

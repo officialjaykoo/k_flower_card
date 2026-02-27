@@ -1,14 +1,14 @@
 ﻿/* ============================================================================
  * 1) Bot/Model policy identifiers
  * ========================================================================== */
-export const POLICY_HEURISTIC_V3 = "heuristic_v3";
-export const POLICY_HEURISTIC_V4 = "heuristic_v4";
-export const POLICY_HEURISTIC_V5 = "heuristic_v5";
-export const POLICY_HEURISTIC_V6 = "heuristic_v6";
-export const POLICY_HEURISTIC_V7 = "heuristic_v7_gold_digger";
-export const POLICY_HEURISTIC_V5PLUS = "heuristic_v5plus";
-export const POLICY_NEAT_PHASE2_SEED9 = "neat_phase2_seed9";
-export const DEFAULT_BOT_POLICY = POLICY_HEURISTIC_V3;
+export const POLICY_HEURISTIC_V3 = "H-V3";
+export const POLICY_HEURISTIC_V4 = "H-V4";
+export const POLICY_HEURISTIC_V5 = "H-V5";
+export const POLICY_HEURISTIC_V6 = "H-V6";
+export const POLICY_HEURISTIC_V7 = "H-V7";
+export const POLICY_HEURISTIC_V5PLUS = "H-V5P";
+export const POLICY_NEAT_PHASE2_SEED9 = "N-P2-Seed9";
+export const DEFAULT_BOT_POLICY = POLICY_HEURISTIC_V5;
 
 /* ============================================================================
  * 2) Bot policy whitelist used by runtime validation
@@ -64,15 +64,24 @@ export const MODEL_CATALOG = Object.freeze({
 });
 
 const BOT_POLICY_SET = new Set(BOT_POLICIES);
+const BOT_POLICY_LOOKUP = new Map(
+  BOT_POLICIES.map((policy) => [String(policy).trim().toLowerCase(), policy])
+);
 
 /* ============================================================================
  * 4) Normalization + UI helpers
  * ========================================================================== */
+export function resolveBotPolicy(policy) {
+  const raw = String(policy || "").trim();
+  if (!raw) return null;
+  const normalized = raw.toLowerCase();
+  if (BOT_POLICY_LOOKUP.has(normalized)) return BOT_POLICY_LOOKUP.get(normalized);
+  return null;
+}
+
 export function normalizeBotPolicy(policy) {
-  const normalized = String(policy || "")
-    .trim()
-    .toLowerCase();
-  if (BOT_POLICY_SET.has(normalized)) return normalized;
+  const resolved = resolveBotPolicy(policy);
+  if (resolved && BOT_POLICY_SET.has(resolved)) return resolved;
   return DEFAULT_BOT_POLICY;
 }
 

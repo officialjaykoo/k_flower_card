@@ -11,7 +11,7 @@
 scripts/optuna_v7.py - V7 Optuna tuner
 
 Target:
-  heuristic_v7_gold_digger (A) vs heuristic_v5 (B)
+  H-V7 (A) vs H-V5 (B)
 
 Notes:
   - This repository locks test duels to exactly 1000 games per trial.
@@ -35,8 +35,8 @@ except ImportError:
     print("optuna not installed. run: pip install optuna")
     sys.exit(1)
 
-SELF_POLICY = "heuristic_v7_gold_digger"
-OPPONENT_POLICY = "heuristic_v5"
+SELF_POLICY = "H-V7"
+OPPONENT_POLICY = "H-V5"
 DUEL_SCRIPT = "scripts/model_duel_worker.mjs"
 
 GAMES = 1000
@@ -86,9 +86,9 @@ def run_duel(params, seed_suffix="", runtime=None):
     cmd = [
         "node",
         DUEL_SCRIPT,
-        "--policy-a",
+        "--human",
         SELF_POLICY,
-        "--policy-b",
+        "--ai",
         runtime.get("opponent_policy", OPPONENT_POLICY),
         "--games",
         str(GAMES),

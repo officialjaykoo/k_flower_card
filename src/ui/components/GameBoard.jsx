@@ -5,6 +5,7 @@ import { openCardGuidePopup, openGameLogPopup, openRulesPopup } from "./gameBoar
 import { POINT_GOLD_UNIT } from "../../engine/economy.js";
 import { isGukjinCard } from "../../engine/scoring.js";
 import { buildDeck, buildCardUiAssetPath, DEFAULT_CARD_THEME } from "../../cards.js";
+import { DEFAULT_BOT_POLICY } from "../../ai/policies.js";
 
 /* ============================================================================
  * Main board view
@@ -419,7 +420,7 @@ export default function GameBoard({
         <div className="status-name">
           {isAiSlot ? (
             <select
-              value={ui.modelPicks?.[playerKey] || "heuristic_v3"}
+              value={ui.modelPicks?.[playerKey] || DEFAULT_BOT_POLICY}
               onChange={(e) =>
                 setUi((u) => ({
                   ...u,

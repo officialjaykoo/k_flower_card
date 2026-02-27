@@ -46,7 +46,7 @@ DEFAULT_RUNTIME = {
     "games_per_genome": 40,
     "eval_timeout_sec": 360,
     "max_eval_steps": 600,
-    "opponent_policy": "heuristic_v4",
+    "opponent_policy": "H-V4",
     "opponent_genome": "",
     "switch_seats": True,
     "checkpoint_every": 50,

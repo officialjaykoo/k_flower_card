@@ -89,36 +89,45 @@ export const DEFAULT_PARAMS = {
   chooseMatchOppShakeMonthBonus: 1.05,
 
   // go model
-  goMinPi: 4,
+  goMinPi: 5,
   goMinPiDesperate: 4,
-  goMinPiSecondTrailingDelta: 2,
-  goHardThreatCut: 1.1,
-  goHardThreatDeckCut: 5,
-  goHardOppFiveCut: 8,
-  goHardOppScoreCut: 9,
+  goMinPiSecondTrailingDelta: 1,
+  goHardThreatCut: 1.0,
+  goHardThreatDeckCut: 7,
+  goHardOppFiveCut: 7,
+  goHardOppScoreCut: 8,
+  goHardLateOneAwayCut: 70,
+  goHardLateOneAwayDeckCut: 8,
+  goHardGoCountCap: 3,
+  goHardGoCountThreatCut: 0.72,
   goUpsideScoreMul: 0.1,
   goUpsidePiMul: 0.045,
   goUpsideSelfJokboMul: 0.5,
   goUpsideOneAwayMul: 0.12,
   goUpsideTrailBonus: 0.12,
-  goRiskPressureMul: 0.32,
-  goRiskOneAwayMul: 0.24,
-  goRiskOppJokboMul: 0.26,
-  goRiskOppOneAwayMul: 0.055,
-  goRiskGoCountMul: 0.04,
-  goRiskLateDeckBonus: 0.06,
-  stopLeadMul: 0.07,
-  stopCarryMul: 0.08,
-  stopTenBonus: 0.14,
-  goBaseThreshold: -0.1,
-  goThresholdLeadUp: 0.05,
-  goThresholdTrailDown: 0.08,
-  goThresholdPressureUp: 0.02,
-  goSecondTrailBonus: 0.11,
-  goRallyPiWindowBonus: 0.05,
-  goRallySecondBonus: 0.04,
-  goRallyTrailBonus: 0.06,
-  goRallyEndDeckBonus: 0.03,
+  goRiskPressureMul: 0.42,
+  goRiskOneAwayMul: 0.30,
+  goRiskOppJokboMul: 0.34,
+  goRiskOppOneAwayMul: 0.08,
+  goRiskGoCountMul: 0.11,
+  goRiskLateDeckBonus: 0.12,
+  stopLeadMul: 0.10,
+  stopCarryMul: 0.13,
+  stopTenBonus: 0.22,
+  goBaseThreshold: 0.10,
+  goThresholdLeadUp: 0.10,
+  goThresholdTrailDown: 0.03,
+  goThresholdPressureUp: 0.08,
+  goSecondTrailBonus: 0.05,
+  goRallyPiWindowBonus: 0.02,
+  goRallySecondBonus: 0.01,
+  goRallyTrailBonus: 0.02,
+  goRallyEndDeckBonus: 0.00,
+  goSoftHighPiThreatCap: 0.90,
+  goSoftHighPiOneAwayCap: 66,
+  goSoftHighPiMargin: 0.06,
+  goSoftTrailHighPiMargin: 0.04,
+  goSoftValueMargin: 0.02,
 
   // rollout (2-ply)
   rolloutEnabled: 1,
@@ -620,6 +629,10 @@ export function shouldGoV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
     if (oppScore >= P.goHardOppScoreCut && myScore <= oppScore + 1) return false;
     if (selfFive === 0 && oppFive >= P.goHardOppFiveCut) return false;
     if (pressure.threat >= P.goHardThreatCut && pressure.deckCount <= P.goHardThreatDeckCut) return false;
+    if (pressure.oneAwayProb >= P.goHardLateOneAwayCut && pressure.deckCount <= P.goHardLateOneAwayDeckCut) {
+      return false;
+    }
+    if (goCount >= P.goHardGoCountCap && pressure.threat >= P.goHardGoCountThreatCut) return false;
   }
 
   const selfJokbo = deps.estimateJokboExpectedPotential?.(state, playerKey, opp) || { total: 0, oneAwayCount: 0 };
@@ -677,10 +690,28 @@ export function shouldGoV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
       goValue += rolloutDelta * safeNum(P.rolloutGoWeight, 0.24);
     }
   }
-  if (selfPi >= 9 && pressure.threat < 1.15 && pressure.oneAwayProb < 80) return true;
-  if (profile.trailing && selfPi >= 8 && pressure.threat < 1.0 && pressure.oneAwayProb < 72) return true;
-  if (goValue >= threshold - 0.02 && selfPi >= 8 && pressure.threat < 0.95) return true;
-  return goValue >= threshold;
+
+  if (goValue < threshold) return false;
+
+  if (selfPi >= 9) {
+    if (
+      pressure.threat >= safeNum(P.goSoftHighPiThreatCap, 0.90) ||
+      pressure.oneAwayProb >= safeNum(P.goSoftHighPiOneAwayCap, 66)
+    ) {
+      return false;
+    }
+    return goValue >= threshold + safeNum(P.goSoftHighPiMargin, 0.06);
+  }
+
+  if (profile.trailing && selfPi >= 8 && pressure.threat < 1.0 && pressure.oneAwayProb < 72) {
+    return goValue >= threshold + safeNum(P.goSoftTrailHighPiMargin, 0.04);
+  }
+
+  if (selfPi >= 8 && pressure.threat < 0.95) {
+    return goValue >= threshold + safeNum(P.goSoftValueMargin, 0.02);
+  }
+
+  return true;
 }
 
 /* Bomb month picker + bomb gate */

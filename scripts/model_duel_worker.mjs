@@ -17,10 +17,10 @@
   chooseGukjinMode,
 } from "../src/engine/index.js";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { getActionPlayerKey } from "../src/engine/runner.js";
 import { aiPlay } from "../src/ai/aiPlay.js";
-import { BOT_POLICIES, normalizeBotPolicy } from "../src/ai/policies.js";
+import { resolveBotPolicy } from "../src/ai/policies.js";
 
 // Pipeline Stage: 3/3 (neat_train.py -> neat_eval_worker.mjs -> model_duel_worker.mjs)
 // Quick Read Map (top-down):
@@ -44,6 +44,7 @@ function parseArgs(argv) {
     firstTurnPolicy: "alternate",
     fixedFirstTurn: "human",
     continuousSeries: true,
+    stdoutFormat: "text",
     kiboDetail: "none",
     kiboOut: "",
     resultOut: "",
@@ -64,8 +65,8 @@ function parseArgs(argv) {
       value = String(args.shift() || "");
     }
 
-    if (key === "--human") out.humanSpecRaw = String(value || "").trim().toLowerCase();
-    else if (key === "--ai") out.aiSpecRaw = String(value || "").trim().toLowerCase();
+    if (key === "--human") out.humanSpecRaw = String(value || "").trim();
+    else if (key === "--ai") out.aiSpecRaw = String(value || "").trim();
     else if (key === "--policy-a" || key === "--policy-b") {
       throw new Error(`deprecated option: ${key} (use --human and --ai)`);
     }
@@ -75,6 +76,7 @@ function parseArgs(argv) {
     else if (key === "--first-turn-policy") out.firstTurnPolicy = String(value || "alternate").trim().toLowerCase();
     else if (key === "--fixed-first-turn") out.fixedFirstTurn = String(value || "human").trim().toLowerCase();
     else if (key === "--continuous-series") out.continuousSeries = parseContinuousSeriesValue(value);
+    else if (key === "--stdout-format") out.stdoutFormat = String(value || "text").trim().toLowerCase();
     else if (key === "--kibo-detail") out.kiboDetail = String(value || "none").trim().toLowerCase();
     else if (key === "--kibo-out") out.kiboOut = String(value || "").trim();
     else if (key === "--result-out") out.resultOut = String(value || "").trim();
@@ -101,6 +103,9 @@ function parseArgs(argv) {
   }
   if (out.datasetActor !== "all" && out.datasetActor !== "human" && out.datasetActor !== "ai") {
     throw new Error(`invalid --dataset-actor: ${out.datasetActor} (allowed: all, human, ai)`);
+  }
+  if (out.stdoutFormat !== "text" && out.stdoutFormat !== "json") {
+    throw new Error(`invalid --stdout-format: ${out.stdoutFormat} (allowed: text, json)`);
   }
 
   return out;
@@ -130,15 +135,16 @@ function dateTag() {
 }
 
 function resolvePlayerSpec(rawSpec, sideLabel) {
-  const token = String(rawSpec || "").trim().toLowerCase();
+  const token = String(rawSpec || "").trim();
   if (!token) throw new Error(`empty player spec: ${sideLabel}`);
 
-  if (BOT_POLICIES.includes(token)) {
+  const resolvedPolicy = resolveBotPolicy(token);
+  if (resolvedPolicy) {
     return {
       input: token,
       kind: "heuristic",
-      key: normalizeBotPolicy(token),
-      label: normalizeBotPolicy(token),
+      key: resolvedPolicy,
+      label: resolvedPolicy,
       model: null,
       modelPath: null,
       phase: null,
@@ -182,7 +188,7 @@ function resolvePlayerSpec(rawSpec, sideLabel) {
 
 function buildAutoOutputDir(humanLabel, aiLabel) {
   const duelKey = `${sanitizeFilePart(humanLabel)}_vs_${sanitizeFilePart(aiLabel)}_${dateTag()}`;
-  const outDir = resolve(join("logs", "model_duel", duelKey));
+  const outDir = join("logs", "model_duel", duelKey);
   mkdirSync(outDir, { recursive: true });
   return outDir;
 }
@@ -190,6 +196,14 @@ function buildAutoOutputDir(humanLabel, aiLabel) {
 function buildAutoArtifactPath(outDir, seed, suffix) {
   const stem = sanitizeFilePart(seed) || "model-duel";
   return join(outDir, `${stem}_${suffix}`);
+}
+
+function toReportPath(pathValue) {
+  const raw = String(pathValue || "").trim();
+  if (!raw) return null;
+  const rel = relative(process.cwd(), resolve(raw));
+  const normalized = String(rel || raw).replace(/\\/g, "/");
+  return normalized || null;
 }
 
 // =============================================================================
@@ -839,6 +853,10 @@ function buildSeatSplitSummary(firstRecord, secondRecord) {
 }
 
 function buildConsoleSummary(report) {
+  const seatAFirst = report?.seat_split_a?.when_first || {};
+  const seatASecond = report?.seat_split_a?.when_second || {};
+  const seatBFirst = report?.seat_split_b?.when_first || {};
+  const seatBSecond = report?.seat_split_b?.when_second || {};
   return {
     games: Number(report?.games || 0),
     human: String(report?.human || ""),
@@ -847,10 +865,6 @@ function buildConsoleSummary(report) {
     fixed_first_turn: report?.fixed_first_turn ?? null,
     continuous_series: !!report?.continuous_series,
     kibo_detail: String(report?.kibo_detail || "none"),
-    result_out: report?.result_out || null,
-    kibo_out: report?.kibo_out || null,
-    dataset_out: report?.dataset_out || null,
-    dataset_actor: String(report?.dataset_actor || "all"),
     wins_a: Number(report?.wins_a || 0),
     losses_a: Number(report?.losses_a || 0),
     wins_b: Number(report?.wins_b || 0),
@@ -859,6 +873,26 @@ function buildConsoleSummary(report) {
     win_rate_a: Number(report?.win_rate_a || 0),
     win_rate_b: Number(report?.win_rate_b || 0),
     draw_rate: Number(report?.draw_rate || 0),
+    seat_split_a: {
+      when_first: {
+        win_rate: Number(seatAFirst.win_rate || 0),
+        mean_gold_delta: Number(seatAFirst.mean_gold_delta || 0),
+      },
+      when_second: {
+        win_rate: Number(seatASecond.win_rate || 0),
+        mean_gold_delta: Number(seatASecond.mean_gold_delta || 0),
+      },
+    },
+    seat_split_b: {
+      when_first: {
+        win_rate: Number(seatBFirst.win_rate || 0),
+        mean_gold_delta: Number(seatBFirst.mean_gold_delta || 0),
+      },
+      when_second: {
+        win_rate: Number(seatBSecond.win_rate || 0),
+        mean_gold_delta: Number(seatBSecond.mean_gold_delta || 0),
+      },
+    },
     mean_gold_delta_a: Number(report?.mean_gold_delta_a || 0),
     p10_gold_delta_a: Number(report?.p10_gold_delta_a || 0),
     p50_gold_delta_a: Number(report?.p50_gold_delta_a || 0),
@@ -871,14 +905,34 @@ function buildConsoleSummary(report) {
     go_fail_count_b: Number(report?.go_fail_count_b || 0),
     go_fail_rate_a: Number(report?.go_fail_rate_a || 0),
     go_fail_rate_b: Number(report?.go_fail_rate_b || 0),
-    dataset_rows: Number(report?.dataset_rows || 0),
-    dataset_positive_rows: Number(report?.dataset_positive_rows || 0),
-    dataset_decisions: Number(report?.dataset_decisions || 0),
-    dataset_unresolved_decisions: Number(report?.dataset_unresolved_decisions || 0),
-    unresolved_decision_rate: Number(report?.unresolved_decision_rate || 0),
     bankrupt: report?.bankrupt || { a_bankrupt_count: 0, b_bankrupt_count: 0 },
-    eval_time_ms: Number(report?.eval_time_ms || 0),
   };
+}
+
+function formatConsoleSummaryText(summary) {
+  const aFirst = summary?.seat_split_a?.when_first || {};
+  const aSecond = summary?.seat_split_a?.when_second || {};
+  const bFirst = summary?.seat_split_b?.when_first || {};
+  const bSecond = summary?.seat_split_b?.when_second || {};
+  const bankrupt = summary?.bankrupt || { a_bankrupt_count: 0, b_bankrupt_count: 0 };
+  const lines = [
+    "",
+    `=== Model Duel (${summary.human} vs ${summary.ai}, games=${summary.games}) ===`,
+    `Win/Loss/Draw(A):  ${summary.wins_a} / ${summary.losses_a} / ${summary.draws}  (WR=${summary.win_rate_a})`,
+    `Win/Loss/Draw(B):  ${summary.wins_b} / ${summary.losses_b} / ${summary.draws}  (WR=${summary.win_rate_b})`,
+    `Seat A first:      WR=${aFirst.win_rate}, mean_gold_delta=${aFirst.mean_gold_delta}`,
+    `Seat A second:     WR=${aSecond.win_rate}, mean_gold_delta=${aSecond.mean_gold_delta}`,
+    `Seat B first:      WR=${bFirst.win_rate}, mean_gold_delta=${bFirst.mean_gold_delta}`,
+    `Seat B second:     WR=${bSecond.win_rate}, mean_gold_delta=${bSecond.mean_gold_delta}`,
+    `Gold delta(A):     mean=${summary.mean_gold_delta_a}, p10=${summary.p10_gold_delta_a}, p50=${summary.p50_gold_delta_a}, p90=${summary.p90_gold_delta_a}`,
+    `GO A:              count=${summary.go_count_a}, games=${summary.go_games_a}, fail=${summary.go_fail_count_a}, fail_rate=${summary.go_fail_rate_a}`,
+    `GO B:              count=${summary.go_count_b}, games=${summary.go_games_b}, fail=${summary.go_fail_count_b}, fail_rate=${summary.go_fail_rate_b}`,
+    `Bankrupt:          A=${bankrupt.a_bankrupt_count}, B=${bankrupt.b_bankrupt_count}`,
+    `Result file:       ${summary.result_out || ""}`,
+    "===========================================================",
+    "",
+  ];
+  return `${lines.join("\n")}\n`;
 }
 
 // =============================================================================
@@ -1109,9 +1163,9 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
     first_turn_counts: firstTurnCounts,
     continuous_series: !!opts.continuousSeries,
     kibo_detail: opts.kiboDetail,
-    result_out: opts.resultOut || null,
-    kibo_out: opts.kiboOut || null,
-    dataset_out: opts.datasetOut || null,
+    result_out: toReportPath(opts.resultOut),
+    kibo_out: toReportPath(opts.kiboOut),
+    dataset_out: toReportPath(opts.datasetOut),
     dataset_actor: opts.datasetActor,
     dataset_rows: datasetStats.rows,
     dataset_positive_rows: datasetStats.positive_rows,
@@ -1160,10 +1214,14 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
   if (datasetWriter) datasetWriter.end();
 
   const reportLine = `${JSON.stringify(summary)}\n`;
-  const consoleLine = `${JSON.stringify(buildConsoleSummary(summary))}\n`;
+  const consoleSummary = buildConsoleSummary(summary);
   mkdirSync(dirname(opts.resultOut), { recursive: true });
   writeFileSync(opts.resultOut, reportLine, { encoding: "utf8" });
-  process.stdout.write(consoleLine);
+  if (opts.stdoutFormat === "json") {
+    process.stdout.write(reportLine);
+  } else {
+    process.stdout.write(formatConsoleSummaryText(consoleSummary));
+  }
 }
 
 try {

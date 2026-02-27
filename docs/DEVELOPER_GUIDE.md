@@ -106,6 +106,9 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --game
 - `phase*_pass_state.json` (phase1/2 평가 실행 시)
 
 ## 7. Worker 동작 메모
+상세 포맷 문서:
+- `docs/KIBO_DATASET_GUIDE.md` (kibo/dataset 구조, 필드 의미, unresolved 해석)
+
 ### 7-1. `neat_eval_worker.mjs`
 - feature vector는 47차원 고정.
 - `opponent_policy=heuristic_v6`일 때 내부 fast tuning 파라미터를 적용해 평가 시간을 줄인다.
@@ -113,7 +116,9 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --game
 
 ### 7-2. `model_duel_worker.mjs`
 - `--games`는 `1000` 이상만 허용된다. (기본값 `1000`)
-- `--kibo-out`, `--dataset-out`으로 추적 파일 저장 가능.
+- 결과 report(`result.json`)는 항상 1개 저장된다.
+- 기본 출력 폴더는 `logs/model_duel/<human>_vs_<ai>_<YYYYMMDD>/` 규칙을 따른다.
+- kibo/dataset은 옵션으로만 저장된다.
 - `--human`, `--ai` 입력은 정책 키 또는 `phase4_seed5` 형식 모두 지원한다.
 
 ### 7-3. `model_duel_worker.mjs` 옵션 상세
@@ -126,16 +131,22 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --game
 - `--first-turn-policy` (선택, 기본 `alternate`): `alternate` 또는 `fixed`.
 - `--fixed-first-turn` (선택, 기본 `human`): `fixed`일 때 `human`만 허용.
 - `--continuous-series` (선택, 기본 `1`): `1=true`, `2=false`.
+- `--result-out` (선택): report JSON 저장 경로. 미지정 시 자동 생성.
 - `--kibo-detail` (선택, 기본 `none`): `none|lean|full`.
-- `--kibo-detail`이 `lean/full`이고 `--kibo-out` 미지정이면 `logs/model_duel/kibo/`에 자동 파일 생성.
+- `--kibo-detail`이 `none`이고 `--kibo-out`만 지정되면 내부적으로 `lean`으로 동작한다.
+- `--kibo-detail`이 `lean/full`이고 `--kibo-out` 미지정이면 report 폴더 아래 `<seed>_kibo.jsonl` 자동 생성.
 - `--kibo-out` (선택): 게임 단위 JSONL 출력 경로. 각 줄에 `game_index`, `seed`, `first_turn`, `human`, `ai`, `winner`, `result`, `kibo_detail`, `kibo` 저장.
-- `--dataset-out` (선택): 의사결정 후보 단위 JSONL 출력 경로. 각 줄은 `actor`, `decision_type`, `candidate`, `chosen`, `chosen_candidate`, `features` 포함.
+- `--dataset-out` (선택): 의사결정 후보 단위 JSONL 출력 경로.
+  - `auto`를 주면 report 폴더 아래 `<seed>_dataset.jsonl` 자동 생성.
+  - 명시 경로를 주면 해당 경로로 저장.
 - `--dataset-actor` (선택, 기본 `all`): 데이터셋 기록 actor 필터. `all|human|ai`.
 - unresolved는 별도 출력 옵션 없이 dataset 사용 시 내부 통계(`dataset_unresolved_decisions`)로만 계산한다.
-- stdout 결과: 마지막 줄에 summary JSON 1줄 출력. `dataset_rows`, `dataset_decisions`, `dataset_unresolved_decisions`, `unresolved_decision_rate`, `seat_split_a/b` 등이 포함됨.
+- report JSON의 `result_out`, `kibo_out`, `dataset_out` 경로 필드는 상대경로(`logs/...`)로 기록된다.
+- stdout 결과: 마지막 줄에 고정 스키마의 compact summary JSON 1줄만 출력된다.
+  - 상세 지표(`seat_split_*`, unresolved 상세 분포 등)는 `result_out` 파일에서 확인한다.
 - 대표 실행 예시:
 ```powershell
-node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --games 1200 --seed v5_vs_phase4s5_1200 --first-turn-policy alternate --continuous-series 1 --max-steps 600 --kibo-detail full --dataset-out logs/model_duel/v5_vs_phase4s5_1200_dataset.jsonl
+node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase4_seed5 --games 1200 --seed v5_vs_phase4s5_1200 --first-turn-policy alternate --continuous-series 1 --max-steps 600 --kibo-detail full --dataset-out auto
 ```
 
 ## 8. 트러블슈팅

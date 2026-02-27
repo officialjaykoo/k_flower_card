@@ -88,7 +88,7 @@ export const DEFAULT_PARAMS = {
   // chooseMatch forward blocking (V5Plus addition)
   matchFwdBlockMul: 1.45,       // bonus multiplier when blocking opponent combo lines
 
-  // ── shouldGo (V5Plus utility model) ──
+  // ── shouldGo (V5 gate + V5Plus first-mover guard) ──
   // Base gate (close to V5)
   goOppOneAwayGate: 100,
   goScoreDiffBonus: 0.055,
@@ -113,23 +113,29 @@ export const DEFAULT_PARAMS = {
   goZeroOppOneAwayLate: 88,
   goZeroOppOneAwayEarly: 95,
   lateDeckMax: 10,
-  // Upside/risk utility weights (V5Plus addition, GO suppression direction)
-  goUpsideScoreMul: 0.07,       // current score upside
-  goUpsidePiMul: 0.030,         // pi upside
-  goUpsideSelfJokboMul: 0.35,   // own jokbo potential
-  goUpsideOneAwayMul: 0.10,     // own one-away bonus
-  goUpsideCarryMul: 0.10,       // carry-over stop incentive
-  goRiskPressureMul: 0.35,      // pressure risk
-  goRiskOneAwayMul: 0.28,       // one-away risk
+  // Upside/risk utility weights (currently kept for tuning surface)
+  goUpsideScoreMul: 0.07,
+  goUpsidePiMul: 0.030,
+  goUpsideSelfJokboMul: 0.35,
+  goUpsideOneAwayMul: 0.10,
+  goUpsideCarryMul: 0.10,
+  goRiskPressureMul: 0.35,
+  goRiskOneAwayMul: 0.28,
   goRiskOppJokboMul: 0.30,
   goRiskOppOneAwayMul: 0.07,
-  goRiskGoCountMul: 0.10,       // accumulated go-count risk
+  goRiskGoCountMul: 0.10,
   goRiskLateDeckBonus: 0.08,
-  goRiskSecondMoverMul: 0.12,   // extra second-mover risk
+  goRiskSecondMoverMul: 0.12,
   stopLeadMul: 0.09,
   stopCarryMul: 0.12,
   stopTenBonus: 0.20,
-  goUtilityThreshold: 0.10,     // higher threshold => fewer GO decisions
+  goUtilityThreshold: 0.10,
+
+  // Additional GO suppression after V5 gate pass (first mover only)
+  plusGoCountCap: 2,
+  plusOppJokboCapThresh: 0.35,
+  plusLateTrailJokboThresh: 0.30,
+  plusLateOneAwayGate: 45,
 
   // ── shouldBomb / selectBombMonth ──
   bombMinPiAdvantage: 1,
@@ -480,11 +486,10 @@ function chooseMatchHeuristicV5Plus(state, playerKey, deps, params = DEFAULT_PAR
   return best?.id ?? null;
 }
 
-/* 6) GO/STOP decision (utility-filtered V5 gate) */
+/* 6) GO/STOP decision (V5 gate + first-mover suppression filter) */
 function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
 
-  // Immediate STOP: if STOP can bankrupt opponent.
   if (deps.canBankruptOpponentByStop?.(state, playerKey)) return false;
 
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -495,7 +500,6 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const secG = sec ? safeNum(P.secondMoverGoGateShrink) : 0;
   const opp = otherPlayerKeyFromDeps(playerKey, deps);
   const oppPiBase = safeNum(ctx.oppPi, deps.capturedCountByCategory(state.players?.[opp], "junk"));
-  const selfPi = safeNum(ctx.selfPi, deps.capturedCountByCategory(state.players?.[playerKey], "junk"));
   const certain = hasCertainJokbo(state.players?.[playerKey]);
   const unseenHi = countUnseen(state, SSANGPI_WITH_GUKJIN_ID_SET, playerKey)
     + countUnseen(state, BONUS_CARD_ID_SET, playerKey);
@@ -526,25 +530,41 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
     if (conf < safeNum(P.goBaseThreshold)) return false;
   }
 
+  const plusFilter = () => {
+    if (sec || certain) return true;
+    const goCount = safeNum(state.players?.[playerKey]?.goCount, 0);
+    const oppJokbo = deps.checkOpponentJokboProgress(state, playerKey);
+    const oppJokboThreat = safeNum(oppJokbo?.threat);
+    if (goCount >= safeNum(P.plusGoCountCap, 2) && oppJokboThreat >= safeNum(P.plusOppJokboCapThresh, 0.35)) {
+      return false;
+    }
+    if (late && diff <= 0 && tr.jokboThreat >= safeNum(P.plusLateTrailJokboThresh, 0.30)) {
+      return false;
+    }
+    if (late && tr.oppOneAwayProb >= safeNum(P.plusLateOneAwayGate, 45)) {
+      return false;
+    }
+    return true;
+  };
+
   const gH = Math.max(5, Math.min(7, Math.round(safeNum(P.goOppScoreGateHigh, 6))));
   const gL = Math.max(3, Math.min(5, Math.round(safeNum(P.goOppScoreGateLow, 4))));
 
   if (oppScoreRisk >= gH) return false;
 
-  // ── Branch-level early returns (same as V5) before utility filter ──
   if (oppScoreRisk >= gH - 1) {
     if (_stopForOppFour(state, playerKey, deps, 1, 2) || sec) return false;
     const bigLead = diff >= P.goBigLeadScoreDiff && myScore >= P.goBigLeadMinScore;
     const lowThreat = tr.oppOneAwayProb < (late ? P.goBigLeadOneAwayLate : P.goBigLeadOneAwayEarly)
       && tr.jokboThreat < P.goBigLeadJokboThresh && tr.nextThreat < P.goBigLeadNextThresh;
-    // Same as V5: fail these checks => immediate STOP.
-    if (!bigLead || !lowThreat) return false;
-    // If passed, utility filter may still block GO.
-  } else if (oppScoreRisk >= gL) {
+    return (bigLead && lowThreat) && plusFilter();
+  }
+  if (oppScoreRisk >= gL) {
     if (_stopForOppFour(state, playerKey, deps, 2, 3)) return false;
-    if (tr.oppOneAwayProb >= (late ? P.goOneAwayThreshOpp4Late : P.goOneAwayThreshOpp4Early) - secG) return false;
-    // If passed, apply utility filter.
-  } else if (oppScoreRisk >= 1) {
+    const gate = tr.oppOneAwayProb < (late ? P.goOneAwayThreshOpp4Late : P.goOneAwayThreshOpp4Early) - secG;
+    return gate && plusFilter();
+  }
+  if (oppScoreRisk >= 1) {
     if (oppScoreRisk === 3 && tr.jokboThreat >= 0.5) return false;
     const base = oppScoreRisk === 3 ? P.goOneAwayThreshOpp3
       : oppScoreRisk === 2 ? P.goOneAwayThreshOpp2 : P.goOneAwayThreshOpp1;
@@ -553,50 +573,12 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
       || tr.nextThreat >= P.goOpp12NextThresh
       || (late && tr.jokboThreat >= 0.4))) return false;
     if (sec && diff <= 0 && tr.oppOneAwayProb >= base - 5 - secG) return false;
-    // If passed, apply utility filter.
-  } else {
-    const zThresh = late ? safeNum(P.goZeroOppOneAwayLate, 88) : safeNum(P.goZeroOppOneAwayEarly, 95);
-    if (tr.oppOneAwayProb >= zThresh) return false;
-    // If passed, apply utility filter.
+    return plusFilter();
   }
 
-  // ── V5Plus addition: post-gate utility filter ──
-  // Suppress a subset of GO decisions that already passed V5-style gates.
-  // Goal: reduce GO frequency and improve GO failure rate.
-  const carry = safeNum(state.carryOverMultiplier, 1);
-  const goCount = safeNum(state.players?.[playerKey]?.goCount, 0);
-
-  const selfJokbo = deps.estimateJokboExpectedPotential?.(state, playerKey, opp) || { total: 0, oneAwayCount: 0 };
-  const oppJokbo = deps.estimateOpponentJokboExpectedPotential?.(state, playerKey) || { total: 0, oneAwayCount: 0 };
-
-  const upside =
-    Math.max(0, myScore - 6) * P.goUpsideScoreMul +
-    selfPi * P.goUpsidePiMul +
-    safeNum(selfJokbo.total) * P.goUpsideSelfJokboMul +
-    safeNum(selfJokbo.oneAwayCount) * P.goUpsideOneAwayMul +
-    (oppPiBase <= 5 ? 0.02 : 0);
-
-  const oneAwayProbNorm = tr.oppOneAwayProb / 100;
-  const risk =
-    tr.jokboThreat * P.goRiskPressureMul +
-    oneAwayProbNorm * P.goRiskOneAwayMul +
-    safeNum(oppJokbo.total) * P.goRiskOppJokboMul +
-    safeNum(oppJokbo.oneAwayCount) * P.goRiskOppOneAwayMul +
-    goCount * P.goRiskGoCountMul +
-    (tr.deckCount <= 10 ? P.goRiskLateDeckBonus : 0) +
-    (sec ? safeNum(P.goRiskSecondMoverMul, 0.12) : 0);
-
-  const stopValue =
-    Math.max(0, diff) * P.stopLeadMul +
-    Math.max(0, carry - 1) * P.stopCarryMul +
-    (myScore >= 10 ? P.stopTenBonus : 0);
-
-  // Be more conservative when carry-over is active.
-  let utilityThreshold = safeNum(P.goUtilityThreshold, 0.10);
-  if (carry >= 2) utilityThreshold += carry * safeNum(P.goUpsideCarryMul, 0.10);
-
-  const utility = upside - risk - stopValue;
-  return utility >= utilityThreshold;
+  const zThresh = late ? safeNum(P.goZeroOppOneAwayLate, 88) : safeNum(P.goZeroOppOneAwayEarly, 95);
+  if (tr.oppOneAwayProb >= zThresh) return false;
+  return plusFilter();
 }
 
 /* 7) President/Gukjin decisions */

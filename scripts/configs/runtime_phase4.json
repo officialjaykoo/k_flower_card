@@ -5,7 +5,7 @@
   "games_per_genome": 40,
   "eval_timeout_sec": 360,
   "max_eval_steps": 600,
-  "opponent_policy": "heuristic_v4",
+  "opponent_policy": "H-V4",
   "switch_seats": true,
   "checkpoint_every": 10,
   "eval_script": "scripts/neat_eval_worker.mjs",

@@ -8,8 +8,8 @@
 # 4) main(): study run + artifact export
 
 """
-scripts/optuna_v5.py  –  V5 Optuna 튜닝
-대상: heuristic_v5 vs heuristic_v4 (1000게임/trial)
+scripts/optuna_v5.py  –  V5 Optuna tuning
+target: H-V5 vs H-V4 (1000 games per trial)
 튜닝 대상: 승률에 영향 큰 핵심 31개 파라미터만 (나머지는 DEFAULT_PARAMS trial0 값 고정)
 
 사용법:
@@ -26,7 +26,7 @@ except ImportError:
 
 # ── 상수 ──────────────────────────────────────────────────────────
 GAMES             = 1000
-OPPONENT_POLICY   = "heuristic_v4"
+OPPONENT_POLICY   = "H-V4"
 SEED              = "optuna-v5"
 MAX_STEPS         = 600
 TRIAL_TIMEOUT_SEC = 600
@@ -97,8 +97,8 @@ def run_duel(params, seed_suffix="", rt=None):
     seed = f"{rt.get('seed', SEED)}|{seed_suffix}" if seed_suffix else rt.get('seed', SEED)
     cmd = [
         "node", DUEL_SCRIPT,
-        "--policy-a", "heuristic_v5",
-        "--policy-b", rt.get("opponent_policy", OPPONENT_POLICY),
+        "--human", "H-V5",
+        "--ai", rt.get("opponent_policy", OPPONENT_POLICY),
         "--games", str(GAMES),
         "--seed", seed,
         "--max-steps", str(rt.get("max_steps", MAX_STEPS)),

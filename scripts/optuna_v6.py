@@ -9,7 +9,7 @@
 
 """
 scripts/optuna_v6.py - V6 Optuna tuner
-target: heuristic_v6 vs heuristic_v5 (1000 games per trial)
+target: H-V6 vs H-V5 (1000 games per trial)
 """
 
 import argparse
@@ -30,7 +30,7 @@ except ImportError:
     sys.exit(1)
 
 GAMES = 1000
-OPPONENT_POLICY = "heuristic_v5"
+OPPONENT_POLICY = "H-V5"
 SEED = "optuna-v6"
 MAX_STEPS = 600
 TRIAL_TIMEOUT_SEC = 600
@@ -127,9 +127,9 @@ def run_duel(params, seed_suffix="", runtime=None):
     cmd = [
         "node",
         DUEL_SCRIPT,
-        "--policy-a",
-        "heuristic_v6",
-        "--policy-b",
+        "--human",
+        "H-V6",
+        "--ai",
         runtime.get("opponent_policy", OPPONENT_POLICY),
         "--games",
         str(GAMES),

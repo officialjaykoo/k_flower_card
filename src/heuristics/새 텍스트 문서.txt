@@ -1,0 +1,118 @@
+/**
+ * heuristicV8.js - "The Negotiator" (Adversarial Strategic Policy)
+ * 구조적 특징:
+ * 1. Adversarial Scoring: 상대방의 가용한 패와 바닥 카드를 매칭하여 나의 수에 따른 '상대적 기회비용' 계산
+ * 2. Phase-Adaptive Logic: 남은 덱의 수에 따라 공격/방어 가중치 실시간 전환
+ * 3. Stop-Loss System: 내 점수가 높아도 상대의 역전 가능성(Threat)이 높으면 강제 중단
+ */
+
+const GUKJIN_CARD_ID = "I0";
+
+export const DEFAULT_PARAMS = {
+  // Phase Weights
+  earlyPhaseLimit: 15, // 덱 15장 이상: 자원 확보
+  latePhaseLimit: 7,   // 덱 7장 이하: 종결 및 방어
+
+  // Core Utilities
+  baseUtility: 10.0,
+  opponentOpportunityCost: 1.5, // 상대에게 주는 기회에 대한 감점 가중치
+  synergyWeight: 12.0,          // 콤보 완성 기대값
+  
+  // Risk Management
+  stopLeadThreshold: 5,        // 이 정도 이기고 있으면 안정권으로 판단
+  threatMultiplier: 2.0        // 상대 위협 계산 시 가중치
+};
+
+/* 1) 핸드 카드 랭킹 - 적대적 탐색 구조 */
+export function rankHandCardsV8(state, playerKey, deps, params = DEFAULT_PARAMS) {
+  const oppKey = playerKey === "ai" ? "human" : "ai";
+  const deckCount = state.deckCount;
+  const isEarly = deckCount > params.earlyPhaseLimit;
+
+  return (card, matches) => {
+    if (matches.length === 0) return -100; // 낼 수 없는 카드는 최하위
+
+    // A. 내 이득 계산 (Immediate Gain)
+    let myGain = matches.reduce((acc, m) => {
+      let val = params.baseUtility;
+      if (m.id.includes("K") || m.id === GUKJIN_CARD_ID) val += 15; // 광, 국진
+      if (m.category === "ribbon" || m.category === "five") val += 8;
+      return acc + val;
+    }, 0);
+
+    // B. 미래 시너지 (Synergy)
+    const synergy = deps.analyzeComboPotential ? deps.analyzeComboPotential(state, playerKey, card.month) * params.synergyWeight : 0;
+
+    // C. [구조적 차이] 상대방 기회 비용 (Opponent Counter-Value)
+    // 내가 이 카드를 냈을 때 바닥에 깔리는 카드가 상대에게 얼마나 유리한지 예측
+    let oppOpportunity = 0;
+    const floorAfterMyMove = state.board || [];
+    // 상대방의 예상 가능한 매칭 점수 합산 (단순화된 예측)
+    oppOpportunity = floorAfterMyMove
+      .filter(fCard => fCard.month === card.month)
+      .length * 10; 
+
+    // 초반에는 자원 확보(A+B), 후반에는 상대 견제(C)에 집중
+    const finalScore = isEarly 
+      ? (myGain + synergy) - (oppOpportunity * 0.5)
+      : (myGain * 0.8) - (oppOpportunity * params.opponentOpportunityCost);
+
+    return finalScore;
+  };
+}
+
+/* 2) 고/스톱 결정 - 리스크 노출 지수 기반 */
+export function shouldGoV8(state, playerKey, deps, params = DEFAULT_PARAMS) {
+  const ctx = deps.analyzeGameContext(state, playerKey);
+  const oppThreat = deps.analyzeOpponentThreat ? deps.analyzeOpponentThreat(state, playerKey) : 0;
+  
+  const scoreDiff = ctx.myScore - ctx.oppScore;
+
+  // 1. 역전 방어 로직: 내가 이기고 있지만 상대가 한 방이 있다면 STOP
+  if (ctx.myScore >= 7 && oppThreat * params.threatMultiplier > scoreDiff) {
+    return false;
+  }
+
+  // 2. 압승 로직: 상대가 '피박' 확정이고 내가 안전하다면 무조건 GO
+  if (ctx.oppPiCount < 5 && ctx.myPiCount >= 10 && state.deckCount > 5) {
+    return true;
+  }
+
+  // 3. 기본 임계값 (V5의 안정성 차용)
+  return ctx.myScore > ctx.oppScore + params.stopLeadThreshold;
+}
+
+/* 3) 국진 결정 - 피박 유도 구조 */
+export function chooseGukjinHeuristicV8(state, playerKey, deps) {
+  const oppKey = playerKey === "ai" ? "human" : "ai";
+  const oppPiCount = deps.capturedCountByCategory 
+    ? deps.capturedCountByCategory(state.players[oppKey], "junk")
+    : state.players[oppKey].captured.junk.length;
+
+  // 상대방이 피박(10개 미만) 근처에서 허덕이고 있다면, 국진을 피로 써서 압박
+  if (oppPiCount >= 5 && oppPiCount <= 8) return "junk";
+  
+  // 내가 열끗(Five) 콤보가 완성 직전이라면 열끗으로 사용
+  const myFiveCount = state.players[playerKey].captured.five.length;
+  if (myFiveCount >= 4) return "five";
+
+  return "junk"; // 기본은 효율이 좋은 피로 사용
+}
+
+/* 4) 기타 필수 함수 (V5/V7의 베스트 프랙티스 통합) */
+export function chooseMatchHeuristicV8(state, playerKey, matches, deps) {
+  // 상대방이 노리는 카드(광, 청단 등)를 우선적으로 끊어먹는 로직
+  return matches.sort((a, b) => {
+    const aUrgency = deps.isOpponentTarget ? (deps.isOpponentTarget(state, a) ? 1 : 0) : 0;
+    const bUrgency = deps.isOpponentTarget ? (deps.isOpponentTarget(state, b) ? 1 : 0) : 0;
+    return bUrgency - aUrgency;
+  })[0];
+}
+
+// 명칭 통일을 위한 export
+export {
+  rankHandCardsV8 as rankHandCards,
+  shouldGoV8 as shouldGo,
+  chooseGukjinHeuristicV8 as chooseGukjin,
+  chooseMatchHeuristicV8 as chooseMatch
+};
