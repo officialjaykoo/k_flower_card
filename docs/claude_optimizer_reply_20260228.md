@@ -8,7 +8,7 @@
 - 보완: expand를 포함한 greedy 전체를 GO 레코드 기반으로 재점수화하고, 스텝마다 재탐색 후 선택된 존을 제거해야 중복 왜곡을 줄일 수 있습니다.
 
 ## 이번에 만든 대응 파일
-- `scripts/optimizer_by_gpt_vs_cl.mjs`
+- `scripts/optimizer_by_cl.mjs`
 
 핵심 차이:
 - discover + greedy 모두 STOP-free EV gap(`baseline_ev - zone_ev`) 일관 적용

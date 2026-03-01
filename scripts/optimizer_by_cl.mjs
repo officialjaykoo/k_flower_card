@@ -517,7 +517,7 @@ function buildSummary(payload) {
 const argv = parseArgs(process.argv.slice(2));
 if (argv.help) {
   console.log(`Usage:
-node scripts/optimizer_by_gpt_vs_cl.mjs --kibo <kibo.jsonl> --dataset <dataset.jsonl> --actor-policy <POLICY> --params-file <heuristic.js> [--actor ai|human] [--out-root <dir>] [--top-zones 12] [--min-ev 1.5] [--apply]
+node scripts/optimizer_by_cl.mjs --kibo <kibo.jsonl> --dataset <dataset.jsonl> --actor-policy <POLICY> --params-file <heuristic.js> [--actor ai|human] [--out-root <dir>] [--top-zones 12] [--min-ev 1.5] [--apply]
 `);
   process.exit(0);
 }
