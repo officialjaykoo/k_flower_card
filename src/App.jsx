@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   initGame,
   startGameFromState,
@@ -31,6 +31,8 @@ import GameBoard from "./ui/components/GameBoard.jsx";
 import GameOverlays from "./ui/components/GameOverlays.jsx";
 import "../styles.css";
 
+const VISUAL_AUTO_STEP_DELAY_MS = 360;
+
 export default function App() {
   const [ui, setUi] = useState(() => {
     return {
@@ -42,8 +44,7 @@ export default function App() {
       participants: { human: "human", ai: "ai" },
       modelPicks: { human: DEFAULT_BOT_POLICY, ai: DEFAULT_BOT_POLICY },
       lastRecordedRoundKey: null,
-      speedMode: "fast",
-      visualDelayMs: 400,
+      speedMode: "visual",
       cardTheme: DEFAULT_CARD_THEME,
       replay: { enabled: false, turnIndex: 0, autoPlay: false, intervalMs: 900 }
     };
@@ -62,6 +63,10 @@ export default function App() {
     aiCard: null,
     winnerKey: null
   });
+  const [turnAnimationBusy, setTurnAnimationBusy] = useState(false);
+  const onTurnAnimationBusyChange = useCallback((busy) => {
+    setTurnAnimationBusy(Boolean(busy));
+  }, []);
 
   const {
     modelOptions,
@@ -136,6 +141,7 @@ export default function App() {
     if (openingPick.active) return;
     if (ui.speedMode !== "visual") return;
     if (state.phase === "resolution") return;
+    if (turnAnimationBusy) return;
     const actor = getActionPlayerKey(state);
     if (!actor || !isBotPlayer(ui, actor)) return;
     const timer = setTimeout(() => {
@@ -145,9 +151,9 @@ export default function App() {
         const next = chooseBotAction(prev, stepActor, ui);
         return next === prev ? prev : next;
       });
-    }, ui.visualDelayMs);
+    }, VISUAL_AUTO_STEP_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [state, ui.speedMode, ui.visualDelayMs, ui.participants, openingPick.active, chooseBotAction]);
+  }, [state, ui.speedMode, ui.participants, openingPick.active, chooseBotAction, turnAnimationBusy]);
 
   const startGame = (opts = {}) => {
     const keepGold = opts.keepGold ?? true;
@@ -242,7 +248,7 @@ export default function App() {
     const { auto = false } = options;
     setState((prev) => {
       let next = reducer(prev);
-      if (auto) next = runAuto(next);
+      if (auto && !turnAnimationBusy) next = runAuto(next);
       const nextNo = (next.uiActionLog?.length || 0) + 1;
       const entry = {
         no: nextNo,
@@ -257,6 +263,18 @@ export default function App() {
       return { ...next, uiActionLog: [...(next.uiActionLog || []), entry] };
     });
   };
+
+  useEffect(() => {
+    if (openingPick.active) return;
+    if (turnAnimationBusy) return;
+    if (ui.speedMode === "visual") return;
+    setState((prev) => {
+      const actor = getActionPlayerKey(prev);
+      if (!actor || !isBotPlayer(ui, actor)) return prev;
+      const next = runAuto(prev);
+      return next === prev ? prev : next;
+    });
+  }, [turnAnimationBusy, ui.speedMode, openingPick.active, ui.participants, runAuto]);
 
   const onChooseMatch = (id) =>
     dispatchGameAction("CHOOSE_MATCH", { boardCardId: id }, (prev) => chooseMatch(prev, id), {
@@ -341,6 +359,7 @@ export default function App() {
           ui={ui}
           setUi={setUi}
           locked={locked}
+          onTurnAnimationBusyChange={onTurnAnimationBusyChange}
           participantType={participantType}
           onChooseMatch={onChooseMatch}
           onPlayCard={onPlayCard}

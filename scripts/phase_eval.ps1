@@ -90,7 +90,10 @@ $cmd = @(
   "--fitness-gold-scale", "$($runtime.fitness_gold_scale)",
   "--fitness-win-weight", "$($runtime.fitness_win_weight)",
   "--fitness-loss-weight", "$($runtime.fitness_loss_weight)",
-  "--fitness-draw-weight", "$($runtime.fitness_draw_weight)"
+  "--fitness-draw-weight", "$($runtime.fitness_draw_weight)",
+  "--fitness-go-target-rate", "$($runtime.fitness_go_target_rate)",
+  "--fitness-go-fail-cap", "$($runtime.fitness_go_fail_cap)",
+  "--fitness-go-min-games", "$($runtime.fitness_go_min_games)"
 )
 
 $resultLines = & node @cmd

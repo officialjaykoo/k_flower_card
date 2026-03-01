@@ -217,7 +217,7 @@ if ([string]::IsNullOrWhiteSpace($ResumeFrom)) {
   } else {
     "full_league_${ts}_$(ConvertTo-SafeFilePart $OutputTag)"
   }
-  $outputDir = Join-Path "logs/full_league" $tag
+  $outputDir = Join-Path "logs/heuristic_duel/full_league" $tag
   New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 } else {
   $resolvedResume = Resolve-Path -LiteralPath $ResumeFrom -ErrorAction Stop

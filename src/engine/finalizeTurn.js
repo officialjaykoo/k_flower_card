@@ -244,6 +244,7 @@ export function finalizeTurn({
   let goldSteal = 0;
   let extraSteal = pendingSteal;
   let nextLog = log.slice();
+  let jabbeokAppliedByPpuk = 0;
   const prevPpukState = prevPlayer.ppukState || {
     active: false,
     streak: 0,
@@ -281,6 +282,7 @@ export function finalizeTurn({
 
     // Unified rule: self-ppuk eat and opponent-ppuk eat are treated identically.
     nextEvents.jabbeok = (nextEvents.jabbeok || 0) + 1;
+    jabbeokAppliedByPpuk += 1;
     extraSteal += 1;
     nextLog.push(`${prevPlayer.label}: ${ownerLabel} conversion succeeded (reserve steal 1 pi)`);
 
@@ -340,11 +342,21 @@ export function finalizeTurn({
   if (capturedAny && prevOppPpukState.active) {
     applyPpukEat(nextPlayerKey);
   }
+  const threePlusBoardCapture =
+    capturedAny &&
+    (turnMeta?.matchEvents || []).some(
+      (event) => event?.source === "hand" && event?.type === "THREE_PLUS"
+    );
+  if (threePlusBoardCapture && jabbeokAppliedByPpuk === 0) {
+    nextEvents.jabbeok = (nextEvents.jabbeok || 0) + 1;
+    extraSteal += 1;
+    nextLog.push(`${prevPlayer.label}: three-of-month board capture treated as jabbeok (+1 steal)`);
+  }
 
   if (!isLastHandTurn && board.length === 0 && capturedAny) {
-    nextEvents.ssul = (nextEvents.ssul || 0) + 1;
+    nextEvents.pansseul = (nextEvents.pansseul || 0) + 1;
     extraSteal += 1;
-    nextLog.push(`${prevPlayer.label}: board sweep triggered (reserve steal 1 pi)`);
+    nextLog.push(`${prevPlayer.label}: pansseul triggered (board empty after turn, reserve steal 1 pi)`);
   }
 
   let nextPlayers = {

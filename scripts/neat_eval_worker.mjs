@@ -51,7 +51,7 @@ function parseArgs(argv) {
     fitnessLossWeight: 0.50,
     fitnessDrawWeight: 0.15,
     fitnessGoTargetRate: 0.20,
-    fitnessGoFailCap: 0.30,
+    fitnessGoFailCap: 0.25,
     fitnessGoMinGames: 20,
   };
 
@@ -86,7 +86,7 @@ function parseArgs(argv) {
     else if (key === "--fitness-loss-weight") out.fitnessLossWeight = Number(value || 0.50);
     else if (key === "--fitness-draw-weight") out.fitnessDrawWeight = Number(value || 0.15);
     else if (key === "--fitness-go-target-rate") out.fitnessGoTargetRate = Math.max(0.01, Number(value || 0.20));
-    else if (key === "--fitness-go-fail-cap") out.fitnessGoFailCap = Math.max(0.01, Number(value || 0.30));
+    else if (key === "--fitness-go-fail-cap") out.fitnessGoFailCap = Math.max(0.01, Number(value || 0.25));
     else if (key === "--fitness-go-min-games") out.fitnessGoMinGames = Math.max(1, Math.floor(Number(value || 20)));
     else throw new Error(`Unknown argument: ${key}`);
   }
@@ -578,7 +578,7 @@ function main() {
   const fitnessGoTargetRate =
     Number.isFinite(fitnessGoTargetRateRaw) && fitnessGoTargetRateRaw > 0 ? fitnessGoTargetRateRaw : 0.20;
   const fitnessGoFailCap =
-    Number.isFinite(fitnessGoFailCapRaw) && fitnessGoFailCapRaw > 0 ? fitnessGoFailCapRaw : 0.30;
+    Number.isFinite(fitnessGoFailCapRaw) && fitnessGoFailCapRaw > 0 ? fitnessGoFailCapRaw : 0.25;
   const fitnessGoMinGames =
     Number.isFinite(fitnessGoMinGamesRaw) && fitnessGoMinGamesRaw > 0 ? Math.floor(fitnessGoMinGamesRaw) : 20;
 
@@ -591,13 +591,15 @@ function main() {
   const goPresence = clamp01(goRate / fitnessGoTargetRate);
   const goQuality =
     goGames >= fitnessGoMinGames ? clamp01(1.0 - (goFailRate / fitnessGoFailCap)) : 0.0;
-  const goTerm01 = (0.4 * goPresence) + (0.6 * goQuality);
+  const goTerm01 = (0.2 * goPresence) + (0.8 * goQuality);
   const goNorm = clamp01(goTerm01) * 2.0 - 1.0;
 
-  const fitness =
+  let fitness =
     (fitnessLossWeight * goldNorm) +
     (fitnessWinWeight * winNorm) +
     (fitnessDrawWeight * goNorm);
+  if (goGames === 0) fitness -= 0.35;
+  else if (goGames < fitnessGoMinGames) fitness -= 0.15;
 
   const simImitation = buildImitationMetrics(simImitationTotals, simImitationMatches);
   const imitationTotals = cloneDecisionCounters(simImitation.totals);

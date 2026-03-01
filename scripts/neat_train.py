@@ -59,6 +59,9 @@ DEFAULT_RUNTIME = {
     "fitness_win_weight": 0.35,
     "fitness_loss_weight": 0.50,
     "fitness_draw_weight": 0.15,
+    "fitness_go_target_rate": 0.20,
+    "fitness_go_fail_cap": 0.25,
+    "fitness_go_min_games": 20,
     # Gate / transition controls (can be phase-specific via runtime config)
     "gate_mode": "win_rate_only",  # win_rate_only | hybrid
     "gate_ema_window": 5,
@@ -294,6 +297,15 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["fitness_draw_weight"] = _to_float(
         cfg.get("fitness_draw_weight"), DEFAULT_RUNTIME["fitness_draw_weight"]
     )
+    cfg["fitness_go_target_rate"] = max(
+        0.01, _to_float(cfg.get("fitness_go_target_rate"), DEFAULT_RUNTIME["fitness_go_target_rate"])
+    )
+    cfg["fitness_go_fail_cap"] = max(
+        0.01, _to_float(cfg.get("fitness_go_fail_cap"), DEFAULT_RUNTIME["fitness_go_fail_cap"])
+    )
+    cfg["fitness_go_min_games"] = max(
+        1, _to_int(cfg.get("fitness_go_min_games"), DEFAULT_RUNTIME["fitness_go_min_games"])
+    )
 
     gate_mode = str(cfg.get("gate_mode") or DEFAULT_RUNTIME["gate_mode"]).strip().lower()
     if gate_mode not in ("win_rate_only", "hybrid"):
@@ -379,6 +391,9 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"] = str(float(runtime["fitness_win_weight"]))
     os.environ[f"{ENV_PREFIX}FITNESS_LOSS_WEIGHT"] = str(float(runtime["fitness_loss_weight"]))
     os.environ[f"{ENV_PREFIX}FITNESS_DRAW_WEIGHT"] = str(float(runtime["fitness_draw_weight"]))
+    os.environ[f"{ENV_PREFIX}FITNESS_GO_TARGET_RATE"] = str(float(runtime["fitness_go_target_rate"]))
+    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_CAP"] = str(float(runtime["fitness_go_fail_cap"]))
+    os.environ[f"{ENV_PREFIX}FITNESS_GO_MIN_GAMES"] = str(int(runtime["fitness_go_min_games"]))
     os.environ[f"{ENV_PREFIX}TEACHER_DATASET_PATH"] = str(runtime.get("teacher_dataset_path") or "")
     os.environ[f"{ENV_PREFIX}TEACHER_KIBO_PATH"] = str(runtime.get("teacher_kibo_path") or "")
     os.environ[f"{ENV_PREFIX}TEACHER_KIBO_COUNT_RECORDS"] = (
@@ -409,6 +424,9 @@ def _runtime_from_env() -> Dict[str, object]:
         "fitness_win_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"),
         "fitness_loss_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_LOSS_WEIGHT"),
         "fitness_draw_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_DRAW_WEIGHT"),
+        "fitness_go_target_rate": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_TARGET_RATE"),
+        "fitness_go_fail_cap": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_FAIL_CAP"),
+        "fitness_go_min_games": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_MIN_GAMES"),
         "teacher_dataset_path": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_PATH") or "",
         "teacher_kibo_path": os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_PATH") or "",
         "teacher_kibo_count_records": os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_COUNT_RECORDS") or "0",
@@ -860,6 +878,12 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             str(float(runtime["fitness_loss_weight"])),
             "--fitness-draw-weight",
             str(float(runtime["fitness_draw_weight"])),
+            "--fitness-go-target-rate",
+            str(float(runtime["fitness_go_target_rate"])),
+            "--fitness-go-fail-cap",
+            str(float(runtime["fitness_go_fail_cap"])),
+            "--fitness-go-min-games",
+            str(int(runtime["fitness_go_min_games"])),
         ]
         if opponent_policy == "genome":
             cmd.extend(["--opponent-genome", opponent_genome])
@@ -1341,6 +1365,24 @@ def parse_args() -> argparse.Namespace:
         help="Override draw-rate fitness weight",
     )
     parser.add_argument(
+        "--fitness-go-target-rate",
+        type=float,
+        default=0.0,
+        help="Override GO target rate for fitness GO presence term",
+    )
+    parser.add_argument(
+        "--fitness-go-fail-cap",
+        type=float,
+        default=0.0,
+        help="Override GO fail-rate cap for fitness GO quality term",
+    )
+    parser.add_argument(
+        "--fitness-go-min-games",
+        type=int,
+        default=0,
+        help="Override minimum GO games required to apply GO quality term",
+    )
+    parser.add_argument(
         "--profile-name",
         default="",
         help="Optional profile label included in run_summary",
@@ -1564,6 +1606,15 @@ def main() -> None:
     if args.fitness_draw_weight == args.fitness_draw_weight:
         runtime["fitness_draw_weight"] = args.fitness_draw_weight
         override_keys.append("fitness_draw_weight")
+    if args.fitness_go_target_rate > 0:
+        runtime["fitness_go_target_rate"] = args.fitness_go_target_rate
+        override_keys.append("fitness_go_target_rate")
+    if args.fitness_go_fail_cap > 0:
+        runtime["fitness_go_fail_cap"] = args.fitness_go_fail_cap
+        override_keys.append("fitness_go_fail_cap")
+    if args.fitness_go_min_games > 0:
+        runtime["fitness_go_min_games"] = args.fitness_go_min_games
+        override_keys.append("fitness_go_min_games")
 
     runtime = _normalize_runtime_values(runtime)
     for key in override_keys:

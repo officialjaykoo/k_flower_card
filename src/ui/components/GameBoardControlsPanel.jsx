@@ -177,25 +177,11 @@ export default function GameBoardControlsPanel({
           <label className="toggle-item">
             <span>{t("controls.speed")}</span>
             <select
-              value={ui.speedMode || "fast"}
+              value={ui.speedMode || "visual"}
               onChange={(e) => setUi((u) => ({ ...u, speedMode: e.target.value }))}
             >
               <option value="fast">{t("controls.speed.fast")}</option>
               <option value="visual">{t("controls.speed.visual")}</option>
-            </select>
-          </label>
-          <label className="toggle-item">
-            <span>{t("controls.visualDelay")}</span>
-            <select
-              value={ui.visualDelayMs || 400}
-              onChange={(e) => setUi((u) => ({ ...u, visualDelayMs: Number(e.target.value) }))}
-              disabled={(ui.speedMode || "fast") !== "visual"}
-            >
-              <option value={150}>0.15s</option>
-              <option value={300}>0.30s</option>
-              <option value={400}>0.40s</option>
-              <option value={700}>0.70s</option>
-              <option value={1000}>1.00s</option>
             </select>
           </label>
           <label className="toggle-item">

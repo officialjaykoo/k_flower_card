@@ -16,6 +16,22 @@
  * - exported decisions: rank / match / go / bomb / shaking
  * ========================================================================== */
 
+// GO/STOP-only tuning surface for external optimizers (Claude/GPT tools).
+// Defaults are set to preserve existing behavior.
+export const DEFAULT_PARAMS = {
+  goBaseThreshold: 0.0,
+  goMinPi: 7,
+  goLiteOppCanStopPenalty: 0.0,
+  goLiteLatePenalty: 0.0,
+  goHardLateOneAwayCut: 45,
+  goUnseeHighPiPenalty: 0.0,
+  goScoreDiffBonus: 0.0,
+  goRiskGoCountMul: 0.0,
+  goDeckLowBonus: 0.0,
+  goThreatRelax: 0.0,
+  goMarginFloor: -0.1
+};
+
 /* 1) Hand ranking (main policy entry for play-card selection) */
 function rankHandCardsV3(state, playerKey, deps) {
   const player = state.players?.[playerKey];
@@ -309,7 +325,8 @@ function shouldPresidentStopV3() {
 }
 
 /* GO decision gate: layered risk checks first, utility margin second */
-function shouldGoV3(state, playerKey, deps) {
+function shouldGoV3(state, playerKey, deps, params = DEFAULT_PARAMS) {
+  const P = { ...DEFAULT_PARAMS, ...(params || {}) };
   const player = state.players?.[playerKey];
   const opp = otherPlayerKeyFromDeps(playerKey, deps);
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -335,10 +352,13 @@ function shouldGoV3(state, playerKey, deps) {
   const goldRisk = deps.goldRiskProfile(state, playerKey);
   const desperateGo = goldRisk.selfLow && !goldRisk.oppLow;
   const conservativeGo = goldRisk.oppLow;
+  const hardLateOneAwayCut = Math.max(0.30, Math.min(0.95, Number(P.goHardLateOneAwayCut) / 100));
+  const minPiBase = desperateGo ? Math.max(3, Number(P.goMinPi) - 1) : Number(P.goMinPi);
+  const oppCanStopLikely = oppScore >= 7 || oppJokboEV.oneAwayCount >= 1;
   if (deps.canBankruptOpponentByStop(state, playerKey)) return false;
   if (ctx.mode === "DESPERATE_DEFENSE" && !desperateGo) return false;
   if (ctx.nagariDelayMode && !desperateGo) return false;
-  if (selfPi < (desperateGo ? 6 : 7)) return false;
+  if (selfPi < minPiBase) return false;
   if (selfFive === 0 && oppFive >= 7 && !desperateGo) return false;
   if (selfFive === 0 && oppFive >= 6 && deckCount <= 5 && !desperateGo) return false;
   if (
@@ -377,8 +397,8 @@ function shouldGoV3(state, playerKey, deps) {
       carryStopBias += 0.22;
     }
   }
-  if (!strongLead && selfPi < (desperateGo ? 6 : 7) && oppPi >= 6) return false;
-  if (!strongLead && deckCount <= 5 && selfPi < (desperateGo ? 8 : 9)) return false;
+  if (!strongLead && selfPi < minPiBase && oppPi >= 6) return false;
+  if (!strongLead && deckCount <= 5 && selfPi < (minPiBase + 2)) return false;
   if (
     myScore >= 7 &&
     oppScore >= 5 &&
@@ -408,24 +428,41 @@ function shouldGoV3(state, playerKey, deps) {
     mongDanger * 0.55 +
     oppJokboEV.total * 0.4 +
     oppJokboEV.oneAwayCount * 0.14;
+  const deckLowBonus = deckCount <= 6 ? Number(P.goDeckLowBonus) : 0;
+  const goChainRisk = Math.max(0, goCount - 1) * Number(P.goRiskGoCountMul);
   let goMargin = isSecond ? 0.22 : 0.12;
   if (desperateGo) goMargin -= 0.18;
   if (conservativeGo) goMargin += 0.22;
   goMargin -= 0.16;
+  goMargin += Number(P.goBaseThreshold);
+  if (oppCanStopLikely) goMargin += Number(P.goLiteOppCanStopPenalty);
+  if (deckCount <= 8) goMargin += Number(P.goLiteLatePenalty);
+  goMargin -= Math.max(0, myScore - oppScore) * Number(P.goScoreDiffBonus);
+  if (oppPi >= 9 && selfPi <= minPiBase + 1) goMargin += Number(P.goUnseeHighPiPenalty);
   if (isSecond && !strongLead && myScore < oppScore) goMargin -= 0.04;
   goMargin += carryStopBias;
-  goMargin = Math.max(-0.1, goMargin);
-  if (!strongLead && myGainPotential < oppGainPotential + goMargin) return false;
+  goMargin = Math.max(Number(P.goMarginFloor), goMargin);
+  if (!strongLead && myGainPotential + deckLowBonus < oppGainPotential + goMargin + goChainRisk) return false;
   const lowDeckGate = isSecond ? 7 : 8;
   const lowJokboGate = isSecond ? 0.4 : 0.45;
   if (!strongLead && deckCount <= lowDeckGate && selfJokboEV.total < lowJokboGate && !desperateGo) return false;
   if (isSecond && !strongLead && (oppProgThreat >= 0.4 && oppNextMatchCount > 0) && !desperateGo) return false;
-  if ((oppProgThreat >= 0.5 || oppNextTurnThreat >= 0.35) && !desperateGo) return false;
+  if (
+    (oppProgThreat >= (0.5 + Number(P.goThreatRelax)) ||
+      oppNextTurnThreat >= (0.35 + Number(P.goThreatRelax))) &&
+    !desperateGo
+  ) {
+    return false;
+  }
   if (selfFive === 0 && oppFive >= 6 && !desperateGo) return false;
   if (
     (oppNextMatchCount >= 2 ||
       (oppNextMatchCount > 0 &&
-        (oppProgThreat >= 0.45 || oppNextTurnThreat >= 0.3 || jokboThreat.threat >= 0.3))) &&
+        (
+          oppProgThreat >= hardLateOneAwayCut ||
+          oppNextTurnThreat >= Math.max(0.30, hardLateOneAwayCut - 0.15) ||
+          jokboThreat.threat >= Math.max(0.30, hardLateOneAwayCut - 0.15)
+        ))) &&
     !strongLead &&
     !desperateGo
   ) {

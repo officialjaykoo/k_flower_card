@@ -341,10 +341,16 @@ body {
   border-radius: 6px;
 }
 
+.hand-card-wrap.month-gray-border .card {
+  box-shadow: 0 0 0 2px rgba(152, 160, 168, 0.95), 0 0 10px rgba(80, 88, 96, 0.45);
+  border-radius: 6px;
+}
+
 .hand-month-badge {
   position: absolute;
   top: 4px;
-  right: 4px;
+  left: 50%;
+  transform: translateX(-50%);
   font-size: 11px;
   line-height: 1;
   padding: 2px 5px;
@@ -373,7 +379,8 @@ body {
 
 .player-hand-lane .hand-month-badge {
   top: 6px;
-  right: 6px;
+  left: 50%;
+  transform: translateX(-50%);
   font-size: 13px;
   padding: 3px 7px;
 }
@@ -499,6 +506,195 @@ body {
   top: 50%;
   transform: translate(-50%, -50%) scale(1.5);
   z-index: 6;
+}
+
+.board.speed-fast {
+  --capture-flash-dur: 320ms;
+}
+
+.board.speed-visual {
+  --capture-flash-dur: 980ms;
+}
+
+.turn-fx-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.turn-flight-card {
+  position: absolute;
+  width: 60px;
+  height: 87px;
+  transform: translate(-50%, -50%);
+  animation-duration: var(--fx-dur, 360ms);
+  animation-delay: var(--fx-delay, 0ms);
+  animation-fill-mode: both;
+  animation-timing-function: cubic-bezier(0.16, 0.74, 0.2, 1);
+  z-index: 3;
+}
+
+.turn-flight-card .card,
+.turn-flight-card .card:hover {
+  width: 60px;
+  height: 87px;
+  transform: none;
+}
+
+.turn-flight-card.turn-flight-play {
+  animation-name: turnFlightPlay;
+}
+
+.turn-flight-card.turn-flight-flip {
+  animation-name: turnFlightFlip;
+}
+
+.turn-flight-card.turn-flight-target-hit .card {
+  box-shadow: 0 0 0 2px rgba(255, 224, 121, 0.92), 0 0 18px rgba(255, 198, 72, 0.62);
+}
+
+.turn-flight-card.turn-flight-target-empty .card {
+  box-shadow: 0 0 0 2px rgba(170, 223, 195, 0.82), 0 0 14px rgba(121, 182, 155, 0.38);
+}
+
+.turn-collect-card {
+  position: absolute;
+  width: 52px;
+  height: 76px;
+  transform: translate(-50%, -50%);
+  animation: turnCollectMove var(--fx-dur, 440ms) cubic-bezier(0.18, 0.82, 0.2, 1) both;
+  animation-delay: var(--fx-delay, 0ms);
+  z-index: 6;
+}
+
+.turn-collect-card .card,
+.turn-collect-card .card:hover {
+  width: 52px;
+  height: 76px;
+  transform: none;
+  box-shadow: 0 0 0 2px rgba(179, 251, 139, 0.86), 0 0 14px rgba(135, 235, 93, 0.45);
+}
+
+.turn-landing-ring {
+  position: absolute;
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%) scale(0.55);
+  opacity: 0;
+  animation: turnLandingPulse var(--fx-dur, 420ms) ease-out both;
+  animation-delay: var(--fx-delay, 0ms);
+  z-index: 2;
+}
+
+.turn-landing-ring-hit {
+  border: 2px solid rgba(255, 217, 98, 0.88);
+  box-shadow: 0 0 16px rgba(255, 200, 83, 0.5);
+}
+
+.turn-landing-ring-empty {
+  border: 2px dashed rgba(190, 235, 211, 0.82);
+  box-shadow: 0 0 12px rgba(150, 213, 189, 0.42);
+}
+
+@keyframes turnFlightPlay {
+  0% {
+    transform: translate(-50%, -50%) rotate(var(--fx-tilt, 0deg)) scale(0.96);
+  }
+  72% {
+    transform: translate(calc(-50% + var(--fx-dx, 0px)), calc(-50% + var(--fx-dy, 0px) - 18px))
+      rotate(var(--fx-tilt, 0deg)) scale(1.04);
+  }
+  100% {
+    transform: translate(calc(-50% + var(--fx-dx, 0px)), calc(-50% + var(--fx-dy, 0px)))
+      rotate(var(--fx-tilt, 0deg)) scale(1);
+  }
+}
+
+@keyframes turnFlightFlip {
+  0% {
+    transform: perspective(520px) translate(-50%, -50%) rotateY(-80deg) rotate(var(--fx-tilt, 0deg)) scale(0.9);
+  }
+  32% {
+    transform: perspective(520px)
+      translate(calc(-50% + var(--fx-dx, 0px) * 0.45), calc(-50% + var(--fx-dy, 0px) * 0.45 - 16px))
+      rotateY(-360deg) rotate(var(--fx-tilt, 0deg)) scale(1.02);
+  }
+  68% {
+    transform: perspective(520px)
+      translate(calc(-50% + var(--fx-dx, 0px) * 0.78), calc(-50% + var(--fx-dy, 0px) * 0.78 - 10px))
+      rotateY(-630deg) rotate(var(--fx-tilt, 0deg)) scale(1.03);
+  }
+  86% {
+    transform: perspective(520px)
+      translate(calc(-50% + var(--fx-dx, 0px)), calc(-50% + var(--fx-dy, 0px) - 16px))
+      rotateY(8deg) rotate(var(--fx-tilt, 0deg)) scale(1.02);
+  }
+  100% {
+    transform: perspective(520px)
+      translate(calc(-50% + var(--fx-dx, 0px)), calc(-50% + var(--fx-dy, 0px)))
+      rotateY(0deg) rotate(var(--fx-tilt, 0deg)) scale(1);
+  }
+}
+
+@keyframes turnLandingPulse {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.48);
+  }
+  40% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.05);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.24);
+  }
+}
+
+@keyframes turnCollectMove {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.95);
+  }
+  24% {
+    opacity: 1;
+    transform: translate(
+        calc(-50% + var(--fx-cdx, 0px) * 0.18),
+        calc(-50% + var(--fx-cdy, 0px) * 0.18 - 12px)
+      )
+      scale(1.02);
+  }
+  100% {
+    opacity: 0.04;
+    transform: translate(calc(-50% + var(--fx-cdx, 0px)), calc(-50% + var(--fx-cdy, 0px))) scale(0.78);
+  }
+}
+
+.stack-item.captured-recent-hand .card {
+  box-shadow: 0 0 0 2px rgba(167, 242, 119, 0.9), 0 0 14px rgba(120, 224, 74, 0.5);
+}
+
+.stack-item.captured-recent-flip .card {
+  box-shadow: 0 0 0 2px rgba(120, 219, 255, 0.92), 0 0 14px rgba(78, 189, 255, 0.52);
+}
+
+.stack-item.captured-recent-enter .card {
+  animation: captureRecentPulse var(--capture-flash-dur, 400ms) ease-out;
+}
+
+@keyframes captureRecentPulse {
+  0% {
+    transform: translateY(-5px) scale(0.95);
+  }
+  55% {
+    transform: translateY(0) scale(1.04);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
 }
 
 /* ==========================================================================

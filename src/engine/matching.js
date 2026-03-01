@@ -4,7 +4,14 @@
  * - Tag events produced by hand/flip context
  * ========================================================================== */
 
-export function resolveMatch({ card, board, source, isLastHandTurn = false, playedMonth = null }) {
+export function resolveMatch({
+  card,
+  board,
+  source,
+  isLastHandTurn = false,
+  playedMonth = null,
+  playedCardId = null
+}) {
   const matches = board.filter((c) => c.month === card.month);
   const result = {
     type: "NONE",
@@ -15,14 +22,6 @@ export function resolveMatch({ card, board, source, isLastHandTurn = false, play
   };
 
   if (matches.length === 0) {
-    if (
-      source === "flip" &&
-      !isLastHandTurn &&
-      playedMonth != null &&
-      playedMonth === card.month
-    ) {
-      result.eventTag = "JJOB";
-    }
     return result;
   }
 
@@ -34,7 +33,8 @@ export function resolveMatch({ card, board, source, isLastHandTurn = false, play
       playedMonth != null &&
       playedMonth === card.month
     ) {
-      result.eventTag = "DDADAK";
+      const matchedPlayedCard = playedCardId != null && matches[0]?.id === playedCardId;
+      result.eventTag = matchedPlayedCard ? "JJOB" : "DDADAK";
     }
     return result;
   }
@@ -42,12 +42,10 @@ export function resolveMatch({ card, board, source, isLastHandTurn = false, play
   if (matches.length === 2) {
     result.type = "TWO";
     result.needsChoice = matches[0].category !== matches[1].category;
-    if (source === "flip" && !isLastHandTurn) result.eventTag = "PPUK";
     return result;
   }
 
   result.type = "THREE_PLUS";
-  if (source === "hand") result.eventTag = "PANSSEUL";
-  if (source === "flip" && !isLastHandTurn) result.eventTag = "PPUK";
+  if (source === "hand" && !isLastHandTurn) result.eventTag = "PANSSEUL";
   return result;
 }

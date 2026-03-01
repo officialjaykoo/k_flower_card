@@ -66,7 +66,6 @@ export function emptyPlayer(label) {
       shaking: 0,
       bomb: 0,
       ddadak: 0,
-      ssul: 0,
       jabbeok: 0,
       yeonPpuk: 0
     }

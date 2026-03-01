@@ -85,7 +85,6 @@ export function formatEventsText(events) {
     `ppuk:${events.ppuk || 0}`,
     `jjob:${events.jjob || 0}`,
     `ddadak:${events.ddadak || 0}`,
-    `ssul:${events.ssul || 0}`,
     `jabbeok:${events.jabbeok || 0}`,
     `yeonPpuk:${events.yeonPpuk || 0}`,
     `shaking:${events.shaking || 0}`,

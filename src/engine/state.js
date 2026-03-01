@@ -51,6 +51,60 @@ function tx(state, key, params = {}, fallback = "") {
   return txLang(state?.language, key, params, fallback);
 }
 
+function uniqueCardsById(cards = []) {
+  const seen = new Set();
+  const result = [];
+  cards.forEach((card) => {
+    if (!card?.id || seen.has(card.id)) return;
+    seen.add(card.id);
+    result.push(card);
+  });
+  return result;
+}
+
+function stripCapturedCardsByIds(captured, cardIdSet) {
+  return {
+    ...captured,
+    kwang: (captured.kwang || []).filter((card) => !cardIdSet.has(card.id)),
+    five: (captured.five || []).filter((card) => !cardIdSet.has(card.id)),
+    ribbon: (captured.ribbon || []).filter((card) => !cardIdSet.has(card.id)),
+    junk: (captured.junk || []).filter((card) => !cardIdSet.has(card.id))
+  };
+}
+
+function bonusStealCount(cards = []) {
+  return (cards || []).reduce((sum, card) => sum + Number(card?.bonus?.stealPi || 0), 0);
+}
+
+function applyPpukBoardStayRule({
+  isLastHandTurn = false,
+  matchEvents = [],
+  board = [],
+  captured,
+  newlyCaptured = [],
+  rollbackCards = [],
+  heldBonusCards = []
+}) {
+  const ppukTriggered = !isLastHandTurn && (matchEvents || []).some((evt) => evt?.source === "flip" && evt?.eventTag === "PPUK");
+  if (!ppukTriggered) {
+    return {
+      board,
+      captured,
+      newlyCaptured,
+      heldBonusCards
+    };
+  }
+
+  const stayCards = uniqueCardsById([...(rollbackCards || []), ...(heldBonusCards || [])]);
+  const stayIdSet = new Set(stayCards.map((card) => card.id));
+  return {
+    board: uniqueCardsById([...(board || []), ...stayCards]),
+    captured: stripCapturedCardsByIds(captured, stayIdSet),
+    newlyCaptured: (newlyCaptured || []).filter((card) => !stayIdSet.has(card.id)),
+    heldBonusCards: []
+  };
+}
+
 // ============================================================================
 // SECTION 1. SETUP
 // ----------------------------------------------------------------------------
@@ -438,6 +492,7 @@ export function playTurn(state, cardId) {
       currentKey,
       playedCard,
       isLastHandTurn,
+      ppukArmed: false,
       board: state.board.slice(),
       deck: state.deck.slice(),
       hand,
@@ -619,6 +674,7 @@ export function playTurn(state, cardId) {
     isLastHandTurn,
     playedMonth: playedCard.month
   });
+  const ppukArmed = handMatch.type === "ONE";
 
   if (handMatch.type === "NONE") {
     board.push(playedCard);
@@ -674,12 +730,7 @@ export function playTurn(state, cardId) {
     pushCaptured(captured, playedCard);
     newlyCaptured.push(playedCard);
     capturedFromHand.push(playedCard);
-    if (handMatch.eventTag === "PANSSEUL") events.pansseul = (events.pansseul || 0) + 1;
     log.push(tx(state, "log.playSweepCapture", { player: player.label, month: playedCard.month }));
-    if (!isLastHandTurn) {
-      pendingSteal += 1;
-      log.push(tx(state, "log.pansseulReserved", { player: player.label }));
-    }
     if (!isLastHandTurn && presidentChainArmed) {
       events.shaking += 1;
       log.push(tx(state, "log.presidentChainShake", { player: player.label, month: playedCard.month }));
@@ -692,6 +743,7 @@ export function playTurn(state, cardId) {
     currentKey,
     playedCard,
     isLastHandTurn,
+    ppukArmed,
     board,
     deck: state.deck.slice(),
     hand,
@@ -704,25 +756,35 @@ export function playTurn(state, cardId) {
   });
 
   if (flipResult.pendingState) return flipResult.pendingState;
+  const turnMatchEvents = matchEvents.concat(flipResult.matchEvents || []);
+  const ppukAdjusted = applyPpukBoardStayRule({
+    isLastHandTurn,
+    matchEvents: turnMatchEvents,
+    board: flipResult.board,
+    captured,
+    newlyCaptured: flipResult.newlyCaptured,
+    rollbackCards: capturedFromHand.concat(flipResult.capturedFromFlip || []),
+    heldBonusCards: flipResult.heldBonusOnPpuk || []
+  });
 
   return finalizeTurn({
     state,
     currentKey,
     hand,
-    captured,
+    captured: ppukAdjusted.captured,
     events,
     deck: flipResult.deck,
-    board: flipResult.board,
+    board: ppukAdjusted.board,
     log: flipResult.log,
-    newlyCaptured: flipResult.newlyCaptured,
+    newlyCaptured: ppukAdjusted.newlyCaptured,
     pendingSteal: flipResult.pendingSteal,
-    heldBonusCards: flipResult.heldBonusOnPpuk || [],
+    heldBonusCards: ppukAdjusted.heldBonusCards,
     isLastHandTurn,
     turnMeta: {
       type: "play",
       card: packCard(playedCard),
       flips: flipResult.flips || [],
-      matchEvents: matchEvents.concat(flipResult.matchEvents || []),
+      matchEvents: turnMatchEvents,
       captureBySource: {
         hand: capturedFromHand.map(packCard),
         flip: (flipResult.capturedFromFlip || []).map(packCard)
@@ -842,6 +904,7 @@ export function declareBomb(state, playerKey, month) {
     currentKey: playerKey,
     playedCard: { id: `bomb-declare-${monthNum}`, month: monthNum, category: "junk", name: "Bomb Declare" },
     isLastHandTurn: hand.length === 0,
+    ppukArmed: false,
     board,
     deck: state.deck.slice(),
     hand,
@@ -852,6 +915,16 @@ export function declareBomb(state, playerKey, month) {
     pendingSteal: 1
   });
   if (flipResult.pendingState) return flipResult.pendingState;
+  const turnMatchEvents = flipResult.matchEvents || [];
+  const ppukAdjusted = applyPpukBoardStayRule({
+    isLastHandTurn: hand.length === 0,
+    matchEvents: turnMatchEvents,
+    board: flipResult.board,
+    captured,
+    newlyCaptured: flipResult.newlyCaptured,
+    rollbackCards: capturedFromHand.concat(flipResult.capturedFromFlip || []),
+    heldBonusCards: flipResult.heldBonusOnPpuk || []
+  });
   const bombState = {
     ...state,
     actionReveal: {
@@ -866,18 +939,20 @@ export function declareBomb(state, playerKey, month) {
     state: bombState,
     currentKey: playerKey,
     hand,
-    captured,
+    captured: ppukAdjusted.captured,
     events,
     deck: flipResult.deck,
-    board: flipResult.board,
+    board: ppukAdjusted.board,
     log: flipResult.log,
-    newlyCaptured: flipResult.newlyCaptured,
+    newlyCaptured: ppukAdjusted.newlyCaptured,
     pendingSteal: flipResult.pendingSteal,
+    heldBonusCards: ppukAdjusted.heldBonusCards,
     turnMeta: {
       type: "declare_bomb",
       month: monthNum,
       captured: [packCard(matched), ...monthCards.map(packCard)],
       flips: flipResult.flips || [],
+      matchEvents: turnMatchEvents,
       captureBySource: {
         hand: capturedFromHand.map(packCard),
         flip: (flipResult.capturedFromFlip || []).map(packCard)
@@ -1205,7 +1280,8 @@ function runFlipPhase(context) {
     log,
     newlyCaptured,
     pendingSteal = 0,
-    pendingBonusFlips = []
+    pendingBonusFlips = [],
+    ppukArmed = false
   } = context;
   let heldBonusOnPpuk = [];
   const flips = [];
@@ -1228,23 +1304,40 @@ function runFlipPhase(context) {
       board,
       source: "flip",
       isLastHandTurn,
-      playedMonth: playedCard.month
+      playedMonth: playedCard.month,
+      playedCardId: playedCard.id
     });
-    matchEvents.push({ source: "flip", eventTag: flipMatch.eventTag, type: flipMatch.type });
+    const flipEventTag =
+      !isLastHandTurn &&
+      ppukArmed &&
+      flipMatch.type === "NONE" &&
+      playedCard?.month != null &&
+      playedCard.month === flip.month
+        ? "PPUK"
+        : flipMatch.eventTag;
+    matchEvents.push({ source: "flip", eventTag: flipEventTag, type: flipMatch.type });
 
     if (flipMatch.type === "NONE") {
-      if (pendingBonusFlips.length > 0) {
+      if (flipEventTag === "PPUK" && pendingBonusFlips.length > 0) {
+        log.push(tx(state, "log.ppukHoldBonus", { count: pendingBonusFlips.length }));
+        heldBonusOnPpuk = heldBonusOnPpuk.concat(pendingBonusFlips);
+        pendingBonusFlips = [];
+      } else if (pendingBonusFlips.length > 0) {
+        const bonusSteal = bonusStealCount(pendingBonusFlips);
         pendingBonusFlips.forEach((b) => {
           pushCaptured(captured, b);
           newlyCaptured.push(b);
           capturedFromFlip.push(b);
         });
         log.push(tx(state, "log.flipPendingBonusConfirmed", { count: pendingBonusFlips.length }));
+        pendingSteal += bonusSteal;
         pendingBonusFlips = [];
       }
       board.push(flip);
       log.push(tx(state, "log.flipPlaceBoard", { month: flip.month }));
-      if (flipMatch.eventTag === "JJOB") {
+      if (flipEventTag === "PPUK") {
+        events.ppuk += 1;
+      } else if (flipEventTag === "JJOB") {
         events.jjob += 1;
         pendingSteal += 1;
         log.push(tx(state, "log.flipJjobReserved"));
@@ -1258,13 +1351,17 @@ function runFlipPhase(context) {
         newlyCaptured,
         pendingSteal,
         flips,
+        heldBonusOnPpuk,
         matchEvents,
         capturedFromFlip
       };
     }
 
     if (flipMatch.type === "ONE") {
+      let confirmedBonusSteal = 0;
       if (pendingBonusFlips.length > 0) {
+        const bonusSteal = bonusStealCount(pendingBonusFlips);
+        confirmedBonusSteal = bonusSteal;
         pendingBonusFlips.forEach((b) => {
           pushCaptured(captured, b);
           newlyCaptured.push(b);
@@ -1280,10 +1377,16 @@ function runFlipPhase(context) {
       newlyCaptured.push(flip, matched);
       capturedFromFlip.push(flip, matched);
       log.push(tx(state, "log.flipMatchCapture", { month: flip.month }));
-      if (flipMatch.eventTag === "DDADAK") {
+      if (flipEventTag === "DDADAK") {
         events.ddadak = (events.ddadak || 0) + 1;
-        pendingSteal += 1;
+        pendingSteal += 1 + confirmedBonusSteal;
         log.push(tx(state, "log.flipDdadakReserved"));
+      } else if (flipEventTag === "JJOB") {
+        events.jjob = (events.jjob || 0) + 1;
+        pendingSteal += 1 + confirmedBonusSteal;
+        log.push(tx(state, "log.flipJjobReserved"));
+      } else {
+        pendingSteal += confirmedBonusSteal;
       }
       return {
         board,
@@ -1331,20 +1434,22 @@ function runFlipPhase(context) {
     }
 
     if (flipMatch.type === "TWO") {
-      if (!isLastHandTurn && pendingBonusFlips.length > 0) {
+      if (flipEventTag === "PPUK" && !isLastHandTurn && pendingBonusFlips.length > 0) {
         log.push(tx(state, "log.ppukHoldBonus", { count: pendingBonusFlips.length }));
         heldBonusOnPpuk = heldBonusOnPpuk.concat(pendingBonusFlips);
         pendingBonusFlips = [];
       } else if (pendingBonusFlips.length > 0) {
+        const bonusSteal = bonusStealCount(pendingBonusFlips);
         pendingBonusFlips.forEach((b) => {
           pushCaptured(captured, b);
           newlyCaptured.push(b);
           capturedFromFlip.push(b);
         });
         log.push(tx(state, "log.flipPendingBonusConfirmed", { count: pendingBonusFlips.length }));
+        pendingSteal += bonusSteal;
         pendingBonusFlips = [];
       }
-      if (flipMatch.eventTag === "PPUK") events.ppuk += 1;
+      if (flipEventTag === "PPUK") events.ppuk += 1;
       const matched = bestMatchCard(flipMatch.matches);
       board = board.filter((c) => c.id !== matched.id);
       pushCaptured(captured, flip);
@@ -1367,18 +1472,20 @@ function runFlipPhase(context) {
       };
     }
 
-    if (flipMatch.eventTag === "PPUK") events.ppuk += 1;
-    if (!isLastHandTurn && pendingBonusFlips.length > 0) {
+    if (flipEventTag === "PPUK") events.ppuk += 1;
+    if (flipEventTag === "PPUK" && !isLastHandTurn && pendingBonusFlips.length > 0) {
       log.push(tx(state, "log.ppukHoldBonus", { count: pendingBonusFlips.length }));
       heldBonusOnPpuk = heldBonusOnPpuk.concat(pendingBonusFlips);
       pendingBonusFlips = [];
     } else if (pendingBonusFlips.length > 0) {
+      const bonusSteal = bonusStealCount(pendingBonusFlips);
       pendingBonusFlips.forEach((b) => {
         pushCaptured(captured, b);
         newlyCaptured.push(b);
         capturedFromFlip.push(b);
       });
       log.push(tx(state, "log.flipPendingBonusConfirmed", { count: pendingBonusFlips.length }));
+      pendingSteal += bonusSteal;
       pendingBonusFlips = [];
     }
     board = board.filter((c) => c.month !== flip.month);
@@ -1407,12 +1514,14 @@ function runFlipPhase(context) {
   }
 
   if (pendingBonusFlips.length > 0) {
+    const bonusSteal = bonusStealCount(pendingBonusFlips);
     pendingBonusFlips.forEach((b) => {
       pushCaptured(captured, b);
       newlyCaptured.push(b);
       capturedFromFlip.push(b);
     });
     log.push(tx(state, "log.flipPendingBonusConfirmed", { count: pendingBonusFlips.length }));
+    pendingSteal += bonusSteal;
     pendingBonusFlips = [];
   }
   return {
@@ -1467,6 +1576,7 @@ function resolvePlayerMatchChoice(state, boardCardId) {
     currentKey: playerKey,
     playedCard,
     isLastHandTurn: startedWithLastHand,
+    ppukArmed: false,
     board: boardAfter,
     deck: state.deck.slice(),
     hand,
@@ -1479,28 +1589,36 @@ function resolvePlayerMatchChoice(state, boardCardId) {
   });
 
   if (flipResult.pendingState) return flipResult.pendingState;
+  const turnMatchEvents = [{ source: "hand", eventTag: "NORMAL", type: "TWO" }].concat(flipResult.matchEvents || []);
+  const ppukAdjusted = applyPpukBoardStayRule({
+    isLastHandTurn: startedWithLastHand,
+    matchEvents: turnMatchEvents,
+    board: flipResult.board,
+    captured,
+    newlyCaptured: flipResult.newlyCaptured,
+    rollbackCards: capturedFromHand.concat(flipResult.capturedFromFlip || []),
+    heldBonusCards: flipResult.heldBonusOnPpuk || []
+  });
 
   return finalizeTurn({
     state,
     currentKey: playerKey,
     hand,
-    captured,
+    captured: ppukAdjusted.captured,
     events,
     deck: flipResult.deck,
-    board: flipResult.board,
+    board: ppukAdjusted.board,
     log: flipResult.log,
-    newlyCaptured: flipResult.newlyCaptured,
+    newlyCaptured: ppukAdjusted.newlyCaptured,
     pendingSteal: flipResult.pendingSteal,
-    heldBonusCards: flipResult.heldBonusOnPpuk || [],
+    heldBonusCards: ppukAdjusted.heldBonusCards,
     isLastHandTurn: startedWithLastHand,
     turnMeta: {
       type: "play",
       card: packCard(playedCard),
       selectedBoardCard: packCard(selected),
       flips: flipResult.flips || [],
-      matchEvents: [{ source: "hand", eventTag: "NORMAL", type: "TWO" }].concat(
-        flipResult.matchEvents || []
-      ),
+      matchEvents: turnMatchEvents,
       captureBySource: {
         hand: capturedFromHand.map(packCard),
         flip: (flipResult.capturedFromFlip || []).map(packCard)
@@ -1541,20 +1659,26 @@ function resolveFlipMatchChoice(state, boardCardId) {
     junk: captured.junk.slice()
   };
   const isLastHandTurn = hand.length === 0;
-  const nextEvents = { ...events, ppuk: isLastHandTurn ? events.ppuk : events.ppuk + 1 };
+  const ppukTriggered =
+    !isLastHandTurn &&
+    (matchEvents || []).some((evt) => evt?.source === "flip" && evt?.eventTag === "PPUK");
+  const nextEvents = { ...events, ppuk: ppukTriggered ? events.ppuk + 1 : events.ppuk };
+  let nextPendingSteal = pendingSteal;
   const nextNewlyCaptured = newlyCaptured.slice();
   let nextLog = log.slice();
   let bonusQueue = pendingBonusFlips.slice();
-  if (!isLastHandTurn && bonusQueue.length > 0) {
+  if (ppukTriggered && bonusQueue.length > 0) {
     nextLog.push(tx(state, "log.ppukSelectHoldBonus", { count: bonusQueue.length }));
     bonusQueue = [];
   } else if (bonusQueue.length > 0) {
+    const bonusSteal = bonusStealCount(bonusQueue);
     bonusQueue.forEach((b) => {
       pushCaptured(nextCaptured, b);
       nextNewlyCaptured.push(b);
       capturedFromFlip.push(b);
     });
     nextLog.push(tx(state, "log.flipPendingBonusConfirmed", { count: bonusQueue.length }));
+    nextPendingSteal += bonusSteal;
     bonusQueue = [];
   }
 
@@ -1564,19 +1688,28 @@ function resolveFlipMatchChoice(state, boardCardId) {
   capturedFromFlip.push(flipCard, selected);
   const nextBoard = board.filter((c) => c.id !== selected.id);
   nextLog.push(tx(state, "log.flipSelectCapture", { month: flipCard.month, cardName: selected.name }));
+  const ppukAdjusted = applyPpukBoardStayRule({
+    isLastHandTurn,
+    matchEvents,
+    board: nextBoard,
+    captured: nextCaptured,
+    newlyCaptured: nextNewlyCaptured,
+    rollbackCards: nextNewlyCaptured,
+    heldBonusCards: ppukTriggered ? pendingBonusFlips : []
+  });
 
   return finalizeTurn({
     state,
     currentKey: playerKey,
     hand,
-    captured: nextCaptured,
+    captured: ppukAdjusted.captured,
     events: nextEvents,
     deck,
-    board: nextBoard,
+    board: ppukAdjusted.board,
     log: nextLog,
-    newlyCaptured: nextNewlyCaptured,
-    pendingSteal,
-    heldBonusCards: !isLastHandTurn ? pendingBonusFlips : [],
+    newlyCaptured: ppukAdjusted.newlyCaptured,
+    pendingSteal: nextPendingSteal,
+    heldBonusCards: ppukAdjusted.heldBonusCards,
     isLastHandTurn,
     turnMeta: {
       type: "flip-select",
