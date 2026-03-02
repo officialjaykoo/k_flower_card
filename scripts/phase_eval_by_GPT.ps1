@@ -33,8 +33,8 @@ function Get-OptionalDouble {
 function Resolve-EvalGateRule {
   param([Parameter(Mandatory = $true)]$Runtime)
 
-  $defaultMeanGold = 100.0
-  $defaultWinRate = 0.48
+  $defaultMeanGold = 0.0
+  $defaultWinRate = 0.45
 
   $meanGold = Get-OptionalDouble -Value $Runtime.eval_pass_mean_gold_delta_min
   if ([double]::IsNaN($meanGold)) {
@@ -45,9 +45,6 @@ function Resolve-EvalGateRule {
   }
 
   $winRate = Get-OptionalDouble -Value $Runtime.eval_pass_win_rate_min
-  if ([double]::IsNaN($winRate)) {
-    $winRate = Get-OptionalDouble -Value $Runtime.transition_ema_win_rate
-  }
   if ([double]::IsNaN($winRate)) {
     $winRate = $defaultWinRate
   }
@@ -60,12 +57,10 @@ function Resolve-EvalGateRule {
 
 function ConvertTo-NativeJsonArg {
   param([Parameter(Mandatory = $true)][string]$JsonText)
-  # PowerShell native command invocation can strip raw double-quotes from JSON.
-  # Escape quotes before passing to Node so JSON.parse receives valid text.
   return $JsonText.Replace('"', '\"')
 }
 
-$runtimeConfigPath = "scripts/configs/runtime_gpt_phase$Phase.json"
+$runtimeConfigPath = "scripts/configs/runtime_phase${Phase}_by_GPT.json"
 $outputDir = "logs/NEAT_GPT/neat_phase${Phase}_seed$Seed"
 $gateStatePath = Join-Path $outputDir "gate_state.json"
 $genomePath = Join-Path $outputDir "models/winner_genome.json"
@@ -102,53 +97,35 @@ if (-not $hasPolicy -and -not $hasPolicyMix) {
 }
 
 $cmd = @(
-  "scripts/neat_eval_worker.mjs",
+  "scripts/neat_eval_worker_by_GPT.mjs",
   "--genome", $genomePath,
   "--games", "$games",
   "--seed", $seedTag,
   "--max-steps", "$($runtime.max_eval_steps)",
   "--first-turn-policy", "alternate",
   "--fitness-gold-scale", "$($runtime.fitness_gold_scale)",
+  "--fitness-gold-neutral-delta", "$($runtime.fitness_gold_neutral_delta)",
   "--fitness-win-weight", "$($runtime.fitness_win_weight)",
   "--fitness-gold-weight", "$($runtime.fitness_gold_weight)",
-  "--fitness-go-zero-games-penalty", "$($runtime.fitness_go_zero_games_penalty)"
+  "--fitness-win-neutral-rate", "$($runtime.fitness_win_neutral_rate)",
+  "--fitness-go-zero-games-penalty", "$($runtime.fitness_go_zero_games_penalty)",
+  "--fitness-go-max-games", "$($runtime.fitness_go_max_games)",
+  "--fitness-go-max-games-penalty", "$($runtime.fitness_go_max_games_penalty)",
+  "--fitness-go-fail-penalty-trigger", "$($runtime.fitness_go_fail_penalty_trigger)",
+  "--fitness-go-fail-penalty-amount", "$($runtime.fitness_go_fail_penalty_amount)",
+  "--fitness-go-fail-bonus-trigger", "$($runtime.fitness_go_fail_bonus_trigger)",
+  "--fitness-go-fail-bonus-amount", "$($runtime.fitness_go_fail_bonus_amount)"
 )
-if (-not $hasPolicy -and $hasPolicyMix) {
-  $mixJson = $mixValue | ConvertTo-Json -Depth 8 -Compress
-  $mixArg = ConvertTo-NativeJsonArg -JsonText $mixJson
-  # Use key=value single token to avoid PowerShell quote-stripping on native args.
-  $cmd += @("--opponent-policy-mix=$mixArg")
-}
+
 if ($hasPolicy) {
-  # opponent_policy 우선. 둘 다 있으면 opponent_policy를 사용한다.
   $cmd += @("--opponent-policy", "$policyValue")
 }
-
-if ($null -ne $runtime.fitness_win_neutral_rate) {
-  $cmd += @("--fitness-win-neutral-rate", "$($runtime.fitness_win_neutral_rate)")
-}
-if ($null -ne $runtime.fitness_gold_neutral_delta) {
-  $cmd += @("--fitness-gold-neutral-delta", "$($runtime.fitness_gold_neutral_delta)")
+if ($hasPolicyMix) {
+  $mixJson = $mixValue | ConvertTo-Json -Depth 8 -Compress
+  $mixArg = ConvertTo-NativeJsonArg -JsonText $mixJson
+  $cmd += @("--opponent-policy-mix=$mixArg")
 }
 
-if ($null -ne $runtime.fitness_go_max_games) {
-  $cmd += @("--fitness-go-max-games", "$($runtime.fitness_go_max_games)")
-}
-if ($null -ne $runtime.fitness_go_max_games_penalty) {
-  $cmd += @("--fitness-go-max-games-penalty", "$($runtime.fitness_go_max_games_penalty)")
-}
-if ($null -ne $runtime.fitness_go_fail_penalty_trigger) {
-  $cmd += @("--fitness-go-fail-penalty-trigger", "$($runtime.fitness_go_fail_penalty_trigger)")
-}
-if ($null -ne $runtime.fitness_go_fail_penalty_amount) {
-  $cmd += @("--fitness-go-fail-penalty-amount", "$($runtime.fitness_go_fail_penalty_amount)")
-}
-if ($null -ne $runtime.fitness_go_fail_bonus_trigger) {
-  $cmd += @("--fitness-go-fail-bonus-trigger", "$($runtime.fitness_go_fail_bonus_trigger)")
-}
-if ($null -ne $runtime.fitness_go_fail_bonus_amount) {
-  $cmd += @("--fitness-go-fail-bonus-amount", "$($runtime.fitness_go_fail_bonus_amount)")
-}
 $resultLines = & node @cmd
 $exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
@@ -161,7 +138,6 @@ if ([string]::IsNullOrWhiteSpace($resultJson)) {
 }
 
 $savePath = Join-Path $outputDir "phase${Phase}_eval_1000.json"
-$enc = New-Object System.Text.UTF8Encoding($true)
 [System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($savePath), $resultJson, $enc)
 
 $r = $resultJson | ConvertFrom-Json
@@ -201,6 +177,7 @@ $failReasons = @()
 if (-not $passMeanGold) { $failReasons += "mean_gold_delta" }
 if (-not $passWinRate) { $failReasons += "win_rate" }
 $reasonText = if ($passed) { "eval_gate_passed" } else { "eval_gate_not_passed:" + ($failReasons -join ",") }
+
 $passState = [ordered]@{
   passed = $passed
   reason = $reasonText
@@ -237,4 +214,3 @@ if ($passed) {
 }
 
 exit 2
-

@@ -15,7 +15,7 @@ function Read-JsonFile {
 }
 
 function To-PositiveIntOrDefault {
-param(
+  param(
     [Parameter(Mandatory = $false)]$Value,
     [Parameter(Mandatory = $true)][int]$DefaultValue
   )
@@ -34,16 +34,14 @@ function Resolve-PreviousCheckpoint {
     [Parameter(Mandatory = $true)][int]$PreferredGeneration,
     [Parameter(Mandatory = $true)][string]$Label
   )
+
   if (-not (Test-Path $CheckpointDir)) {
     throw "$Label checkpoint directory not found: $CheckpointDir"
   }
 
   $preferred = Join-Path $CheckpointDir "neat-checkpoint-gen$PreferredGeneration"
   if (Test-Path $preferred) {
-    return [ordered]@{
-      path = $preferred
-      generation = $PreferredGeneration
-    }
+    return [ordered]@{ path = $preferred; generation = $PreferredGeneration }
   }
 
   $latest = Get-ChildItem -Path $CheckpointDir -File -Filter "neat-checkpoint-gen*" |
@@ -62,7 +60,24 @@ function Resolve-PreviousCheckpoint {
   if ($null -eq $latest) {
     throw "$Label checkpoint not found in: $CheckpointDir"
   }
+
   return $latest
+}
+
+function Get-OptionalDouble {
+  param(
+    [Parameter(Mandatory = $false)]$Value,
+    [Parameter(Mandatory = $false)][double]$DefaultValue = [double]::NaN
+  )
+  if ($null -eq $Value) {
+    return $DefaultValue
+  }
+  try {
+    return [double]$Value
+  }
+  catch {
+    return $DefaultValue
+  }
 }
 
 function Get-BestGenomeGoMetrics {
@@ -158,29 +173,13 @@ function Get-LatestGenerationGoAverages {
   }
 }
 
-function Get-OptionalDouble {
-  param(
-    [Parameter(Mandatory = $false)]$Value,
-    [Parameter(Mandatory = $false)][double]$DefaultValue = [double]::NaN
-  )
-  if ($null -eq $Value) {
-    return $DefaultValue
-  }
-  try {
-    return [double]$Value
-  }
-  catch {
-    return $DefaultValue
-  }
-}
-
 $python = ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
   throw "python not found: $python"
 }
 
 $configFeedforward = "scripts/configs/neat_feedforward.ini"
-$runtimeConfig = "scripts/configs/runtime_gpt_phase$Phase.json"
+$runtimeConfig = "scripts/configs/runtime_phase${Phase}_by_GPT.json"
 $outputDir = "logs/NEAT_GPT/neat_phase${Phase}_seed$Seed"
 
 if (-not (Test-Path $configFeedforward)) {
@@ -191,7 +190,7 @@ if (-not (Test-Path $runtimeConfig)) {
 }
 
 $cmd = @(
-  "scripts/neat_train.py",
+  "scripts/neat_train_worker_by_GPT.py",
   "--config-feedforward", $configFeedforward,
   "--runtime-config", $runtimeConfig,
   "--output-dir", $outputDir,
@@ -202,7 +201,7 @@ $cmd = @(
 if ($Phase -ne "1") {
   $previousPhase = [int]$Phase - 1
   $previousLabel = "phase$previousPhase"
-  $previousRuntimePath = "scripts/configs/runtime_gpt_phase$previousPhase.json"
+  $previousRuntimePath = "scripts/configs/runtime_phase${previousPhase}_by_GPT.json"
   $previousRuntime = Read-JsonFile -Path $previousRuntimePath
   $previousGenerations = To-PositiveIntOrDefault -Value $previousRuntime.generations -DefaultValue 20
   $previousCheckpointDir = "logs/NEAT_GPT/neat_phase${previousPhase}_seed$Seed/checkpoints"
@@ -232,14 +231,14 @@ catch {
   if (-not [string]::IsNullOrWhiteSpace($result)) {
     Write-Host $result.Trim()
   }
-  throw "failed to parse neat_train output as JSON"
+  throw "failed to parse neat_train_worker_by_GPT output as JSON"
 }
 
 $goMetrics = Get-BestGenomeGoMetrics -Summary $summary
 $goAverages = Get-LatestGenerationGoAverages -Summary $summary
 $summaryElapsedSec = Get-OptionalDouble -Value $summary.run_elapsed_sec -DefaultValue $phaseRunElapsedSec
 
-Write-Host "=== Phase$Phase Summary (Seed=$Seed) ==="
+Write-Host "=== Phase$Phase GPT Summary (Seed=$Seed) ==="
 Write-Host "EMA win rate:     $($summary.gate_state.ema_win_rate)"
 Write-Host "EMA imitation:    $($summary.gate_state.ema_imitation)"
 Write-Host "Latest win rate:  $($summary.gate_state.latest_win_rate)"
@@ -274,4 +273,3 @@ else {
 Write-Host "================================"
 
 exit 0
-
