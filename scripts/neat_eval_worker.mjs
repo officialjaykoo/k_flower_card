@@ -275,7 +275,7 @@ function heuristicCandidateForDecision(state, actor, decisionType, candidates, h
   if (!Array.isArray(candidates) || !candidates.length) return null;
   const nextByHeuristic = aiPlay(state, actor, {
     source: "heuristic",
-    heuristicPolicy: heuristicPolicy || "H-V4",
+    heuristicPolicy: heuristicPolicy || "H-J2",
   });
   if (!nextByHeuristic || stateProgressKey(nextByHeuristic) === stateProgressKey(state)) {
     return null;
@@ -447,7 +447,7 @@ function playSingleRound(
       if (chosen) {
         const imitationRefPolicy =
           normalizePolicyName(opponentPolicy) === "genome"
-            ? "H-V4"
+            ? "H-J2"
             : opponentPolicy;
         const refCandidate = heuristicCandidateForDecision(
           state,

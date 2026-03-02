@@ -1,16 +1,16 @@
 ﻿export {
-  rankHandCardsV5,
-  chooseMatchHeuristicV5,
-  chooseGukjinHeuristicV5,
-  shouldPresidentStopV5,
-  shouldGoV5,
-  selectBombMonthV5,
-  shouldBombV5,
-  decideShakingV5
+  rankHandCardsCL,
+  chooseMatchHeuristicCL,
+  chooseGukjinHeuristicCL,
+  shouldPresidentStopCL,
+  shouldGoCL,
+  selectBombMonthCL,
+  shouldBombCL,
+  decideShakingCL
 };
 
 /* ============================================================================
- * Heuristic V5
+ * Heuristic CL
  * - Optuna-tuned stable rule policy
  * - score gates first, tactical tie-breakers second
  * - exported decisions: rank / match / go / bomb / shaking / president / gukjin
@@ -188,7 +188,7 @@ function _oppOneAway(state, playerKey, deps) {
 }
 
 /* 3) Hand ranking */
-function rankHandCardsV5(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function rankHandCardsCL(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
@@ -286,7 +286,7 @@ function rankHandCardsV5(state, playerKey, deps, params = DEFAULT_PARAMS) {
 }
 
 /* 4) Pending match-card selection */
-function chooseMatchHeuristicV5(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function chooseMatchHeuristicCL(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
@@ -330,7 +330,7 @@ function chooseMatchHeuristicV5(state, playerKey, deps, params = DEFAULT_PARAMS)
 }
 
 /* 5) GO/STOP decision gate */
-function shouldGoV5(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function shouldGoCL(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   if (deps.canBankruptOpponentByStop?.(state, playerKey)) return false;
 
@@ -395,7 +395,7 @@ function shouldGoV5(state, playerKey, deps, params = DEFAULT_PARAMS) {
 }
 
 /* 6) Bomb month selection and bomb gate */
-function shouldBombV5(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
+function shouldBombCL(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   if (!bombMonths?.length) return false;
   const ctx  = deps.analyzeGameContext(state, playerKey);
@@ -411,13 +411,13 @@ function shouldBombV5(state, playerKey, bombMonths, deps, params = DEFAULT_PARAM
   if (ctx.nagariDelayMode && safeNum(imp.immediateGain) < 6) return false;
   return gain >= 1.0;
 }
-function selectBombMonthV5(state, _pk, months, deps) { return _bestBomb(state, months, deps); }
+function selectBombMonthCL(state, _pk, months, deps) { return _bestBomb(state, months, deps); }
 function _bestBomb(state, months, deps) {
   return months?.length ? months.reduce((b, m) => safeNum(deps.monthBoardGain(state, m)) > safeNum(deps.monthBoardGain(state, b)) ? m : b, months[0]) : null;
 }
 
 /* 7) Shaking decision */
-function decideShakingV5(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
+function decideShakingCL(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
   const bbm = deps.boardMatchesByMonth(state);
@@ -455,7 +455,7 @@ function decideShakingV5(state, playerKey, shakingMonths, deps, params = DEFAULT
 }
 
 /* 8) President/Gukjin late decisions */
-function shouldPresidentStopV5(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function shouldPresidentStopCL(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const ctx  = deps.analyzeGameContext(state, playerKey);
   const diff = safeNum(ctx.myScore) - safeNum(ctx.oppScore);
   const co   = safeNum(state.carryOverMultiplier, 1);
@@ -465,7 +465,7 @@ function shouldPresidentStopV5(state, playerKey, deps, params = DEFAULT_PARAMS) 
   return diff >= 1;
 }
 
-function chooseGukjinHeuristicV5(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function chooseGukjinHeuristicCL(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const ctx = deps.analyzeGameContext(state, playerKey);
   const br  = deps.analyzeGukjinBranches(state, playerKey);
   const sf  = safeNum(ctx.selfFive), of_ = safeNum(ctx.oppFive);

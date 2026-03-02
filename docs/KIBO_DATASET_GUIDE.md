@@ -74,10 +74,10 @@ The key difference is snapshot depth.
 ```json
 {
   "game_index": 0,
-  "seed": "v5_vs_v7_1000|g=0|first=ai|sr=0",
+  "seed": "cl_vs_gemini_1000|g=0|first=ai|sr=0",
   "first_turn": "ai",
-  "human": "heuristic_v5",
-  "ai": "heuristic_v7_gold_digger",
+  "human": "heuristic_h_cl",
+  "ai": "heuristic_h_gemini",
   "winner": "human",
   "kibo_detail": "lean",
   "kibo": [
@@ -164,10 +164,10 @@ The order is identical to `featureVectorForCandidate()` in `model_duel_worker.mj
 ```json
 {
   "game_index": 0,
-  "seed": "v5_vs_v7_1000|g=0|first=ai|sr=0",
+  "seed": "cl_vs_gemini_1000|g=0|first=ai|sr=0",
   "step": 0,
   "actor": "ai",
-  "actor_policy": "heuristic_v7_gold_digger",
+  "actor_policy": "heuristic_h_gemini",
   "decision_type": "play",
   "legal_count": 10,
   "candidate": "H3",
@@ -203,10 +203,10 @@ Yes.
 
 ## 7. Recommended Command
 ```powershell
-node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase3_seed5 --games 1000 --seed v5_vs_phase3s5 --kibo-detail lean --dataset-out auto
+node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --games 1000 --seed cl_vs_phase3s5 --kibo-detail lean --dataset-out auto
 ```
 
 Generated files example:
-- `logs/model_duel/heuristic_v5_vs_phase3_seed5_20260226/v5_vs_phase3s5_result.json`
-- `logs/model_duel/heuristic_v5_vs_phase3_seed5_20260226/v5_vs_phase3s5_kibo.jsonl`
-- `logs/model_duel/heuristic_v5_vs_phase3_seed5_20260226/v5_vs_phase3s5_dataset.jsonl`
+- `logs/model_duel/heuristic_h_cl_vs_phase3_seed5_20260226/cl_vs_phase3s5_result.json`
+- `logs/model_duel/heuristic_h_cl_vs_phase3_seed5_20260226/cl_vs_phase3s5_kibo.jsonl`
+- `logs/model_duel/heuristic_h_cl_vs_phase3_seed5_20260226/cl_vs_phase3s5_dataset.jsonl`

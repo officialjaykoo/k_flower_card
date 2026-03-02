@@ -1,6 +1,6 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Pipeline Stage: Optuna Tuning Wrapper (V7)
+# Pipeline Stage: Optuna Tuning Wrapper (GPT)
 # Quick Read Map:
 # 1) Define search space/constants
 # 2) suggest_params + run_duel helpers
@@ -8,14 +8,8 @@
 # 4) main(): study run + artifact export
 
 """
-scripts/optuna_v7.py - V7 Optuna tuner
-
-Target:
-  H-V7 (A) vs H-V5 (B)
-
-Notes:
-  - This repository locks test duels to exactly 1000 games per trial.
-  - Uses nonlinear objective with loss-cut penalties to target V5.
+scripts/optuna_gpt.py - GPT Optuna tuner
+target: H-GPT vs H-CL (1000 games per trial)
 """
 
 import argparse
@@ -35,29 +29,79 @@ except ImportError:
     print("optuna not installed. run: pip install optuna")
     sys.exit(1)
 
-SELF_POLICY = "H-V7"
-OPPONENT_POLICY = "H-V5"
-DUEL_SCRIPT = "scripts/model_duel_worker.mjs"
-
 GAMES = 1000
-SEED = "optuna-v7"
+OPPONENT_POLICY = "H-CL"
+SEED = "optuna-gpt"
 MAX_STEPS = 600
-TRIAL_TIMEOUT_SEC = 900
+TRIAL_TIMEOUT_SEC = 600
+DUEL_SCRIPT = "scripts/model_duel_worker.mjs"
+WIN_RATE_WEIGHT = 0.35
+GOLD_DELTA_WEIGHT = 0.65
+GOLD_DELTA_SCALE = 500.0
+GOLD_DELTA_MIN_REQUIRED = 1.0
+GOLD_DELTA_FAIL_SCORE = -2.0
 
 FLOAT_PARAMS = {
-    # Gemini requested sharp-target ranges
-    "matchBase": (12.0, 25.0),
-    "comboBonus": (35.0, 60.0),
-    "riskTolerance": (0.8, 2.0),
-    "denialBonus": (15.0, 40.0),
-    "goAggression": (0.2, 0.5),
-    "antiPiBakBonus": (30.0, 100.0),
-    # Requested focus parameter for V5 countering
-    "comboBreakerBonus": (20.0, 80.0),
+    # profile and phase
+    "trailingAttackBoost": (0.0, 0.35),
+    "trailingTempoBoost": (0.0, 0.4),
+    "leadingDefenseBoost": (0.0, 0.35),
+    "leadingRiskBoost": (0.0, 0.4),
+    "highPressureDefenseBoost": (0.0, 0.4),
+    "highPressureRiskBoost": (0.0, 0.4),
+    # card utility
+    "noMatchBase": (-12.0, -3.0),
+    "matchOneBase": (4.0, 10.0),
+    "matchTwoBase": (8.0, 16.0),
+    "matchThreeBase": (10.0, 20.0),
+    "captureGainMul": (0.7, 1.8),
+    "junkPiMul": (2.0, 8.0),
+    "selfPiWindowMul": (0.8, 2.4),
+    "oppPiWindowMul": (0.6, 2.2),
+    "comboOpportunityMul": (1.5, 8.0),
+    "blockBase": (2.0, 10.0),
+    "blockUrgencyMul": (0.6, 2.6),
+    "blockThreatMul": (0.8, 5.0),
+    "feedRiskNoMatchMul": (1.5, 8.0),
+    "feedRiskMatchMul": (0.2, 2.0),
+    "dangerNoMatchMul": (0.6, 4.5),
+    "dangerMatchMul": (0.1, 1.5),
+    "releaseRiskMul": (2.0, 14.0),
+    "pukRiskMul": (1.0, 6.0),
+    # go model
+    "goUpsideScoreMul": (0.03, 0.15),
+    "goUpsidePiMul": (0.01, 0.08),
+    "goUpsideSelfJokboMul": (0.12, 0.8),
+    "goRiskPressureMul": (0.1, 0.9),
+    "goRiskOneAwayMul": (0.004, 0.03),
+    "goRiskOppJokboMul": (0.05, 0.6),
+    "goRiskOppOneAwayMul": (0.02, 0.2),
+    "goBaseThreshold": (-0.1, 0.2),
+    "goThresholdLeadUp": (0.0, 0.2),
+    "goThresholdTrailDown": (0.0, 0.2),
+    "goThresholdPressureUp": (0.0, 0.2),
+    # shaking
+    "shakeImmediateMul": (0.7, 2.4),
+    "shakeComboMul": (0.6, 2.0),
+    "shakeRiskMul": (0.0, 1.3),
+    "shakeThreshold": (0.3, 1.1),
+    # rollout
+    "rolloutCardWeight": (0.4, 1.4),
+    "rolloutGoWeight": (0.6, 1.8),
 }
 
 INT_PARAMS = {
-    "lockProfitScore": (6, 12),
+    "phaseEarlyDeck": (12, 18),
+    "phaseLateDeck": (6, 10),
+    "phaseEndDeck": (3, 5),
+    "goMinPi": (6, 9),
+    "goMinPiDesperate": (5, 8),
+    "goMinPiSecondTrailingDelta": (0, 2),
+    "goHardThreatDeckCut": (5, 9),
+    "goHardOppFiveCut": (6, 9),
+    "goHardOppScoreCut": (7, 10),
+    "rolloutTopK": (2, 4),
+    "rolloutMaxSteps": (18, 36),
 }
 
 
@@ -93,8 +137,7 @@ def parse_duel_json(stdout):
 def run_duel(params, seed_suffix="", runtime=None):
     runtime = runtime or {}
     env = os.environ.copy()
-    env["HEURISTIC_V7_PARAMS"] = json.dumps(params)
-
+    env["HEURISTIC_GPT_PARAMS"] = json.dumps(params)
     seed = f"{runtime.get('seed', SEED)}|{seed_suffix}" if seed_suffix else runtime.get("seed", SEED)
     result_dir = runtime.get("result_dir", os.path.join("logs", "optuna"))
     os.makedirs(result_dir, exist_ok=True)
@@ -105,7 +148,7 @@ def run_duel(params, seed_suffix="", runtime=None):
         "node",
         DUEL_SCRIPT,
         "--human",
-        SELF_POLICY,
+        "H-GPT",
         "--ai",
         runtime.get("opponent_policy", OPPONENT_POLICY),
         "--games",
@@ -121,7 +164,6 @@ def run_duel(params, seed_suffix="", runtime=None):
         "--result-out",
         result_out,
     ]
-
     try:
         result = subprocess.run(
             cmd,
@@ -145,45 +187,30 @@ def objective(trial, runtime):
         print(f"  [trial {trial.number:3d}] ERROR: {exc}", flush=True)
         raise optuna.exceptions.TrialPruned()
 
-    win_rate = float(duel.get("win_rate_a", 0.0))
-    gold_delta = float(duel.get("mean_gold_delta_a", 0.0))
-    go_fail_rate = float(duel.get("go_fail_rate_a", 0.0))
-    score = (win_rate * 2.0) + (gold_delta / 1000.0)
+    win_rate = float(duel.get("win_rate_a", 0))
+    gold_delta = float(duel.get("mean_gold_delta_a", 0))
+    gold_norm = max(-1.0, min(1.0, gold_delta / GOLD_DELTA_SCALE))
+    if gold_delta <= GOLD_DELTA_MIN_REQUIRED:
+        # Hard requirement: non-positive (or near-zero) gold is unacceptable.
+        score = GOLD_DELTA_FAIL_SCORE + win_rate * 0.05 + gold_norm * 0.05
+    else:
+        score = win_rate * WIN_RATE_WEIGHT + gold_norm * GOLD_DELTA_WEIGHT
 
-    # Loss-cut: force minimum win-rate floor against V5.
-    if win_rate < 0.45:
-        score -= (0.45 - win_rate) * 10.0
-
-    # Penalize unstable go behavior (high go fail).
-    if go_fail_rate > 0.08:
-        score -= (go_fail_rate - 0.08) * 5.0
-
-    # Additional penalty when average gold result is negative.
-    if gold_delta < 0:
-        score += gold_delta / 500.0
-
-    print(
-        f"  [trial {trial.number:3d}] "
-        f"win={win_rate:.4f}  gold={gold_delta:+.1f}  "
-        f"go_fail={go_fail_rate:.4f}  score={score:.4f}",
-        flush=True,
-    )
-
+    print(f"  [trial {trial.number:3d}] win={win_rate:.4f}  gold={gold_delta:+.1f}  score={score:.4f}", flush=True)
     trial.set_user_attr("win_rate", win_rate)
     trial.set_user_attr("gold_delta", gold_delta)
-    trial.set_user_attr("go_fail_rate", go_fail_rate)
     trial.set_user_attr("wins_a", duel.get("wins_a", 0))
     trial.set_user_attr("losses_a", duel.get("losses_a", 0))
     return score
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="V7 Optuna tuner (V7 vs V5)")
-    parser.add_argument("--trials", type=int, default=150)
-    parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) // 2))
+    parser = argparse.ArgumentParser(description="GPT Optuna tuner")
+    parser.add_argument("--trials", type=int, default=200)
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--db", type=str, default="")
-    parser.add_argument("--study", type=str, default="v7_tuning")
-    parser.add_argument("--output", type=str, default="logs/optuna/optuna_v7_best.json")
+    parser.add_argument("--study", type=str, default="gpt_tuning")
+    parser.add_argument("--output", type=str, default="logs/optuna/optuna_gpt_best.json")
     parser.add_argument("--result-dir", type=str, default="")
     parser.add_argument("--timeout", type=int, default=0)
     parser.add_argument("--seed", type=str, default=SEED)
@@ -196,7 +223,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-
     if not Path(DUEL_SCRIPT).exists():
         print(f"duel worker not found: {DUEL_SCRIPT}")
         sys.exit(1)
@@ -209,7 +235,7 @@ def main():
         "max_steps": max(20, args.max_steps),
         "trial_timeout_sec": max(60, args.trial_timeout),
         "result_dir": args.result_dir
-        or os.path.join("logs", "optuna", sanitize_file_part(args.study or "v7_tuning")),
+        or os.path.join("logs", "optuna", sanitize_file_part(args.study or "gpt_tuning")),
     }
     os.makedirs(runtime["result_dir"], exist_ok=True)
 
@@ -227,19 +253,17 @@ def main():
         load_if_exists=True,
     )
 
-    print("=== V7 Optuna start ===")
-    print(f"  target={SELF_POLICY} vs {runtime['opponent_policy']}")
-    print(f"  trials={args.trials}  workers={max(1, args.workers)}  games/trial={GAMES}")
+    print("=== GPT Optuna start ===")
+    print(f"  trials={args.trials}  opponent={runtime['opponent_policy']}  games/trial={GAMES}")
     print(f"  params={len(FLOAT_PARAMS) + len(INT_PARAMS)}  seed={runtime['seed']}")
     print(f"  db={args.db or 'memory'}")
     print(f"  trial_result_dir={runtime['result_dir']}")
-    print("  objective=(win_rate*2.0) + (gold_delta/1000.0)")
-    print("  penalties: win_rate<0.45, go_fail_rate>0.08, gold_delta<0\n")
+    print(f"  objective=win_rate*{WIN_RATE_WEIGHT} + gold_delta*{GOLD_DELTA_WEIGHT}\n")
 
     study.optimize(
         lambda trial: objective(trial, runtime),
-        n_trials=max(1, args.trials),
-        n_jobs=max(1, args.workers),
+        n_trials=args.trials,
+        n_jobs=args.workers,
         timeout=args.timeout if args.timeout > 0 else None,
         show_progress_bar=False,
     )
@@ -249,27 +273,18 @@ def main():
     print(f"  score:      {best.value:.4f}")
     print(f"  win_rate:   {best.user_attrs.get('win_rate', 0):.4f}")
     print(f"  gold_delta: {best.user_attrs.get('gold_delta', 0):+.1f}")
-    print(f"  go_fail:    {best.user_attrs.get('go_fail_rate', 0):.4f}")
     print(f"  W/L:        {best.user_attrs.get('wins_a', 0)}/{best.user_attrs.get('losses_a', 0)}")
 
     payload = {
         "score": best.value,
         "win_rate": best.user_attrs.get("win_rate"),
         "gold_delta": best.user_attrs.get("gold_delta"),
-        "go_fail_rate": best.user_attrs.get("go_fail_rate"),
         "params": best.params,
         "trial_number": best.number,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "self_policy": SELF_POLICY,
         "opponent": runtime["opponent_policy"],
         "seed": runtime["seed"],
         "games_per_trial": GAMES,
-        "objective": {
-            "base": "score=(win_rate*2.0)+(gold_delta/1000.0)",
-            "win_rate_floor": 0.45,
-            "go_fail_rate_cap": 0.08,
-            "negative_gold_penalty_divisor": 500.0,
-        },
     }
     with open(args.output, "w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
@@ -282,9 +297,7 @@ def main():
             continue
         print(
             f"  trial {t.number:3d}  score={t.value:.4f}  "
-            f"win={t.user_attrs.get('win_rate', 0):.4f}  "
-            f"gold={t.user_attrs.get('gold_delta', 0):+.1f}  "
-            f"go_fail={t.user_attrs.get('go_fail_rate', 0):.4f}"
+            f"win={t.user_attrs.get('win_rate', 0):.4f}  gold={t.user_attrs.get('gold_delta', 0):+.1f}"
         )
 
 

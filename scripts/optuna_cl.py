@@ -1,6 +1,6 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Pipeline Stage: Optuna Tuning Wrapper (V5)
+# Pipeline Stage: Optuna Tuning Wrapper (CL)
 # Quick Read Map:
 # 1) Define search space/constants
 # 2) suggest_params + run_duel helpers
@@ -8,12 +8,12 @@
 # 4) main(): study run + artifact export
 
 """
-scripts/optuna_v5.py  –  V5 Optuna tuning
-target: H-V5 vs H-V4 (1000 games per trial)
+scripts/optuna_cl.py  –  CL Optuna tuning
+target: H-CL vs H-J2 (1000 games per trial)
 튜닝 대상: 승률에 영향 큰 핵심 31개 파라미터만 (나머지는 DEFAULT_PARAMS trial0 값 고정)
 
 사용법:
-  python scripts/optuna_v5.py --trials 200 --workers 4
+  python scripts/optuna_cl.py --trials 200 --workers 4
 """
 import argparse, json, math, os, subprocess, sys, time
 from pathlib import Path
@@ -26,8 +26,8 @@ except ImportError:
 
 # ── 상수 ──────────────────────────────────────────────────────────
 GAMES             = 1000
-OPPONENT_POLICY   = "H-V4"
-SEED              = "optuna-v5"
+OPPONENT_POLICY   = "H-J2"
+SEED              = "optuna-cl"
 MAX_STEPS         = 600
 TRIAL_TIMEOUT_SEC = 600
 DUEL_SCRIPT       = "scripts/model_duel_worker.mjs"
@@ -106,7 +106,7 @@ def parse_duel_json(stdout):
 def run_duel(params, seed_suffix="", rt=None):
     rt = rt or {}
     env = os.environ.copy()
-    env["HEURISTIC_V5_PARAMS"] = json.dumps(params)
+    env["HEURISTIC_CL_PARAMS"] = json.dumps(params)
     seed = f"{rt.get('seed', SEED)}|{seed_suffix}" if seed_suffix else rt.get('seed', SEED)
     result_dir = rt.get("result_dir", os.path.join("logs", "optuna"))
     os.makedirs(result_dir, exist_ok=True)
@@ -115,7 +115,7 @@ def run_duel(params, seed_suffix="", rt=None):
     result_out = os.path.join(result_dir, f"{seed_tag}_{trial_tag}_result.json")
     cmd = [
         "node", DUEL_SCRIPT,
-        "--human", "H-V5",
+        "--human", "H-CL",
         "--ai", rt.get("opponent_policy", OPPONENT_POLICY),
         "--games", str(GAMES),
         "--seed", seed,
@@ -155,12 +155,12 @@ def objective(trial, rt):
 
 # ── 메인 ──────────────────────────────────────────────────────────
 def parse_args():
-    p = argparse.ArgumentParser(description="V5 Optuna 튜닝")
+    p = argparse.ArgumentParser(description="CL Optuna 튜닝")
     p.add_argument("--trials",          type=int, default=200)
     p.add_argument("--workers",         type=int, default=1)
     p.add_argument("--db",              type=str, default="")
-    p.add_argument("--study",           type=str, default="v5_tuning")
-    p.add_argument("--output",          type=str, default="logs/optuna/optuna_v5_best.json")
+    p.add_argument("--study",           type=str, default="cl_tuning")
+    p.add_argument("--output",          type=str, default="logs/optuna/optuna_cl_best.json")
     p.add_argument("--result-dir",      type=str, default="")
     p.add_argument("--timeout",         type=int, default=0)
     p.add_argument("--seed",            type=str, default=SEED)
@@ -181,7 +181,7 @@ def main():
         "seed":              args.seed or SEED,
         "max_steps":         max(20, args.max_steps),
         "trial_timeout_sec": max(60, args.trial_timeout),
-        "result_dir":        args.result_dir or os.path.join("logs", "optuna", sanitize_file_part(args.study or "v5_tuning")),
+        "result_dir":        args.result_dir or os.path.join("logs", "optuna", sanitize_file_part(args.study or "cl_tuning")),
     }
     os.makedirs(rt["result_dir"], exist_ok=True)
     sampler = optuna.samplers.TPESampler(
@@ -192,7 +192,7 @@ def main():
         storage=args.db or None, sampler=sampler, load_if_exists=True,
     )
 
-    print(f"=== V5 Optuna 튜닝 시작 ===")
+    print(f"=== CL Optuna 튜닝 시작 ===")
     print(f"  trials={args.trials}  opponent={rt['opponent_policy']}  games/trial={GAMES}")
     print(f"  params={len(FLOAT_PARAMS)+len(INT_PARAMS)}개  seed={rt['seed']}")
     print(f"  DB: {args.db or '메모리 (비영속)'}")

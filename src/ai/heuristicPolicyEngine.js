@@ -19,88 +19,88 @@ import { STARTING_GOLD } from "../engine/economy.js";
 import { buildDeck } from "../cards.js";
 import {
   DEFAULT_BOT_POLICY,
-  POLICY_HEURISTIC_V3,
-  POLICY_HEURISTIC_V4,
-  POLICY_HEURISTIC_V5,
-  POLICY_HEURISTIC_V5PLUS,
-  POLICY_HEURISTIC_V6,
-  POLICY_HEURISTIC_V7,
+  POLICY_HEURISTIC_J1,
+  POLICY_HEURISTIC_J2,
+  POLICY_HEURISTIC_CL,
+  POLICY_HEURISTIC_NEXG,
+  POLICY_HEURISTIC_GPT,
+  POLICY_HEURISTIC_GEMINI,
   normalizeBotPolicy
 } from "./policies.js";
 import {
-  chooseGukjinHeuristicV3,
-  chooseMatchHeuristicV3,
-  decideShakingV3,
-  rankHandCardsV3,
-  selectBombMonthV3,
-  shouldBombV3,
-  shouldGoV3,
-  shouldPresidentStopV3
-} from "../heuristics/heuristicV3.js";
+  chooseGukjinHeuristicJ1,
+  chooseMatchHeuristicJ1,
+  decideShakingJ1,
+  rankHandCardsJ1,
+  selectBombMonthJ1,
+  shouldBombJ1,
+  shouldGoJ1,
+  shouldPresidentStopJ1
+} from "../heuristics/heuristicJ1.js";
 import {
-  chooseGukjinHeuristicV4,
-  chooseMatchHeuristicV4,
-  decideShakingV4,
-  rankHandCardsV4,
-  selectBombMonthV4,
-  shouldBombV4,
-  shouldGoV4,
-  shouldPresidentStopV4
-} from "../heuristics/heuristicV4.js";
+  chooseGukjinHeuristicJ2,
+  chooseMatchHeuristicJ2,
+  decideShakingJ2,
+  rankHandCardsJ2,
+  selectBombMonthJ2,
+  shouldBombJ2,
+  shouldGoJ2,
+  shouldPresidentStopJ2
+} from "../heuristics/heuristicJ2.js";
 import {
-  chooseGukjinHeuristicV5,
-  chooseMatchHeuristicV5,
-  decideShakingV5,
-  rankHandCardsV5,
-  selectBombMonthV5,
-  shouldBombV5,
-  shouldGoV5,
-  shouldPresidentStopV5,
+  chooseGukjinHeuristicCL,
+  chooseMatchHeuristicCL,
+  decideShakingCL,
+  rankHandCardsCL,
+  selectBombMonthCL,
+  shouldBombCL,
+  shouldGoCL,
+  shouldPresidentStopCL,
   DEFAULT_PARAMS as V5_DEFAULT_PARAMS
-} from "../heuristics/heuristicV5.js";
+} from "../heuristics/heuristicCL.js";
 import {
-  rankHandCardsV5Plus,
-  chooseMatchHeuristicV5Plus,
-  chooseGukjinHeuristicV5Plus,
-  shouldPresidentStopV5Plus,
-  shouldGoV5Plus,
-  selectBombMonthV5Plus,
-  shouldBombV5Plus,
-  decideShakingV5Plus,
-  DEFAULT_PARAMS as V5PLUS_DEFAULT_PARAMS
-} from "../heuristics/heuristicV5Plus.js";
+  rankHandCardsNEXg,
+  chooseMatchHeuristicNEXg,
+  chooseGukjinHeuristicNEXg,
+  shouldPresidentStopNEXg,
+  shouldGoNEXg,
+  selectBombMonthNEXg,
+  shouldBombNEXg,
+  decideShakingNEXg,
+  DEFAULT_PARAMS as NEXG_DEFAULT_PARAMS
+} from "../heuristics/heuristicNEXg.js";
 import {
-  chooseGukjinHeuristicV6,
-  chooseMatchHeuristicV6,
-  decideShakingV6,
-  rankHandCardsV6,
-  selectBombMonthV6,
-  shouldBombV6,
-  shouldGoV6,
-  shouldPresidentStopV6,
+  chooseGukjinHeuristicGPT,
+  chooseMatchHeuristicGPT,
+  decideShakingGPT,
+  rankHandCardsGPT,
+  selectBombMonthGPT,
+  shouldBombGPT,
+  shouldGoGPT,
+  shouldPresidentStopGPT,
   DEFAULT_PARAMS as V6_DEFAULT_PARAMS
-} from "../heuristics/heuristicV6.js";
+} from "../heuristics/heuristicGPT.js";
 import {
-  canBankruptOpponentByStopV7,
-  chooseGukjinHeuristicV7,
-  chooseMatchHeuristicV7,
-  decideShakingV7,
-  rankHandCardsV7,
-  selectBombMonthV7,
-  shouldBombV7,
-  shouldGoV7,
-  shouldPresidentStopV7,
+  canBankruptOpponentByStopGemini,
+  chooseGukjinHeuristicGemini,
+  chooseMatchHeuristicGemini,
+  decideShakingGemini,
+  rankHandCardsGemini,
+  selectBombMonthGemini,
+  shouldBombGemini,
+  shouldGoGemini,
+  shouldPresidentStopGemini,
   DEFAULT_PARAMS as V7_DEFAULT_PARAMS
-} from "../heuristics/heuristicV7.js";
+} from "../heuristics/heuristicGemini.js";
 
 /* ============================================================================
  * Heuristic policy engine (v3-v7)
  * Quick reading order:
  * 1) Runtime params + exported entry points
  * 2) Shared state/score utilities
- * 3) Fair-teacher public-state helpers (v6)
- * 4) Policy dispatch (v3/v4/v5/v5plus/v6/v7)
- * 5) Rollout helpers used by v6
+ * 3) Fair-teacher public-state helpers (gpt)
+ * 4) Policy dispatch (j1/j2/cl/nexg/gpt/gemini)
+ * 5) Rollout helpers used by gpt
  * ========================================================================== */
 const GWANG_MONTHS = Object.freeze([1, 3, 8, 11, 12]);
 const GOLD_RISK_THRESHOLD_RATIO = 0.1;
@@ -115,9 +115,9 @@ const COMBO_REQUIRED_CATEGORY = Object.freeze({
 const HIGH_PI_CARD_IDS = Object.freeze(["M0", "M1", "K1", "L3", GUKJIN_CARD_ID]);
 
 /* 1) Runtime parameter loaders */
-function loadV5Params() {
+function loadCLParams() {
   try {
-    const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_V5_PARAMS) || "";
+    const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_CL_PARAMS) || "";
     if (!raw) return { ...V5_DEFAULT_PARAMS };
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -129,23 +129,23 @@ function loadV5Params() {
   return { ...V5_DEFAULT_PARAMS };
 }
 
-function loadV5PlusParams() {
+function loadNEXgParams() {
   try {
-    const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_V5PLUS_PARAMS) || "";
-    if (!raw) return { ...V5PLUS_DEFAULT_PARAMS };
+    const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_NEXG_PARAMS) || "";
+    if (!raw) return { ...NEXG_DEFAULT_PARAMS };
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return { ...V5PLUS_DEFAULT_PARAMS, ...parsed };
+      return { ...NEXG_DEFAULT_PARAMS, ...parsed };
     }
   } catch {
     // Fall through to defaults on parse/runtime errors.
   }
-  return { ...V5PLUS_DEFAULT_PARAMS };
+  return { ...NEXG_DEFAULT_PARAMS };
 }
 
-function loadV6Params() {
+function loadGPTParams() {
   try {
-    const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_V6_PARAMS) || "";
+    const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_GPT_PARAMS) || "";
     if (!raw) return { ...V6_DEFAULT_PARAMS };
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -157,9 +157,9 @@ function loadV6Params() {
   return { ...V6_DEFAULT_PARAMS };
 }
 
-function loadV7Params() {
+function loadGeminiParams() {
   try {
-    const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_V7_PARAMS) || "";
+    const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_GEMINI_PARAMS) || "";
     if (!raw) return { ...V7_DEFAULT_PARAMS };
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -171,19 +171,19 @@ function loadV7Params() {
   return { ...V7_DEFAULT_PARAMS };
 }
 
-const HEURISTIC_V5_PARAMS = Object.freeze(loadV5Params());
-const HEURISTIC_V5PLUS_PARAMS = Object.freeze(loadV5PlusParams());
-const HEURISTIC_V6_PARAMS = Object.freeze(loadV6Params());
-const HEURISTIC_V7_PARAMS = Object.freeze(loadV7Params());
+const HEURISTIC_CL_PARAMS = Object.freeze(loadCLParams());
+const HEURISTIC_NEXG_PARAMS = Object.freeze(loadNEXgParams());
+const HEURISTIC_GPT_PARAMS = Object.freeze(loadGPTParams());
+const HEURISTIC_GEMINI_PARAMS = Object.freeze(loadGeminiParams());
 
 export {
   DEFAULT_BOT_POLICY,
-  POLICY_HEURISTIC_V3,
-  POLICY_HEURISTIC_V4,
-  POLICY_HEURISTIC_V5,
-  POLICY_HEURISTIC_V5PLUS,
-  POLICY_HEURISTIC_V6,
-  POLICY_HEURISTIC_V7
+  POLICY_HEURISTIC_J1,
+  POLICY_HEURISTIC_J2,
+  POLICY_HEURISTIC_CL,
+  POLICY_HEURISTIC_NEXG,
+  POLICY_HEURISTIC_GPT,
+  POLICY_HEURISTIC_GEMINI
 };
 
 /* 2) Public entry points */
@@ -228,8 +228,8 @@ function chooseShakingCardIdForMonth(state, playerKey, month, policy = DEFAULT_B
   if (!monthCards.length) return null;
 
   const ranked = rankHandCardsByPolicy(state, playerKey, policy, heuristicParams);
-  if (policy === POLICY_HEURISTIC_V6) {
-    const v6Picked = chooseShakingDiscardCardIdV6(state, playerKey, monthCards, ranked);
+  if (policy === POLICY_HEURISTIC_GPT) {
+    const v6Picked = chooseShakingDiscardCardIdGPT(state, playerKey, monthCards, ranked);
     if (v6Picked) return v6Picked;
   }
 
@@ -250,7 +250,7 @@ function toFiniteNumber(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function chooseShakingDiscardCardIdV6(state, playerKey, monthCards, ranked) {
+function chooseShakingDiscardCardIdGPT(state, playerKey, monthCards, ranked) {
   if (!monthCards?.length) return null;
   const player = state.players?.[playerKey];
   const oppKey = otherPlayerKey(playerKey);
@@ -608,9 +608,9 @@ function canBankruptOpponentByStop(state, playerKey) {
   return oppGoldAfterStop <= 0;
 }
 
-function canBankruptOpponentByStopV7Proxy(state, playerKey) {
+function canBankruptOpponentByStopGeminiProxy(state, playerKey) {
   const scoreHint = Number(analyzeGameContext(state, playerKey)?.myScore || 0);
-  return canBankruptOpponentByStopV7(state, playerKey, {
+  return canBankruptOpponentByStopGemini(state, playerKey, {
     currentScore: scoreHint,
     fallbackExact: canBankruptOpponentByStop,
     defaultBetAmount: 100,
@@ -1696,7 +1696,7 @@ const RANK_HAND_CARD_DEPS = Object.freeze({
   monthStrategicPriority
 });
 
-const HEURISTIC_V3_DEPS = Object.freeze({
+const HEURISTIC_J1_DEPS = Object.freeze({
   ...RANK_HAND_CARD_DEPS,
   analyzeGukjinBranches,
   boardHighValueThreatForPlayer,
@@ -1714,7 +1714,7 @@ const HEURISTIC_V3_DEPS = Object.freeze({
   shakingImmediateGainScore
 });
 
-const HEURISTIC_V4_DEPS = Object.freeze({
+const HEURISTIC_J2_DEPS = Object.freeze({
   analyzeGameContext,
   analyzeGukjinBranches,
   blockingMonthsAgainst,
@@ -1743,7 +1743,7 @@ const HEURISTIC_V4_DEPS = Object.freeze({
   shakingImmediateGainScore
 });
 
-const HEURISTIC_V5_DEPS = Object.freeze({
+const HEURISTIC_CL_DEPS = Object.freeze({
   analyzeGameContext,
   analyzeGukjinBranches,
   blockingMonthsAgainst,
@@ -1772,7 +1772,7 @@ const HEURISTIC_V5_DEPS = Object.freeze({
   shakingImmediateGainScore
 });
 
-const HEURISTIC_V6_DEPS = Object.freeze({
+const HEURISTIC_GPT_DEPS = Object.freeze({
   analyzeGameContext,
   analyzeGukjinBranches,
   blockingMonthsAgainst,
@@ -1806,23 +1806,23 @@ const HEURISTIC_V6_DEPS = Object.freeze({
   ownComboOpportunityScore,
   boardMatchesByMonth,
   shakingImmediateGainScore,
-  rolloutStateUtilityV6,
-  rolloutCardValueV6,
-  rolloutGoStopValueV6
+  rolloutStateUtilityGPT,
+  rolloutCardValueGPT,
+  rolloutGoStopValueGPT
 });
 
-const HEURISTIC_V7_DEPS = Object.freeze({
-  ...HEURISTIC_V5_DEPS,
-  canBankruptOpponentByStop: canBankruptOpponentByStopV7Proxy,
+const HEURISTIC_GEMINI_DEPS = Object.freeze({
+  ...HEURISTIC_CL_DEPS,
+  canBankruptOpponentByStop: canBankruptOpponentByStopGeminiProxy,
   estimateDangerMonthRisk,
   monthBoardGain,
   opponentThreatScore
 });
 
 /* 4) Fair-teacher wrapper + decision context builders */
-function createHeuristicV6FairDeps(observerKey) {
+function createHeuristicGPTFairDeps(observerKey) {
   return Object.freeze({
-    ...HEURISTIC_V6_DEPS,
+    ...HEURISTIC_GPT_DEPS,
     boardHighValueThreatForPlayer: (state, playerKey) =>
       boardHighValueThreatForPlayerPublic(state, playerKey, observerKey),
     estimateOpponentJokboExpectedPotential: (state, playerKey) =>
@@ -1833,14 +1833,14 @@ function createHeuristicV6FairDeps(observerKey) {
       matchableMonthCountForPlayerPublic(state, playerKey, observerKey),
     nextTurnThreatScore: (state, playerKey) => nextTurnThreatScorePublic(state, playerKey, observerKey),
     opponentThreatScore: (state, playerKey) => opponentThreatScorePublic(state, playerKey, observerKey),
-    rolloutCardValueV6: (state, playerKey, cardId, options = {}) =>
-      rolloutCardValueV6(state, playerKey, cardId, {
+    rolloutCardValueGPT: (state, playerKey, cardId, options = {}) =>
+      rolloutCardValueGPT(state, playerKey, cardId, {
         ...options,
         observerKey,
         fairTeacher: true
       }),
-    rolloutGoStopValueV6: (state, playerKey, chooseGoFlag, options = {}) =>
-      rolloutGoStopValueV6(state, playerKey, chooseGoFlag, {
+    rolloutGoStopValueGPT: (state, playerKey, chooseGoFlag, options = {}) =>
+      rolloutGoStopValueGPT(state, playerKey, chooseGoFlag, {
         ...options,
         observerKey,
         fairTeacher: true
@@ -1848,9 +1848,9 @@ function createHeuristicV6FairDeps(observerKey) {
   });
 }
 
-function createV6FairDecisionContext(state, playerKey) {
+function createGPTFairDecisionContext(state, playerKey) {
   const publicState = createPublicState(state, playerKey);
-  const deps = createHeuristicV6FairDeps(playerKey);
+  const deps = createHeuristicGPTFairDeps(playerKey);
   return { publicState, deps };
 }
 
@@ -1870,111 +1870,111 @@ function resolveHeuristicDecisionContext(
     heuristicParams && typeof heuristicParams === "object" && !Array.isArray(heuristicParams)
       ? heuristicParams
       : null;
-  if (resolvedPolicy === POLICY_HEURISTIC_V7) {
+  if (resolvedPolicy === POLICY_HEURISTIC_GEMINI) {
     return {
-      policy: POLICY_HEURISTIC_V7,
+      policy: POLICY_HEURISTIC_GEMINI,
       decisionState: createHeuristicPublicState(state, playerKey),
-      deps: HEURISTIC_V7_DEPS,
-      params: paramsOverride ? { ...HEURISTIC_V7_PARAMS, ...paramsOverride } : HEURISTIC_V7_PARAMS
+      deps: HEURISTIC_GEMINI_DEPS,
+      params: paramsOverride ? { ...HEURISTIC_GEMINI_PARAMS, ...paramsOverride } : HEURISTIC_GEMINI_PARAMS
     };
   }
-  if (resolvedPolicy === POLICY_HEURISTIC_V6) {
-    const fair = createV6FairDecisionContext(state, playerKey);
+  if (resolvedPolicy === POLICY_HEURISTIC_GPT) {
+    const fair = createGPTFairDecisionContext(state, playerKey);
     return {
-      policy: POLICY_HEURISTIC_V6,
+      policy: POLICY_HEURISTIC_GPT,
       decisionState: fair.publicState,
       deps: fair.deps,
-      params: paramsOverride ? { ...HEURISTIC_V6_PARAMS, ...paramsOverride } : HEURISTIC_V6_PARAMS
+      params: paramsOverride ? { ...HEURISTIC_GPT_PARAMS, ...paramsOverride } : HEURISTIC_GPT_PARAMS
     };
   }
 
   const decisionState = createHeuristicPublicState(state, playerKey);
-  if (resolvedPolicy === POLICY_HEURISTIC_V5PLUS) {
+  if (resolvedPolicy === POLICY_HEURISTIC_NEXG) {
     return {
-      policy: POLICY_HEURISTIC_V5PLUS,
+      policy: POLICY_HEURISTIC_NEXG,
       decisionState,
-      deps: HEURISTIC_V5_DEPS,
-      params: paramsOverride ? { ...HEURISTIC_V5PLUS_PARAMS, ...paramsOverride } : HEURISTIC_V5PLUS_PARAMS
+      deps: HEURISTIC_CL_DEPS,
+      params: paramsOverride ? { ...HEURISTIC_NEXG_PARAMS, ...paramsOverride } : HEURISTIC_NEXG_PARAMS
     };
   }
-  if (resolvedPolicy === POLICY_HEURISTIC_V5) {
+  if (resolvedPolicy === POLICY_HEURISTIC_CL) {
     return {
-      policy: POLICY_HEURISTIC_V5,
+      policy: POLICY_HEURISTIC_CL,
       decisionState,
-      deps: HEURISTIC_V5_DEPS,
-      params: paramsOverride ? { ...HEURISTIC_V5_PARAMS, ...paramsOverride } : HEURISTIC_V5_PARAMS
+      deps: HEURISTIC_CL_DEPS,
+      params: paramsOverride ? { ...HEURISTIC_CL_PARAMS, ...paramsOverride } : HEURISTIC_CL_PARAMS
     };
   }
-  if (resolvedPolicy === POLICY_HEURISTIC_V4) {
+  if (resolvedPolicy === POLICY_HEURISTIC_J2) {
     return {
-      policy: POLICY_HEURISTIC_V4,
+      policy: POLICY_HEURISTIC_J2,
       decisionState,
-      deps: HEURISTIC_V4_DEPS,
+      deps: HEURISTIC_J2_DEPS,
       params: null
     };
   }
   return {
-    policy: POLICY_HEURISTIC_V3,
+    policy: POLICY_HEURISTIC_J1,
     decisionState,
-    deps: HEURISTIC_V3_DEPS,
+    deps: HEURISTIC_J1_DEPS,
     params: null
   };
 }
 
 function dispatchHeuristicPolicyCall(ctx, handlers) {
-  if (ctx.policy === POLICY_HEURISTIC_V7 && typeof handlers.v7 === "function") return handlers.v7(ctx);
-  if (ctx.policy === POLICY_HEURISTIC_V6 && typeof handlers.v6 === "function") return handlers.v6(ctx);
-  if (ctx.policy === POLICY_HEURISTIC_V5PLUS && typeof handlers.v5plus === "function") return handlers.v5plus(ctx);
-  if (ctx.policy === POLICY_HEURISTIC_V5 && typeof handlers.v5 === "function") return handlers.v5(ctx);
-  if (ctx.policy === POLICY_HEURISTIC_V4 && typeof handlers.v4 === "function") return handlers.v4(ctx);
-  return handlers.v3(ctx);
+  if (ctx.policy === POLICY_HEURISTIC_GEMINI && typeof handlers.gemini === "function") return handlers.gemini(ctx);
+  if (ctx.policy === POLICY_HEURISTIC_GPT && typeof handlers.gpt === "function") return handlers.gpt(ctx);
+  if (ctx.policy === POLICY_HEURISTIC_NEXG && typeof handlers.nexg === "function") return handlers.nexg(ctx);
+  if (ctx.policy === POLICY_HEURISTIC_CL && typeof handlers.cl === "function") return handlers.cl(ctx);
+  if (ctx.policy === POLICY_HEURISTIC_J2 && typeof handlers.j2 === "function") return handlers.j2(ctx);
+  return handlers.j1(ctx);
 }
 
 function chooseGukjinByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
-    v7: ({ decisionState, deps, params }) => chooseGukjinHeuristicV7(decisionState, playerKey, deps, params),
-    v6: ({ decisionState, deps, params }) => chooseGukjinHeuristicV6(decisionState, playerKey, deps, params),
-    v5plus: ({ decisionState, deps, params }) => chooseGukjinHeuristicV5Plus(decisionState, playerKey, deps, params),
-    v5: ({ decisionState, deps, params }) => chooseGukjinHeuristicV5(decisionState, playerKey, deps, params),
-    v4: ({ decisionState, deps }) => chooseGukjinHeuristicV4(decisionState, playerKey, deps),
-    v3: ({ decisionState, deps }) => chooseGukjinHeuristicV3(decisionState, playerKey, deps)
+    gemini: ({ decisionState, deps, params }) => chooseGukjinHeuristicGemini(decisionState, playerKey, deps, params),
+    gpt: ({ decisionState, deps, params }) => chooseGukjinHeuristicGPT(decisionState, playerKey, deps, params),
+    nexg: ({ decisionState, deps, params }) => chooseGukjinHeuristicNEXg(decisionState, playerKey, deps, params),
+    cl: ({ decisionState, deps, params }) => chooseGukjinHeuristicCL(decisionState, playerKey, deps, params),
+    j2: ({ decisionState, deps }) => chooseGukjinHeuristicJ2(decisionState, playerKey, deps),
+    j1: ({ decisionState, deps }) => chooseGukjinHeuristicJ1(decisionState, playerKey, deps)
   });
 }
 
 function shouldPresidentStopByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
-    v7: ({ decisionState, deps, params }) => shouldPresidentStopV7(decisionState, playerKey, deps, params),
-    v6: ({ decisionState, deps, params }) => shouldPresidentStopV6(decisionState, playerKey, deps, params),
-    v5plus: ({ decisionState, deps, params }) => shouldPresidentStopV5Plus(decisionState, playerKey, deps, params),
-    v5: ({ decisionState, deps, params }) => shouldPresidentStopV5(decisionState, playerKey, deps, params),
-    v4: ({ decisionState, deps }) => shouldPresidentStopV4(decisionState, playerKey, deps),
-    v3: ({ decisionState, deps }) => shouldPresidentStopV3(decisionState, playerKey, deps)
+    gemini: ({ decisionState, deps, params }) => shouldPresidentStopGemini(decisionState, playerKey, deps, params),
+    gpt: ({ decisionState, deps, params }) => shouldPresidentStopGPT(decisionState, playerKey, deps, params),
+    nexg: ({ decisionState, deps, params }) => shouldPresidentStopNEXg(decisionState, playerKey, deps, params),
+    cl: ({ decisionState, deps, params }) => shouldPresidentStopCL(decisionState, playerKey, deps, params),
+    j2: ({ decisionState, deps }) => shouldPresidentStopJ2(decisionState, playerKey, deps),
+    j1: ({ decisionState, deps }) => shouldPresidentStopJ1(decisionState, playerKey, deps)
   });
 }
 
 function chooseMatchByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
-    v7: ({ decisionState, deps, params }) => chooseMatchHeuristicV7(decisionState, playerKey, deps, params),
-    v6: ({ decisionState, deps, params }) => chooseMatchHeuristicV6(decisionState, playerKey, deps, params),
-    v5plus: ({ decisionState, deps, params }) => chooseMatchHeuristicV5Plus(decisionState, playerKey, deps, params),
-    v5: ({ decisionState, deps, params }) => chooseMatchHeuristicV5(decisionState, playerKey, deps, params),
-    v4: ({ decisionState, deps }) => chooseMatchHeuristicV4(decisionState, playerKey, deps),
-    v3: ({ decisionState, deps }) => chooseMatchHeuristicV3(decisionState, playerKey, deps)
+    gemini: ({ decisionState, deps, params }) => chooseMatchHeuristicGemini(decisionState, playerKey, deps, params),
+    gpt: ({ decisionState, deps, params }) => chooseMatchHeuristicGPT(decisionState, playerKey, deps, params),
+    nexg: ({ decisionState, deps, params }) => chooseMatchHeuristicNEXg(decisionState, playerKey, deps, params),
+    cl: ({ decisionState, deps, params }) => chooseMatchHeuristicCL(decisionState, playerKey, deps, params),
+    j2: ({ decisionState, deps }) => chooseMatchHeuristicJ2(decisionState, playerKey, deps),
+    j1: ({ decisionState, deps }) => chooseMatchHeuristicJ1(decisionState, playerKey, deps)
   });
 }
 
 function shouldGoByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
-    v7: ({ decisionState, deps, params }) => shouldGoV7(decisionState, playerKey, deps, params),
-    v6: ({ decisionState, deps, params }) => shouldGoV6(decisionState, playerKey, deps, params),
-    v5plus: ({ decisionState, deps, params }) => shouldGoV5Plus(decisionState, playerKey, deps, params),
-    v5: ({ decisionState, deps, params }) => shouldGoV5(decisionState, playerKey, deps, params),
-    v4: ({ decisionState, deps }) => shouldGoV4(decisionState, playerKey, deps),
-    v3: ({ decisionState, deps }) => shouldGoV3(decisionState, playerKey, deps)
+    gemini: ({ decisionState, deps, params }) => shouldGoGemini(decisionState, playerKey, deps, params),
+    gpt: ({ decisionState, deps, params }) => shouldGoGPT(decisionState, playerKey, deps, params),
+    nexg: ({ decisionState, deps, params }) => shouldGoNEXg(decisionState, playerKey, deps, params),
+    cl: ({ decisionState, deps, params }) => shouldGoCL(decisionState, playerKey, deps, params),
+    j2: ({ decisionState, deps }) => shouldGoJ2(decisionState, playerKey, deps),
+    j1: ({ decisionState, deps }) => shouldGoJ1(decisionState, playerKey, deps)
   });
 }
 
@@ -1987,12 +1987,12 @@ function selectBombMonthByPolicy(
 ) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
-    v7: ({ decisionState, deps }) => selectBombMonthV7(decisionState, playerKey, bombMonths, deps),
-    v6: ({ decisionState, deps }) => selectBombMonthV6(decisionState, playerKey, bombMonths, deps),
-    v5plus: ({ decisionState, deps }) => selectBombMonthV5Plus(decisionState, playerKey, bombMonths, deps),
-    v5: ({ decisionState, deps }) => selectBombMonthV5(decisionState, playerKey, bombMonths, deps),
-    v4: ({ decisionState, deps }) => selectBombMonthV4(decisionState, playerKey, bombMonths, deps),
-    v3: ({ decisionState, deps }) => selectBombMonthV3(decisionState, playerKey, bombMonths, deps)
+    gemini: ({ decisionState, deps }) => selectBombMonthGemini(decisionState, playerKey, bombMonths, deps),
+    gpt: ({ decisionState, deps }) => selectBombMonthGPT(decisionState, playerKey, bombMonths, deps),
+    nexg: ({ decisionState, deps }) => selectBombMonthNEXg(decisionState, playerKey, bombMonths, deps),
+    cl: ({ decisionState, deps }) => selectBombMonthCL(decisionState, playerKey, bombMonths, deps),
+    j2: ({ decisionState, deps }) => selectBombMonthJ2(decisionState, playerKey, bombMonths, deps),
+    j1: ({ decisionState, deps }) => selectBombMonthJ1(decisionState, playerKey, bombMonths, deps)
   });
 }
 
@@ -2005,12 +2005,12 @@ function shouldBombByPolicy(
 ) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
-    v7: ({ decisionState, deps, params }) => shouldBombV7(decisionState, playerKey, bombMonths, deps, params),
-    v6: ({ decisionState, deps, params }) => shouldBombV6(decisionState, playerKey, bombMonths, deps, params),
-    v5plus: ({ decisionState, deps, params }) => shouldBombV5Plus(decisionState, playerKey, bombMonths, deps, params),
-    v5: ({ decisionState, deps, params }) => shouldBombV5(decisionState, playerKey, bombMonths, deps, params),
-    v4: ({ decisionState, deps }) => shouldBombV4(decisionState, playerKey, bombMonths, deps),
-    v3: ({ decisionState, deps }) => shouldBombV3(decisionState, playerKey, bombMonths, deps)
+    gemini: ({ decisionState, deps, params }) => shouldBombGemini(decisionState, playerKey, bombMonths, deps, params),
+    gpt: ({ decisionState, deps, params }) => shouldBombGPT(decisionState, playerKey, bombMonths, deps, params),
+    nexg: ({ decisionState, deps, params }) => shouldBombNEXg(decisionState, playerKey, bombMonths, deps, params),
+    cl: ({ decisionState, deps, params }) => shouldBombCL(decisionState, playerKey, bombMonths, deps, params),
+    j2: ({ decisionState, deps }) => shouldBombJ2(decisionState, playerKey, bombMonths, deps),
+    j1: ({ decisionState, deps }) => shouldBombJ1(decisionState, playerKey, bombMonths, deps)
   });
 }
 
@@ -2023,24 +2023,24 @@ function decideShakingByPolicy(
 ) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
-    v7: ({ decisionState, deps, params }) => decideShakingV7(decisionState, playerKey, shakingMonths, deps, params),
-    v6: ({ decisionState, deps, params }) => decideShakingV6(decisionState, playerKey, shakingMonths, deps, params),
-    v5plus: ({ decisionState, deps, params }) => decideShakingV5Plus(decisionState, playerKey, shakingMonths, deps, params),
-    v5: ({ decisionState, deps, params }) => decideShakingV5(decisionState, playerKey, shakingMonths, deps, params),
-    v4: ({ decisionState, deps }) => decideShakingV4(decisionState, playerKey, shakingMonths, deps),
-    v3: ({ decisionState, deps }) => decideShakingV3(decisionState, playerKey, shakingMonths, deps)
+    gemini: ({ decisionState, deps, params }) => decideShakingGemini(decisionState, playerKey, shakingMonths, deps, params),
+    gpt: ({ decisionState, deps, params }) => decideShakingGPT(decisionState, playerKey, shakingMonths, deps, params),
+    nexg: ({ decisionState, deps, params }) => decideShakingNEXg(decisionState, playerKey, shakingMonths, deps, params),
+    cl: ({ decisionState, deps, params }) => decideShakingCL(decisionState, playerKey, shakingMonths, deps, params),
+    j2: ({ decisionState, deps }) => decideShakingJ2(decisionState, playerKey, shakingMonths, deps),
+    j1: ({ decisionState, deps }) => decideShakingJ1(decisionState, playerKey, shakingMonths, deps)
   });
 }
 
 function rankHandCardsByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
   const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
   return dispatchHeuristicPolicyCall(ctx, {
-    v7: ({ decisionState, deps, params }) => rankHandCardsV7(decisionState, playerKey, deps, params),
-    v6: ({ decisionState, deps, params }) => rankHandCardsV6(decisionState, playerKey, deps, params),
-    v5plus: ({ decisionState, deps, params }) => rankHandCardsV5Plus(decisionState, playerKey, deps, params),
-    v5: ({ decisionState, deps, params }) => rankHandCardsV5(decisionState, playerKey, deps, params),
-    v4: ({ decisionState, deps }) => rankHandCardsV4(decisionState, playerKey, deps),
-    v3: ({ decisionState, deps }) => rankHandCardsV3(decisionState, playerKey, deps)
+    gemini: ({ decisionState, deps, params }) => rankHandCardsGemini(decisionState, playerKey, deps, params),
+    gpt: ({ decisionState, deps, params }) => rankHandCardsGPT(decisionState, playerKey, deps, params),
+    nexg: ({ decisionState, deps, params }) => rankHandCardsNEXg(decisionState, playerKey, deps, params),
+    cl: ({ decisionState, deps, params }) => rankHandCardsCL(decisionState, playerKey, deps, params),
+    j2: ({ decisionState, deps }) => rankHandCardsJ2(decisionState, playerKey, deps),
+    j1: ({ decisionState, deps }) => rankHandCardsJ1(decisionState, playerKey, deps)
   });
 }
 
@@ -2133,7 +2133,7 @@ function getActionPlayerKeyLocal(state) {
   return null;
 }
 
-function rolloutStateUtilityV6(state, rootPlayerKey, deps = HEURISTIC_V6_DEPS) {
+function rolloutStateUtilityGPT(state, rootPlayerKey, deps = HEURISTIC_GPT_DEPS) {
   if (!state || !rootPlayerKey) return 0;
   const opp = otherPlayerKey(rootPlayerKey);
   const myScore = currentScoreTotal(state, rootPlayerKey);
@@ -2162,29 +2162,29 @@ function rolloutStateUtilityV6(state, rootPlayerKey, deps = HEURISTIC_V6_DEPS) {
   return utility;
 }
 
-function rolloutBotPlayV6NoRollout(state, actor) {
-  const params = { ...HEURISTIC_V6_PARAMS, rolloutEnabled: 0 };
-  const fair = createV6FairDecisionContext(state, actor);
+function rolloutBotPlayGPTNoRollout(state, actor) {
+  const params = { ...HEURISTIC_GPT_PARAMS, rolloutEnabled: 0 };
+  const fair = createGPTFairDecisionContext(state, actor);
   const decisionState = fair.publicState;
   const fairDeps = fair.deps;
   if (state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey === actor) {
-    const mode = chooseGukjinHeuristicV6(decisionState, actor, fairDeps, params);
+    const mode = chooseGukjinHeuristicGPT(decisionState, actor, fairDeps, params);
     return chooseGukjinMode(state, actor, mode);
   }
   if (state.phase === "president-choice" && state.pendingPresident?.playerKey === actor) {
-    const stop = shouldPresidentStopV6(decisionState, actor, fairDeps, params);
+    const stop = shouldPresidentStopGPT(decisionState, actor, fairDeps, params);
     return stop ? choosePresidentStop(state, actor) : choosePresidentHold(state, actor);
   }
   if (state.phase === "select-match" && state.pendingMatch?.playerKey === actor) {
-    const choiceId = chooseMatchHeuristicV6(decisionState, actor, fairDeps, params);
+    const choiceId = chooseMatchHeuristicGPT(decisionState, actor, fairDeps, params);
     return choiceId ? chooseMatch(state, choiceId) : state;
   }
   if (state.phase === "go-stop" && state.pendingGoStop === actor) {
-    const go = shouldGoV6(decisionState, actor, fairDeps, params);
+    const go = shouldGoGPT(decisionState, actor, fairDeps, params);
     return go ? chooseGo(state, actor) : chooseStop(state, actor);
   }
   if (state.phase === "playing" && state.currentTurn === actor) {
-    const ranked = rankHandCardsV6(decisionState, actor, fairDeps, params);
+    const ranked = rankHandCardsGPT(decisionState, actor, fairDeps, params);
     const cardId = ranked?.[0]?.card?.id;
     return cardId ? playTurn(state, cardId) : state;
   }
@@ -2197,7 +2197,7 @@ function rolloutAdvanceUntilTurnEnds(state, turnOwner, maxSteps = 28) {
     if (!next || next.phase === "resolution") break;
     const actor = getActionPlayerKeyLocal(next);
     if (!actor) break;
-    const updated = rolloutBotPlayV6NoRollout(next, actor);
+    const updated = rolloutBotPlayGPTNoRollout(next, actor);
     if (!updated || updated === next) break;
     next = updated;
     if (next.phase === "playing" && next.currentTurn && next.currentTurn !== turnOwner) break;
@@ -2205,13 +2205,13 @@ function rolloutAdvanceUntilTurnEnds(state, turnOwner, maxSteps = 28) {
   return next;
 }
 
-function rolloutCardValueV6(state, playerKey, cardId, options = {}) {
+function rolloutCardValueGPT(state, playerKey, cardId, options = {}) {
   if (!state || state.phase !== "playing" || state.currentTurn !== playerKey) return null;
   if (!cardId) return null;
   const maxSteps = Math.max(8, Number(options.maxSteps || 28));
   const samples = Math.max(1, Math.floor(Number(options.samples || 5)));
   const observerKey = options.observerKey || playerKey;
-  const utilityDeps = createHeuristicV6FairDeps(playerKey);
+  const utilityDeps = createHeuristicGPTFairDeps(playerKey);
   let sum = 0;
   let count = 0;
 
@@ -2229,7 +2229,7 @@ function rolloutCardValueV6(state, playerKey, cardId, options = {}) {
         next = rolloutAdvanceUntilTurnEnds(next, opp, maxSteps);
       }
     }
-    const utility = rolloutStateUtilityV6(next, playerKey, utilityDeps);
+    const utility = rolloutStateUtilityGPT(next, playerKey, utilityDeps);
     if (!Number.isFinite(utility)) continue;
     sum += utility;
     count += 1;
@@ -2239,12 +2239,12 @@ function rolloutCardValueV6(state, playerKey, cardId, options = {}) {
   return sum / count;
 }
 
-function rolloutGoStopValueV6(state, playerKey, chooseGoFlag, options = {}) {
+function rolloutGoStopValueGPT(state, playerKey, chooseGoFlag, options = {}) {
   if (!state || state.phase !== "go-stop" || state.pendingGoStop !== playerKey) return null;
   const maxSteps = Math.max(8, Number(options.maxSteps || 28));
   const samples = Math.max(1, Math.floor(Number(options.samples || 5)));
   const observerKey = options.observerKey || playerKey;
-  const utilityDeps = createHeuristicV6FairDeps(playerKey);
+  const utilityDeps = createHeuristicGPTFairDeps(playerKey);
   let sum = 0;
   let count = 0;
 
@@ -2265,7 +2265,7 @@ function rolloutGoStopValueV6(state, playerKey, chooseGoFlag, options = {}) {
         next = rolloutAdvanceUntilTurnEnds(next, opp, maxSteps);
       }
     }
-    const utility = rolloutStateUtilityV6(next, playerKey, utilityDeps);
+    const utility = rolloutStateUtilityGPT(next, playerKey, utilityDeps);
     if (!Number.isFinite(utility)) continue;
     sum += utility;
     count += 1;

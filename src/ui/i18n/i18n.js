@@ -5,12 +5,12 @@ export const SUPPORTED_LANGUAGES = Object.freeze(["ko", "en"]);
 
 const MESSAGES = {
   ko: {
-    "model.heuristicV3": "휴리스틱 V3",
-    "model.heuristicV4": "휴리스틱 V4",
-    "model.heuristicV5": "휴리스틱 V5",
-    "model.heuristicV5Plus": "휴리스틱 V5Plus",
-    "model.heuristicV6": "휴리스틱 V6",
-    "model.heuristicV7": "휴리스틱 V7 Gold Digger",
+    "model.heuristicJ1": "휴리스틱 J1",
+    "model.heuristicJ2": "휴리스틱 J2",
+    "model.heuristicCL": "휴리스틱 CL",
+    "model.heuristicNEXg": "휴리스틱 NEXg",
+    "model.heuristicGPT": "휴리스틱 GPT",
+    "model.heuristicGemini": "휴리스틱 Gemini",
     "model.neatPhase2Seed9": "NEAT Phase2 Seed9",
     "model.v14Moe": "모델 V14 자동",
     "model.v14Attack": "모델 V14 공격",
@@ -130,12 +130,12 @@ const MESSAGES = {
     "card.alt.format": "{month}월 {name}"
   },
   en: {
-    "model.heuristicV3": "Heuristic V3",
-    "model.heuristicV4": "Heuristic V4",
-    "model.heuristicV5": "Heuristic V5",
-    "model.heuristicV5Plus": "Heuristic V5Plus",
-    "model.heuristicV6": "Heuristic V6",
-    "model.heuristicV7": "Heuristic V7 Gold Digger",
+    "model.heuristicJ1": "Heuristic J1",
+    "model.heuristicJ2": "Heuristic J2",
+    "model.heuristicCL": "Heuristic CL",
+    "model.heuristicNEXg": "Heuristic NEXg",
+    "model.heuristicGPT": "Heuristic GPT",
+    "model.heuristicGemini": "Heuristic Gemini",
     "model.neatPhase2Seed9": "NEAT Phase2 Seed9",
     "model.v14Moe": "Model V14 Auto",
     "model.v14Attack": "Model V14 Attack",

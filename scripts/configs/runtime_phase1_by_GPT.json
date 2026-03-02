@@ -1,36 +1,37 @@
 ﻿{
   "format_version": "neat_runtime_by_gpt_phase1_v1",
-  "generations": 12,
+
+  "_notes_structure": {
+    "section_1": "meta/version",
+    "section_2": "run core",
+    "section_3": "opponent",
+    "section_4": "fitness",
+    "section_5": "gate/transition"
+  },
+
+  "seed": 13,
+  "eval_script": "scripts/neat_eval_worker_by_GPT.mjs",
+  "fitness_profile": "phase1",
+
+  "generations": 14,
   "eval_workers": 6,
   "games_per_genome": 150,
   "eval_timeout_sec": 360,
   "max_eval_steps": 600,
   "checkpoint_every": 3,
-  "eval_script": "scripts/neat_eval_worker_by_GPT.mjs",
-  "seed": 13,
+
   "opponent_policy_mix": [
-    { "policy": "H-V4", "weight": 45 },
-    { "policy": "H-V7", "weight": 35 },
-    { "policy": "H-V3", "weight": 20 }
+    { "policy": "H-J2", "weight": 50 },
+    { "policy": "H-Gemini", "weight": 30 },
+    { "policy": "H-J1", "weight": 20 }
   ],
   "switch_seats": true,
-  "fitness_gold_scale": 2500.0,
-  "fitness_gold_neutral_delta": -300.0,
-  "fitness_win_weight": 0.45,
-  "fitness_gold_weight": 0.55,
-  "fitness_win_neutral_rate": 0.40,
-  "fitness_go_zero_games_penalty": 0.24,
-  "fitness_go_max_games": 90,
-  "fitness_go_max_games_penalty": 0.02,
-  "fitness_go_fail_penalty_trigger": 0.42,
-  "fitness_go_fail_penalty_amount": 0.02,
-  "fitness_go_fail_bonus_trigger": 0.20,
-  "fitness_go_fail_bonus_amount": 0.01,
+
   "gate_mode": "win_rate_only",
   "gate_ema_window": 5,
-  "eval_pass_win_rate_min": 0.40,
-  "eval_pass_mean_gold_delta_min": -500.0,
-  "transition_mean_gold_delta_min": 0.0,
+  "eval_pass_win_rate_min": 0.36,
+  "eval_pass_mean_gold_delta_min": -300.0,
+  "transition_mean_gold_delta_min": -100.0,
   "transition_streak": 1,
   "failure_generation_min": 999,
   "failure_slope_5_max": 0.0

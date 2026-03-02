@@ -5,11 +5,11 @@ from __future__ import annotations
 Pipeline Stage: 1/3 (neat_train_worker_by_GPT.py -> neat_eval_worker_by_GPT.mjs -> phase_eval_by_GPT.ps1)
 
 Quick Read Map (top-down):
-1) main()
-2) LoggedParallelEvaluator
-3) eval_function()
-4) runtime load/env bridge helpers
-5) teacher dataset cache helpers
+1) parse_args()/main(): runtime/bootstrap and training orchestration
+2) LoggedParallelEvaluator: generation metrics + gate tracking
+3) eval_function(): per-genome node-worker evaluation call
+4) runtime/env bridge helpers: strict normalization + fail-fast
+5) teacher dataset cache helpers (optional offline teacher)
 """
 
 import argparse
@@ -53,26 +53,8 @@ DEFAULT_RUNTIME = {
     "switch_seats": True,
     "checkpoint_every": 50,
     "eval_script": "scripts/neat_eval_worker_by_GPT.mjs",
+    "fitness_profile": "phase1",
     "seed": 13,
-    # Evaluator maps these to win/gold/go component weights.
-    "fitness_gold_scale": 2500.0,
-    "fitness_gold_neutral_delta": 0.0,
-    "fitness_win_weight": 0.35,
-    "fitness_gold_weight": 0.50,
-    "fitness_win_neutral_rate": 0.40,
-    "fitness_go_weight": 0.15,
-    "fitness_go_target_rate": 0.20,
-    "fitness_go_max_games": 70,
-    "fitness_go_max_games_penalty": 0.80,
-    "fitness_go_presence_weight": 0.2,
-    "fitness_go_quality_weight": 0.8,
-    "fitness_go_zero_games_penalty": 0.07,
-    "fitness_go_fail_penalty_enabled": True,
-    "fitness_go_fail_penalty_margin": 0.05,
-    "fitness_go_fail_penalty_trigger": 0.45,
-    "fitness_go_fail_penalty_amount": 0.10,
-    "fitness_go_fail_bonus_trigger": 0.20,
-    "fitness_go_fail_bonus_amount": 0.20,
     # Gate / transition controls (can be phase-specific via runtime config)
     "gate_mode": "win_rate_only",  # win_rate_only | hybrid
     "gate_ema_window": 5,
@@ -295,110 +277,11 @@ def _normalize_runtime_values(cfg: dict) -> dict:
         1, _to_int(cfg.get("checkpoint_every"), DEFAULT_RUNTIME["checkpoint_every"])
     )
     cfg["eval_script"] = str(cfg.get("eval_script") or DEFAULT_RUNTIME["eval_script"]).strip()
+    fitness_profile = str(cfg.get("fitness_profile") or "").strip().lower()
+    if fitness_profile not in ("phase1", "phase2", "phase3"):
+        raise RuntimeError("runtime fitness_profile must be one of: phase1, phase2, phase3")
+    cfg["fitness_profile"] = fitness_profile
     cfg["seed"] = _to_seed(cfg.get("seed"), DEFAULT_RUNTIME["seed"])
-    cfg["fitness_gold_scale"] = max(
-        1.0, _to_float(cfg.get("fitness_gold_scale"), DEFAULT_RUNTIME["fitness_gold_scale"])
-    )
-    cfg["fitness_gold_neutral_delta"] = _to_float(
-        cfg.get("fitness_gold_neutral_delta"),
-        DEFAULT_RUNTIME["fitness_gold_neutral_delta"],
-    )
-    cfg["fitness_win_weight"] = _to_float(
-        cfg.get("fitness_win_weight"), DEFAULT_RUNTIME["fitness_win_weight"]
-    )
-    cfg["fitness_gold_weight"] = _to_float(
-        cfg.get("fitness_gold_weight"), DEFAULT_RUNTIME["fitness_gold_weight"]
-    )
-    cfg["fitness_win_neutral_rate"] = min(
-        0.99,
-        max(
-            0.01,
-            _to_float(
-                cfg.get("fitness_win_neutral_rate"),
-                DEFAULT_RUNTIME["fitness_win_neutral_rate"],
-            ),
-        ),
-    )
-    cfg["fitness_go_weight"] = _to_float(
-        cfg.get("fitness_go_weight"), DEFAULT_RUNTIME["fitness_go_weight"]
-    )
-    cfg["fitness_go_target_rate"] = max(
-        0.01, _to_float(cfg.get("fitness_go_target_rate"), DEFAULT_RUNTIME["fitness_go_target_rate"])
-    )
-    cfg["fitness_go_max_games"] = max(
-        1,
-        _to_int(
-            cfg.get("fitness_go_max_games"),
-            DEFAULT_RUNTIME["fitness_go_max_games"],
-        ),
-    )
-    cfg["fitness_go_max_games_penalty"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_max_games_penalty"),
-            DEFAULT_RUNTIME["fitness_go_max_games_penalty"],
-        ),
-    )
-    cfg["fitness_go_presence_weight"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_presence_weight"),
-            DEFAULT_RUNTIME["fitness_go_presence_weight"],
-        ),
-    )
-    cfg["fitness_go_quality_weight"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_quality_weight"),
-            DEFAULT_RUNTIME["fitness_go_quality_weight"],
-        ),
-    )
-    cfg["fitness_go_zero_games_penalty"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_zero_games_penalty"),
-            DEFAULT_RUNTIME["fitness_go_zero_games_penalty"],
-        ),
-    )
-    cfg["fitness_go_fail_penalty_enabled"] = _to_bool(
-        cfg.get("fitness_go_fail_penalty_enabled"),
-        DEFAULT_RUNTIME["fitness_go_fail_penalty_enabled"],
-    )
-    cfg["fitness_go_fail_penalty_margin"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_fail_penalty_margin"),
-            DEFAULT_RUNTIME["fitness_go_fail_penalty_margin"],
-        ),
-    )
-    cfg["fitness_go_fail_penalty_trigger"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_fail_penalty_trigger"),
-            DEFAULT_RUNTIME["fitness_go_fail_penalty_trigger"],
-        ),
-    )
-    cfg["fitness_go_fail_penalty_amount"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_fail_penalty_amount"),
-            DEFAULT_RUNTIME["fitness_go_fail_penalty_amount"],
-        ),
-    )
-    cfg["fitness_go_fail_bonus_trigger"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_fail_bonus_trigger"),
-            DEFAULT_RUNTIME["fitness_go_fail_bonus_trigger"],
-        ),
-    )
-    cfg["fitness_go_fail_bonus_amount"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_fail_bonus_amount"),
-            DEFAULT_RUNTIME["fitness_go_fail_bonus_amount"],
-        ),
-    )
     gate_mode = str(cfg.get("gate_mode") or DEFAULT_RUNTIME["gate_mode"]).strip().lower()
     if gate_mode not in ("win_rate_only", "hybrid"):
         gate_mode = str(DEFAULT_RUNTIME["gate_mode"])
@@ -476,51 +359,10 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
         separators=(",", ":"),
     )
     os.environ[f"{ENV_PREFIX}OPPONENT_GENOME"] = str(runtime.get("opponent_genome") or "")
+    os.environ[f"{ENV_PREFIX}FITNESS_PROFILE"] = str(runtime["fitness_profile"])
     os.environ[f"{ENV_PREFIX}SWITCH_SEATS"] = "1" if bool(runtime["switch_seats"]) else "0"
     os.environ[f"{ENV_PREFIX}SEED"] = str(runtime["seed"])
     os.environ[f"{ENV_PREFIX}OUTPUT_DIR"] = os.path.abspath(output_dir)
-    os.environ[f"{ENV_PREFIX}FITNESS_GOLD_SCALE"] = str(float(runtime["fitness_gold_scale"]))
-    os.environ[f"{ENV_PREFIX}FITNESS_GOLD_NEUTRAL_DELTA"] = str(
-        float(runtime["fitness_gold_neutral_delta"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"] = str(float(runtime["fitness_win_weight"]))
-    os.environ[f"{ENV_PREFIX}FITNESS_GOLD_WEIGHT"] = str(float(runtime["fitness_gold_weight"]))
-    os.environ[f"{ENV_PREFIX}FITNESS_WIN_NEUTRAL_RATE"] = str(
-        float(runtime["fitness_win_neutral_rate"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_WEIGHT"] = str(float(runtime["fitness_go_weight"]))
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_TARGET_RATE"] = str(float(runtime["fitness_go_target_rate"]))
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES"] = str(int(runtime["fitness_go_max_games"]))
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES_PENALTY"] = str(
-        float(runtime["fitness_go_max_games_penalty"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_PRESENCE_WEIGHT"] = str(
-        float(runtime["fitness_go_presence_weight"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_QUALITY_WEIGHT"] = str(
-        float(runtime["fitness_go_quality_weight"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_ZERO_GAMES_PENALTY"] = str(
-        float(runtime["fitness_go_zero_games_penalty"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_ENABLED"] = (
-        "1" if bool(runtime.get("fitness_go_fail_penalty_enabled")) else "0"
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_MARGIN"] = str(
-        float(runtime["fitness_go_fail_penalty_margin"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_TRIGGER"] = str(
-        float(runtime["fitness_go_fail_penalty_trigger"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_AMOUNT"] = str(
-        float(runtime["fitness_go_fail_penalty_amount"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_BONUS_TRIGGER"] = str(
-        float(runtime["fitness_go_fail_bonus_trigger"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_BONUS_AMOUNT"] = str(
-        float(runtime["fitness_go_fail_bonus_amount"])
-    )
     os.environ[f"{ENV_PREFIX}TEACHER_DATASET_PATH"] = str(runtime.get("teacher_dataset_path") or "")
     os.environ[f"{ENV_PREFIX}TEACHER_KIBO_PATH"] = str(runtime.get("teacher_kibo_path") or "")
     os.environ[f"{ENV_PREFIX}TEACHER_KIBO_COUNT_RECORDS"] = (
@@ -544,41 +386,10 @@ def _runtime_from_env() -> Dict[str, object]:
         "opponent_policy": os.environ.get(f"{ENV_PREFIX}OPPONENT_POLICY"),
         "opponent_policy_mix": os.environ.get(f"{ENV_PREFIX}OPPONENT_POLICY_MIX"),
         "opponent_genome": os.environ.get(f"{ENV_PREFIX}OPPONENT_GENOME"),
+        "fitness_profile": os.environ.get(f"{ENV_PREFIX}FITNESS_PROFILE"),
         "switch_seats": os.environ.get(f"{ENV_PREFIX}SWITCH_SEATS"),
         "seed": os.environ.get(f"{ENV_PREFIX}SEED"),
         "output_dir": os.environ.get(f"{ENV_PREFIX}OUTPUT_DIR") or os.getcwd(),
-        "fitness_gold_scale": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_SCALE"),
-        "fitness_gold_neutral_delta": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_NEUTRAL_DELTA"),
-        "fitness_win_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"),
-        "fitness_gold_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_WEIGHT"),
-        "fitness_win_neutral_rate": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_NEUTRAL_RATE"),
-        "fitness_go_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_WEIGHT"),
-        "fitness_go_target_rate": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_TARGET_RATE"),
-        "fitness_go_max_games": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES"),
-        "fitness_go_max_games_penalty": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES_PENALTY"),
-        "fitness_go_presence_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_PRESENCE_WEIGHT"),
-        "fitness_go_quality_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_QUALITY_WEIGHT"),
-        "fitness_go_zero_games_penalty": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_ZERO_GAMES_PENALTY"
-        ),
-        "fitness_go_fail_penalty_enabled": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_ENABLED"
-        ),
-        "fitness_go_fail_penalty_margin": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_MARGIN"
-        ),
-        "fitness_go_fail_penalty_trigger": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_TRIGGER"
-        ),
-        "fitness_go_fail_penalty_amount": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_AMOUNT"
-        ),
-        "fitness_go_fail_bonus_trigger": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_BONUS_TRIGGER"
-        ),
-        "fitness_go_fail_bonus_amount": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_BONUS_AMOUNT"
-        ),
         "teacher_dataset_path": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_PATH") or "",
         "teacher_kibo_path": os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_PATH") or "",
         "teacher_kibo_count_records": os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_COUNT_RECORDS") or "0",
@@ -929,8 +740,12 @@ def _select_opponent_policy(runtime: dict, seed_text: str, generation: int, geno
 
 # =============================================================================
 # Section 7. Single Genome Evaluation Worker
+# - Builds a strict node command per genome.
+# - Returns fitness summary dict; failures are explicit and heavily penalized.
 # =============================================================================
 def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1):
+    # 7-1) Export genome payload and runtime options.
+    # 7-2) Execute node evaluator and parse last-line JSON summary.
     runtime = _runtime_from_env_cached()
     eval_script = str(runtime["eval_script"] or "")
     seed_text = str(seed_override or runtime["seed"])
@@ -1023,6 +838,7 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             )
             return {"fitness": -1e9, "seed_used": seed_text, "eval_ok": False}
 
+        # 7-3) Command contract: keep argument semantics stable for worker scripts.
         cmd = [
             "node",
             eval_script,
@@ -1034,32 +850,10 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             seed_text,
             "--max-steps",
             str(int(runtime["max_eval_steps"])),
+            "--fitness-profile",
+            str(runtime["fitness_profile"]),
             "--switch-seats",
             "1" if bool(runtime["switch_seats"]) else "0",
-            "--fitness-gold-scale",
-            str(float(runtime["fitness_gold_scale"])),
-            "--fitness-gold-neutral-delta",
-            str(float(runtime["fitness_gold_neutral_delta"])),
-            "--fitness-win-weight",
-            str(float(runtime["fitness_win_weight"])),
-            "--fitness-gold-weight",
-            str(float(runtime["fitness_gold_weight"])),
-            "--fitness-win-neutral-rate",
-            str(float(runtime["fitness_win_neutral_rate"])),
-            "--fitness-go-zero-games-penalty",
-            str(float(runtime["fitness_go_zero_games_penalty"])),
-            "--fitness-go-max-games",
-            str(int(runtime["fitness_go_max_games"])),
-            "--fitness-go-max-games-penalty",
-            str(float(runtime["fitness_go_max_games_penalty"])),
-            "--fitness-go-fail-penalty-trigger",
-            str(float(runtime["fitness_go_fail_penalty_trigger"])),
-            "--fitness-go-fail-penalty-amount",
-            str(float(runtime["fitness_go_fail_penalty_amount"])),
-            "--fitness-go-fail-bonus-trigger",
-            str(float(runtime["fitness_go_fail_bonus_trigger"])),
-            "--fitness-go-fail-bonus-amount",
-            str(float(runtime["fitness_go_fail_bonus_amount"])),
         ]
         if has_runtime_policy:
             cmd.extend(["--opponent-policy", opponent_policy])
@@ -1119,6 +913,7 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
 
 # =============================================================================
 # Section 8. Parallel Evaluator + Gate Tracking
+# - Aggregates generation-level metrics from per-genome evaluation results.
 # =============================================================================
 class LoggedParallelEvaluator:
     def __init__(self, num_workers: int, output_dir: str, runtime: dict):
@@ -1391,6 +1186,13 @@ class LoggedParallelEvaluator:
             valid_go_games_values = []
             valid_go_rate_values = []
             valid_go_fail_rate_values = []
+            valid_mean_gold_delta_values = []
+            valid_p10_gold_delta_values = []
+            valid_p50_gold_delta_values = []
+            valid_gold_core_values = []
+            valid_expected_result_values = []
+            valid_bankrupt_rate_values = []
+            valid_bankrupt_penalty_values = []
             for r in valid_records:
                 if "imitation_weighted_score" not in r:
                     pass
@@ -1398,6 +1200,15 @@ class LoggedParallelEvaluator:
                     v = _safe_float(r.get("imitation_weighted_score"), float("nan"))
                     if v == v:
                         valid_imit_values.append(v)
+                mean_gold_delta = _safe_optional_float(r.get("mean_gold_delta"))
+                if mean_gold_delta is not None:
+                    valid_mean_gold_delta_values.append(mean_gold_delta)
+                p10_gold_delta = _safe_optional_float(r.get("p10_gold_delta"))
+                if p10_gold_delta is not None:
+                    valid_p10_gold_delta_values.append(p10_gold_delta)
+                p50_gold_delta = _safe_optional_float(r.get("p50_gold_delta"))
+                if p50_gold_delta is not None:
+                    valid_p50_gold_delta_values.append(p50_gold_delta)
                 go_games = _safe_optional_float(r.get("go_games"))
                 if go_games is not None:
                     valid_go_games_values.append(go_games)
@@ -1407,6 +1218,24 @@ class LoggedParallelEvaluator:
                 go_fail_rate = _safe_optional_float(r.get("go_fail_rate"))
                 if go_fail_rate is not None:
                     valid_go_fail_rate_values.append(go_fail_rate)
+                fitness_components = r.get("fitness_components") or {}
+                gold_core = _safe_optional_float(fitness_components.get("gold_core"))
+                if gold_core is not None:
+                    valid_gold_core_values.append(gold_core)
+                expected_result = _safe_optional_float(fitness_components.get("expected_result"))
+                if expected_result is not None:
+                    valid_expected_result_values.append(expected_result)
+                bankrupt_penalty = _safe_optional_float(fitness_components.get("bankrupt_penalty"))
+                if bankrupt_penalty is not None:
+                    valid_bankrupt_penalty_values.append(bankrupt_penalty)
+                bankrupt_rate = _safe_optional_float(fitness_components.get("bankrupt_rate"))
+                if bankrupt_rate is not None:
+                    valid_bankrupt_rate_values.append(bankrupt_rate)
+                elif isinstance(r.get("bankrupt"), dict):
+                    bankrupt_count = _safe_optional_float((r.get("bankrupt") or {}).get("my_bankrupt_count"))
+                    games_count = _safe_optional_float(r.get("games"))
+                    if bankrupt_count is not None and games_count is not None and games_count > 0:
+                        valid_bankrupt_rate_values.append(max(0.0, bankrupt_count / games_count))
             valid_eval_ms = [
                 max(0.0, _safe_float(r.get("eval_time_ms"), 0.0))
                 for r in valid_records
@@ -1427,9 +1256,44 @@ class LoggedParallelEvaluator:
                 "mean_win_rate": (
                     sum(valid_win_values) / max(1, len(valid_win_values)) if len(valid_win_values) > 0 else None
                 ),
+                "mean_mean_gold_delta": (
+                    sum(valid_mean_gold_delta_values) / max(1, len(valid_mean_gold_delta_values))
+                    if len(valid_mean_gold_delta_values) > 0
+                    else None
+                ),
+                "mean_p10_gold_delta": (
+                    sum(valid_p10_gold_delta_values) / max(1, len(valid_p10_gold_delta_values))
+                    if len(valid_p10_gold_delta_values) > 0
+                    else None
+                ),
+                "mean_p50_gold_delta": (
+                    sum(valid_p50_gold_delta_values) / max(1, len(valid_p50_gold_delta_values))
+                    if len(valid_p50_gold_delta_values) > 0
+                    else None
+                ),
                 "mean_imitation_weighted_score": (
                     sum(valid_imit_values) / max(1, len(valid_imit_values))
                     if len(valid_imit_values) > 0
+                    else None
+                ),
+                "mean_gold_core": (
+                    sum(valid_gold_core_values) / max(1, len(valid_gold_core_values))
+                    if len(valid_gold_core_values) > 0
+                    else None
+                ),
+                "mean_expected_result": (
+                    sum(valid_expected_result_values) / max(1, len(valid_expected_result_values))
+                    if len(valid_expected_result_values) > 0
+                    else None
+                ),
+                "mean_bankrupt_rate": (
+                    sum(valid_bankrupt_rate_values) / max(1, len(valid_bankrupt_rate_values))
+                    if len(valid_bankrupt_rate_values) > 0
+                    else None
+                ),
+                "mean_bankrupt_penalty": (
+                    sum(valid_bankrupt_penalty_values) / max(1, len(valid_bankrupt_penalty_values))
+                    if len(valid_bankrupt_penalty_values) > 0
                     else None
                 ),
                 "mean_go_games": (
@@ -1452,12 +1316,57 @@ class LoggedParallelEvaluator:
                     if self._is_valid_gate_record(best_record)
                     else None
                 ),
+                "best_mean_gold_delta": (
+                    _safe_optional_float(best_record.get("mean_gold_delta"))
+                    if self._is_valid_gate_record(best_record)
+                    else None
+                ),
+                "best_p10_gold_delta": (
+                    _safe_optional_float(best_record.get("p10_gold_delta"))
+                    if self._is_valid_gate_record(best_record)
+                    else None
+                ),
+                "best_p50_gold_delta": (
+                    _safe_optional_float(best_record.get("p50_gold_delta"))
+                    if self._is_valid_gate_record(best_record)
+                    else None
+                ),
                 "best_imitation_weighted_score": (
                     _safe_optional_float(best_record.get("imitation_weighted_score"))
                     if (
                         self._is_valid_gate_record(best_record)
                         and "imitation_weighted_score" in best_record
                     )
+                    else None
+                ),
+                "best_gold_core": (
+                    _safe_optional_float((best_record.get("fitness_components") or {}).get("gold_core"))
+                    if self._is_valid_gate_record(best_record)
+                    else None
+                ),
+                "best_expected_result": (
+                    _safe_optional_float((best_record.get("fitness_components") or {}).get("expected_result"))
+                    if self._is_valid_gate_record(best_record)
+                    else None
+                ),
+                "best_bankrupt_rate": (
+                    _safe_optional_float((best_record.get("fitness_components") or {}).get("bankrupt_rate"))
+                    if self._is_valid_gate_record(best_record)
+                    else None
+                ),
+                "best_bankrupt_penalty": (
+                    _safe_optional_float((best_record.get("fitness_components") or {}).get("bankrupt_penalty"))
+                    if self._is_valid_gate_record(best_record)
+                    else None
+                ),
+                "best_fitness_model": (
+                    str(best_record.get("fitness_model") or "")
+                    if self._is_valid_gate_record(best_record)
+                    else None
+                ),
+                "best_fitness_profile": (
+                    str(best_record.get("fitness_profile") or "")
+                    if self._is_valid_gate_record(best_record)
                     else None
                 ),
                 "best_genome_nodes": int(best_record.get("num_nodes", 0)),
@@ -1483,12 +1392,28 @@ class LoggedParallelEvaluator:
                 "mean_fitness": -1e9,
                 "std_fitness": 0.0,
                 "mean_win_rate": None,
+                "mean_mean_gold_delta": None,
+                "mean_p10_gold_delta": None,
+                "mean_p50_gold_delta": None,
                 "mean_imitation_weighted_score": None,
+                "mean_gold_core": None,
+                "mean_expected_result": None,
+                "mean_bankrupt_rate": None,
+                "mean_bankrupt_penalty": None,
                 "mean_go_games": None,
                 "mean_go_rate": None,
                 "mean_go_fail_rate": None,
                 "best_win_rate": None,
+                "best_mean_gold_delta": None,
+                "best_p10_gold_delta": None,
+                "best_p50_gold_delta": None,
                 "best_imitation_weighted_score": None,
+                "best_gold_core": None,
+                "best_expected_result": None,
+                "best_bankrupt_rate": None,
+                "best_bankrupt_penalty": None,
+                "best_fitness_model": None,
+                "best_fitness_profile": None,
                 "best_genome_nodes": 0,
                 "best_genome_connections": 0,
                 "mean_eval_time_ms": None,
@@ -1554,115 +1479,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint-every", type=int, default=0, help="Override checkpoint interval")
     parser.add_argument("--seed", default="", help="Override runtime seed")
-    parser.add_argument(
-        "--fitness-gold-scale",
-        type=float,
-        default=0.0,
-        help="Override fitness gold scale denominator",
-    )
-    parser.add_argument(
-        "--fitness-gold-neutral-delta",
-        type=float,
-        default=float("nan"),
-        help="Override gold neutral baseline delta for gold_norm",
-    )
-    parser.add_argument(
-        "--fitness-win-weight",
-        type=float,
-        default=float("nan"),
-        help="Override win-rate fitness weight",
-    )
-    parser.add_argument(
-        "--fitness-gold-weight",
-        type=float,
-        default=float("nan"),
-        help="Override loss-rate fitness penalty weight",
-    )
-    parser.add_argument(
-        "--fitness-win-neutral-rate",
-        type=float,
-        default=float("nan"),
-        help="Override neutral baseline win rate for win_norm",
-    )
-    parser.add_argument(
-        "--fitness-go-weight",
-        type=float,
-        default=float("nan"),
-        help="Override draw-rate fitness weight",
-    )
-    parser.add_argument(
-        "--fitness-go-target-rate",
-        type=float,
-        default=0.0,
-        help="Override GO target rate for fitness GO presence term",
-    )
-    parser.add_argument(
-        "--fitness-go-max-games",
-        type=int,
-        default=0,
-        help="Override maximum GO games allowed before penalty",
-    )
-    parser.add_argument(
-        "--fitness-go-max-games-penalty",
-        type=float,
-        default=float("nan"),
-        help="Override GO max-games penalty amount",
-    )
-    parser.add_argument(
-        "--fitness-go-presence-weight",
-        type=float,
-        default=float("nan"),
-        help="Override GO presence ratio weight in GO term",
-    )
-    parser.add_argument(
-        "--fitness-go-quality-weight",
-        type=float,
-        default=float("nan"),
-        help="Override GO quality ratio weight in GO term",
-    )
-    parser.add_argument(
-        "--fitness-go-zero-games-penalty",
-        type=float,
-        default=float("nan"),
-        help="Override fitness penalty when go_games is zero",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-penalty-enabled",
-        type=int,
-        choices=[0, 1],
-        default=-1,
-        help="Override GO fail-over-cap penalty enable (1=on, 0=off)",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-penalty-margin",
-        type=float,
-        default=float("nan"),
-        help="Override GO fail-over-cap penalty margin",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-penalty-trigger",
-        type=float,
-        default=float("nan"),
-        help="Override GO fail penalty trigger rate",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-penalty-amount",
-        type=float,
-        default=float("nan"),
-        help="Override GO fail penalty amount",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-bonus-trigger",
-        type=float,
-        default=float("nan"),
-        help="Override GO fail bonus trigger rate",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-bonus-amount",
-        type=float,
-        default=float("nan"),
-        help="Override GO fail bonus amount",
-    )
     parser.add_argument(
         "--profile-name",
         default="",
@@ -1832,8 +1648,11 @@ if neat is not None:
 
 # =============================================================================
 # Section 10. Entrypoint
+# - Loads runtime/config, prepares population, runs NEAT, writes summary artifacts.
 # =============================================================================
 def main() -> None:
+    # 10-1) Resolve runtime config and apply CLI overrides.
+    # 10-2) Run population with parallel evaluator, then export winner artifacts.
     args = parse_args()
     run_started_wall = datetime.now(timezone.utc)
     run_started_perf = time.perf_counter()
@@ -1877,60 +1696,6 @@ def main() -> None:
     if args.switch_seats is not None:
         runtime["switch_seats"] = bool(args.switch_seats)
         override_keys.append("switch_seats")
-    if args.fitness_gold_scale > 0:
-        runtime["fitness_gold_scale"] = args.fitness_gold_scale
-        override_keys.append("fitness_gold_scale")
-    if args.fitness_gold_neutral_delta == args.fitness_gold_neutral_delta:
-        runtime["fitness_gold_neutral_delta"] = args.fitness_gold_neutral_delta
-        override_keys.append("fitness_gold_neutral_delta")
-    if args.fitness_win_weight == args.fitness_win_weight:
-        runtime["fitness_win_weight"] = args.fitness_win_weight
-        override_keys.append("fitness_win_weight")
-    if args.fitness_gold_weight == args.fitness_gold_weight:
-        runtime["fitness_gold_weight"] = args.fitness_gold_weight
-        override_keys.append("fitness_gold_weight")
-    if args.fitness_win_neutral_rate == args.fitness_win_neutral_rate:
-        runtime["fitness_win_neutral_rate"] = args.fitness_win_neutral_rate
-        override_keys.append("fitness_win_neutral_rate")
-    if args.fitness_go_weight == args.fitness_go_weight:
-        runtime["fitness_go_weight"] = args.fitness_go_weight
-        override_keys.append("fitness_go_weight")
-    if args.fitness_go_target_rate > 0:
-        runtime["fitness_go_target_rate"] = args.fitness_go_target_rate
-        override_keys.append("fitness_go_target_rate")
-    if args.fitness_go_max_games > 0:
-        runtime["fitness_go_max_games"] = args.fitness_go_max_games
-        override_keys.append("fitness_go_max_games")
-    if args.fitness_go_max_games_penalty == args.fitness_go_max_games_penalty:
-        runtime["fitness_go_max_games_penalty"] = args.fitness_go_max_games_penalty
-        override_keys.append("fitness_go_max_games_penalty")
-    if args.fitness_go_presence_weight == args.fitness_go_presence_weight:
-        runtime["fitness_go_presence_weight"] = args.fitness_go_presence_weight
-        override_keys.append("fitness_go_presence_weight")
-    if args.fitness_go_quality_weight == args.fitness_go_quality_weight:
-        runtime["fitness_go_quality_weight"] = args.fitness_go_quality_weight
-        override_keys.append("fitness_go_quality_weight")
-    if args.fitness_go_zero_games_penalty == args.fitness_go_zero_games_penalty:
-        runtime["fitness_go_zero_games_penalty"] = args.fitness_go_zero_games_penalty
-        override_keys.append("fitness_go_zero_games_penalty")
-    if args.fitness_go_fail_penalty_enabled in (0, 1):
-        runtime["fitness_go_fail_penalty_enabled"] = bool(args.fitness_go_fail_penalty_enabled)
-        override_keys.append("fitness_go_fail_penalty_enabled")
-    if args.fitness_go_fail_penalty_margin == args.fitness_go_fail_penalty_margin:
-        runtime["fitness_go_fail_penalty_margin"] = args.fitness_go_fail_penalty_margin
-        override_keys.append("fitness_go_fail_penalty_margin")
-    if args.fitness_go_fail_penalty_trigger == args.fitness_go_fail_penalty_trigger:
-        runtime["fitness_go_fail_penalty_trigger"] = args.fitness_go_fail_penalty_trigger
-        override_keys.append("fitness_go_fail_penalty_trigger")
-    if args.fitness_go_fail_penalty_amount == args.fitness_go_fail_penalty_amount:
-        runtime["fitness_go_fail_penalty_amount"] = args.fitness_go_fail_penalty_amount
-        override_keys.append("fitness_go_fail_penalty_amount")
-    if args.fitness_go_fail_bonus_trigger == args.fitness_go_fail_bonus_trigger:
-        runtime["fitness_go_fail_bonus_trigger"] = args.fitness_go_fail_bonus_trigger
-        override_keys.append("fitness_go_fail_bonus_trigger")
-    if args.fitness_go_fail_bonus_amount == args.fitness_go_fail_bonus_amount:
-        runtime["fitness_go_fail_bonus_amount"] = args.fitness_go_fail_bonus_amount
-        override_keys.append("fitness_go_fail_bonus_amount")
     runtime = _normalize_runtime_values(runtime)
     for key in override_keys:
         applied_overrides[key] = runtime.get(key)

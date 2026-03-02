@@ -1,16 +1,16 @@
 ﻿export {
-  rankHandCardsV4,
-  chooseMatchHeuristicV4,
-  chooseGukjinHeuristicV4,
-  shouldPresidentStopV4,
-  shouldGoV4,
-  selectBombMonthV4,
-  shouldBombV4,
-  decideShakingV4
+  rankHandCardsJ2,
+  chooseMatchHeuristicJ2,
+  chooseGukjinHeuristicJ2,
+  shouldPresidentStopJ2,
+  shouldGoJ2,
+  selectBombMonthJ2,
+  shouldBombJ2,
+  decideShakingJ2
 };
 
 /* ============================================================================
- * Heuristic V4
+ * Heuristic J2
  * - stricter rule-gate policy focused on STOP safety and pi/combo threats
  * - explicit high-risk filters before GO/BOMB/SHAKING decisions
  * ========================================================================== */
@@ -136,7 +136,7 @@ function discardTieOrderScore(card, deps, monthIsLiveDoublePi) {
 }
 
 /* 2) Hand ranking (primary card-play ordering) */
-function rankHandCardsV4(state, playerKey, deps) {
+function rankHandCardsJ2(state, playerKey, deps) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
 
@@ -289,7 +289,7 @@ function rankHandCardsV4(state, playerKey, deps) {
 }
 
 /* 3) Pending decision handlers (match / gukjin / president) */
-function chooseMatchHeuristicV4(state, playerKey, deps) {
+function chooseMatchHeuristicJ2(state, playerKey, deps) {
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
 
@@ -350,7 +350,7 @@ function chooseMatchHeuristicV4(state, playerKey, deps) {
   return best?.id ?? null;
 }
 
-function chooseGukjinHeuristicV4(state, playerKey, deps) {
+function chooseGukjinHeuristicJ2(state, playerKey, deps) {
   const ctx = deps.analyzeGameContext(state, playerKey);
   const branch = deps.analyzeGukjinBranches(state, playerKey);
 
@@ -548,7 +548,7 @@ function shouldStopForOpponentFourLike(state, playerKey, deps, ctx, options = {}
   return false;
 }
 
-function shouldPresidentStopV4(state, playerKey, deps) {
+function shouldPresidentStopJ2(state, playerKey, deps) {
   const ctx = deps.analyzeGameContext(state, playerKey);
   const player = state.players?.[playerKey];
   if (!player) return true;
@@ -582,7 +582,7 @@ function shouldPresidentStopV4(state, playerKey, deps) {
   return !holdAllowed;
 }
 
-function estimateOpponentOneAwayProbV4(state, playerKey, deps, ctx) {
+function estimateOpponentOneAwayProbJ2(state, playerKey, deps, ctx) {
   const deckCount = safeNumber(state?.deck?.length, 0);
   const oppScore = safeNumber(ctx?.oppScore, 0);
   const comboThreat = opponentComboThreatProfile(state, playerKey, deps);
@@ -633,13 +633,13 @@ function summarizeOppGukjinCase(branch, oppMode) {
 }
 
 /* 5) GO decision */
-function shouldGoV4(state, playerKey, deps) {
+function shouldGoJ2(state, playerKey, deps) {
   if (deps.canBankruptOpponentByStop(state, playerKey)) return false;
 
   const ctx = deps.analyzeGameContext(state, playerKey);
   const myScore = safeNumber(ctx?.myScore, 0);
   const oppScoreBase = safeNumber(ctx?.oppScore, 0);
-  const threat = estimateOpponentOneAwayProbV4(state, playerKey, deps, ctx);
+  const threat = estimateOpponentOneAwayProbJ2(state, playerKey, deps, ctx);
   const lateGame = threat.deckCount <= 10;
   const selfPlayer = state.players?.[playerKey];
   const oppPlayer = state.players?.[otherPlayerKeyFromDeps(playerKey, deps)];
@@ -766,7 +766,7 @@ function canStealDoublePiFromOpponent(state, playerKey, deps) {
   return false;
 }
 
-function selectBombMonthV4(state, playerKey, bombMonths, deps) {
+function selectBombMonthJ2(state, playerKey, bombMonths, deps) {
   if (!Array.isArray(bombMonths) || !bombMonths.length) return null;
 
   let bestMonth = bombMonths[0];
@@ -789,7 +789,7 @@ function selectBombMonthV4(state, playerKey, bombMonths, deps) {
   return bestMonth;
 }
 
-function shouldBombV4(state, playerKey, bombMonths, deps) {
+function shouldBombJ2(state, playerKey, bombMonths, deps) {
   if (!Array.isArray(bombMonths) || !bombMonths.length) return false;
 
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -803,7 +803,7 @@ function shouldBombV4(state, playerKey, bombMonths, deps) {
 }
 
 /* 7) Shaking decision */
-function decideShakingV4(state, playerKey, shakingMonths, deps) {
+function decideShakingJ2(state, playerKey, shakingMonths, deps) {
   if (!Array.isArray(shakingMonths) || !shakingMonths.length) {
     return { allow: false, month: null, score: -Infinity, highImpact: false };
   }

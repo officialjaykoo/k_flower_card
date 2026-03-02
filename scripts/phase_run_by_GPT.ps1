@@ -1,8 +1,17 @@
-﻿param(
+﻿#
+# phase_run_by_GPT.ps1
+# - Train NEAT by phase using GPT runtime configs.
+# - Keep runtime logic unchanged; this file is comment/structure organized.
+#
+
+param(
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed
 )
 
+# ---------------------------------------------------------------------------
+# Section 1) Strict mode and shared helpers
+# ---------------------------------------------------------------------------
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -85,6 +94,15 @@ function Get-BestGenomeGoMetrics {
 
   $empty = [ordered]@{
     available = $false
+    fitness_model = $null
+    fitness_profile = $null
+    mean_gold_delta = $null
+    p10_gold_delta = $null
+    p50_gold_delta = $null
+    gold_core = $null
+    expected_result = $null
+    bankrupt_rate = $null
+    bankrupt_penalty = $null
     go_count = $null
     go_games = $null
     go_fail_count = $null
@@ -128,6 +146,15 @@ function Get-BestGenomeGoMetrics {
 
   return [ordered]@{
     available = $true
+    fitness_model = [string]$bestEvalRecord.fitness_model
+    fitness_profile = [string]$bestEvalRecord.fitness_profile
+    mean_gold_delta = [double]$bestEvalRecord.mean_gold_delta
+    p10_gold_delta = [double]$bestEvalRecord.p10_gold_delta
+    p50_gold_delta = [double]$bestEvalRecord.p50_gold_delta
+    gold_core = [double]$bestEvalRecord.fitness_components.gold_core
+    expected_result = [double]$bestEvalRecord.fitness_components.expected_result
+    bankrupt_rate = [double]$bestEvalRecord.fitness_components.bankrupt_rate
+    bankrupt_penalty = [double]$bestEvalRecord.fitness_components.bankrupt_penalty
     go_count = [int]$bestEvalRecord.go_count
     go_games = [int]$bestEvalRecord.go_games
     go_fail_count = [int]$bestEvalRecord.go_fail_count
@@ -144,6 +171,13 @@ function Get-LatestGenerationGoAverages {
 
   $empty = [ordered]@{
     available = $false
+    mean_gold_delta = $null
+    mean_p10_gold_delta = $null
+    mean_p50_gold_delta = $null
+    mean_gold_core = $null
+    mean_expected_result = $null
+    mean_bankrupt_rate = $null
+    mean_bankrupt_penalty = $null
     mean_go_games = $null
     mean_go_rate = $null
     mean_go_fail_rate = $null
@@ -167,12 +201,22 @@ function Get-LatestGenerationGoAverages {
   $generationRecord = $lastGenerationLine | ConvertFrom-Json
   return [ordered]@{
     available = $true
+    mean_gold_delta = Get-OptionalDouble -Value $generationRecord.mean_mean_gold_delta
+    mean_p10_gold_delta = Get-OptionalDouble -Value $generationRecord.mean_p10_gold_delta
+    mean_p50_gold_delta = Get-OptionalDouble -Value $generationRecord.mean_p50_gold_delta
+    mean_gold_core = Get-OptionalDouble -Value $generationRecord.mean_gold_core
+    mean_expected_result = Get-OptionalDouble -Value $generationRecord.mean_expected_result
+    mean_bankrupt_rate = Get-OptionalDouble -Value $generationRecord.mean_bankrupt_rate
+    mean_bankrupt_penalty = Get-OptionalDouble -Value $generationRecord.mean_bankrupt_penalty
     mean_go_games = Get-OptionalDouble -Value $generationRecord.mean_go_games
     mean_go_rate = Get-OptionalDouble -Value $generationRecord.mean_go_rate
     mean_go_fail_rate = Get-OptionalDouble -Value $generationRecord.mean_go_fail_rate
   }
 }
 
+# ---------------------------------------------------------------------------
+# Section 2) Runtime paths and validation
+# ---------------------------------------------------------------------------
 $python = ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
   throw "python not found: $python"
@@ -189,6 +233,9 @@ if (-not (Test-Path $runtimeConfig)) {
   throw "runtime config not found: $runtimeConfig"
 }
 
+# ---------------------------------------------------------------------------
+# Section 3) Build training command
+# ---------------------------------------------------------------------------
 $cmd = @(
   "scripts/neat_train_worker_by_GPT.py",
   "--config-feedforward", $configFeedforward,
@@ -213,6 +260,9 @@ if ($Phase -ne "1") {
   )
 }
 
+# ---------------------------------------------------------------------------
+# Section 4) Execute training and parse summary
+# ---------------------------------------------------------------------------
 $phaseRunStartedAt = Get-Date
 $result = & $python @cmd | Out-String
 $phaseRunElapsedSec = [math]::Round(((Get-Date) - $phaseRunStartedAt).TotalSeconds, 3)
@@ -234,6 +284,9 @@ catch {
   throw "failed to parse neat_train_worker_by_GPT output as JSON"
 }
 
+# ---------------------------------------------------------------------------
+# Section 5) Human-readable summary output
+# ---------------------------------------------------------------------------
 $goMetrics = Get-BestGenomeGoMetrics -Summary $summary
 $goAverages = Get-LatestGenerationGoAverages -Summary $summary
 $summaryElapsedSec = Get-OptionalDouble -Value $summary.run_elapsed_sec -DefaultValue $phaseRunElapsedSec
@@ -248,16 +301,39 @@ Write-Host "Transition gen:   $($summary.gate_state.transition_generation)"
 Write-Host "Best fitness:     $($summary.best_fitness)"
 Write-Host "Elapsed time:     $summaryElapsedSec s"
 if ([bool]$goAverages.available) {
+  Write-Host "Mean gold delta:  $($goAverages.mean_gold_delta)"
+  Write-Host "Mean p10 delta:   $($goAverages.mean_p10_gold_delta)"
+  Write-Host "Mean p50 delta:   $($goAverages.mean_p50_gold_delta)"
+  Write-Host "Mean gold core:   $($goAverages.mean_gold_core)"
+  Write-Host "Mean exp result:  $($goAverages.mean_expected_result)"
+  Write-Host "Mean bankrupt:    $($goAverages.mean_bankrupt_rate)"
+  Write-Host "Mean bk penalty:  $($goAverages.mean_bankrupt_penalty)"
   Write-Host "GO mean games:    $($goAverages.mean_go_games)"
   Write-Host "GO mean fail:     $($goAverages.mean_go_fail_rate)"
   Write-Host "GO mean rate:     $($goAverages.mean_go_rate)"
 }
 else {
+  Write-Host "Mean gold delta:  N/A"
+  Write-Host "Mean p10 delta:   N/A"
+  Write-Host "Mean p50 delta:   N/A"
+  Write-Host "Mean gold core:   N/A"
+  Write-Host "Mean exp result:  N/A"
+  Write-Host "Mean bankrupt:    N/A"
+  Write-Host "Mean bk penalty:  N/A"
   Write-Host "GO mean games:    N/A"
   Write-Host "GO mean fail:     N/A"
   Write-Host "GO mean rate:     N/A"
 }
 if ([bool]$goMetrics.available) {
+  Write-Host "Fitness model:    $($goMetrics.fitness_model)"
+  Write-Host "Fitness profile:  $($goMetrics.fitness_profile)"
+  Write-Host "Best gold delta:  $($goMetrics.mean_gold_delta)"
+  Write-Host "Best p10 delta:   $($goMetrics.p10_gold_delta)"
+  Write-Host "Best p50 delta:   $($goMetrics.p50_gold_delta)"
+  Write-Host "Best gold core:   $($goMetrics.gold_core)"
+  Write-Host "Best exp result:  $($goMetrics.expected_result)"
+  Write-Host "Best bankrupt:    $($goMetrics.bankrupt_rate)"
+  Write-Host "Best bk penalty:  $($goMetrics.bankrupt_penalty)"
   Write-Host "GO count:         $($goMetrics.go_count)"
   Write-Host "GO games:         $($goMetrics.go_games)"
   Write-Host "GO fail count:    $($goMetrics.go_fail_count)"

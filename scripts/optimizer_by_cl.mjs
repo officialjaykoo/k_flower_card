@@ -31,8 +31,8 @@
 //     --kibo        <kibo.jsonl> \
 //     --dataset     <dataset.jsonl> \
 //     --actor       ai \
-//     --actor-policy H-V5P \
-//     --params-file src/heuristics/heuristicV5Plus.js \
+//     --actor-policy H-NEXg \
+//     --params-file src/heuristics/heuristicNEXg.js \
 //     [--out-root   <dir>]       default: <kibo_dir>/optimize_cl/
 //     [--top-zones  12]          zones in greedy plan
 //     [--min-ev     1.5]         min netEV/decision to include
@@ -638,8 +638,8 @@ if (argv.help) {
   console.log(`
   node scripts/optimizer_by_cl.mjs \\
     --kibo <kibo.jsonl> --dataset <dataset.jsonl> \\
-    --actor ai --actor-policy H-V5P \\
-    --params-file src/heuristics/heuristicV5Plus.js \\
+    --actor ai --actor-policy H-NEXg \\
+    --params-file src/heuristics/heuristicNEXg.js \\
     [--out-root <dir>] [--top-zones 12] [--min-ev 1.5] [--apply]
 `);
   process.exit(0);
@@ -650,7 +650,7 @@ const cfg = {
   dataset:     String(argv.dataset || ""),
   actor:       String(argv.actor || "ai").toLowerCase(),
   actorPolicy: argv["actor-policy"] != null ? String(argv["actor-policy"]) : null,
-  paramsFile:  String(argv["params-file"] || "src/heuristics/heuristicV5Plus.js"),
+  paramsFile:  String(argv["params-file"] || "src/heuristics/heuristicNEXg.js"),
   outRoot:     argv["out-root"]
     ? String(argv["out-root"])
     : join(resolve(dirname(String(argv.kibo || "."))), "optimize_cl"),

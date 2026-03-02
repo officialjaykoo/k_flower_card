@@ -16,7 +16,7 @@ import { pathToFileURL } from "node:url";
 const DEFAULTS = {
   actor: "human",
   actorPolicy: null,
-  paramsFile: "src/heuristics/heuristicV6.js",
+  paramsFile: "src/heuristics/heuristicGPT.js",
   outRoot: null,
   minNetDecisionEv: 1.0,
   minGoldImpact: 200.0,

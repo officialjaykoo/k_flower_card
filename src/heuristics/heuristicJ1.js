@@ -1,16 +1,16 @@
 ﻿export {
-  rankHandCardsV3,
-  chooseMatchHeuristicV3,
-  chooseGukjinHeuristicV3,
-  shouldPresidentStopV3,
-  shouldGoV3,
-  selectBombMonthV3,
-  shouldBombV3,
-  decideShakingV3
+  rankHandCardsJ1,
+  chooseMatchHeuristicJ1,
+  chooseGukjinHeuristicJ1,
+  shouldPresidentStopJ1,
+  shouldGoJ1,
+  selectBombMonthJ1,
+  shouldBombJ1,
+  decideShakingJ1
 };
 
 /* ============================================================================
- * Heuristic V3
+ * Heuristic J1
  * - conservative risk gating with tactical block bias
  * - fallback-safe dependency access pattern
  * - exported decisions: rank / match / go / bomb / shaking
@@ -33,7 +33,7 @@ export const DEFAULT_PARAMS = {
 };
 
 /* 1) Hand ranking (main policy entry for play-card selection) */
-function rankHandCardsV3(state, playerKey, deps) {
+function rankHandCardsJ1(state, playerKey, deps) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
 
@@ -256,7 +256,7 @@ function otherPlayerKeyFromDeps(playerKey, deps) {
 }
 
 /* 3) Pending decision handlers (match / gukjin / president / go) */
-function chooseMatchHeuristicV3(state, playerKey, deps) {
+function chooseMatchHeuristicJ1(state, playerKey, deps) {
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
 
@@ -305,7 +305,7 @@ function chooseMatchHeuristicV3(state, playerKey, deps) {
   return candidates[0].id;
 }
 
-function chooseGukjinHeuristicV3(state, playerKey, deps) {
+function chooseGukjinHeuristicJ1(state, playerKey, deps) {
   const branch = deps.analyzeGukjinBranches(state, playerKey);
   if (!branch.enabled || !branch.scenarios.length) return "junk";
 
@@ -320,12 +320,12 @@ function chooseGukjinHeuristicV3(state, playerKey, deps) {
   return "junk";
 }
 
-function shouldPresidentStopV3() {
+function shouldPresidentStopJ1() {
   return false;
 }
 
 /* GO decision gate: layered risk checks first, utility margin second */
-function shouldGoV3(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function shouldGoJ1(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...(params || {}) };
   const player = state.players?.[playerKey];
   const opp = otherPlayerKeyFromDeps(playerKey, deps);
@@ -489,11 +489,11 @@ function selectBestMonthByGain(state, months, deps) {
   return best;
 }
 
-function selectBombMonthV3(state, _playerKey, bombMonths, deps) {
+function selectBombMonthJ1(state, _playerKey, bombMonths, deps) {
   return selectBestMonthByGain(state, bombMonths, deps);
 }
 
-function shouldBombV3(state, playerKey, bombMonths, deps) {
+function shouldBombJ1(state, playerKey, bombMonths, deps) {
   const ctx = deps.analyzeGameContext(state, playerKey);
   const firstTurnPiPlan = deps.getFirstTurnDoublePiPlan(state, playerKey);
   if (firstTurnPiPlan.active) {
@@ -515,7 +515,7 @@ function shouldBombV3(state, playerKey, bombMonths, deps) {
 }
 
 /* 5) Shaking helpers */
-function shakingTempoPressureScoreV3(state, playerKey, ctx, oppThreat, deps) {
+function shakingTempoPressureScoreJ1(state, playerKey, ctx, oppThreat, deps) {
   const opp = otherPlayerKeyFromDeps(playerKey, deps);
   const self = state.players?.[playerKey];
   const oppPlayer = state.players?.[opp];
@@ -530,7 +530,7 @@ function shakingTempoPressureScoreV3(state, playerKey, ctx, oppThreat, deps) {
   return tempo;
 }
 
-function shakingRiskPenaltyV3(state, playerKey, ctx, oppThreat, jokboThreat, nextThreat) {
+function shakingRiskPenaltyJ1(state, playerKey, ctx, oppThreat, jokboThreat, nextThreat) {
   const self = state.players?.[playerKey];
   let risk = oppThreat * 2.0 + jokboThreat * 1.3 + nextThreat * 1.2;
   if ((ctx.deckCount || 0) <= 8) risk += 0.6;
@@ -540,7 +540,7 @@ function shakingRiskPenaltyV3(state, playerKey, ctx, oppThreat, jokboThreat, nex
   return risk;
 }
 
-function slowPlayPenaltyV3(immediateGain, comboGain, tempoPressure, ctx) {
+function slowPlayPenaltyJ1(immediateGain, comboGain, tempoPressure, ctx) {
   const lowPracticalGain = immediateGain < 0.75 && comboGain < 0.9;
   const noTempoNeed = tempoPressure < 1.2;
   const notBehind = (ctx.myScore || 0) >= (ctx.oppScore || 0);
@@ -550,7 +550,7 @@ function slowPlayPenaltyV3(immediateGain, comboGain, tempoPressure, ctx) {
 }
 
 /* 6) Shaking decision */
-function decideShakingV3(state, playerKey, shakingMonths, deps) {
+function decideShakingJ1(state, playerKey, shakingMonths, deps) {
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
 
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -558,8 +558,8 @@ function decideShakingV3(state, playerKey, shakingMonths, deps) {
   const oppThreat = deps.opponentThreatScore(state, playerKey);
   const jokboThreat = deps.checkOpponentJokboProgress(state, playerKey).threat;
   const nextThreat = deps.nextTurnThreatScore(state, playerKey);
-  const tempoPressure = shakingTempoPressureScoreV3(state, playerKey, ctx, oppThreat, deps);
-  const riskPenalty = shakingRiskPenaltyV3(state, playerKey, ctx, oppThreat, jokboThreat, nextThreat);
+  const tempoPressure = shakingTempoPressureScoreJ1(state, playerKey, ctx, oppThreat, deps);
+  const riskPenalty = shakingRiskPenaltyJ1(state, playerKey, ctx, oppThreat, jokboThreat, nextThreat);
   const trailingBy = Math.max(0, (ctx.oppScore || 0) - (ctx.myScore || 0));
   const selfPi = deps.capturedCountByCategory(state.players?.[playerKey], "junk");
   const opp = otherPlayerKeyFromDeps(playerKey, deps);
@@ -576,7 +576,7 @@ function decideShakingV3(state, playerKey, shakingMonths, deps) {
     const impact = deps.isHighImpactShaking(state, playerKey, month);
     if (impact.directThreeGwang) immediateGain += 0.55;
     if (impact.hasDoublePiLine) immediateGain += 0.35;
-    const slowPenalty = slowPlayPenaltyV3(immediateGain, comboGain, tempoPressure, ctx);
+    const slowPenalty = slowPlayPenaltyJ1(immediateGain, comboGain, tempoPressure, ctx);
     const monthTieBreak = deps.monthStrategicPriority(month) * 0.25;
     let score = immediateGain * 1.3 + comboGain * 1.15 + tempoPressure - riskPenalty - slowPenalty + monthTieBreak;
     if (trailingBy >= 3) score += 0.35;

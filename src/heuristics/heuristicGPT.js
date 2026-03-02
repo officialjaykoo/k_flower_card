@@ -1,6 +1,6 @@
-﻿// heuristicV6.js - Matgo Heuristic V6
+﻿// heuristicGPT.js - Matgo Heuristic GPT
 /* ============================================================================
- * Heuristic V6
+ * Heuristic GPT
  * - risk-adjusted expected utility
  * - phase profile + pressure model + optional rollout blending
  * - exported decisions: rank / match / go / bomb / shaking / president / gukjin
@@ -519,7 +519,7 @@ function evaluateCardUtility(state, playerKey, card, deps, P, profile, cache) {
 }
 
 /* 5) Exported policy decisions */
-export function rankHandCardsV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
+export function rankHandCardsGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
 
@@ -551,7 +551,7 @@ export function rankHandCardsV6(state, playerKey, deps, params = DEFAULT_PARAMS)
   const ranked = player.hand.map((card) => evaluateCardUtility(state, playerKey, card, deps, P, profile, cache));
   ranked.sort((a, b) => b.score - a.score);
 
-  if (safeNum(P.rolloutEnabled, 1) > 0 && typeof deps.rolloutCardValueV6 === "function") {
+  if (safeNum(P.rolloutEnabled, 1) > 0 && typeof deps.rolloutCardValueGPT === "function") {
     const leadGap =
       ranked.length >= 2 ? Math.abs(safeNum(ranked[0]?.score) - safeNum(ranked[1]?.score)) : Number.POSITIVE_INFINITY;
     const selectiveOn = safeNum(P.rolloutSelectiveEnabled, 1) > 0;
@@ -566,12 +566,12 @@ export function rankHandCardsV6(state, playerKey, deps, params = DEFAULT_PARAMS)
       const baseTopK = Math.max(1, Math.floor(safeNum(P.rolloutTopK, 1)));
       const topK = Math.max(1, Math.min(ranked.length, closeTop ? Math.max(2, baseTopK) : baseTopK));
       const baseline =
-        typeof deps.rolloutStateUtilityV6 === "function"
-          ? safeNum(deps.rolloutStateUtilityV6(state, playerKey))
+        typeof deps.rolloutStateUtilityGPT === "function"
+          ? safeNum(deps.rolloutStateUtilityGPT(state, playerKey))
           : 0;
       for (let i = 0; i < topK; i += 1) {
         const cand = ranked[i];
-        const rv = deps.rolloutCardValueV6(state, playerKey, cand.card?.id, {
+        const rv = deps.rolloutCardValueGPT(state, playerKey, cand.card?.id, {
           maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 12)),
           samples: Math.floor(safeNum(P.rolloutSamples, 2))
         });
@@ -587,7 +587,7 @@ export function rankHandCardsV6(state, playerKey, deps, params = DEFAULT_PARAMS)
 }
 
 /* choose-match policy for pending TWO-match selections */
-export function chooseMatchHeuristicV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
+export function chooseMatchHeuristicGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
 
@@ -636,7 +636,7 @@ export function chooseMatchHeuristicV6(state, playerKey, deps, params = DEFAULT_
 }
 
 /* GO/STOP utility model with optional rollout delta blending */
-export function shouldGoV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
+export function shouldGoGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = mergedParams(params);
   if (deps.canBankruptOpponentByStop?.(state, playerKey)) return false;
 
@@ -743,13 +743,13 @@ export function shouldGoV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
     goValue += safeNum(P.goLiteSafeAttackBonus, 0.06);
   }
 
-  if (safeNum(P.rolloutEnabled, 1) > 0 && typeof deps.rolloutGoStopValueV6 === "function") {
-    // GO/STOP rollout is always evaluated to preserve V6 identity.
-    const goRv = deps.rolloutGoStopValueV6(state, playerKey, true, {
+  if (safeNum(P.rolloutEnabled, 1) > 0 && typeof deps.rolloutGoStopValueGPT === "function") {
+    // GO/STOP rollout is always evaluated to preserve GPT identity.
+    const goRv = deps.rolloutGoStopValueGPT(state, playerKey, true, {
       maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 8)),
       samples: Math.floor(safeNum(P.rolloutSamples, 5))
     });
-    const stopRv = deps.rolloutGoStopValueV6(state, playerKey, false, {
+    const stopRv = deps.rolloutGoStopValueGPT(state, playerKey, false, {
       maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 8)),
       samples: Math.floor(safeNum(P.rolloutSamples, 5))
     });
@@ -784,7 +784,7 @@ export function shouldGoV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
 }
 
 /* Bomb month picker + bomb gate */
-export function selectBombMonthV6(state, _playerKey, bombMonths, deps) {
+export function selectBombMonthGPT(state, _playerKey, bombMonths, deps) {
   if (!bombMonths?.length) return null;
   let best = bombMonths[0];
   let bestScore = safeNum(deps.monthBoardGain(state, best));
@@ -798,7 +798,7 @@ export function selectBombMonthV6(state, _playerKey, bombMonths, deps) {
   return best;
 }
 
-export function shouldBombV6(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
+export function shouldBombGPT(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
   if (!bombMonths?.length) return false;
   const P = mergedParams(params);
   const profile = buildProfile(state, playerKey, deps, P);
@@ -806,7 +806,7 @@ export function shouldBombV6(state, playerKey, bombMonths, deps, params = DEFAUL
   const plan = deps.getFirstTurnDoublePiPlan(state, playerKey);
   if (plan?.active && bombMonths.some((m) => plan.months.has(m))) return true;
 
-  const bestMonth = selectBombMonthV6(state, playerKey, bombMonths, deps);
+  const bestMonth = selectBombMonthGPT(state, playerKey, bombMonths, deps);
   if (bestMonth == null) return false;
 
   const impact = deps.isHighImpactBomb(state, playerKey, bestMonth);
@@ -823,7 +823,7 @@ export function shouldBombV6(state, playerKey, bombMonths, deps, params = DEFAUL
   return value >= P.bombThreshold;
 }
 
-export function decideShakingV6(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
+export function decideShakingGPT(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
   const P = mergedParams(params);
   const profile = buildProfile(state, playerKey, deps, P);
@@ -863,7 +863,7 @@ export function decideShakingV6(state, playerKey, shakingMonths, deps, params = 
 }
 
 /* President/Gukjin late decision helpers */
-export function shouldPresidentStopV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
+export function shouldPresidentStopGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = mergedParams(params);
   const ctx = deps.analyzeGameContext(state, playerKey);
   const carry = safeNum(state.carryOverMultiplier, 1);
@@ -872,7 +872,7 @@ export function shouldPresidentStopV6(state, playerKey, deps, params = DEFAULT_P
   return false;
 }
 
-export function chooseGukjinHeuristicV6(state, playerKey, deps, params = DEFAULT_PARAMS) {
+export function chooseGukjinHeuristicGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = mergedParams(params);
   const ctx = deps.analyzeGameContext(state, playerKey);
   const selfFive = safeNum(ctx.selfFive);

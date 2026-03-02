@@ -9,9 +9,9 @@
   "eval_script": "scripts/neat_eval_worker.mjs",
   "seed": 13,
   "opponent_policy_mix": [
-    { "policy": "H-V4", "weight": 60 },
-    { "policy": "H-V3", "weight": 20 },
-    { "policy": "H-V7", "weight": 20 }
+    { "policy": "H-J2", "weight": 60 },
+    { "policy": "H-J1", "weight": 20 },
+    { "policy": "H-Gemini", "weight": 20 }
   ],
   "switch_seats": true,
   "fitness_gold_scale": 2500.0,

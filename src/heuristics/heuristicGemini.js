@@ -1,7 +1,7 @@
-﻿// heuristicV7.js - V7 "The Negotiator"
+﻿// heuristicGemini.js - Gemini "The Negotiator"
 
 /* ============================================================================
- * Heuristic V7 (Negotiator)
+ * Heuristic Gemini (Negotiator)
  * - Adversarial card ranking with opponent counter-value penalty
  * - Phase-adaptive scoring (early resource gain / late denial and safety)
  * - Conservative GO gate when opponent threat is meaningful
@@ -106,7 +106,7 @@ function deniedMonthSet(state, playerKey, deps) {
   return deps.blockingMonthsAgainst(state?.players?.[oppKey], state?.players?.[playerKey]) || new Set();
 }
 
-function inferCurrentScoreV7(state, playerKey, options = {}) {
+function inferCurrentScoreGemini(state, playerKey, options = {}) {
   const fromOption = safeNum(options.currentScore, NaN);
   if (Number.isFinite(fromOption)) return Math.max(0, fromOption);
 
@@ -122,7 +122,7 @@ function inferCurrentScoreV7(state, playerKey, options = {}) {
   return NaN;
 }
 
-function inferMultiplierV7(state, playerKey) {
+function inferMultiplierGemini(state, playerKey) {
   const player = state?.players?.[playerKey] || {};
   let multiplier = Math.max(1, safeNum(state?.multiplier, 1));
 
@@ -141,7 +141,7 @@ function inferMultiplierV7(state, playerKey) {
   return Math.max(1, multiplier);
 }
 
-export function canBankruptOpponentByStopV7(state, playerKey, options = {}) {
+export function canBankruptOpponentByStopGemini(state, playerKey, options = {}) {
   if (!state?.players || !state.players[playerKey]) return false;
   const oppKey = getOtherPlayerKey(state, playerKey, null);
   if (!oppKey) return false;
@@ -154,21 +154,21 @@ export function canBankruptOpponentByStopV7(state, playerKey, options = {}) {
     if (exact) return true;
   }
 
-  const score = inferCurrentScoreV7(state, playerKey, options);
+  const score = inferCurrentScoreGemini(state, playerKey, options);
   if (!Number.isFinite(score) || score <= 0) {
     if (typeof options.fallbackExact === "function") return !!options.fallbackExact(state, playerKey);
     return false;
   }
 
   const betPerScore = Math.max(1, safeNum(state?.betAmount, safeNum(options.defaultBetAmount, 100)));
-  const multiplier = inferMultiplierV7(state, playerKey);
+  const multiplier = inferMultiplierGemini(state, playerKey);
   const safetyMargin = Math.min(1, Math.max(0.5, safeNum(options.safetyMargin, 0.9)));
   const expectedDamage = score * betPerScore * multiplier;
 
   return expectedDamage >= oppGold * safetyMargin;
 }
 
-export function rankHandCardsV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
+export function rankHandCardsGemini(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const player = state?.players?.[playerKey];
   if (!player?.hand?.length) return [];
 
@@ -198,7 +198,7 @@ export function rankHandCardsV7(state, playerKey, deps, params = DEFAULT_PARAMS)
   return ranked;
 }
 
-export function chooseMatchHeuristicV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
+export function chooseMatchHeuristicGemini(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const ids = state?.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
 
@@ -232,7 +232,7 @@ export function chooseMatchHeuristicV7(state, playerKey, deps, params = DEFAULT_
   return bestId;
 }
 
-export function shouldGoV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
+export function shouldGoGemini(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   const ctx = getContext(state, playerKey, deps);
   const deckCount = getDeckCount(state);
@@ -254,7 +254,7 @@ export function shouldGoV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
   return ctx.myScore > ctx.oppScore + P.stopLeadThreshold;
 }
 
-export function selectBombMonthV7(state, _playerKey, bombMonths, deps) {
+export function selectBombMonthGemini(state, _playerKey, bombMonths, deps) {
   if (!bombMonths?.length) return null;
   return bombMonths.reduce(
     (best, month) =>
@@ -265,10 +265,10 @@ export function selectBombMonthV7(state, _playerKey, bombMonths, deps) {
   );
 }
 
-export function shouldBombV7(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
+export function shouldBombGemini(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
   if (!bombMonths?.length) return false;
   const P = { ...DEFAULT_PARAMS, ...params };
-  const bestMonth = selectBombMonthV7(state, playerKey, bombMonths, deps);
+  const bestMonth = selectBombMonthGemini(state, playerKey, bombMonths, deps);
   if (bestMonth == null) return false;
 
   const impact = deps?.isHighImpactBomb?.(state, playerKey, bestMonth);
@@ -278,7 +278,7 @@ export function shouldBombV7(state, playerKey, bombMonths, deps, params = DEFAUL
   return gain >= safeNum(P.bombMinMonthGain, 0.5);
 }
 
-export function decideShakingV7(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
+export function decideShakingGemini(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
   const P = { ...DEFAULT_PARAMS, ...params };
 
@@ -303,7 +303,7 @@ export function decideShakingV7(state, playerKey, shakingMonths, deps, params = 
   return { allow, month: bestMonth, score: bestScore, highImpact: bestHighImpact };
 }
 
-export function shouldPresidentStopV7(state, playerKey, deps, params = DEFAULT_PARAMS) {
+export function shouldPresidentStopGemini(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   const ctx = getContext(state, playerKey, deps);
   const diff = ctx.myScore - ctx.oppScore;
@@ -312,7 +312,7 @@ export function shouldPresidentStopV7(state, playerKey, deps, params = DEFAULT_P
   return diff >= safeNum(P.presidentStopDiff, 2);
 }
 
-export function chooseGukjinHeuristicV7(state, playerKey, deps, _params = DEFAULT_PARAMS) {
+export function chooseGukjinHeuristicGemini(state, playerKey, deps, _params = DEFAULT_PARAMS) {
   const oppKey = getOtherPlayerKey(state, playerKey, deps);
   if (!oppKey) return "junk";
 
@@ -326,8 +326,8 @@ export function chooseGukjinHeuristicV7(state, playerKey, deps, _params = DEFAUL
 }
 
 export {
-  rankHandCardsV7 as rankHandCards,
-  shouldGoV7 as shouldGo,
-  chooseGukjinHeuristicV7 as chooseGukjin,
-  chooseMatchHeuristicV7 as chooseMatch
+  rankHandCardsGemini as rankHandCards,
+  shouldGoGemini as shouldGo,
+  chooseGukjinHeuristicGemini as chooseGukjin,
+  chooseMatchHeuristicGemini as chooseMatch
 };

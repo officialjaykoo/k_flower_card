@@ -14,11 +14,11 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const DEFAULT_INPUT = {
-  kibo: "logs/model_duel/v5_vs_v6_go_diag_20260227/h-v5_vs_h-v6_1000_kibo2.jsonl",
-  dataset: "logs/model_duel/v5_vs_v6_go_diag_20260227/h-v5_vs_h-v6_1000_dataset2.jsonl",
+  kibo: "logs/model_duel/v5_vs_v6_go_diag_20260227/h-cl_vs_h-gpt_1000_kibo2.jsonl",
+  dataset: "logs/model_duel/v5_vs_v6_go_diag_20260227/h-cl_vs_h-gpt_1000_dataset2.jsonl",
   actor: "ai",
   actorPolicy: null,
-  paramsFile: "src/heuristics/heuristicV6.js",
+  paramsFile: "src/heuristics/heuristicGPT.js",
   outRoot: null
 };
 

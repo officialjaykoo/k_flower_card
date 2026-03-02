@@ -1,60 +1,60 @@
 ﻿/* ============================================================================
  * 1) Bot/Model policy identifiers
  * ========================================================================== */
-export const POLICY_HEURISTIC_V3 = "H-V3";
-export const POLICY_HEURISTIC_V4 = "H-V4";
-export const POLICY_HEURISTIC_V5 = "H-V5";
-export const POLICY_HEURISTIC_V6 = "H-V6";
-export const POLICY_HEURISTIC_V7 = "H-V7";
-export const POLICY_HEURISTIC_V5PLUS = "H-V5P";
+export const POLICY_HEURISTIC_J1 = "H-J1";
+export const POLICY_HEURISTIC_J2 = "H-J2";
+export const POLICY_HEURISTIC_CL = "H-CL";
+export const POLICY_HEURISTIC_GPT = "H-GPT";
+export const POLICY_HEURISTIC_GEMINI = "H-Gemini";
+export const POLICY_HEURISTIC_NEXG = "H-NEXg";
 export const POLICY_NEAT_PHASE2_SEED9 = "N-P2-Seed9";
-export const DEFAULT_BOT_POLICY = POLICY_HEURISTIC_V5;
+export const DEFAULT_BOT_POLICY = POLICY_HEURISTIC_CL;
 
 /* ============================================================================
  * 2) Bot policy whitelist used by runtime validation
  * ========================================================================== */
 export const BOT_POLICIES = Object.freeze([
-  POLICY_HEURISTIC_V3,
-  POLICY_HEURISTIC_V4,
-  POLICY_HEURISTIC_V5,
-  POLICY_HEURISTIC_V5PLUS,
-  POLICY_HEURISTIC_V6,
-  POLICY_HEURISTIC_V7
+  POLICY_HEURISTIC_J1,
+  POLICY_HEURISTIC_J2,
+  POLICY_HEURISTIC_CL,
+  POLICY_HEURISTIC_NEXG,
+  POLICY_HEURISTIC_GPT,
+  POLICY_HEURISTIC_GEMINI
 ]);
 
 /* ============================================================================
  * 3) Catalog for UI labels and policy loading config
  * ========================================================================== */
 export const MODEL_CATALOG = Object.freeze({
-  [POLICY_HEURISTIC_V3]: {
-    labelKey: "model.heuristicV3",
+  [POLICY_HEURISTIC_J1]: {
+    labelKey: "model.heuristicJ1",
     kind: "bot_policy",
-    botPolicy: POLICY_HEURISTIC_V3
+    botPolicy: POLICY_HEURISTIC_J1
   },
-  [POLICY_HEURISTIC_V4]: {
-    labelKey: "model.heuristicV4",
+  [POLICY_HEURISTIC_J2]: {
+    labelKey: "model.heuristicJ2",
     kind: "bot_policy",
-    botPolicy: POLICY_HEURISTIC_V4
+    botPolicy: POLICY_HEURISTIC_J2
   },
-  [POLICY_HEURISTIC_V5]: {
-    labelKey: "model.heuristicV5",
+  [POLICY_HEURISTIC_CL]: {
+    labelKey: "model.heuristicCL",
     kind: "bot_policy",
-    botPolicy: POLICY_HEURISTIC_V5
+    botPolicy: POLICY_HEURISTIC_CL
   },
-  [POLICY_HEURISTIC_V5PLUS]: {
-    labelKey: "model.heuristicV5Plus",
+  [POLICY_HEURISTIC_NEXG]: {
+    labelKey: "model.heuristicNEXg",
     kind: "bot_policy",
-    botPolicy: POLICY_HEURISTIC_V5PLUS
+    botPolicy: POLICY_HEURISTIC_NEXG
   },
-  [POLICY_HEURISTIC_V6]: {
-    labelKey: "model.heuristicV6",
+  [POLICY_HEURISTIC_GPT]: {
+    labelKey: "model.heuristicGPT",
     kind: "bot_policy",
-    botPolicy: POLICY_HEURISTIC_V6
+    botPolicy: POLICY_HEURISTIC_GPT
   },
-  [POLICY_HEURISTIC_V7]: {
-    labelKey: "model.heuristicV7",
+  [POLICY_HEURISTIC_GEMINI]: {
+    labelKey: "model.heuristicGemini",
     kind: "bot_policy",
-    botPolicy: POLICY_HEURISTIC_V7
+    botPolicy: POLICY_HEURISTIC_GEMINI
   },
   [POLICY_NEAT_PHASE2_SEED9]: {
     labelKey: "model.neatPhase2Seed9",

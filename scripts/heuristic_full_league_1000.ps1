@@ -11,7 +11,7 @@ param(
   [int]$MaxSteps = 600,
   [string]$OutputTag = "",
   [string]$ResumeFrom = "",
-  [string]$Policies = "H-V4,H-V5,H-V5P,H-V6,H-V7"
+  [string]$Policies = "H-J2,H-CL,H-NEXg,H-GPT,H-Gemini"
 )
 
 if ($GamesPerMatch -ne 1000) {
@@ -55,34 +55,37 @@ function Convert-PolicyAliasToCanonical {
   if ([string]::IsNullOrWhiteSpace($k)) { return "" }
 
   $known = @{
-    "heuristic_v3" = "h-v3"
-    "heuristic_v4" = "h-v4"
-    "heuristic_v5" = "h-v5"
-    "heuristic_v6" = "h-v6"
-    "heuristic_v7" = "h-v7"
-    "heuristic_v5plus" = "h-v5p"
-    "heuristic_v5p" = "h-v5p"
-    "heuristic_v7_gold_digger" = "h-v7"
-    "h-v5plus" = "h-v5p"
-    "hv3" = "h-v3"
-    "hv4" = "h-v4"
-    "hv5" = "h-v5"
-    "hv6" = "h-v6"
-    "hv7" = "h-v7"
-    "hv5p" = "h-v5p"
+    "heuristic_h_j1" = "h-j1"
+    "heuristic_h_j2" = "h-j2"
+    "heuristic_h_cl" = "h-cl"
+    "heuristic_h_gpt" = "h-gpt"
+    "heuristic_h_gemini" = "h-gemini"
+    "heuristic_h_nexg" = "h-nexg"
+    "h-j1" = "h-j1"
+    "h-j2" = "h-j2"
+    "h-cl" = "h-cl"
+    "h-gpt" = "h-gpt"
+    "h-gemini" = "h-gemini"
+    "h-nexg" = "h-nexg"
+    "hj1" = "h-j1"
+    "hj2" = "h-j2"
+    "hcl" = "h-cl"
+    "hgpt" = "h-gpt"
+    "hgemini" = "h-gemini"
+    "hnexg" = "h-nexg"
   }
   if ($known.ContainsKey($k)) {
     return $known[$k]
   }
 
-  $mHv = [System.Text.RegularExpressions.Regex]::Match($k, "^h[\s_-]?v([0-9]+)$")
-  if ($mHv.Success) {
-    return ("h-v{0}" -f $mHv.Groups[1].Value)
+  $mHj = [System.Text.RegularExpressions.Regex]::Match($k, "^h[\s_-]?j([12])$")
+  if ($mHj.Success) {
+    return ("h-j{0}" -f $mHj.Groups[1].Value)
   }
 
-  $mHeuristic = [System.Text.RegularExpressions.Regex]::Match($k, "^heuristic[\s_-]?v([0-9]+)$")
-  if ($mHeuristic.Success) {
-    return ("h-v{0}" -f $mHeuristic.Groups[1].Value)
+  $mHeuristicJ = [System.Text.RegularExpressions.Regex]::Match($k, "^heuristic[\s_-]?h[\s_-]?j([12])$")
+  if ($mHeuristicJ.Success) {
+    return ("h-j{0}" -f $mHeuristicJ.Groups[1].Value)
   }
 
   return $k
@@ -193,7 +196,7 @@ function Set-LatestMatchSummary {
 
 $policyInputs = ConvertFrom-PoliciesCsv -CsvText $Policies
 if ($policyInputs.Count -lt 2) {
-  throw "Policies must be one comma-separated string with at least two policies. Example: -Policies ""H-V4,H-V5,H-V5P,H-V6"""
+  throw "Policies must be one comma-separated string with at least two policies. Example: -Policies ""H-J2,H-CL,H-NEXg,H-GPT"""
 }
 
 $policyList = ConvertTo-UniqueLowerPolicies -InputPolicies $policyInputs

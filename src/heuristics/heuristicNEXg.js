@@ -1,17 +1,17 @@
 ﻿export {
-  rankHandCardsV5Plus,
-  chooseMatchHeuristicV5Plus,
-  chooseGukjinHeuristicV5Plus,
-  shouldPresidentStopV5Plus,
-  shouldGoV5Plus,
-  selectBombMonthV5Plus,
-  shouldBombV5Plus,
-  decideShakingV5Plus,
+  rankHandCardsNEXg,
+  chooseMatchHeuristicNEXg,
+  chooseGukjinHeuristicNEXg,
+  shouldPresidentStopNEXg,
+  shouldGoNEXg,
+  selectBombMonthNEXg,
+  shouldBombNEXg,
+  decideShakingNEXg,
 };
 
 /* ============================================================================
- * Heuristic V5Plus
- * - V5 baseline + targeted upgrades:
+ * Heuristic NEXg
+ * - CL baseline + targeted upgrades:
  *   1) phase-aware scoring
  *   2) utility-filtered GO gate
  *   3) forward-blocking chooseMatch
@@ -23,13 +23,13 @@ const DOUBLE_PI_MONTHS = Object.freeze([11, 12, 13]);
 const BONUS_CARD_ID_SET = Object.freeze(new Set(["M0", "M1"]));
 const SSANGPI_WITH_GUKJIN_ID_SET = Object.freeze(new Set(["K1", "L3", GUKJIN_CARD_ID]));
 
-/* 2) Parameter defaults (V5 base + V5Plus additions) */
+/* 2) Parameter defaults (CL base + NEXg additions) */
 export const DEFAULT_PARAMS = {
   // ── phase boundaries ──
   phaseEarlyDeck: 18,          // deck >= this => early
   phaseMidDeck: 10,            // deck >= this => mid, otherwise late
 
-  // ── rankHandCards (same baseline as V5) ──
+  // ── rankHandCards (same baseline as CL) ──
   matchZeroBase: -48.1,
   matchOneBase: 7.53,
   matchTwoBase: 14.80,
@@ -66,7 +66,7 @@ export const DEFAULT_PARAMS = {
   lockedMonthPenalty: 6.0,
   secondMoverGoGateShrink: 4.0,  secondMoverBlockBonus: 2.0,  secondMoverPiBonus: 1.5,
 
-  // ── phase multipliers (V5Plus additions) ──
+  // ── phase multipliers (NEXg additions) ──
   // early phase: bias toward combo building
   phaseEarlyComboMul: 1.20,     // increase combo score
   phaseEarlyBlockMul: 0.90,     // slightly relax blocking pressure
@@ -78,18 +78,18 @@ export const DEFAULT_PARAMS = {
   phaseLateFeedMul: 1.40,       // increase feed risk cost
   phaseLateDoublePiMul: 1.50,   // increase double-pi value
 
-  // ── chooseMatch (same baseline as V5) ──
+  // ── chooseMatch (same baseline as CL) ──
   matchPiGainMul: 6.25,
   matchKwangBonus: 15.02,
   matchRibbonBonus: 10.02,
   matchFiveBonus: 8.0,
   matchDoublePiBonus: 18.0,
   matchMongBakFiveBonus: 33.83,
-  // chooseMatch forward blocking (V5Plus addition)
+  // chooseMatch forward blocking (NEXg addition)
   matchFwdBlockMul: 1.45,       // bonus multiplier when blocking opponent combo lines
 
-  // ── shouldGo (V5 gate + V5Plus first-mover guard) ──
-  // Base gate (close to V5)
+  // ── shouldGo (CL gate + NEXg first-mover guard) ──
+  // Base gate (close to CL)
   goMinPi: 8,
   goOppOneAwayGate: 100,
   goScoreDiffBonus: 0.055,
@@ -132,7 +132,7 @@ export const DEFAULT_PARAMS = {
   stopTenBonus: 0.20,
   goUtilityThreshold: 0.10,
 
-  // Additional GO suppression after V5 gate pass (first mover only)
+  // Additional GO suppression after CL gate pass (first mover only)
   plusFirstGoMinDeck: 7,
 
   // ── shouldBomb / selectBombMonth ──
@@ -277,8 +277,8 @@ function resolvePhase(deckCount, P) {
   return "late";
 }
 
-/* 4) Hand ranking (phase-aware V5 baseline) */
-function rankHandCardsV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
+/* 4) Hand ranking (phase-aware CL baseline) */
+function rankHandCardsNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
@@ -436,7 +436,7 @@ function rankHandCardsV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
 }
 
 /* 5) Pending match-card selection (forward-blocking) */
-function chooseMatchHeuristicV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function chooseMatchHeuristicNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
@@ -484,8 +484,8 @@ function chooseMatchHeuristicV5Plus(state, playerKey, deps, params = DEFAULT_PAR
   return best?.id ?? null;
 }
 
-/* 6) GO/STOP decision (V5 gate + first-mover suppression filter) */
-function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
+/* 6) GO/STOP decision (CL gate + first-mover suppression filter) */
+function shouldGoNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
 
   if (deps.canBankruptOpponentByStop?.(state, playerKey)) return false;
@@ -522,7 +522,7 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
   if (unseenHi >= 2 && oppPiRisk >= 7 && !certain) return false;
   if (tr.oppOneAwayProb >= safeNum(P.goOppOneAwayGate, 100)) return false;
 
-  // Base gate pass/fail (same branching structure as V5)
+  // Base gate pass/fail (same branching structure as CL)
   if (!certain) {
     const conf = 0.5 + diff * safeNum(P.goScoreDiffBonus)
       + (late ? safeNum(P.goDeckLowBonus) : 0)
@@ -572,7 +572,7 @@ function shouldGoV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
 }
 
 /* 7) President/Gukjin decisions */
-function shouldPresidentStopV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function shouldPresidentStopNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const ctx = deps.analyzeGameContext(state, playerKey);
   const diff = safeNum(ctx.myScore) - safeNum(ctx.oppScore);
   const co = safeNum(state.carryOverMultiplier, 1);
@@ -582,7 +582,7 @@ function shouldPresidentStopV5Plus(state, playerKey, deps, params = DEFAULT_PARA
   return diff >= 1;
 }
 
-function chooseGukjinHeuristicV5Plus(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function chooseGukjinHeuristicNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const ctx = deps.analyzeGameContext(state, playerKey);
   const br = deps.analyzeGukjinBranches(state, playerKey);
   const sf = safeNum(ctx.selfFive), of_ = safeNum(ctx.oppFive);
@@ -597,14 +597,14 @@ function chooseGukjinHeuristicV5Plus(state, playerKey, deps, params = DEFAULT_PA
 }
 
 /* 8) Bomb decision helpers */
-function selectBombMonthV5Plus(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
+function selectBombMonthNEXg(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
   if (!bombMonths?.length) return null;
   const months = [...bombMonths];
   return months.length === 1 ? months[0]
     : months.reduce((b, m) => safeNum(deps.monthBoardGain(state, m)) > safeNum(deps.monthBoardGain(state, b)) ? m : b, months[0]);
 }
 
-function shouldBombV5Plus(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
+function shouldBombNEXg(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
   if (!bombMonths?.length) return false;
   const P = { ...DEFAULT_PARAMS, ...params };
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -624,7 +624,7 @@ function shouldBombV5Plus(state, playerKey, bombMonths, deps, params = DEFAULT_P
 }
 
 /* 9) Shaking decision */
-function decideShakingV5Plus(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
+function decideShakingNEXg(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
   const P = { ...DEFAULT_PARAMS, ...params };
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
   const bbm = deps.boardMatchesByMonth(state);

@@ -8,7 +8,7 @@
   "checkpoint_every": 3,
   "eval_script": "scripts/neat_eval_worker.mjs",
   "seed": 13,
-  "opponent_policy": "H-V7",
+  "opponent_policy": "H-Gemini",
   "switch_seats": true,
   "fitness_gold_scale": 2500.0,
   "fitness_gold_neutral_delta": -500.0,

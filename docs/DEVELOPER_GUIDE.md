@@ -58,7 +58,7 @@ powershell -ExecutionPolicy Bypass -File scripts/phase_eval.ps1 -Phase 3 -Seed 9
 
 ### 4-3. 휴리스틱 대전 (고정 1000게임)
 ```powershell
-node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase3_seed5 --games 1000 --seed v5_vs_phase3s5 --first-turn-policy alternate --continuous-series 1 --max-steps 600
+node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --games 1000 --seed cl_vs_phase3s5 --first-turn-policy alternate --continuous-series 1 --max-steps 600
 ```
 
 ## 5. 런타임 키 규칙
@@ -102,7 +102,7 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase3_seed5 --game
 
 ### 7-1. `neat_eval_worker.mjs`
 - feature vector는 47차원 고정.
-- `opponent_policy=heuristic_v6`일 때 내부 fast tuning 파라미터를 적용해 평가 시간을 줄인다.
+- `opponent_policy=heuristic_h_gpt`일 때 내부 fast tuning 파라미터를 적용해 평가 시간을 줄인다.
 - teacher dataset cache(`--teacher-dataset-cache`)가 있으면 imitation 계산 소스를 cache로 전환한다.
 
 ### 7-2. `model_duel_worker.mjs`
@@ -146,7 +146,7 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase3_seed5 --game
   - 상세 지표(`seat_split_*`, unresolved 상세 분포 등)는 `result_out` 파일에서 확인한다.
 - 대표 실행 예시:
 ```powershell
-node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase3_seed5 --games 1000 --seed v5_vs_phase3s5_1000 --first-turn-policy alternate --continuous-series 1 --max-steps 600 --kibo-detail full --dataset-out auto
+node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --games 1000 --seed cl_vs_phase3s5_1000 --first-turn-policy alternate --continuous-series 1 --max-steps 600 --kibo-detail full --dataset-out auto
 ```
 
 ## 8. 트러블슈팅
