@@ -36,6 +36,17 @@ If rules conflict, the smaller section number takes precedence.
 - Do not keep obsolete structure only for short-term convenience during development stage.
 - If the full structural change is too large for one pass, split it into up to 5 explicit steps and instruct the user to run/approve each step in sequence.
 
+4.1 Objective-first execution gate
+- If either condition is true, do not execute immediately:
+  - (1) high uncertainty / high failure likelihood
+  - (2) likely negative impact on the primary objective
+- In that case, do step (3) first:
+  - warn clearly,
+  - state reason and likely failure mode,
+  - provide 1-2 safer alternatives.
+- Execute only after explicit user override.
+- After override, apply minimal-scope change only (single hypothesis) and report exact diff.
+
 5. Path and structure lock
 - Keep all runtime/config files under `scripts/configs/`.
 - Keep orchestration/entry scripts under `scripts/` (e.g., `phase_run.ps1`, `phase_eval.ps1`).

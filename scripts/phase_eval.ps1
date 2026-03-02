@@ -100,6 +100,13 @@ $cmd = @(
   "--fitness-go-min-games", "$($runtime.fitness_go_min_games)"
 )
 
+if ($null -ne $runtime.fitness_win_neutral_rate) {
+  $cmd += @("--fitness-win-neutral-rate", "$($runtime.fitness_win_neutral_rate)")
+}
+if ($null -ne $runtime.fitness_gold_neutral_delta) {
+  $cmd += @("--fitness-gold-neutral-delta", "$($runtime.fitness_gold_neutral_delta)")
+}
+
 if ($null -ne $runtime.fitness_go_low_games_penalty) {
   $cmd += @("--fitness-go-low-games-penalty", "$($runtime.fitness_go_low_games_penalty)")
 }

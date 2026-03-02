@@ -56,8 +56,10 @@ DEFAULT_RUNTIME = {
     "seed": 13,
     # Evaluator maps these to win/gold/go component weights.
     "fitness_gold_scale": 2500.0,
+    "fitness_gold_neutral_delta": 0.0,
     "fitness_win_weight": 0.35,
     "fitness_gold_weight": 0.50,
+    "fitness_win_neutral_rate": 0.40,
     "fitness_go_weight": 0.15,
     "fitness_go_target_rate": 0.20,
     "fitness_go_min_games": 20,
@@ -301,11 +303,25 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["fitness_gold_scale"] = max(
         1.0, _to_float(cfg.get("fitness_gold_scale"), DEFAULT_RUNTIME["fitness_gold_scale"])
     )
+    cfg["fitness_gold_neutral_delta"] = _to_float(
+        cfg.get("fitness_gold_neutral_delta"),
+        DEFAULT_RUNTIME["fitness_gold_neutral_delta"],
+    )
     cfg["fitness_win_weight"] = _to_float(
         cfg.get("fitness_win_weight"), DEFAULT_RUNTIME["fitness_win_weight"]
     )
     cfg["fitness_gold_weight"] = _to_float(
         cfg.get("fitness_gold_weight"), DEFAULT_RUNTIME["fitness_gold_weight"]
+    )
+    cfg["fitness_win_neutral_rate"] = min(
+        0.99,
+        max(
+            0.01,
+            _to_float(
+                cfg.get("fitness_win_neutral_rate"),
+                DEFAULT_RUNTIME["fitness_win_neutral_rate"],
+            ),
+        ),
     )
     cfg["fitness_go_weight"] = _to_float(
         cfg.get("fitness_go_weight"), DEFAULT_RUNTIME["fitness_go_weight"]
@@ -492,8 +508,14 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}SEED"] = str(runtime["seed"])
     os.environ[f"{ENV_PREFIX}OUTPUT_DIR"] = os.path.abspath(output_dir)
     os.environ[f"{ENV_PREFIX}FITNESS_GOLD_SCALE"] = str(float(runtime["fitness_gold_scale"]))
+    os.environ[f"{ENV_PREFIX}FITNESS_GOLD_NEUTRAL_DELTA"] = str(
+        float(runtime["fitness_gold_neutral_delta"])
+    )
     os.environ[f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"] = str(float(runtime["fitness_win_weight"]))
     os.environ[f"{ENV_PREFIX}FITNESS_GOLD_WEIGHT"] = str(float(runtime["fitness_gold_weight"]))
+    os.environ[f"{ENV_PREFIX}FITNESS_WIN_NEUTRAL_RATE"] = str(
+        float(runtime["fitness_win_neutral_rate"])
+    )
     os.environ[f"{ENV_PREFIX}FITNESS_GO_WEIGHT"] = str(float(runtime["fitness_go_weight"]))
     os.environ[f"{ENV_PREFIX}FITNESS_GO_TARGET_RATE"] = str(float(runtime["fitness_go_target_rate"]))
     os.environ[f"{ENV_PREFIX}FITNESS_GO_MIN_GAMES"] = str(int(runtime["fitness_go_min_games"]))
@@ -564,8 +586,10 @@ def _runtime_from_env() -> Dict[str, object]:
         "seed": os.environ.get(f"{ENV_PREFIX}SEED"),
         "output_dir": os.environ.get(f"{ENV_PREFIX}OUTPUT_DIR") or os.getcwd(),
         "fitness_gold_scale": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_SCALE"),
+        "fitness_gold_neutral_delta": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_NEUTRAL_DELTA"),
         "fitness_win_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"),
         "fitness_gold_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_WEIGHT"),
+        "fitness_win_neutral_rate": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_NEUTRAL_RATE"),
         "fitness_go_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_WEIGHT"),
         "fitness_go_target_rate": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_TARGET_RATE"),
         "fitness_go_min_games": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_MIN_GAMES"),
@@ -1048,10 +1072,14 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             "1" if bool(runtime["switch_seats"]) else "0",
             "--fitness-gold-scale",
             str(float(runtime["fitness_gold_scale"])),
+            "--fitness-gold-neutral-delta",
+            str(float(runtime["fitness_gold_neutral_delta"])),
             "--fitness-win-weight",
             str(float(runtime["fitness_win_weight"])),
             "--fitness-gold-weight",
             str(float(runtime["fitness_gold_weight"])),
+            "--fitness-win-neutral-rate",
+            str(float(runtime["fitness_win_neutral_rate"])),
             "--fitness-go-low-games-penalty",
             str(float(runtime["fitness_go_low_games_penalty"])),
             "--fitness-go-min-games",
@@ -1393,12 +1421,25 @@ class LoggedParallelEvaluator:
             valid_fitness_values = [_safe_float(r.get("fitness"), -1e9) for r in valid_records]
             valid_win_values = [_safe_float(r.get("win_rate"), 0.0) for r in valid_records]
             valid_imit_values = []
+            valid_go_games_values = []
+            valid_go_rate_values = []
+            valid_go_fail_rate_values = []
             for r in valid_records:
                 if "imitation_weighted_score" not in r:
-                    continue
-                v = _safe_float(r.get("imitation_weighted_score"), float("nan"))
-                if v == v:
-                    valid_imit_values.append(v)
+                    pass
+                else:
+                    v = _safe_float(r.get("imitation_weighted_score"), float("nan"))
+                    if v == v:
+                        valid_imit_values.append(v)
+                go_games = _safe_optional_float(r.get("go_games"))
+                if go_games is not None:
+                    valid_go_games_values.append(go_games)
+                go_rate = _safe_optional_float(r.get("go_rate"))
+                if go_rate is not None:
+                    valid_go_rate_values.append(go_rate)
+                go_fail_rate = _safe_optional_float(r.get("go_fail_rate"))
+                if go_fail_rate is not None:
+                    valid_go_fail_rate_values.append(go_fail_rate)
             valid_eval_ms = [
                 max(0.0, _safe_float(r.get("eval_time_ms"), 0.0))
                 for r in valid_records
@@ -1422,6 +1463,21 @@ class LoggedParallelEvaluator:
                 "mean_imitation_weighted_score": (
                     sum(valid_imit_values) / max(1, len(valid_imit_values))
                     if len(valid_imit_values) > 0
+                    else None
+                ),
+                "mean_go_games": (
+                    sum(valid_go_games_values) / max(1, len(valid_go_games_values))
+                    if len(valid_go_games_values) > 0
+                    else None
+                ),
+                "mean_go_rate": (
+                    sum(valid_go_rate_values) / max(1, len(valid_go_rate_values))
+                    if len(valid_go_rate_values) > 0
+                    else None
+                ),
+                "mean_go_fail_rate": (
+                    sum(valid_go_fail_rate_values) / max(1, len(valid_go_fail_rate_values))
+                    if len(valid_go_fail_rate_values) > 0
                     else None
                 ),
                 "best_win_rate": (
@@ -1461,6 +1517,9 @@ class LoggedParallelEvaluator:
                 "std_fitness": 0.0,
                 "mean_win_rate": None,
                 "mean_imitation_weighted_score": None,
+                "mean_go_games": None,
+                "mean_go_rate": None,
+                "mean_go_fail_rate": None,
                 "best_win_rate": None,
                 "best_imitation_weighted_score": None,
                 "best_genome_nodes": 0,
@@ -1535,6 +1594,12 @@ def parse_args() -> argparse.Namespace:
         help="Override fitness gold scale denominator",
     )
     parser.add_argument(
+        "--fitness-gold-neutral-delta",
+        type=float,
+        default=float("nan"),
+        help="Override gold neutral baseline delta for gold_norm",
+    )
+    parser.add_argument(
         "--fitness-win-weight",
         type=float,
         default=float("nan"),
@@ -1545,6 +1610,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=float("nan"),
         help="Override loss-rate fitness penalty weight",
+    )
+    parser.add_argument(
+        "--fitness-win-neutral-rate",
+        type=float,
+        default=float("nan"),
+        help="Override neutral baseline win rate for win_norm",
     )
     parser.add_argument(
         "--fitness-go-weight",
@@ -1866,12 +1937,18 @@ def main() -> None:
     if args.fitness_gold_scale > 0:
         runtime["fitness_gold_scale"] = args.fitness_gold_scale
         override_keys.append("fitness_gold_scale")
+    if args.fitness_gold_neutral_delta == args.fitness_gold_neutral_delta:
+        runtime["fitness_gold_neutral_delta"] = args.fitness_gold_neutral_delta
+        override_keys.append("fitness_gold_neutral_delta")
     if args.fitness_win_weight == args.fitness_win_weight:
         runtime["fitness_win_weight"] = args.fitness_win_weight
         override_keys.append("fitness_win_weight")
     if args.fitness_gold_weight == args.fitness_gold_weight:
         runtime["fitness_gold_weight"] = args.fitness_gold_weight
         override_keys.append("fitness_gold_weight")
+    if args.fitness_win_neutral_rate == args.fitness_win_neutral_rate:
+        runtime["fitness_win_neutral_rate"] = args.fitness_win_neutral_rate
+        override_keys.append("fitness_win_neutral_rate")
     if args.fitness_go_weight == args.fitness_go_weight:
         runtime["fitness_go_weight"] = args.fitness_go_weight
         override_keys.append("fitness_go_weight")

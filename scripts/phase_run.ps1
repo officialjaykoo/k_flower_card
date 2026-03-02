@@ -124,6 +124,40 @@ function Get-BestGenomeGoMetrics {
   }
 }
 
+function Get-LatestGenerationGoAverages {
+  param([Parameter(Mandatory = $true)]$Summary)
+
+  $empty = [ordered]@{
+    available = $false
+    mean_go_games = $null
+    mean_go_rate = $null
+    mean_go_fail_rate = $null
+  }
+
+  $generationMetricsPathRaw = [string]$Summary.generation_metrics_log
+  if ([string]::IsNullOrWhiteSpace($generationMetricsPathRaw)) {
+    return $empty
+  }
+
+  $generationMetricsPath = [System.IO.Path]::GetFullPath($generationMetricsPathRaw)
+  if (-not (Test-Path $generationMetricsPath)) {
+    return $empty
+  }
+
+  $lastGenerationLine = Get-Content $generationMetricsPath | Select-Object -Last 1
+  if ([string]::IsNullOrWhiteSpace($lastGenerationLine)) {
+    return $empty
+  }
+
+  $generationRecord = $lastGenerationLine | ConvertFrom-Json
+  return [ordered]@{
+    available = $true
+    mean_go_games = Get-OptionalDouble -Value $generationRecord.mean_go_games
+    mean_go_rate = Get-OptionalDouble -Value $generationRecord.mean_go_rate
+    mean_go_fail_rate = Get-OptionalDouble -Value $generationRecord.mean_go_fail_rate
+  }
+}
+
 function Get-OptionalDouble {
   param(
     [Parameter(Mandatory = $false)]$Value,
@@ -202,6 +236,7 @@ catch {
 }
 
 $goMetrics = Get-BestGenomeGoMetrics -Summary $summary
+$goAverages = Get-LatestGenerationGoAverages -Summary $summary
 $summaryElapsedSec = Get-OptionalDouble -Value $summary.run_elapsed_sec -DefaultValue $phaseRunElapsedSec
 
 Write-Host "=== Phase$Phase Summary (Seed=$Seed) ==="
@@ -213,6 +248,16 @@ Write-Host "Transition ready: $($summary.gate_state.transition_ready)"
 Write-Host "Transition gen:   $($summary.gate_state.transition_generation)"
 Write-Host "Best fitness:     $($summary.best_fitness)"
 Write-Host "Elapsed time:     $summaryElapsedSec s"
+if ([bool]$goAverages.available) {
+  Write-Host "GO mean games:    $($goAverages.mean_go_games)"
+  Write-Host "GO mean fail:     $($goAverages.mean_go_fail_rate)"
+  Write-Host "GO mean rate:     $($goAverages.mean_go_rate)"
+}
+else {
+  Write-Host "GO mean games:    N/A"
+  Write-Host "GO mean fail:     N/A"
+  Write-Host "GO mean rate:     N/A"
+}
 if ([bool]$goMetrics.available) {
   Write-Host "GO count:         $($goMetrics.go_count)"
   Write-Host "GO games:         $($goMetrics.go_games)"
