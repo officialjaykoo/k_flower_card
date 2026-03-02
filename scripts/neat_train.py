@@ -61,10 +61,8 @@ DEFAULT_RUNTIME = {
     "fitness_go_weight": 0.15,
     "fitness_go_target_rate": 0.20,
     "fitness_go_min_games": 20,
-    "fitness_go_rate_penalty_trigger_1": 0.40,
-    "fitness_go_rate_penalty_amount_1": 0.15,
-    "fitness_go_rate_penalty_trigger_2": 0.50,
-    "fitness_go_rate_penalty_amount_2": 0.25,
+    "fitness_go_max_games": 70,
+    "fitness_go_max_games_penalty": 0.80,
     "fitness_go_presence_weight": 0.2,
     "fitness_go_quality_weight": 0.8,
     "fitness_go_zero_games_penalty": 0.35,
@@ -318,32 +316,18 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["fitness_go_min_games"] = max(
         1, _to_int(cfg.get("fitness_go_min_games"), DEFAULT_RUNTIME["fitness_go_min_games"])
     )
-    cfg["fitness_go_rate_penalty_trigger_1"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_rate_penalty_trigger_1"),
-            DEFAULT_RUNTIME["fitness_go_rate_penalty_trigger_1"],
+    cfg["fitness_go_max_games"] = max(
+        1,
+        _to_int(
+            cfg.get("fitness_go_max_games"),
+            DEFAULT_RUNTIME["fitness_go_max_games"],
         ),
     )
-    cfg["fitness_go_rate_penalty_amount_1"] = max(
+    cfg["fitness_go_max_games_penalty"] = max(
         0.0,
         _to_float(
-            cfg.get("fitness_go_rate_penalty_amount_1"),
-            DEFAULT_RUNTIME["fitness_go_rate_penalty_amount_1"],
-        ),
-    )
-    cfg["fitness_go_rate_penalty_trigger_2"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_rate_penalty_trigger_2"),
-            DEFAULT_RUNTIME["fitness_go_rate_penalty_trigger_2"],
-        ),
-    )
-    cfg["fitness_go_rate_penalty_amount_2"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_rate_penalty_amount_2"),
-            DEFAULT_RUNTIME["fitness_go_rate_penalty_amount_2"],
+            cfg.get("fitness_go_max_games_penalty"),
+            DEFAULT_RUNTIME["fitness_go_max_games_penalty"],
         ),
     )
     cfg["fitness_go_presence_weight"] = max(
@@ -513,17 +497,9 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}FITNESS_GO_WEIGHT"] = str(float(runtime["fitness_go_weight"]))
     os.environ[f"{ENV_PREFIX}FITNESS_GO_TARGET_RATE"] = str(float(runtime["fitness_go_target_rate"]))
     os.environ[f"{ENV_PREFIX}FITNESS_GO_MIN_GAMES"] = str(int(runtime["fitness_go_min_games"]))
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_RATE_PENALTY_TRIGGER_1"] = str(
-        float(runtime["fitness_go_rate_penalty_trigger_1"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_RATE_PENALTY_AMOUNT_1"] = str(
-        float(runtime["fitness_go_rate_penalty_amount_1"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_RATE_PENALTY_TRIGGER_2"] = str(
-        float(runtime["fitness_go_rate_penalty_trigger_2"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_RATE_PENALTY_AMOUNT_2"] = str(
-        float(runtime["fitness_go_rate_penalty_amount_2"])
+    os.environ[f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES"] = str(int(runtime["fitness_go_max_games"]))
+    os.environ[f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES_PENALTY"] = str(
+        float(runtime["fitness_go_max_games_penalty"])
     )
     os.environ[f"{ENV_PREFIX}FITNESS_GO_PRESENCE_WEIGHT"] = str(
         float(runtime["fitness_go_presence_weight"])
@@ -593,18 +569,8 @@ def _runtime_from_env() -> Dict[str, object]:
         "fitness_go_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_WEIGHT"),
         "fitness_go_target_rate": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_TARGET_RATE"),
         "fitness_go_min_games": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_MIN_GAMES"),
-        "fitness_go_rate_penalty_trigger_1": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_RATE_PENALTY_TRIGGER_1"
-        ),
-        "fitness_go_rate_penalty_amount_1": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_RATE_PENALTY_AMOUNT_1"
-        ),
-        "fitness_go_rate_penalty_trigger_2": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_RATE_PENALTY_TRIGGER_2"
-        ),
-        "fitness_go_rate_penalty_amount_2": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_RATE_PENALTY_AMOUNT_2"
-        ),
+        "fitness_go_max_games": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES"),
+        "fitness_go_max_games_penalty": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES_PENALTY"),
         "fitness_go_presence_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_PRESENCE_WEIGHT"),
         "fitness_go_quality_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_QUALITY_WEIGHT"),
         "fitness_go_zero_games_penalty": os.environ.get(
@@ -1090,14 +1056,10 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             str(float(runtime["fitness_go_low_games_penalty"])),
             "--fitness-go-min-games",
             str(int(runtime["fitness_go_min_games"])),
-            "--fitness-go-rate-penalty-trigger-1",
-            str(float(runtime["fitness_go_rate_penalty_trigger_1"])),
-            "--fitness-go-rate-penalty-amount-1",
-            str(float(runtime["fitness_go_rate_penalty_amount_1"])),
-            "--fitness-go-rate-penalty-trigger-2",
-            str(float(runtime["fitness_go_rate_penalty_trigger_2"])),
-            "--fitness-go-rate-penalty-amount-2",
-            str(float(runtime["fitness_go_rate_penalty_amount_2"])),
+            "--fitness-go-max-games",
+            str(int(runtime["fitness_go_max_games"])),
+            "--fitness-go-max-games-penalty",
+            str(float(runtime["fitness_go_max_games_penalty"])),
             "--fitness-go-fail-penalty-trigger",
             str(float(runtime["fitness_go_fail_penalty_trigger"])),
             "--fitness-go-fail-penalty-amount",
@@ -1603,28 +1565,16 @@ def parse_args() -> argparse.Namespace:
         help="Override minimum GO games required to apply GO quality term",
     )
     parser.add_argument(
-        "--fitness-go-rate-penalty-trigger-1",
-        type=float,
-        default=float("nan"),
-        help="Override GO rate penalty trigger 1",
+        "--fitness-go-max-games",
+        type=int,
+        default=0,
+        help="Override maximum GO games allowed before penalty",
     )
     parser.add_argument(
-        "--fitness-go-rate-penalty-amount-1",
+        "--fitness-go-max-games-penalty",
         type=float,
         default=float("nan"),
-        help="Override GO rate penalty amount 1",
-    )
-    parser.add_argument(
-        "--fitness-go-rate-penalty-trigger-2",
-        type=float,
-        default=float("nan"),
-        help="Override GO rate penalty trigger 2",
-    )
-    parser.add_argument(
-        "--fitness-go-rate-penalty-amount-2",
-        type=float,
-        default=float("nan"),
-        help="Override GO rate penalty amount 2",
+        help="Override GO max-games penalty amount",
     )
     parser.add_argument(
         "--fitness-go-presence-weight",
@@ -1931,18 +1881,12 @@ def main() -> None:
     if args.fitness_go_min_games > 0:
         runtime["fitness_go_min_games"] = args.fitness_go_min_games
         override_keys.append("fitness_go_min_games")
-    if args.fitness_go_rate_penalty_trigger_1 == args.fitness_go_rate_penalty_trigger_1:
-        runtime["fitness_go_rate_penalty_trigger_1"] = args.fitness_go_rate_penalty_trigger_1
-        override_keys.append("fitness_go_rate_penalty_trigger_1")
-    if args.fitness_go_rate_penalty_amount_1 == args.fitness_go_rate_penalty_amount_1:
-        runtime["fitness_go_rate_penalty_amount_1"] = args.fitness_go_rate_penalty_amount_1
-        override_keys.append("fitness_go_rate_penalty_amount_1")
-    if args.fitness_go_rate_penalty_trigger_2 == args.fitness_go_rate_penalty_trigger_2:
-        runtime["fitness_go_rate_penalty_trigger_2"] = args.fitness_go_rate_penalty_trigger_2
-        override_keys.append("fitness_go_rate_penalty_trigger_2")
-    if args.fitness_go_rate_penalty_amount_2 == args.fitness_go_rate_penalty_amount_2:
-        runtime["fitness_go_rate_penalty_amount_2"] = args.fitness_go_rate_penalty_amount_2
-        override_keys.append("fitness_go_rate_penalty_amount_2")
+    if args.fitness_go_max_games > 0:
+        runtime["fitness_go_max_games"] = args.fitness_go_max_games
+        override_keys.append("fitness_go_max_games")
+    if args.fitness_go_max_games_penalty == args.fitness_go_max_games_penalty:
+        runtime["fitness_go_max_games_penalty"] = args.fitness_go_max_games_penalty
+        override_keys.append("fitness_go_max_games_penalty")
     if args.fitness_go_presence_weight == args.fitness_go_presence_weight:
         runtime["fitness_go_presence_weight"] = args.fitness_go_presence_weight
         override_keys.append("fitness_go_presence_weight")

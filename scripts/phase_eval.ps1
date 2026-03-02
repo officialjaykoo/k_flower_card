@@ -103,17 +103,11 @@ $cmd = @(
 if ($null -ne $runtime.fitness_go_low_games_penalty) {
   $cmd += @("--fitness-go-low-games-penalty", "$($runtime.fitness_go_low_games_penalty)")
 }
-if ($null -ne $runtime.fitness_go_rate_penalty_trigger_1) {
-  $cmd += @("--fitness-go-rate-penalty-trigger-1", "$($runtime.fitness_go_rate_penalty_trigger_1)")
+if ($null -ne $runtime.fitness_go_max_games) {
+  $cmd += @("--fitness-go-max-games", "$($runtime.fitness_go_max_games)")
 }
-if ($null -ne $runtime.fitness_go_rate_penalty_amount_1) {
-  $cmd += @("--fitness-go-rate-penalty-amount-1", "$($runtime.fitness_go_rate_penalty_amount_1)")
-}
-if ($null -ne $runtime.fitness_go_rate_penalty_trigger_2) {
-  $cmd += @("--fitness-go-rate-penalty-trigger-2", "$($runtime.fitness_go_rate_penalty_trigger_2)")
-}
-if ($null -ne $runtime.fitness_go_rate_penalty_amount_2) {
-  $cmd += @("--fitness-go-rate-penalty-amount-2", "$($runtime.fitness_go_rate_penalty_amount_2)")
+if ($null -ne $runtime.fitness_go_max_games_penalty) {
+  $cmd += @("--fitness-go-max-games-penalty", "$($runtime.fitness_go_max_games_penalty)")
 }
 if ($null -ne $runtime.fitness_go_fail_penalty_trigger) {
   $cmd += @("--fitness-go-fail-penalty-trigger", "$($runtime.fitness_go_fail_penalty_trigger)")

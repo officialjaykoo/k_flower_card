@@ -51,10 +51,8 @@ function parseArgs(argv) {
     fitnessGoldWeight: 0.50,
     fitnessGoLowGamesPenalty: 0.30,
     fitnessGoMinGames: 20,
-    fitnessGoRatePenaltyTrigger1: 0.40,
-    fitnessGoRatePenaltyAmount1: 0.15,
-    fitnessGoRatePenaltyTrigger2: 0.50,
-    fitnessGoRatePenaltyAmount2: 0.25,
+    fitnessGoMaxGames: 70,
+    fitnessGoMaxGamesPenalty: 0.80,
     fitnessGoFailPenaltyTrigger: 0.45,
     fitnessGoFailPenaltyAmount: 0.10,
     fitnessGoFailBonusTrigger: 0.20,
@@ -94,10 +92,8 @@ function parseArgs(argv) {
     else if (key === "--fitness-gold-weight") out.fitnessGoldWeight = Number(value || 0.50);
     else if (key === "--fitness-go-low-games-penalty") out.fitnessGoLowGamesPenalty = Math.max(0.0, Number(value || 0.30));
     else if (key === "--fitness-go-min-games") out.fitnessGoMinGames = Math.max(1, Math.floor(Number(value || 20)));
-    else if (key === "--fitness-go-rate-penalty-trigger-1") out.fitnessGoRatePenaltyTrigger1 = Math.max(0.0, Number(value || 0.40));
-    else if (key === "--fitness-go-rate-penalty-amount-1") out.fitnessGoRatePenaltyAmount1 = Math.max(0.0, Number(value || 0.15));
-    else if (key === "--fitness-go-rate-penalty-trigger-2") out.fitnessGoRatePenaltyTrigger2 = Math.max(0.0, Number(value || 0.50));
-    else if (key === "--fitness-go-rate-penalty-amount-2") out.fitnessGoRatePenaltyAmount2 = Math.max(0.0, Number(value || 0.25));
+    else if (key === "--fitness-go-max-games") out.fitnessGoMaxGames = Math.max(1, Math.floor(Number(value || 70)));
+    else if (key === "--fitness-go-max-games-penalty") out.fitnessGoMaxGamesPenalty = Math.max(0.0, Number(value || 0.80));
     else if (key === "--fitness-go-fail-penalty-trigger") out.fitnessGoFailPenaltyTrigger = Math.max(0.0, Number(value || 0.45));
     else if (key === "--fitness-go-fail-penalty-amount") out.fitnessGoFailPenaltyAmount = Math.max(0.0, Number(value || 0.10));
     else if (key === "--fitness-go-fail-bonus-trigger") out.fitnessGoFailBonusTrigger = Math.max(0.0, Number(value || 0.20));
@@ -604,10 +600,8 @@ function main() {
   const fitnessGoldWeightRaw = Number(opts.fitnessGoldWeight);
   const fitnessGoLowGamesPenaltyRaw = Number(opts.fitnessGoLowGamesPenalty);
   const fitnessGoMinGamesRaw = Number(opts.fitnessGoMinGames);
-  const fitnessGoRatePenaltyTrigger1Raw = Number(opts.fitnessGoRatePenaltyTrigger1);
-  const fitnessGoRatePenaltyAmount1Raw = Number(opts.fitnessGoRatePenaltyAmount1);
-  const fitnessGoRatePenaltyTrigger2Raw = Number(opts.fitnessGoRatePenaltyTrigger2);
-  const fitnessGoRatePenaltyAmount2Raw = Number(opts.fitnessGoRatePenaltyAmount2);
+  const fitnessGoMaxGamesRaw = Number(opts.fitnessGoMaxGames);
+  const fitnessGoMaxGamesPenaltyRaw = Number(opts.fitnessGoMaxGamesPenalty);
   const fitnessGoFailPenaltyTriggerRaw = Number(opts.fitnessGoFailPenaltyTrigger);
   const fitnessGoFailPenaltyAmountRaw = Number(opts.fitnessGoFailPenaltyAmount);
   const fitnessGoFailBonusTriggerRaw = Number(opts.fitnessGoFailBonusTrigger);
@@ -628,22 +622,12 @@ function main() {
       : 0.30;
   const fitnessGoMinGames =
     Number.isFinite(fitnessGoMinGamesRaw) && fitnessGoMinGamesRaw > 0 ? Math.floor(fitnessGoMinGamesRaw) : 20;
-  const goRatePenaltyTrigger1 =
-    Number.isFinite(fitnessGoRatePenaltyTrigger1Raw) && fitnessGoRatePenaltyTrigger1Raw >= 0
-      ? fitnessGoRatePenaltyTrigger1Raw
-      : 0.40;
-  const goRatePenaltyAmount1 =
-    Number.isFinite(fitnessGoRatePenaltyAmount1Raw) && fitnessGoRatePenaltyAmount1Raw >= 0
-      ? fitnessGoRatePenaltyAmount1Raw
-      : 0.15;
-  const goRatePenaltyTrigger2 =
-    Number.isFinite(fitnessGoRatePenaltyTrigger2Raw) && fitnessGoRatePenaltyTrigger2Raw >= 0
-      ? fitnessGoRatePenaltyTrigger2Raw
-      : 0.50;
-  const goRatePenaltyAmount2 =
-    Number.isFinite(fitnessGoRatePenaltyAmount2Raw) && fitnessGoRatePenaltyAmount2Raw >= 0
-      ? fitnessGoRatePenaltyAmount2Raw
-      : 0.25;
+  const fitnessGoMaxGames =
+    Number.isFinite(fitnessGoMaxGamesRaw) && fitnessGoMaxGamesRaw > 0 ? Math.floor(fitnessGoMaxGamesRaw) : 70;
+  const fitnessGoMaxGamesPenalty =
+    Number.isFinite(fitnessGoMaxGamesPenaltyRaw) && fitnessGoMaxGamesPenaltyRaw >= 0
+      ? fitnessGoMaxGamesPenaltyRaw
+      : 0.80;
   const goFailPenaltyTrigger =
     Number.isFinite(fitnessGoFailPenaltyTriggerRaw) && fitnessGoFailPenaltyTriggerRaw >= 0
       ? fitnessGoFailPenaltyTriggerRaw
@@ -669,11 +653,6 @@ function main() {
       ? fitnessGoFailBonusAmount2Raw
       : 0.10;
 
-  if (goRatePenaltyTrigger1 > goRatePenaltyTrigger2) {
-    throw new Error(
-      `invalid go rate penalty trigger ordering: low(${goRatePenaltyTrigger1}) must be <= high(${goRatePenaltyTrigger2})`,
-    );
-  }
   if (goFailBonusTrigger > goFailBonusTrigger2) {
     throw new Error(
       `invalid go fail bonus trigger ordering: strict(${goFailBonusTrigger}) must be <= loose(${goFailBonusTrigger2})`,
@@ -690,8 +669,7 @@ function main() {
     (fitnessGoldWeight * goldNorm) +
     (fitnessWinWeight * winNorm);
   let goLowGamesPenalty = 0.0;
-  let goRatePenalty = 0.0;
-  let goRatePenaltyTier = "none";
+  let goMaxGamesPenalty = 0.0;
   let goFailPenalty = 0.0;
   let goFailBonus = 0.0;
   let goFailBonusTier = "none";
@@ -710,14 +688,9 @@ function main() {
     goFailPenalty = goFailPenaltyAmount;
     fitness -= goFailPenalty;
   }
-  if (goRate >= goRatePenaltyTrigger2) {
-    goRatePenalty = goRatePenaltyAmount2;
-    goRatePenaltyTier = "high";
-    fitness -= goRatePenalty;
-  } else if (goRate >= goRatePenaltyTrigger1) {
-    goRatePenalty = goRatePenaltyAmount1;
-    goRatePenaltyTier = "low";
-    fitness -= goRatePenalty;
+  if (goGames > fitnessGoMaxGames) {
+    goMaxGamesPenalty = fitnessGoMaxGamesPenalty;
+    fitness -= goMaxGamesPenalty;
   }
 
   // Luck proxy (logging-only):
@@ -814,12 +787,7 @@ function main() {
       win_norm: winNorm,
       go_low_games_penalty: goLowGamesPenalty,
       go_low_games_penalty_amount: fitnessGoLowGamesPenalty,
-      go_rate_penalty: goRatePenalty,
-      go_rate_penalty_tier: goRatePenaltyTier,
-      go_rate_penalty_trigger_1: goRatePenaltyTrigger1,
-      go_rate_penalty_amount_1: goRatePenaltyAmount1,
-      go_rate_penalty_trigger_2: goRatePenaltyTrigger2,
-      go_rate_penalty_amount_2: goRatePenaltyAmount2,
+      go_max_games_penalty: goMaxGamesPenalty,
       go_fail_penalty: goFailPenalty,
       go_fail_penalty_trigger: goFailPenaltyTrigger,
       go_fail_penalty_amount: goFailPenaltyAmount,
@@ -834,6 +802,8 @@ function main() {
         gold: fitnessGoldWeight,
       },
       go_min_games: fitnessGoMinGames,
+      go_max_games: fitnessGoMaxGames,
+      go_max_games_penalty_amount: fitnessGoMaxGamesPenalty,
     },
     eval_time_ms: Math.max(0, Date.now() - evalStartMs),
     seed_used: opts.seed,
