@@ -19,6 +19,9 @@ const DEFAULTS = {
   paramsFile: "src/heuristics/heuristicGPT.js",
   outRoot: null,
   minNetDecisionEv: 1.0,
+  minNetDecisionEvFloor: 0.05,
+  minNetDecisionGoldFloor: 100.0,
+  optionCountScalingEnabled: true,
   minGoldImpact: 200.0,
   minWinImpact: 2.0,
   minGoImpact: 10.0,
@@ -188,9 +191,31 @@ function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
 }
 
+function parseBoolean(value, fallback) {
+  if (value == null || value === "") return Boolean(fallback);
+  const raw = String(value).trim().toLowerCase();
+  if (raw === "1" || raw === "true" || raw === "yes" || raw === "on") return true;
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") return false;
+  return Boolean(fallback);
+}
+
 function atanhSafe(x) {
   const c = clamp(Number(x) || 0, -0.999999, 0.999999);
   return 0.5 * Math.log((1 + c) / (1 - c));
+}
+
+function computeEffectiveMinNetDecisionEv(cfg, optionN) {
+  const base = Math.max(0, Number(cfg?.minNetDecisionEv) || 0);
+  if (!parseBoolean(cfg?.optionCountScalingEnabled, true)) return base;
+
+  const n = Math.max(1, Number(optionN) || 1);
+  const goldFloor = Math.max(0, Number(cfg?.minNetDecisionGoldFloor) || 0);
+  const evFloor = Math.max(0, Number(cfg?.minNetDecisionEvFloor) || 0);
+  if (goldFloor <= 0) return base;
+
+  // Keep expected total-gold gate roughly stable across different option counts.
+  const scaled = goldFloor / n;
+  return clamp(Math.min(base, scaled), evFloor, base);
 }
 
 function quantileSorted(sorted, q) {
@@ -300,18 +325,27 @@ function calcGameStats(payoutByGame) {
 }
 
 function decodeFeatures(f) {
-  const deck = Math.round((Number(f?.[9]) || 0) * 30);
-  const goCount = Math.round((Number(f?.[12]) || 0) * 5) + 1;
-  const selfPi = Math.round((Number(f?.[28]) || 0) * 20);
-  const oppPi = Math.round((Number(f?.[29]) || 0) * 20);
-  const scoreDiff = atanhSafe(Number(f?.[14]) || 0) * 10.0;
-  const selfScore = Math.max(0, atanhSafe(Number(f?.[15]) || 0) * 10.0);
+  if (!Array.isArray(f)) throw new Error("invalid dataset row: features must be an array");
+  const needIdx = [9, 12, 14, 15, 27, 28, 29, 31, 33, 35, 37, 38, 39];
+  for (const idx of needIdx) {
+    const n = Number(f[idx]);
+    if (!Number.isFinite(n)) {
+      throw new Error(`invalid dataset features[${idx}] (non-finite)`);
+    }
+  }
+
+  const deck = Math.round(Number(f[9]) * 30);
+  const goCount = Math.round(Number(f[12]) * 5) + 1;
+  const selfPi = Math.round(Number(f[28]) * 20);
+  const oppPi = Math.round(Number(f[29]) * 20);
+  const scoreDiff = atanhSafe(Number(f[14])) * 10.0;
+  const selfScore = Math.max(0, atanhSafe(Number(f[15])) * 10.0);
   const oppScore = Math.max(0, selfScore - scoreDiff);
-  const oppGwang = Math.round((Number(f?.[27]) || 0) * 5);
-  const oppGodori = Math.round((Number(f?.[31]) || 0) * 3);
-  const oppCheongdan = Math.round((Number(f?.[33]) || 0) * 3);
-  const oppHongdan = Math.round((Number(f?.[35]) || 0) * 3);
-  const oppChodan = Math.round((Number(f?.[37]) || 0) * 3);
+  const oppGwang = Math.round(Number(f[27]) * 5);
+  const oppGodori = Math.round(Number(f[31]) * 3);
+  const oppCheongdan = Math.round(Number(f[33]) * 3);
+  const oppHongdan = Math.round(Number(f[35]) * 3);
+  const oppChodan = Math.round(Number(f[37]) * 3);
   const oppComboNearCount = [oppGodori, oppCheongdan, oppHongdan, oppChodan].filter((x) => x >= 2).length;
   const oppBurstSignals = (oppGwang >= 2 ? 1 : 0) + (oppComboNearCount > 0 ? 1 : 0) + (oppScore >= 6 ? 1 : 0);
   return {
@@ -325,8 +359,8 @@ function decodeFeatures(f) {
     oppScore,
     oppComboNearCount,
     oppBurstSignals,
-    selfCanStop: Number(f?.[38]) > 0.5,
-    oppCanStop: Number(f?.[39]) > 0.5
+    selfCanStop: Number(f[38]) > 0.5,
+    oppCanStop: Number(f[39]) > 0.5
   };
 }
 
@@ -377,15 +411,31 @@ function zoneFns() {
 }
 
 function evaluateRule(rule, currentParams, referenced, goRecs, stopRecs, fnMap, global, cfg) {
-  if (!(rule.param in currentParams)) return null;
-  if (!referenced.has(rule.param)) return null;
+  const reject = (reason, extra = {}) => ({
+    status: "rejected",
+    reject_reason: reason,
+    direction: rule.direction,
+    mode: rule.mode,
+    zone_key: rule.zoneKey,
+    param: rule.param,
+    current: rule.param in currentParams ? Number(currentParams[rule.param]) : null,
+    ...extra
+  });
+
+  if (!(rule.param in currentParams)) return reject("param_missing");
+  if (!referenced.has(rule.param)) return reject("param_unreferenced");
   const fn = fnMap[rule.zoneKey];
-  if (!fn) return null;
+  if (!fn) return reject("zone_missing");
   const zGoRecs = goRecs.filter(fn);
   const zStopRecs = stopRecs.filter(fn);
   const goZ = calcStats(zGoRecs);
   const stopZ = calcStats(zStopRecs);
-  if (goZ.n <= 0 && stopZ.n <= 0) return null;
+  if (goZ.n <= 0 && stopZ.n <= 0) {
+    return reject("zone_empty", {
+      zone_go_n: goZ.n,
+      zone_stop_n: stopZ.n
+    });
+  }
 
   const confidence = clamp(Math.sqrt((goZ.n + stopZ.n) / 80), 0.2, 1.0);
   const baseFlipRate = 0.35;
@@ -396,12 +446,26 @@ function evaluateRule(rule, currentParams, referenced, goRecs, stopRecs, fnMap, 
   let goldDelta = 0;
 
   if (rule.mode === "block") {
-    if (goZ.n < 5) return null;
+    if (goZ.n < 5) return reject("block_low_go_samples", { zone_go_n: goZ.n, zone_stop_n: stopZ.n });
     const edgeGold = stopZ.ev - goZ.ev;
     const edgeFail = goZ.failRate - stopZ.failRate;
     const reliableRisk = goZ.failCiLow > global.go.failCiHigh || goZ.n >= 20;
-    if (!reliableRisk && edgeGold <= 0) return null;
-    if (edgeGold <= 0 && edgeFail <= 0) return null;
+    if (!reliableRisk && edgeGold <= 0) {
+      return reject("block_unreliable_and_nonpositive_edge", {
+        zone_go_n: goZ.n,
+        zone_stop_n: stopZ.n,
+        edge_gold: edgeGold,
+        edge_fail: edgeFail
+      });
+    }
+    if (edgeGold <= 0 && edgeFail <= 0) {
+      return reject("block_nonpositive_edge", {
+        zone_go_n: goZ.n,
+        zone_stop_n: stopZ.n,
+        edge_gold: edgeGold,
+        edge_fail: edgeFail
+      });
+    }
     const oppCostMul = clamp(
       global.stop.ev > 1e-9 ? Math.max(goZ.avgLossAbs, goZ.p90LossAbs) / Math.max(global.stop.ev, 1e-9) : 1,
       0.7,
@@ -412,12 +476,37 @@ function evaluateRule(rule, currentParams, referenced, goRecs, stopRecs, fnMap, 
     failDelta = -flipCount * Math.max(0, edgeFail);
     goldDelta = flipCount * edgeGold;
   } else {
-    if (stopZ.n < 6 || goZ.n < 6) return null;
+    if (stopZ.n < 6 || goZ.n < 6) {
+      return reject("expand_low_samples", {
+        zone_go_n: goZ.n,
+        zone_stop_n: stopZ.n
+      });
+    }
     const edgeGold = goZ.ev - stopZ.ev;
-    if (edgeGold <= 0) return null;
-    if (goZ.failRate > Math.min(0.24, global.go.failRate + 0.07)) return null;
+    if (edgeGold <= 0) {
+      return reject("expand_nonpositive_edge", {
+        zone_go_n: goZ.n,
+        zone_stop_n: stopZ.n,
+        edge_gold: edgeGold
+      });
+    }
+    if (goZ.failRate > Math.min(0.24, global.go.failRate + 0.07)) {
+      return reject("expand_failrate_too_high", {
+        zone_go_n: goZ.n,
+        zone_stop_n: stopZ.n,
+        zone_go_fail_rate: goZ.failRate,
+        baseline_go_fail_rate: global.go.failRate
+      });
+    }
     const reliableAttack = goZ.failCiHigh <= Math.max(global.go.failRate, 0.12) || goZ.n >= 20;
-    if (!reliableAttack) return null;
+    if (!reliableAttack) {
+      return reject("expand_unreliable_attack", {
+        zone_go_n: goZ.n,
+        zone_stop_n: stopZ.n,
+        zone_go_fail_ci_high: goZ.failCiHigh,
+        baseline_go_fail_rate: global.go.failRate
+      });
+    }
     flipCount = stopZ.n * baseFlipRate * confidence;
     goDelta = flipCount;
     failDelta = flipCount * Math.max(0, goZ.failRate - stopZ.failRate);
@@ -432,7 +521,12 @@ function evaluateRule(rule, currentParams, referenced, goRecs, stopRecs, fnMap, 
     Number.isFinite(rule.min) ? rule.min : Number.NEGATIVE_INFINITY,
     Number.isFinite(rule.max) ? rule.max : Number.POSITIVE_INFINITY
   );
-  if (round(suggested, 6) === round(Number(currentParams[rule.param]), 6)) return null;
+  if (round(suggested, 6) === round(Number(currentParams[rule.param]), 6)) {
+    return reject("no_param_change", {
+      zone_go_n: goZ.n,
+      zone_stop_n: stopZ.n
+    });
+  }
 
   const rec = {
     direction: rule.direction,
@@ -461,15 +555,25 @@ function evaluateRule(rule, currentParams, referenced, goRecs, stopRecs, fnMap, 
   };
 
   const isMeaningful =
-    netDecisionEv >= cfg.minNetDecisionEv &&
+    netDecisionEv >= Number(global?.effectiveMinNetDecisionEv || 0) &&
     (
       Math.abs(rec.expected_total_gold_delta) >= cfg.minGoldImpact ||
       Math.abs(rec.expected_win_delta) >= cfg.minWinImpact ||
       Math.abs(rec.expected_go_delta_count) >= cfg.minGoImpact ||
       Math.abs(rec.expected_fail_delta_count) >= cfg.minFailImpact
     );
-  if (!isMeaningful) return null;
-  return rec;
+  if (!isMeaningful) {
+    return reject("below_threshold", {
+      zone_go_n: goZ.n,
+      zone_stop_n: stopZ.n,
+      net_decision_ev_delta: netDecisionEv,
+      expected_total_gold_delta: rec.expected_total_gold_delta,
+      expected_win_delta: rec.expected_win_delta,
+      expected_go_delta_count: rec.expected_go_delta_count,
+      expected_fail_delta_count: rec.expected_fail_delta_count
+    });
+  }
+  return { status: "ok", ...rec };
 }
 
 function dedupeBestByParamDirection(records) {
@@ -562,9 +666,34 @@ function buildSummaryText(payload) {
   );
   lines.push("");
   lines.push(
-    `Filter thresholds: netEV>=${payload.thresholds.min_net_decision_ev}, |gold|>=${payload.thresholds.min_gold_impact}, |win|>=${payload.thresholds.min_win_impact}, |GO|>=${payload.thresholds.min_go_impact}, |fail|>=${payload.thresholds.min_fail_impact}`
+    `Filter thresholds: netEV>=${payload.thresholds.effective_min_net_decision_ev} (base=${payload.thresholds.min_net_decision_ev}, optionN=${payload.thresholds.option_decisions}, floorGold=${payload.thresholds.min_net_decision_gold_floor}, evFloor=${payload.thresholds.min_net_decision_ev_floor}, scaling=${payload.thresholds.option_count_scaling_enabled ? "on" : "off"}), |gold|>=${payload.thresholds.min_gold_impact}, |win|>=${payload.thresholds.min_win_impact}, |GO|>=${payload.thresholds.min_go_impact}, |fail|>=${payload.thresholds.min_fail_impact}`
   );
   lines.push("");
+
+  if (payload?.diagnostics) {
+    const d = payload.diagnostics;
+    lines.push("Diagnostics:");
+    lines.push(
+      `- rules=${d.rule_count}, accepted(before-dedupe)=${d.accepted_candidate_count}, accepted(unique)=${d.unique_candidate_count}, rejected=${d.rejected_count}`
+    );
+    const reasonParts = Object.entries(d.reject_reason_counts || {})
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .slice(0, 8)
+      .map(([k, v]) => `${k}:${v}`);
+    lines.push(`- top reject reasons: ${reasonParts.length > 0 ? reasonParts.join(", ") : "(none)"}`);
+    if (Array.isArray(d.top_rejected) && d.top_rejected.length > 0) {
+      lines.push("- top rejected candidates:");
+      for (const r of d.top_rejected) {
+        lines.push(
+          `  - ${r.direction}/${r.param} zone=${r.zone_key} reason=${r.reject_reason} netEV=${round(
+            r.net_decision_ev_delta,
+            4
+          )} gold=${round(r.expected_total_gold_delta, 2)}`
+        );
+      }
+    }
+    lines.push("");
+  }
 
   const planOrder = ["defense", "attack"];
   for (const key of planOrder) {
@@ -611,6 +740,12 @@ if (argv.help) {
   console.log(`Usage:
 node scripts/optimizer_by_gpt.mjs --kibo <kibo.jsonl> --dataset <dataset.jsonl> --actor-policy <POLICY> --params-file <heuristic.js> [--actor human|ai]
 
+Option-count scaling (default on):
+  --min-net-decision-ev <v>          base threshold (default: 1.0)
+  --min-net-decision-gold-floor <v>  total-gold floor used for scaling (default: 100)
+  --min-net-decision-ev-floor <v>    lower bound after scaling (default: 0.05)
+  --option-count-scaling <1|0>       enable/disable scaling (default: 1)
+
 Outputs:
   <match_dir>/optimize_gpt/optimizer_gpt_summary.txt
   <match_dir>/optimize_gpt/optimizer_gpt_plan.json
@@ -626,6 +761,14 @@ const cfg = {
   paramsFile: String(argv["params-file"] || DEFAULTS.paramsFile),
   outRoot: resolveOutRoot(String(argv.kibo || ""), argv["out-root"] ?? DEFAULTS.outRoot),
   minNetDecisionEv: Number(argv["min-net-decision-ev"] || DEFAULTS.minNetDecisionEv),
+  minNetDecisionEvFloor: Number(argv["min-net-decision-ev-floor"] || DEFAULTS.minNetDecisionEvFloor),
+  minNetDecisionGoldFloor: Number(
+    argv["min-net-decision-gold-floor"] || DEFAULTS.minNetDecisionGoldFloor
+  ),
+  optionCountScalingEnabled: parseBoolean(
+    argv["option-count-scaling"],
+    DEFAULTS.optionCountScalingEnabled
+  ),
   minGoldImpact: Number(argv["min-gold-impact"] || DEFAULTS.minGoldImpact),
   minWinImpact: Number(argv["min-win-impact"] || DEFAULTS.minWinImpact),
   minGoImpact: Number(argv["min-go-impact"] || DEFAULTS.minGoImpact),
@@ -645,18 +788,42 @@ const dataset = readJsonl(cfg.dataset);
 const payoutByGame = buildPayoutMap(kibo, cfg.actor);
 const gameStats = calcGameStats(payoutByGame);
 const chosen = collectChosenGoStop(dataset, cfg.actor, cfg.actorPolicy);
-const allRecords = chosen.map((r) => ({
-  game: r.game,
-  action: r.action,
-  gold: Number(payoutByGame.get(r.game) ?? 0),
-  ...decodeFeatures(r.features)
-}));
+if (chosen.length <= 0) {
+  throw new Error(
+    `no chosen go/stop option rows for actor=${cfg.actor}, policy=${cfg.actorPolicy}. dataset=${cfg.dataset}`
+  );
+}
+
+const allRecords = chosen.map((r) => {
+  if (!payoutByGame.has(r.game)) {
+    throw new Error(`missing payout for game_index=${r.game} in kibo=${cfg.kibo}`);
+  }
+  let decoded;
+  try {
+    decoded = decodeFeatures(r.features);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`invalid features at game_index=${r.game}, action=${r.action}: ${msg}`);
+  }
+  return {
+    game: r.game,
+    action: r.action,
+    gold: Number(payoutByGame.get(r.game)),
+    ...decoded
+  };
+});
 
 const goRecs = allRecords.filter((r) => r.action === "go");
 const stopRecs = allRecords.filter((r) => r.action === "stop");
+if (goRecs.length <= 0 || stopRecs.length <= 0) {
+  throw new Error(
+    `insufficient action diversity: go=${goRecs.length}, stop=${stopRecs.length}. require both > 0`
+  );
+}
 const goStats = calcStats(goRecs);
 const stopStats = calcStats(stopRecs);
 const optionN = Math.max(1, goRecs.length + stopRecs.length);
+const effectiveMinNetDecisionEv = computeEffectiveMinNetDecisionEv(cfg, optionN);
 
 const currentParams = await loadCurrentParams(cfg.paramsFile);
 const referenced = extractReferencedParamKeys(cfg.paramsFile);
@@ -665,13 +832,21 @@ const global = {
   go: goStats,
   stop: stopStats,
   game: gameStats,
-  optionN
+  optionN,
+  effectiveMinNetDecisionEv
 };
 
 const evaluated = [];
+const rejected = [];
 for (const rule of RULES) {
-  const rec = evaluateRule(rule, currentParams, referenced, goRecs, stopRecs, zones, global, cfg);
-  if (rec) evaluated.push(rec);
+  const out = evaluateRule(rule, currentParams, referenced, goRecs, stopRecs, zones, global, cfg);
+  if (!out) continue;
+  if (out.status === "ok") {
+    const { status: _status, ...rec } = out;
+    evaluated.push(rec);
+  } else {
+    rejected.push(out);
+  }
 }
 const unique = dedupeBestByParamDirection(evaluated);
 
@@ -689,6 +864,11 @@ const payload = {
   },
   thresholds: {
     min_net_decision_ev: cfg.minNetDecisionEv,
+    effective_min_net_decision_ev: effectiveMinNetDecisionEv,
+    min_net_decision_ev_floor: cfg.minNetDecisionEvFloor,
+    min_net_decision_gold_floor: cfg.minNetDecisionGoldFloor,
+    option_count_scaling_enabled: Boolean(cfg.optionCountScalingEnabled),
+    option_decisions: optionN,
     min_gold_impact: cfg.minGoldImpact,
     min_win_impact: cfg.minWinImpact,
     min_go_impact: cfg.minGoImpact,
@@ -719,6 +899,31 @@ const payload = {
   plans: {
     defense: defensePlan,
     attack: attackPlan
+  },
+  diagnostics: {
+    rule_count: RULES.length,
+    accepted_candidate_count: evaluated.length,
+    unique_candidate_count: unique.length,
+    rejected_count: rejected.length,
+    reject_reason_counts: rejected.reduce((acc, r) => {
+      const key = String(r.reject_reason || "unknown");
+      acc[key] = Number(acc[key] || 0) + 1;
+      return acc;
+    }, {}),
+    top_rejected: [...rejected]
+      .sort((a, b) => {
+        const an = Number(a.net_decision_ev_delta);
+        const bn = Number(b.net_decision_ev_delta);
+        if (Number.isFinite(bn) && Number.isFinite(an) && bn !== an) return bn - an;
+        const ag = Number(a.expected_total_gold_delta);
+        const bg = Number(b.expected_total_gold_delta);
+        if (Number.isFinite(bg) && Number.isFinite(ag) && bg !== ag) return bg - ag;
+        return String(a.reject_reason || "").localeCompare(String(b.reject_reason || ""));
+      })
+      .slice(0, 8)
+      .map((r) => ({
+        ...Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === "number" ? round(v, 6) : v]))
+      }))
   },
   all_candidates: unique.map((r) => ({
     ...Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === "number" ? round(v, 6) : v]))

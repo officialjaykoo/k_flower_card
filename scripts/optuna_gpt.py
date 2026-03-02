@@ -138,13 +138,10 @@ INT_PARAMS = {
     "goMinPiDesperate": (3, 7),
     "goMinPiSecondTrailingDelta": (0, 3),
     "goHardThreatDeckCut": (4, 10),
-    "goHardOppFiveCut": (5, 10),
     "goHardOppScoreCut": (7, 12),
     "goHardLateOneAwayCut": (40, 85),
-    "goHardLateOneAwayDeckCut": (5, 12),
     "goHardGoCountCap": (2, 5),
     "goHardJokboOneAwayCut": (40, 85),
-    "goHardJokboOneAwayDeckCut": (6, 14),
     "goHardJokboOneAwayCountCut": (1, 2),
 }
 

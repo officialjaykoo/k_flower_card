@@ -93,7 +93,7 @@ export const DEFAULT_PARAMS = {
 
   // go model (utility)
   goUpsideTrailBonus: 0.12,
-  goRiskGoCountMul: 0.11,
+  goRiskGoCountMul: 0.09,
   goRiskLateDeckBonus: 0.1,
   stopLeadMul: 0.07,
   stopCarryMul: 0.1,
@@ -113,6 +113,13 @@ export const DEFAULT_PARAMS = {
   goSoftHighPiMargin: 0.06,
   goSoftTrailHighPiMargin: 0.04,
   goSoftValueMargin: 0.02,
+  goSecondChaseThresholdRelief: 0.045,
+  goSecondChaseNearMargin: 0.03,
+  goSecondChasePiMargin: 1,
+  goSecondChaseThreatCap: 0.72,
+  goSecondChaseOneAwayCap: 62,
+  goSecondChaseSwingCap: 0.45,
+  goSecondChaseHardRiskRelaxMargin: 0.08,
 
   // go hard safe-stop + light penalties
   goHardSafeStopEnabled: 1,
@@ -174,11 +181,8 @@ export const DEFAULT_PARAMS = {
   goHardGoCountCap: 4,
   goHardJokboOneAwayCountCut: 1,
   goHardJokboOneAwayCut: 68,
-  goHardJokboOneAwayDeckCut: 7,
   goHardJokboOneAwaySwingCut: 0.45964118755905231,
   goHardLateOneAwayCut: 47,
-  goHardLateOneAwayDeckCut: 8,
-  goHardOppFiveCut: 7,
   goHardOppScoreCut: 8,
   goHardRiskOneAwayMul: 0.67869959500383537,
   goHardRiskOppStopPenalty: 0.43208757051963176,
@@ -255,21 +259,13 @@ export const DEFAULT_PARAMS = {
   cardSecondNoMatchRiskMul: 0.2,
   cardFirstTrailTempoBonus: 0.35,
   goModeSafeThresholdUp: 0.06,
-  goModeSafeRiskMul: 1.18,
-  goModeSafeStopMul: 1.1,
   goModeChaseThresholdDown: 0.04,
-  goModeChaseUpsideMul: 1.08,
-  goModeChaseRiskMul: 1.0,
-  goModeChaseStopMul: 0.95,
-  goModeSecondSafeThresholdUp: 0.07,
-  goModeSecondChaseThresholdDown: 0.0,
-  goModeLateSafeThresholdUp: 0.04,
-  goModeLateChaseThresholdDown: 0.0,
   goHardSecondChaseBlockEnabled: 1,
   goHardSecondChaseThreatCut: 0.8,
   goHardSecondChaseLateDeckCut: 7,
-  goHardSecondChaseOneAwayCut: 70,
-  goHardCarryOppStopCarryMin: 1,
+  goHardCarryOppStopCarryMin: 2,
+  goHardCarryOppStopThreatCut: 0.85,
+  goHardCarryOppStopLateDeckCut: 6,
 
   // decision trace
   decisionTraceEnabled: 0,
@@ -750,33 +746,10 @@ function calcHardStopRiskScore(core, flags, P) {
   return riskScore;
 }
 
-function deriveGoMode(core, flags, P) {
-  const lateDeck = safeNum(core?.deckCount) <= safeNum(P?.phaseLateDeck, 6);
-  const chaseMode = Boolean(flags?.desperate || flags?.trailing);
-  const safeMode = Boolean(!chaseMode && (flags?.leading || flags?.selfCanStop || safeNum(core?.selfPi) >= 8));
-  const mode = chaseMode ? "chase" : safeMode ? "safe" : "neutral";
-
-  let upsideMul = 1.0;
-  let riskMul = 1.0;
-  let stopMul = 1.0;
-  let thresholdShift = 0.0;
-
-  if (mode === "safe") {
-    thresholdShift += safeNum(P?.goModeSafeThresholdUp, 0.05);
-    riskMul *= Math.max(0.5, safeNum(P?.goModeSafeRiskMul, 1.12));
-    stopMul *= Math.max(0.5, safeNum(P?.goModeSafeStopMul, 1.06));
-    if (flags?.second) thresholdShift += safeNum(P?.goModeSecondSafeThresholdUp, 0.03);
-    if (lateDeck) thresholdShift += safeNum(P?.goModeLateSafeThresholdUp, 0.03);
-  } else if (mode === "chase") {
-    thresholdShift -= safeNum(P?.goModeChaseThresholdDown, 0.07);
-    upsideMul *= Math.max(0.5, safeNum(P?.goModeChaseUpsideMul, 1.15));
-    riskMul *= Math.max(0.5, safeNum(P?.goModeChaseRiskMul, 0.9));
-    stopMul *= Math.max(0.2, safeNum(P?.goModeChaseStopMul, 0.86));
-    if (flags?.second) thresholdShift -= safeNum(P?.goModeSecondChaseThresholdDown, 0.02);
-    if (lateDeck) thresholdShift -= safeNum(P?.goModeLateChaseThresholdDown, 0.02);
-  }
-
-  return { mode, upsideMul, riskMul, stopMul, thresholdShift };
+function classifyGoMode(core, flags) {
+  if (flags?.desperate || flags?.trailing) return "chase";
+  if (flags?.leading || flags?.selfCanStop || safeNum(core?.selfPi) >= 8) return "safe";
+  return "neutral";
 }
 
 // ---------------------------------------------------------------------------
@@ -1089,74 +1062,84 @@ export function shouldGoGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
 
   const swingProb = estimateNextTurnSwingProb(core, flags, P);
   const hardRiskScore = calcHardStopRiskScore(core, flags, P);
+  const goMode = classifyGoMode(core, flags);
   traceLayer(trace, "layer1_hard_risk", {
     swingProb,
     score: hardRiskScore,
-    threshold: safeNum(P.goHardRiskThreshold, 0.62)
+    threshold: safeNum(P.goHardRiskThreshold, 0.62),
+    mode: goMode
   });
 
-  // Layer 1: deterministic hard-stop cutoff.
+  // Layer 1: deterministic hard-stop cutoffs.
   if (!flags.desperate) {
     let hardReason = "";
     if (core.oppScore >= P.goHardOppScoreCut && core.myScore <= core.oppScore + safeNum(P.goHardOppLeadGrace, 1)) {
       hardReason = "opp_score_cut";
     } else if (
       flags.oppCanStop &&
-      core.carry >= safeNum(P.goHardCarryOppStopCarryMin, 1)
+      core.carry >= safeNum(P.goHardCarryOppStopCarryMin, 2) &&
+      core.deckCount <= safeNum(P.goHardCarryOppStopLateDeckCut, 6) &&
+      core.threat >= safeNum(P.goHardCarryOppStopThreatCut, 0.85)
     ) {
       hardReason = "carry_opp_stop_hard";
-    } else if (core.selfFive === 0 && core.oppFive >= P.goHardOppFiveCut) {
-      hardReason = "opp_five_cut";
-    } else if (core.threat >= P.goHardThreatCut && core.deckCount <= P.goHardThreatDeckCut) {
-      hardReason = "threat_deck_cut";
-    } else if (core.oneAwayProb >= P.goHardLateOneAwayCut && core.deckCount <= P.goHardLateOneAwayDeckCut) {
-      hardReason = "late_one_away_cut";
     } else if (
-      core.oppJokboOneAway >= safeNum(P.goHardJokboOneAwayCountCut, 1) &&
-      core.deckCount <= safeNum(P.goHardJokboOneAwayDeckCut, 10) &&
+      safeNum(P.goHardSecondChaseBlockEnabled, 1) > 0 &&
+      flags.second &&
+      goMode === "chase" &&
+      flags.oppCanStop &&
+      core.deckCount <= safeNum(P.goHardSecondChaseLateDeckCut, 7) &&
+      core.threat >= safeNum(P.goHardSecondChaseThreatCut, 0.8)
+    ) {
+      hardReason = "second_chase_block";
+    } else if (
+      core.deckCount <= safeNum(P.goHardThreatDeckCut, 10) &&
       (
-        core.oneAwayProb >= safeNum(P.goHardJokboOneAwayCut, 64) ||
-        swingProb >= safeNum(P.goHardJokboOneAwaySwingCut, 0.62)
+        core.threat >= safeNum(P.goHardThreatCut, 1.0) ||
+        core.oneAwayProb >= safeNum(P.goHardLateOneAwayCut, 47) ||
+        (
+          core.oppJokboOneAway >= safeNum(P.goHardJokboOneAwayCountCut, 1) &&
+          (
+            core.oneAwayProb >= safeNum(P.goHardJokboOneAwayCut, 64) ||
+            swingProb >= safeNum(P.goHardJokboOneAwaySwingCut, 0.62)
+          )
+        )
       )
     ) {
-      hardReason = "jokbo_one_away_hard_stop";
-    } else if (core.goCount >= P.goHardGoCountCap && core.threat >= P.goHardGoCountThreatCut) {
+      hardReason = "late_risk_cut";
+    } else if (
+      core.goCount >= safeNum(P.goHardGoCountCap, 4) &&
+      core.threat >= safeNum(P.goHardGoCountThreatCut, 0.72)
+    ) {
       hardReason = "go_count_threat_cut";
     } else if (hardRiskScore >= safeNum(P.goHardRiskThreshold, 0.62)) {
       hardReason = "hard_risk_score";
     }
+
+    if (
+      hardReason &&
+      (hardReason === "late_risk_cut" || hardReason === "hard_risk_score") &&
+      flags.second &&
+      flags.trailing &&
+      !flags.oppCanStop &&
+      core.selfPi >= flags.minPi + Math.max(0, Math.floor(safeNum(P.goSecondChasePiMargin, 1))) &&
+      core.threat <= safeNum(P.goSecondChaseThreatCap, 0.72) &&
+      core.oneAwayProb <= safeNum(P.goSecondChaseOneAwayCap, 62) &&
+      swingProb <= safeNum(P.goSecondChaseSwingCap, 0.45) &&
+      hardRiskScore <= safeNum(P.goHardRiskThreshold, 0.62) + safeNum(P.goSecondChaseHardRiskRelaxMargin, 0.08)
+    ) {
+      traceLayer(trace, "layer1_hard_relax", {
+        relaxed: hardReason,
+        mode: "second_chase_relax",
+        swingProb,
+        hardRiskScore
+      });
+      hardReason = "";
+    }
+
     if (hardReason) {
-      traceLayer(trace, "layer1_hard_stop", { reason: hardReason, swingProb, hardRiskScore });
+      traceLayer(trace, "layer1_hard_stop", { reason: hardReason, swingProb, hardRiskScore, mode: goMode });
       return pushTrace(trace, false, hardReason, P, deps);
     }
-  }
-
-  const goMode = deriveGoMode(core, flags, P);
-  traceLayer(trace, "layer1_mode", {
-    mode: goMode.mode,
-    upsideMul: goMode.upsideMul,
-    riskMul: goMode.riskMul,
-    stopMul: goMode.stopMul,
-    thresholdShift: goMode.thresholdShift
-  });
-
-  // Structural hard gate: block second-seat chase GO unless desperate mode.
-  if (
-    safeNum(P.goHardSecondChaseBlockEnabled, 1) > 0 &&
-    flags.second &&
-    goMode.mode === "chase" &&
-    !flags.desperate &&
-    flags.oppCanStop &&
-    (
-      core.threat >= safeNum(P.goHardSecondChaseThreatCut, 0.8) ||
-      (
-        core.deckCount <= safeNum(P.goHardSecondChaseLateDeckCut, 7) &&
-        core.oneAwayProb >= safeNum(P.goHardSecondChaseOneAwayCut, 70)
-      )
-    )
-  ) {
-    traceLayer(trace, "layer1_hard_stop", { reason: "second_chase_block" });
-    return pushTrace(trace, false, "second_chase_block", P, deps);
   }
 
   // Layer 2 fast-pass: emergency comeback mode.
@@ -1170,7 +1153,7 @@ export function shouldGoGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
     return pushTrace(trace, true, "desperate_fast_go", P, deps);
   }
 
-  // Layer 2: value/risk composition.
+  // Layer 2: compact value/risk composition.
   const oneAwayNorm = core.oneAwayProb / 100;
   const upside =
     Math.max(0, core.myScore - 6) * P.goUpsideScoreMul +
@@ -1192,16 +1175,17 @@ export function shouldGoGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
     Math.max(0, core.carry - 1) * P.stopCarryMul +
     (core.myScore >= 10 ? P.stopTenBonus : 0);
 
-  const utilityUpsideWeight = safeNum(P.goUtilityUpsideWeight, 1.0);
-  const utilityRiskWeight = safeNum(P.goUtilityRiskWeight, 1.0);
-  const utilityStopWeight = safeNum(P.goUtilityStopWeight, 1.0);
-  const modeUpside = upside * goMode.upsideMul;
-  const modeRisk = risk * goMode.riskMul;
-  const modeStopValue = stopValue * goMode.stopMul;
   let goValue =
-    modeUpside * utilityUpsideWeight -
-    modeRisk * utilityRiskWeight -
-    modeStopValue * utilityStopWeight;
+    upside * safeNum(P.goUtilityUpsideWeight, 1.0) -
+    risk * safeNum(P.goUtilityRiskWeight, 1.0) -
+    stopValue * safeNum(P.goUtilityStopWeight, 1.0);
+
+  if (goMode === "safe") {
+    goValue -= safeNum(P.goModeSafeThresholdUp, 0.05) * 0.5;
+  } else if (goMode === "chase") {
+    goValue += safeNum(P.goModeChaseThresholdDown, 0.07) * 0.5;
+  }
+
   goValue -= clamp(flags.lead / 10, -1, 1) * safeNum(P.goLiteScoreDiffMul, 0.04);
   if (flags.second && flags.trailing) goValue += P.goSecondTrailBonus;
   if (core.selfPi >= 8) goValue += P.goRallyPiWindowBonus;
@@ -1216,7 +1200,7 @@ export function shouldGoGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
     goValue += safeNum(P.goSafeGoBonus, 0.14);
   }
 
-  let threshold = P.goBaseThreshold + goMode.thresholdShift;
+  let threshold = P.goBaseThreshold;
   if (flags.leading) threshold += P.goThresholdLeadUp;
   if (flags.trailing) threshold -= P.goThresholdTrailDown;
   if (core.threat >= 0.72) threshold += P.goThresholdPressureUp;
@@ -1226,6 +1210,7 @@ export function shouldGoGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   threshold += swingProb * safeNum(P.goLookaheadThresholdMul, 0.09);
   if (core.deckCount <= P.phaseLateDeck) {
     threshold += safeNum(P.goLiteLatePenalty, 0.045);
+  } else {
     threshold -= safeNum(P.goDeckLowBonus, 0.02);
   }
   if (flags.oppCanStop) threshold += safeNum(P.goLiteOppCanStopPenalty, 0.1);
@@ -1234,6 +1219,19 @@ export function shouldGoGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   threshold += Math.max(0, flags.lead) * safeNum(P.goScoreDiffBonus, 0.01);
   threshold -= Math.max(0, -flags.lead) * safeNum(P.goScoreDiffBonus, 0.01) * 0.5;
   if (core.oppPi >= 9 && core.selfPi <= flags.minPi + 1) threshold += safeNum(P.goUnseeHighPiPenalty, 0.04);
+
+  if (
+    flags.second &&
+    flags.trailing &&
+    !flags.oppCanStop &&
+    core.selfPi >= flags.minPi + Math.max(0, Math.floor(safeNum(P.goSecondChasePiMargin, 1))) &&
+    core.threat <= safeNum(P.goSecondChaseThreatCap, 0.72) &&
+    core.oneAwayProb <= safeNum(P.goSecondChaseOneAwayCap, 62) &&
+    swingProb <= safeNum(P.goSecondChaseSwingCap, 0.45)
+  ) {
+    threshold -= safeNum(P.goSecondChaseThresholdRelief, 0.045);
+  }
+
   threshold *= Math.max(0.1, safeNum(P.goUtilityThresholdWeight, 1.0));
 
   if (
@@ -1247,13 +1245,10 @@ export function shouldGoGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   }
 
   traceLayer(trace, "layer2_utility", {
-    mode: goMode.mode,
+    mode: goMode,
     upside,
     risk,
     stopValue,
-    modeUpside,
-    modeRisk,
-    modeStopValue,
     swingProb,
     goValue,
     threshold,
@@ -1261,12 +1256,25 @@ export function shouldGoGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   });
 
   if (goValue < threshold) {
+    if (
+      flags.second &&
+      flags.trailing &&
+      !flags.oppCanStop &&
+      core.selfPi >= flags.minPi + Math.max(0, Math.floor(safeNum(P.goSecondChasePiMargin, 1))) &&
+      core.threat <= safeNum(P.goSecondChaseThreatCap, 0.72) &&
+      core.oneAwayProb <= safeNum(P.goSecondChaseOneAwayCap, 62) &&
+      swingProb <= safeNum(P.goSecondChaseSwingCap, 0.45) &&
+      goValue >= threshold - safeNum(P.goSecondChaseNearMargin, 0.03)
+    ) {
+      traceLayer(trace, "layer3_final", {
+        mode: "second_chase_near",
+        decision: 1,
+        margin: goValue - threshold
+      });
+      return pushTrace(trace, true, "second_chase_near_pass", P, deps);
+    }
     return pushTrace(trace, false, "utility_below_threshold", P, deps);
   }
-
-  const modeMarginAdj =
-    goMode.mode === "safe" ? 0.02 :
-    goMode.mode === "chase" ? -0.01 : 0;
 
   // Layer 3: soft guards for high-pi and trailing windows.
   if (core.selfPi >= 9) {
@@ -1276,19 +1284,19 @@ export function shouldGoGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
     ) {
       return pushTrace(trace, false, "soft_cap_high_pi", P, deps);
     }
-    const ok = goValue >= threshold + Math.max(0, safeNum(P.goSoftHighPiMargin, 0.06) + modeMarginAdj);
+    const ok = goValue >= threshold + safeNum(P.goSoftHighPiMargin, 0.06);
     traceLayer(trace, "layer3_final", { mode: "high_pi", decision: ok ? 1 : 0 });
     return pushTrace(trace, ok, ok ? "high_pi_margin_pass" : "high_pi_margin_fail", P, deps);
   }
 
   if (flags.trailing && core.selfPi >= 8) {
-    const ok = goValue >= threshold + Math.max(0, safeNum(P.goSoftTrailHighPiMargin, 0.04) + modeMarginAdj);
+    const ok = goValue >= threshold + safeNum(P.goSoftTrailHighPiMargin, 0.04);
     traceLayer(trace, "layer3_final", { mode: "trail_high_pi", decision: ok ? 1 : 0 });
     return pushTrace(trace, ok, ok ? "trail_high_pi_pass" : "trail_high_pi_fail", P, deps);
   }
 
   if (core.selfPi >= 8) {
-    const ok = goValue >= threshold + Math.max(0, safeNum(P.goSoftValueMargin, 0.02) + modeMarginAdj);
+    const ok = goValue >= threshold + safeNum(P.goSoftValueMargin, 0.02);
     traceLayer(trace, "layer3_final", { mode: "high_pi_soft", decision: ok ? 1 : 0 });
     return pushTrace(trace, ok, ok ? "high_pi_soft_pass" : "high_pi_soft_fail", P, deps);
   }
