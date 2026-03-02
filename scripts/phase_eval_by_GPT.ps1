@@ -44,6 +44,8 @@ function Resolve-EvalGateRule {
 
   $defaultMeanGold = 0.0
   $defaultWinRate = 0.45
+  $defaultCvar10Gold = -1000000000.0
+  $defaultCatastrophicLossRate = 1.0
 
   $meanGold = Get-OptionalDouble -Value $Runtime.eval_pass_mean_gold_delta_min
   if ([double]::IsNaN($meanGold)) {
@@ -58,15 +60,22 @@ function Resolve-EvalGateRule {
     $winRate = $defaultWinRate
   }
 
+  $cvar10Gold = Get-OptionalDouble -Value $Runtime.eval_pass_cvar10_gold_delta_min
+  if ([double]::IsNaN($cvar10Gold)) {
+    $cvar10Gold = $defaultCvar10Gold
+  }
+
+  $catastrophicLossRate = Get-OptionalDouble -Value $Runtime.eval_pass_catastrophic_loss_rate_max
+  if ([double]::IsNaN($catastrophicLossRate)) {
+    $catastrophicLossRate = $defaultCatastrophicLossRate
+  }
+
   return [ordered]@{
     mean_gold_delta_min = [double]$meanGold
     win_rate_min = [double]$winRate
+    cvar10_gold_delta_min = [double]$cvar10Gold
+    catastrophic_loss_rate_max = [double]$catastrophicLossRate
   }
-}
-
-function ConvertTo-NativeJsonArg {
-  param([Parameter(Mandatory = $true)][string]$JsonText)
-  return $JsonText.Replace('"', '\"')
 }
 
 # ---------------------------------------------------------------------------
@@ -133,8 +142,7 @@ if ($hasPolicy) {
 }
 if ($hasPolicyMix) {
   $mixJson = $mixValue | ConvertTo-Json -Depth 8 -Compress
-  $mixArg = ConvertTo-NativeJsonArg -JsonText $mixJson
-  $cmd += @("--opponent-policy-mix", "$mixArg")
+  $cmd += @("--opponent-policy-mix", "$mixJson")
 }
 
 # ---------------------------------------------------------------------------
@@ -164,9 +172,8 @@ $goGames = [int](Get-OptionalDouble -Value $r.go_games -DefaultValue 0.0)
 $goFailCount = [int](Get-OptionalDouble -Value $r.go_fail_count -DefaultValue 0.0)
 $goFailRate = [double](Get-OptionalDouble -Value $r.go_fail_rate -DefaultValue 0.0)
 $goRate = [double](Get-OptionalDouble -Value $r.go_rate -DefaultValue 0.0)
-$luckProxy = [double](Get-OptionalDouble -Value $r.luck_proxy -DefaultValue 0.0)
-$luckSeatWinRateGap = [double](Get-OptionalDouble -Value $r.luck_components.seat_win_rate_gap -DefaultValue 0.0)
-$luckGoldVolatilityNorm = [double](Get-OptionalDouble -Value $r.luck_components.gold_volatility_norm -DefaultValue 0.0)
+$cvar10GoldDelta = [double](Get-OptionalDouble -Value $r.cvar10_gold_delta -DefaultValue 0.0)
+$catastrophicLossRate = [double](Get-OptionalDouble -Value $r.catastrophic_loss_rate -DefaultValue 0.0)
 $fitnessModel = [string]$r.fitness_model
 $fitnessProfile = [string]$r.fitness_profile
 $goldCore = [double](Get-OptionalDouble -Value $r.fitness_components.gold_core -DefaultValue 0.0)
@@ -181,6 +188,8 @@ Write-Host "=== Phase$Phase Evaluation (Seed=$Seed) ==="
 Write-Host "Win rate:        $($r.win_rate)"
 Write-Host "Mean gold delta: $($r.mean_gold_delta)"
 Write-Host "P10/P50/P90:     $($r.p10_gold_delta) / $($r.p50_gold_delta) / $($r.p90_gold_delta)"
+Write-Host "CVaR10 delta:    $cvar10GoldDelta"
+Write-Host "Cat loss rate:   $catastrophicLossRate"
 Write-Host "Fitness:         $($r.fitness)"
 Write-Host "Fitness model:   $fitnessModel"
 Write-Host "Fitness profile: $fitnessProfile"
@@ -195,12 +204,6 @@ Write-Host "GO games:        $goGames"
 Write-Host "GO fail count:   $goFailCount"
 Write-Host "GO fail rate:    $goFailRate"
 Write-Host "GO rate:         $goRate"
-Write-Host "Luck proxy:      $luckProxy"
-Write-Host "Luck seat gap:   $luckSeatWinRateGap"
-Write-Host "Luck volatility: $luckGoldVolatilityNorm"
-Write-Host "Imit play ratio: $($r.imitation_play_ratio)"
-Write-Host "Imit match ratio:$($r.imitation_match_ratio)"
-Write-Host "Imit opt ratio:  $($r.imitation_option_ratio)"
 Write-Host "Bankrupt count:  $($r.bankrupt.my_bankrupt_count)"
 Write-Host "================================"
 
@@ -209,11 +212,15 @@ Write-Host "================================"
 # ---------------------------------------------------------------------------
 $passMeanGold = ([double]$r.mean_gold_delta -ge [double]$passRule.mean_gold_delta_min)
 $passWinRate = ([double]$r.win_rate -ge [double]$passRule.win_rate_min)
-$passed = $passMeanGold -and $passWinRate
+$passCvar10Gold = ($cvar10GoldDelta -ge [double]$passRule.cvar10_gold_delta_min)
+$passCatastrophicLossRate = ($catastrophicLossRate -le [double]$passRule.catastrophic_loss_rate_max)
+$passed = $passMeanGold -and $passWinRate -and $passCvar10Gold -and $passCatastrophicLossRate
 
 $failReasons = @()
 if (-not $passMeanGold) { $failReasons += "mean_gold_delta" }
 if (-not $passWinRate) { $failReasons += "win_rate" }
+if (-not $passCvar10Gold) { $failReasons += "cvar10_gold_delta" }
+if (-not $passCatastrophicLossRate) { $failReasons += "catastrophic_loss_rate" }
 $reasonText = if ($passed) { "eval_gate_passed" } else { "eval_gate_not_passed:" + ($failReasons -join ",") }
 
 $passState = [ordered]@{
@@ -224,9 +231,13 @@ $passState = [ordered]@{
   pass_rule = [ordered]@{
     mean_gold_delta_min = [double]$passRule.mean_gold_delta_min
     win_rate_min = [double]$passRule.win_rate_min
+    cvar10_gold_delta_min = [double]$passRule.cvar10_gold_delta_min
+    catastrophic_loss_rate_max = [double]$passRule.catastrophic_loss_rate_max
   }
   win_rate = [double]$r.win_rate
   mean_gold_delta = [double]$r.mean_gold_delta
+  cvar10_gold_delta = $cvar10GoldDelta
+  catastrophic_loss_rate = $catastrophicLossRate
   fitness = [double]$r.fitness
   go_count = $goCount
   go_games = $goGames
@@ -241,9 +252,6 @@ $passState = [ordered]@{
   bankrupt_rate = $bankruptRate
   bankrupt_penalty = $bankruptPenalty
   go_zero_hard_fail = $goZeroHardFail
-  luck_proxy = $luckProxy
-  luck_seat_win_rate_gap = $luckSeatWinRateGap
-  luck_gold_volatility_norm = $luckGoldVolatilityNorm
   eval_result_path = $savePath
   gate_state_path = $gateStatePath
   transition_ready = [bool]$gate.transition_ready

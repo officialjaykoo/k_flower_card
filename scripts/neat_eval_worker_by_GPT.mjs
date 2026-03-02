@@ -249,6 +249,41 @@ function quantile(values, q) {
   return sorted[idx];
 }
 
+function mean(values) {
+  if (!Array.isArray(values) || values.length <= 0) return 0;
+  return values.reduce((acc, v) => acc + Number(v || 0), 0) / values.length;
+}
+
+function tailMean(values, ratio) {
+  if (!Array.isArray(values) || values.length <= 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const r = Math.max(0.01, Math.min(1.0, Number(ratio || 0.1)));
+  const n = Math.max(1, Math.ceil(sorted.length * r));
+  const slice = sorted.slice(0, n);
+  return mean(slice);
+}
+
+function downsideSemiDeviation(values, center = 0) {
+  if (!Array.isArray(values) || values.length <= 0) return 0;
+  const c = Number(center || 0);
+  let acc = 0;
+  for (const raw of values) {
+    const d = Number(raw || 0) - c;
+    if (d < 0) acc += d * d;
+  }
+  return Math.sqrt(acc / values.length);
+}
+
+function rateAtOrBelow(values, threshold) {
+  if (!Array.isArray(values) || values.length <= 0) return 0;
+  const t = Number(threshold || 0);
+  let hit = 0;
+  for (const raw of values) {
+    if (Number(raw || 0) <= t) hit += 1;
+  }
+  return hit / values.length;
+}
+
 function clamp01(v) {
   const x = Number(v || 0);
   if (x <= 0) return 0;
@@ -301,6 +336,10 @@ function main() {
     ai: 0,
   };
   const opponentPolicyCounts = {};
+  const controlSeatStats = {
+    first: { games: 0, wins: 0, goldDeltas: [] },
+    second: { games: 0, wins: 0, goldDeltas: [] },
+  };
   const seriesSession = {
     roundsPlayed: 0,
     previousEndState: null,
@@ -315,6 +354,8 @@ function main() {
     }
     opponentPolicyCounts[opponentPolicyForGame] = Number(opponentPolicyCounts[opponentPolicyForGame] || 0) + 1;
     firstTurnCounts[firstTurnKey] += 1;
+    const controlSeat = firstTurnKey === controlActor ? "first" : "second";
+    controlSeatStats[controlSeat].games += 1;
     const seed = `${opts.seed}|g=${gi}|first=${firstTurnKey}|sr=${seriesSession.roundsPlayed}`;
     const roundStart = opts.continuousSeries
       ? seriesSession.previousEndState
@@ -335,6 +376,7 @@ function main() {
     const afterGoldDiff = controlGoldDiff(endState, controlActor);
     const goldDelta = afterGoldDiff - beforeGoldDiff;
     goldDeltas.push(goldDelta);
+    controlSeatStats[controlSeat].goldDeltas.push(goldDelta);
     const controlGold = Number(endState?.players?.[controlActor]?.gold || 0);
     const opponentGold = Number(endState?.players?.[opponentActor]?.gold || 0);
     const controlBankrupt = controlGold <= 0;
@@ -359,6 +401,7 @@ function main() {
     const winner = endState?.result?.winner || "unknown";
     if (winner === controlActor) {
       wins += 1;
+      controlSeatStats[controlSeat].wins += 1;
     }
     else if (winner === opponentActor) losses += 1;
     else draws += 1;
@@ -385,52 +428,88 @@ function main() {
   // 4) Bankrupt rate is direct downside penalty.
   const FITNESS_PROFILES = {
     phase1: {
-      modelName: "gold_core_hard_go_zero_profile_phase1_v2",
+      modelName: "gold_tail_guard_profile_phase1_v3",
       goldMeanNeutral: -250.0,
       goldMeanScale: 3200.0,
       goldP50Neutral: -800.0,
       goldP50Scale: 3500.0,
       goldP10Neutral: -2600.0,
       goldP10Scale: 5200.0,
-      goldMeanWeight: 0.65,
-      goldP50Weight: 0.20,
-      goldP10Weight: 0.15,
+      goldCvar10Neutral: -4200.0,
+      goldCvar10Scale: 7200.0,
+      goldMeanWeight: 0.50,
+      goldP50Weight: 0.16,
+      goldP10Weight: 0.18,
+      goldCvar10Weight: 0.16,
       tieBreakWeight: 0.02,
-      tieBreakExpectedNeutral: -0.20,
+      tieBreakExpectedNeutral: -0.18,
       bankruptPenaltyWeight: 0.10,
+      catastrophicLossThreshold: -7000.0,
+      catastrophicLossWeight: 0.08,
+      downsideSemiScale: 5200.0,
+      downsideSemiWeight: 0.04,
+      goFailRateCap: 0.46,
+      goFailExcessWeight: 0.03,
+      seatGapWeight: 0.03,
+      seatGoldGapScale: 4500.0,
+      inflictedBankruptBonusWeight: 0.015,
       goZeroForceScore: -3.0,
     },
     phase2: {
-      modelName: "gold_core_hard_go_zero_profile_phase2_v2",
+      modelName: "gold_tail_guard_profile_phase2_v3",
       goldMeanNeutral: -100.0,
       goldMeanScale: 3000.0,
       goldP50Neutral: -500.0,
       goldP50Scale: 3200.0,
       goldP10Neutral: -2200.0,
       goldP10Scale: 4800.0,
-      goldMeanWeight: 0.55,
-      goldP50Weight: 0.20,
-      goldP10Weight: 0.25,
+      goldCvar10Neutral: -2800.0,
+      goldCvar10Scale: 6200.0,
+      goldMeanWeight: 0.44,
+      goldP50Weight: 0.16,
+      goldP10Weight: 0.20,
+      goldCvar10Weight: 0.20,
       tieBreakWeight: 0.03,
-      tieBreakExpectedNeutral: -0.16,
+      tieBreakExpectedNeutral: -0.14,
       bankruptPenaltyWeight: 0.14,
+      catastrophicLossThreshold: -6400.0,
+      catastrophicLossWeight: 0.12,
+      downsideSemiScale: 4600.0,
+      downsideSemiWeight: 0.05,
+      goFailRateCap: 0.42,
+      goFailExcessWeight: 0.04,
+      seatGapWeight: 0.04,
+      seatGoldGapScale: 4200.0,
+      inflictedBankruptBonusWeight: 0.015,
       goZeroForceScore: -3.0,
     },
     phase3: {
-      modelName: "gold_core_hard_go_zero_profile_phase3_v2",
+      modelName: "gold_tail_guard_profile_phase3_v3",
       goldMeanNeutral: 0.0,
       goldMeanScale: 2800.0,
       goldP50Neutral: 0.0,
       goldP50Scale: 2800.0,
       goldP10Neutral: -1800.0,
       goldP10Scale: 4200.0,
-      goldMeanWeight: 0.45,
-      goldP50Weight: 0.20,
-      goldP10Weight: 0.35,
+      goldCvar10Neutral: -2200.0,
+      goldCvar10Scale: 5000.0,
+      goldMeanWeight: 0.34,
+      goldP50Weight: 0.14,
+      goldP10Weight: 0.22,
+      goldCvar10Weight: 0.30,
       tieBreakWeight: 0.04,
-      tieBreakExpectedNeutral: -0.10,
+      tieBreakExpectedNeutral: -0.08,
       bankruptPenaltyWeight: 0.18,
-      goZeroForceScore: -3.0,
+      catastrophicLossThreshold: -5600.0,
+      catastrophicLossWeight: 0.16,
+      downsideSemiScale: 4000.0,
+      downsideSemiWeight: 0.07,
+      goFailRateCap: 0.38,
+      goFailExcessWeight: 0.05,
+      seatGapWeight: 0.05,
+      seatGoldGapScale: 3600.0,
+      inflictedBankruptBonusWeight: 0.02,
+      goZeroForceScore: -3.2,
     },
   };
   const profile = FITNESS_PROFILES[opts.fitnessProfile];
@@ -443,29 +522,83 @@ function main() {
   const FITNESS_GOLD_P50_SCALE = profile.goldP50Scale;
   const FITNESS_GOLD_P10_NEUTRAL = profile.goldP10Neutral;
   const FITNESS_GOLD_P10_SCALE = profile.goldP10Scale;
+  const FITNESS_GOLD_CVAR10_NEUTRAL = profile.goldCvar10Neutral;
+  const FITNESS_GOLD_CVAR10_SCALE = profile.goldCvar10Scale;
   const FITNESS_GOLD_MEAN_WEIGHT = profile.goldMeanWeight;
   const FITNESS_GOLD_P50_WEIGHT = profile.goldP50Weight;
   const FITNESS_GOLD_P10_WEIGHT = profile.goldP10Weight;
+  const FITNESS_GOLD_CVAR10_WEIGHT = profile.goldCvar10Weight;
   const FITNESS_TIE_BREAK_WEIGHT = profile.tieBreakWeight;
   const FITNESS_TIE_BREAK_EXPECTED_NEUTRAL = profile.tieBreakExpectedNeutral;
   const FITNESS_BANKRUPT_PENALTY_WEIGHT = profile.bankruptPenaltyWeight;
+  const FITNESS_CATASTROPHIC_LOSS_THRESHOLD = profile.catastrophicLossThreshold;
+  const FITNESS_CATASTROPHIC_LOSS_WEIGHT = profile.catastrophicLossWeight;
+  const FITNESS_DOWNSIDE_SEMI_SCALE = profile.downsideSemiScale;
+  const FITNESS_DOWNSIDE_SEMI_WEIGHT = profile.downsideSemiWeight;
+  const FITNESS_GO_FAIL_RATE_CAP = profile.goFailRateCap;
+  const FITNESS_GO_FAIL_EXCESS_WEIGHT = profile.goFailExcessWeight;
+  const FITNESS_SEAT_GAP_WEIGHT = profile.seatGapWeight;
+  const FITNESS_SEAT_GOLD_GAP_SCALE = profile.seatGoldGapScale;
+  const FITNESS_INFLICTED_BANKRUPT_BONUS_WEIGHT = profile.inflictedBankruptBonusWeight;
   const FITNESS_GO_ZERO_FORCE_SCORE = profile.goZeroForceScore;
 
   const expectedResultRaw =
     clamp01(winRate) + (0.5 * clamp01(drawRate)) - clamp01(lossRate);
   const expectedResult = Math.max(-1.0, Math.min(1.0, expectedResultRaw));
+  const cvar10GoldDelta = tailMean(goldDeltas, 0.1);
+  const cvar20GoldDelta = tailMean(goldDeltas, 0.2);
+  const catastrophicLossRate = rateAtOrBelow(goldDeltas, FITNESS_CATASTROPHIC_LOSS_THRESHOLD);
+  const downsideSemiRaw = downsideSemiDeviation(goldDeltas, meanGoldDelta);
+  const downsideSemiNorm = clamp01(downsideSemiRaw / Math.max(1.0, FITNESS_DOWNSIDE_SEMI_SCALE));
+
   const goldMeanNorm = Math.tanh((meanGoldDelta - FITNESS_GOLD_MEAN_NEUTRAL) / FITNESS_GOLD_MEAN_SCALE);
   const goldP50Norm = Math.tanh((p50GoldDelta - FITNESS_GOLD_P50_NEUTRAL) / FITNESS_GOLD_P50_SCALE);
   const goldP10Norm = Math.tanh((p10GoldDelta - FITNESS_GOLD_P10_NEUTRAL) / FITNESS_GOLD_P10_SCALE);
+  const goldCvar10Norm = Math.tanh((cvar10GoldDelta - FITNESS_GOLD_CVAR10_NEUTRAL) / FITNESS_GOLD_CVAR10_SCALE);
   const goldCore =
     (FITNESS_GOLD_MEAN_WEIGHT * goldMeanNorm) +
     (FITNESS_GOLD_P50_WEIGHT * goldP50Norm) +
-    (FITNESS_GOLD_P10_WEIGHT * goldP10Norm);
+    (FITNESS_GOLD_P10_WEIGHT * goldP10Norm) +
+    (FITNESS_GOLD_CVAR10_WEIGHT * goldCvar10Norm);
+
   const tieBreak = FITNESS_TIE_BREAK_WEIGHT * (expectedResult - FITNESS_TIE_BREAK_EXPECTED_NEUTRAL);
   const bankruptRate = games > 0 ? clamp01(bankrupt.my_bankrupt_count / games) : 0;
   const bankruptPenalty = FITNESS_BANKRUPT_PENALTY_WEIGHT * bankruptRate;
+  const catastrophicLossPenalty = FITNESS_CATASTROPHIC_LOSS_WEIGHT * catastrophicLossRate;
+  const downsideSemiPenalty = FITNESS_DOWNSIDE_SEMI_WEIGHT * downsideSemiNorm;
+  const goFailExcess = goGames > 0 ? Math.max(0, goFailRate - FITNESS_GO_FAIL_RATE_CAP) : 0;
+  const goFailPenalty = FITNESS_GO_FAIL_EXCESS_WEIGHT * goFailExcess;
+  const inflictedBankruptRate = games > 0 ? clamp01(bankrupt.my_inflicted_bankrupt_count / games) : 0;
+  const inflictedBankruptBonus = FITNESS_INFLICTED_BANKRUPT_BONUS_WEIGHT * inflictedBankruptRate;
+
+  const seatFirstWinRate = controlSeatStats.first.games > 0
+    ? controlSeatStats.first.wins / controlSeatStats.first.games
+    : 0;
+  const seatSecondWinRate = controlSeatStats.second.games > 0
+    ? controlSeatStats.second.wins / controlSeatStats.second.games
+    : 0;
+  const seatWinRateGap = Math.abs(seatFirstWinRate - seatSecondWinRate);
+  const seatFirstMeanGoldDelta = mean(controlSeatStats.first.goldDeltas);
+  const seatSecondMeanGoldDelta = mean(controlSeatStats.second.goldDeltas);
+  const seatMeanGoldGap = Math.abs(seatFirstMeanGoldDelta - seatSecondMeanGoldDelta);
+  const seatMeanGoldGapNorm = clamp01(
+    Math.tanh(seatMeanGoldGap / Math.max(1.0, Number(FITNESS_SEAT_GOLD_GAP_SCALE || 1.0)))
+  );
+  const seatGapPenalty = FITNESS_SEAT_GAP_WEIGHT * ((0.6 * seatWinRateGap) + (0.4 * seatMeanGoldGapNorm));
+
   const goZeroHardFail = goGames === 0;
-  let fitness = goZeroHardFail ? FITNESS_GO_ZERO_FORCE_SCORE : (goldCore + tieBreak - bankruptPenalty);
+  let fitness = goZeroHardFail
+    ? FITNESS_GO_ZERO_FORCE_SCORE
+    : (
+      goldCore +
+      tieBreak -
+      bankruptPenalty -
+      catastrophicLossPenalty -
+      downsideSemiPenalty -
+      goFailPenalty -
+      seatGapPenalty +
+      inflictedBankruptBonus
+    );
 
   // 4-4) Build final summary contract consumed by phase scripts.
   const summary = {
@@ -500,6 +633,15 @@ function main() {
     p10_gold_delta: p10GoldDelta,
     p50_gold_delta: p50GoldDelta,
     p90_gold_delta: p90GoldDelta,
+    cvar10_gold_delta: cvar10GoldDelta,
+    cvar20_gold_delta: cvar20GoldDelta,
+    catastrophic_loss_rate: catastrophicLossRate,
+    seat_first_win_rate: seatFirstWinRate,
+    seat_second_win_rate: seatSecondWinRate,
+    seat_win_rate_gap: seatWinRateGap,
+    seat_first_mean_gold_delta: seatFirstMeanGoldDelta,
+    seat_second_mean_gold_delta: seatSecondMeanGoldDelta,
+    seat_mean_gold_gap: seatMeanGoldGap,
     fitness_model: profile.modelName,
     fitness_profile: opts.fitnessProfile,
     fitness_gold_scale: FITNESS_GOLD_MEAN_SCALE,
@@ -508,10 +650,21 @@ function main() {
     fitness_gold_p50_neutral_delta: FITNESS_GOLD_P50_NEUTRAL,
     fitness_gold_p10_scale: FITNESS_GOLD_P10_SCALE,
     fitness_gold_p10_neutral_delta: FITNESS_GOLD_P10_NEUTRAL,
+    fitness_gold_cvar10_scale: FITNESS_GOLD_CVAR10_SCALE,
+    fitness_gold_cvar10_neutral_delta: FITNESS_GOLD_CVAR10_NEUTRAL,
     fitness_tie_break_expected_neutral: FITNESS_TIE_BREAK_EXPECTED_NEUTRAL,
     fitness_win_weight: FITNESS_TIE_BREAK_WEIGHT,
     fitness_gold_weight: 1.0,
     fitness_bankrupt_penalty_weight: FITNESS_BANKRUPT_PENALTY_WEIGHT,
+    fitness_catastrophic_loss_threshold: FITNESS_CATASTROPHIC_LOSS_THRESHOLD,
+    fitness_catastrophic_loss_weight: FITNESS_CATASTROPHIC_LOSS_WEIGHT,
+    fitness_downside_semi_scale: FITNESS_DOWNSIDE_SEMI_SCALE,
+    fitness_downside_semi_weight: FITNESS_DOWNSIDE_SEMI_WEIGHT,
+    fitness_go_fail_rate_cap: FITNESS_GO_FAIL_RATE_CAP,
+    fitness_go_fail_excess_weight: FITNESS_GO_FAIL_EXCESS_WEIGHT,
+    fitness_seat_gap_weight: FITNESS_SEAT_GAP_WEIGHT,
+    fitness_seat_gold_gap_scale: FITNESS_SEAT_GOLD_GAP_SCALE,
+    fitness_inflicted_bankrupt_bonus_weight: FITNESS_INFLICTED_BANKRUPT_BONUS_WEIGHT,
     imitation_weighted_score: 0,
     fitness_components: {
       gold_mean_norm: goldMeanNorm,
@@ -523,10 +676,16 @@ function main() {
       gold_p10_norm: goldP10Norm,
       gold_p10_neutral: FITNESS_GOLD_P10_NEUTRAL,
       gold_p10_scale: FITNESS_GOLD_P10_SCALE,
+      gold_cvar10_norm: goldCvar10Norm,
+      gold_cvar10_neutral: FITNESS_GOLD_CVAR10_NEUTRAL,
+      gold_cvar10_scale: FITNESS_GOLD_CVAR10_SCALE,
+      cvar10_gold_delta: cvar10GoldDelta,
+      cvar20_gold_delta: cvar20GoldDelta,
       gold_core: goldCore,
       gold_core_weight_mean: FITNESS_GOLD_MEAN_WEIGHT,
       gold_core_weight_p50: FITNESS_GOLD_P50_WEIGHT,
       gold_core_weight_p10: FITNESS_GOLD_P10_WEIGHT,
+      gold_core_weight_cvar10: FITNESS_GOLD_CVAR10_WEIGHT,
       expected_result: expectedResult,
       tie_break: tieBreak,
       tie_break_weight: FITNESS_TIE_BREAK_WEIGHT,
@@ -534,6 +693,32 @@ function main() {
       bankrupt_rate: bankruptRate,
       bankrupt_penalty: bankruptPenalty,
       bankrupt_penalty_weight: FITNESS_BANKRUPT_PENALTY_WEIGHT,
+      catastrophic_loss_rate: catastrophicLossRate,
+      catastrophic_loss_threshold: FITNESS_CATASTROPHIC_LOSS_THRESHOLD,
+      catastrophic_loss_penalty: catastrophicLossPenalty,
+      catastrophic_loss_weight: FITNESS_CATASTROPHIC_LOSS_WEIGHT,
+      downside_semi_raw: downsideSemiRaw,
+      downside_semi_norm: downsideSemiNorm,
+      downside_semi_penalty: downsideSemiPenalty,
+      downside_semi_weight: FITNESS_DOWNSIDE_SEMI_WEIGHT,
+      downside_semi_scale: FITNESS_DOWNSIDE_SEMI_SCALE,
+      go_fail_rate_cap: FITNESS_GO_FAIL_RATE_CAP,
+      go_fail_excess: goFailExcess,
+      go_fail_penalty: goFailPenalty,
+      go_fail_excess_weight: FITNESS_GO_FAIL_EXCESS_WEIGHT,
+      seat_first_win_rate: seatFirstWinRate,
+      seat_second_win_rate: seatSecondWinRate,
+      seat_win_rate_gap: seatWinRateGap,
+      seat_first_mean_gold_delta: seatFirstMeanGoldDelta,
+      seat_second_mean_gold_delta: seatSecondMeanGoldDelta,
+      seat_mean_gold_gap: seatMeanGoldGap,
+      seat_mean_gold_gap_norm: seatMeanGoldGapNorm,
+      seat_gap_penalty: seatGapPenalty,
+      seat_gap_weight: FITNESS_SEAT_GAP_WEIGHT,
+      seat_gold_gap_scale: FITNESS_SEAT_GOLD_GAP_SCALE,
+      inflicted_bankrupt_rate: inflictedBankruptRate,
+      inflicted_bankrupt_bonus: inflictedBankruptBonus,
+      inflicted_bankrupt_bonus_weight: FITNESS_INFLICTED_BANKRUPT_BONUS_WEIGHT,
       go_zero_hard_fail: goZeroHardFail,
       go_zero_force_score: FITNESS_GO_ZERO_FORCE_SCORE,
       fitness_profile: opts.fitnessProfile,

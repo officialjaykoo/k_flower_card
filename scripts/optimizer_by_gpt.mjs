@@ -597,6 +597,12 @@ function buildSummaryText(payload) {
     }
     lines.push("");
   }
+  if (payload?.optuna_hint?.command) {
+    lines.push("Optuna Seed Integration:");
+    lines.push(`- optimizer_plan: ${payload.optuna_hint.optimizer_plan}`);
+    lines.push(`- command: ${payload.optuna_hint.command}`);
+    lines.push("");
+  }
   return `${lines.join("\n")}\n`;
 }
 
@@ -722,6 +728,10 @@ const payload = {
 mkdirSync(cfg.outRoot, { recursive: true });
 const summaryPath = join(cfg.outRoot, "optimizer_gpt_summary.txt");
 const jsonPath = join(cfg.outRoot, "optimizer_gpt_plan.json");
+payload.optuna_hint = {
+  optimizer_plan: jsonPath,
+  command: `python scripts/optuna_gpt.py --optimizer-plan \"${jsonPath}\" --optimizer-top-k 4`
+};
 writeFileSync(summaryPath, buildSummaryText(payload), "utf8");
 writeFileSync(jsonPath, JSON.stringify(payload, null, 2), "utf8");
 
@@ -729,6 +739,7 @@ console.log("=== Optimizer by GPT ===");
 console.log(`run_dir: ${cfg.outRoot}`);
 console.log(`summary: ${summaryPath}`);
 console.log(`json:    ${jsonPath}`);
+console.log(`optuna:  ${payload.optuna_hint.command}`);
 console.log(
   `defense=${defensePlan.recommendation_count}, attack=${attackPlan.recommendation_count}, baseline WR=${round(
     (gameStats.games > 0 ? gameStats.wins / gameStats.games : 0) * 100,

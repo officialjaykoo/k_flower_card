@@ -15,15 +15,17 @@
 
   "generations": 15,
   "eval_workers": 6,
-  "games_per_genome": 180,
-  "eval_timeout_sec": 420,
+  "games_per_genome": 220,
+  "eval_timeout_sec": 480,
   "max_eval_steps": 600,
   "checkpoint_every": 3,
 
   "opponent_policy_mix": [
-    { "policy": "H-J2", "weight": 40 },
-    { "policy": "H-Gemini", "weight": 35 },
-    { "policy": "H-J1", "weight": 25 }
+    { "policy": "H-CL", "weight": 30 },
+    { "policy": "H-J2", "weight": 30 },
+    { "policy": "H-J1", "weight": 20 },
+    { "policy": "H-NEXg", "weight": 15 },
+    { "policy": "H-Gemini", "weight": 5 }
   ],
   "switch_seats": true,
 
@@ -31,6 +33,8 @@
   "gate_ema_window": 5,
   "eval_pass_win_rate_min": 0.43,
   "eval_pass_mean_gold_delta_min": -150.0,
+  "eval_pass_cvar10_gold_delta_min": -5200.0,
+  "eval_pass_catastrophic_loss_rate_max": 0.16,
   "transition_mean_gold_delta_min": 0.0,
   "transition_streak": 1,
   "failure_generation_min": 999,

@@ -16,7 +16,6 @@
 } from "../engine/index.js";
 import { COMBO_MONTH_SETS, countComboTag, missingComboMonths } from "../engine/combos.js";
 import { STARTING_GOLD } from "../engine/economy.js";
-import { buildDeck } from "../cards.js";
 import {
   DEFAULT_BOT_POLICY,
   POLICY_HEURISTIC_J1,
@@ -1438,67 +1437,6 @@ function createPublicState(state, observerKey) {
   return pub;
 }
 
-function shuffledCards(cards) {
-  const out = [...(cards || [])];
-  for (let i = out.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [out[i], out[j]] = [out[j], out[i]];
-  }
-  return out;
-}
-
-function determinizeUnknownCards(state, observerKey) {
-  const opp = otherPlayerKey(observerKey);
-  const oppHandLen = state?.players?.[opp]?.hand?.length || 0;
-  const deckLen = state?.deck?.length || 0;
-  const fixedKnownOppCards = getPublicKnownOpponentHandCards(state, observerKey).map((c) => ({ ...c }));
-  const hiddenOppHandSize = Math.max(0, oppHandLen - fixedKnownOppCards.length);
-  const unknownCount = hiddenOppHandSize + deckLen;
-  const next = cloneGameState(state);
-  if (unknownCount <= 0) return next;
-
-  const knownIds = new Set();
-  const collect = (cards = []) => {
-    for (const c of cards) {
-      const id = c?.id;
-      if (typeof id !== "string") continue;
-      if (id.startsWith("opp_") || id.startsWith("deck_")) continue;
-      knownIds.add(id);
-    }
-  };
-
-  collect(state.board || []);
-  collect(state.players?.[observerKey]?.hand || []);
-  collect(fixedKnownOppCards);
-  for (const k of ["human", "ai"]) {
-    const cap = state.players?.[k]?.captured || {};
-    collect(cap.kwang || []);
-    collect(cap.five || []);
-    collect(cap.ribbon || []);
-    collect(cap.junk || []);
-  }
-
-  const cardTheme = state?.cardTheme || state?.theme;
-  const candidateUnknown = buildDeck(cardTheme).filter((c) => !knownIds.has(c.id));
-  let sampledUnknown = shuffledCards(candidateUnknown).slice(0, unknownCount);
-
-  if (sampledUnknown.length < unknownCount) {
-    const missing = unknownCount - sampledUnknown.length;
-    const fillers = Array.from({ length: missing }, (_, i) => ({
-      id: `sample_${i}`,
-      month: (i % 12) + 1,
-      category: "junk",
-      piValue: 1
-    }));
-    sampledUnknown = sampledUnknown.concat(fillers);
-  }
-
-  const sampledOppUnknown = sampledUnknown.slice(0, hiddenOppHandSize);
-  if (next?.players?.[opp]) next.players[opp].hand = fixedKnownOppCards.concat(sampledOppUnknown);
-  next.deck = sampledUnknown.slice(hiddenOppHandSize);
-  return next;
-}
-
 function knownMonthCountForObserver(state, observerKey, month) {
   let count = 0;
   for (const c of state.board || []) if (c?.month === month) count += 1;
@@ -1805,10 +1743,7 @@ const HEURISTIC_GPT_DEPS = Object.freeze({
   otherPlayerKey,
   ownComboOpportunityScore,
   boardMatchesByMonth,
-  shakingImmediateGainScore,
-  rolloutStateUtilityGPT,
-  rolloutCardValueGPT,
-  rolloutGoStopValueGPT
+  shakingImmediateGainScore
 });
 
 const HEURISTIC_GEMINI_DEPS = Object.freeze({
@@ -1832,19 +1767,7 @@ function createHeuristicGPTFairDeps(observerKey) {
     matchableMonthCountForPlayer: (state, playerKey) =>
       matchableMonthCountForPlayerPublic(state, playerKey, observerKey),
     nextTurnThreatScore: (state, playerKey) => nextTurnThreatScorePublic(state, playerKey, observerKey),
-    opponentThreatScore: (state, playerKey) => opponentThreatScorePublic(state, playerKey, observerKey),
-    rolloutCardValueGPT: (state, playerKey, cardId, options = {}) =>
-      rolloutCardValueGPT(state, playerKey, cardId, {
-        ...options,
-        observerKey,
-        fairTeacher: true
-      }),
-    rolloutGoStopValueGPT: (state, playerKey, chooseGoFlag, options = {}) =>
-      rolloutGoStopValueGPT(state, playerKey, chooseGoFlag, {
-        ...options,
-        observerKey,
-        fairTeacher: true
-      })
+    opponentThreatScore: (state, playerKey) => opponentThreatScorePublic(state, playerKey, observerKey)
   });
 }
 
@@ -2121,156 +2044,4 @@ function shakingImmediateGainScore(state, playerKey, month) {
 function pickRandom(arr) {
   if (!arr || arr.length === 0) return null;
   return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function getActionPlayerKeyLocal(state) {
-  if (state?.phase === "playing") return state.currentTurn || null;
-  if (state?.phase === "go-stop") return state.pendingGoStop || null;
-  if (state?.phase === "select-match") return state.pendingMatch?.playerKey || null;
-  if (state?.phase === "president-choice") return state.pendingPresident?.playerKey || null;
-  if (state?.phase === "shaking-confirm") return state.pendingShakingConfirm?.playerKey || null;
-  if (state?.phase === "gukjin-choice") return state.pendingGukjinChoice?.playerKey || null;
-  return null;
-}
-
-function rolloutStateUtilityGPT(state, rootPlayerKey, deps = HEURISTIC_GPT_DEPS) {
-  if (!state || !rootPlayerKey) return 0;
-  const opp = otherPlayerKey(rootPlayerKey);
-  const myScore = currentScoreTotal(state, rootPlayerKey);
-  const oppScore = currentScoreTotal(state, opp);
-  const myPi = capturedCountByCategory(state.players?.[rootPlayerKey], "junk");
-  const oppPi = capturedCountByCategory(state.players?.[opp], "junk");
-  const myFive = scoringFiveCount(state.players?.[rootPlayerKey]);
-  const oppFive = scoringFiveCount(state.players?.[opp]);
-  const oppThreat = Number(deps?.opponentThreatScore?.(state, rootPlayerKey) ?? 0);
-  const nextThreat = Number(deps?.nextTurnThreatScore?.(state, rootPlayerKey) ?? 0);
-  const deckCount = Number(state?.deck?.length || 0);
-  const carry = Number(state?.carryOverMultiplier || 1);
-  const goldDiff = Number(state?.players?.[rootPlayerKey]?.gold || 0) - Number(state?.players?.[opp]?.gold || 0);
-
-  let utility =
-    (myScore - oppScore) * 1.0 +
-    (myPi - oppPi) * 0.12 +
-    (myFive - oppFive) * 0.2 +
-    goldDiff * 0.004 -
-    oppThreat * 0.55 -
-    nextThreat * 0.35;
-
-  if (carry >= 2) utility -= 0.12;
-  if (deckCount <= 6 && myScore < oppScore) utility -= 0.06;
-  if (deckCount <= 6 && myScore >= oppScore) utility += 0.04;
-  return utility;
-}
-
-function rolloutBotPlayGPTNoRollout(state, actor) {
-  const params = { ...HEURISTIC_GPT_PARAMS, rolloutEnabled: 0 };
-  const fair = createGPTFairDecisionContext(state, actor);
-  const decisionState = fair.publicState;
-  const fairDeps = fair.deps;
-  if (state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey === actor) {
-    const mode = chooseGukjinHeuristicGPT(decisionState, actor, fairDeps, params);
-    return chooseGukjinMode(state, actor, mode);
-  }
-  if (state.phase === "president-choice" && state.pendingPresident?.playerKey === actor) {
-    const stop = shouldPresidentStopGPT(decisionState, actor, fairDeps, params);
-    return stop ? choosePresidentStop(state, actor) : choosePresidentHold(state, actor);
-  }
-  if (state.phase === "select-match" && state.pendingMatch?.playerKey === actor) {
-    const choiceId = chooseMatchHeuristicGPT(decisionState, actor, fairDeps, params);
-    return choiceId ? chooseMatch(state, choiceId) : state;
-  }
-  if (state.phase === "go-stop" && state.pendingGoStop === actor) {
-    const go = shouldGoGPT(decisionState, actor, fairDeps, params);
-    return go ? chooseGo(state, actor) : chooseStop(state, actor);
-  }
-  if (state.phase === "playing" && state.currentTurn === actor) {
-    const ranked = rankHandCardsGPT(decisionState, actor, fairDeps, params);
-    const cardId = ranked?.[0]?.card?.id;
-    return cardId ? playTurn(state, cardId) : state;
-  }
-  return state;
-}
-
-function rolloutAdvanceUntilTurnEnds(state, turnOwner, maxSteps = 28) {
-  let next = state;
-  for (let step = 0; step < maxSteps; step += 1) {
-    if (!next || next.phase === "resolution") break;
-    const actor = getActionPlayerKeyLocal(next);
-    if (!actor) break;
-    const updated = rolloutBotPlayGPTNoRollout(next, actor);
-    if (!updated || updated === next) break;
-    next = updated;
-    if (next.phase === "playing" && next.currentTurn && next.currentTurn !== turnOwner) break;
-  }
-  return next;
-}
-
-function rolloutCardValueGPT(state, playerKey, cardId, options = {}) {
-  if (!state || state.phase !== "playing" || state.currentTurn !== playerKey) return null;
-  if (!cardId) return null;
-  const maxSteps = Math.max(8, Number(options.maxSteps || 28));
-  const samples = Math.max(1, Math.floor(Number(options.samples || 5)));
-  const observerKey = options.observerKey || playerKey;
-  const utilityDeps = createHeuristicGPTFairDeps(playerKey);
-  let sum = 0;
-  let count = 0;
-
-  for (let i = 0; i < samples; i += 1) {
-    const sampled = determinizeUnknownCards(state, observerKey);
-    let next = playTurn(sampled, cardId);
-    if (!next || next === sampled) continue;
-    if (next.phase !== "resolution") {
-      next = rolloutAdvanceUntilTurnEnds(next, playerKey, maxSteps);
-    }
-    if (next.phase !== "resolution") {
-      const opp = otherPlayerKey(playerKey);
-      const actor = getActionPlayerKeyLocal(next);
-      if (actor === opp || (next.phase === "playing" && next.currentTurn === opp)) {
-        next = rolloutAdvanceUntilTurnEnds(next, opp, maxSteps);
-      }
-    }
-    const utility = rolloutStateUtilityGPT(next, playerKey, utilityDeps);
-    if (!Number.isFinite(utility)) continue;
-    sum += utility;
-    count += 1;
-  }
-
-  if (count <= 0) return null;
-  return sum / count;
-}
-
-function rolloutGoStopValueGPT(state, playerKey, chooseGoFlag, options = {}) {
-  if (!state || state.phase !== "go-stop" || state.pendingGoStop !== playerKey) return null;
-  const maxSteps = Math.max(8, Number(options.maxSteps || 28));
-  const samples = Math.max(1, Math.floor(Number(options.samples || 5)));
-  const observerKey = options.observerKey || playerKey;
-  const utilityDeps = createHeuristicGPTFairDeps(playerKey);
-  let sum = 0;
-  let count = 0;
-
-  for (let i = 0; i < samples; i += 1) {
-    const sampled = determinizeUnknownCards(state, observerKey);
-    let next = chooseGoFlag ? chooseGo(sampled, playerKey) : chooseStop(sampled, playerKey);
-    if (!next || next === sampled) continue;
-    if (next.phase !== "resolution") {
-      const actor = getActionPlayerKeyLocal(next);
-      if (actor === playerKey) {
-        next = rolloutAdvanceUntilTurnEnds(next, playerKey, maxSteps);
-      }
-    }
-    if (next.phase !== "resolution") {
-      const opp = otherPlayerKey(playerKey);
-      const actor = getActionPlayerKeyLocal(next);
-      if (actor === opp || (next.phase === "playing" && next.currentTurn === opp)) {
-        next = rolloutAdvanceUntilTurnEnds(next, opp, maxSteps);
-      }
-    }
-    const utility = rolloutStateUtilityGPT(next, playerKey, utilityDeps);
-    if (!Number.isFinite(utility)) continue;
-    sum += utility;
-    count += 1;
-  }
-
-  if (count <= 0) return null;
-  return sum / count;
 }

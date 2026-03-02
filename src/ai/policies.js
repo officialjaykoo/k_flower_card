@@ -8,6 +8,7 @@ export const POLICY_HEURISTIC_GPT = "H-GPT";
 export const POLICY_HEURISTIC_GEMINI = "H-Gemini";
 export const POLICY_HEURISTIC_NEXG = "H-NEXg";
 export const POLICY_NEAT_PHASE2_SEED9 = "N-P2-Seed9";
+export const POLICY_NEAT_PHASE2_SEED66 = "N-P2-Seed66";
 export const DEFAULT_BOT_POLICY = POLICY_HEURISTIC_CL;
 
 /* ============================================================================
@@ -60,6 +61,11 @@ export const MODEL_CATALOG = Object.freeze({
     labelKey: "model.neatPhase2Seed9",
     kind: "policy_model",
     policyPath: "/models/neat_phase2_seed9_winner_genome.json"
+  },
+  [POLICY_NEAT_PHASE2_SEED66]: {
+    kind: "policy_model",
+    policyPath: "/models/neat_phase2_seed66_winner_genome.json",
+    label: "NEAT Phase2 Seed66"
   }
 });
 
@@ -88,12 +94,15 @@ export function normalizeBotPolicy(policy) {
 export function getModelLabel(pick, language, translateFn) {
   const cfg = MODEL_CATALOG[pick] || null;
   if (!cfg) return String(pick || "AI");
-  return translateFn(language, cfg.labelKey, {}, String(pick));
+  if (cfg.labelKey) return translateFn(language, cfg.labelKey, {}, String(pick));
+  return String(cfg.label || pick || "AI");
 }
 
 export function buildModelOptions(language, translateFn) {
   return Object.entries(MODEL_CATALOG).map(([value, config]) => ({
     value,
-    label: translateFn(language, config.labelKey, {}, value)
+    label: config?.labelKey
+      ? translateFn(language, config.labelKey, {}, value)
+      : String(config?.label || value)
   }));
 }

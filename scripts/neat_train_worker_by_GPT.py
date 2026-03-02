@@ -884,6 +884,8 @@ class LoggedParallelEvaluator:
             valid_mean_gold_delta_values = []
             valid_p10_gold_delta_values = []
             valid_p50_gold_delta_values = []
+            valid_cvar10_gold_delta_values = []
+            valid_catastrophic_loss_rate_values = []
             valid_gold_core_values = []
             valid_expected_result_values = []
             valid_bankrupt_rate_values = []
@@ -898,6 +900,12 @@ class LoggedParallelEvaluator:
                 p50_gold_delta = _safe_optional_float(r.get("p50_gold_delta"))
                 if p50_gold_delta is not None:
                     valid_p50_gold_delta_values.append(p50_gold_delta)
+                cvar10_gold_delta = _safe_optional_float(r.get("cvar10_gold_delta"))
+                if cvar10_gold_delta is not None:
+                    valid_cvar10_gold_delta_values.append(cvar10_gold_delta)
+                catastrophic_loss_rate = _safe_optional_float(r.get("catastrophic_loss_rate"))
+                if catastrophic_loss_rate is not None:
+                    valid_catastrophic_loss_rate_values.append(catastrophic_loss_rate)
                 go_games = _safe_optional_float(r.get("go_games"))
                 if go_games is not None:
                     valid_go_games_values.append(go_games)
@@ -960,6 +968,16 @@ class LoggedParallelEvaluator:
                     if len(valid_p50_gold_delta_values) > 0
                     else None
                 ),
+                "mean_cvar10_gold_delta": (
+                    sum(valid_cvar10_gold_delta_values) / max(1, len(valid_cvar10_gold_delta_values))
+                    if len(valid_cvar10_gold_delta_values) > 0
+                    else None
+                ),
+                "mean_catastrophic_loss_rate": (
+                    sum(valid_catastrophic_loss_rate_values) / max(1, len(valid_catastrophic_loss_rate_values))
+                    if len(valid_catastrophic_loss_rate_values) > 0
+                    else None
+                ),
                 "mean_imitation_weighted_score": None,
                 "mean_gold_core": (
                     sum(valid_gold_core_values) / max(1, len(valid_gold_core_values))
@@ -1013,6 +1031,16 @@ class LoggedParallelEvaluator:
                 ),
                 "best_p50_gold_delta": (
                     _safe_optional_float(best_record.get("p50_gold_delta"))
+                    if self._is_valid_gate_record(best_record)
+                    else None
+                ),
+                "best_cvar10_gold_delta": (
+                    _safe_optional_float(best_record.get("cvar10_gold_delta"))
+                    if self._is_valid_gate_record(best_record)
+                    else None
+                ),
+                "best_catastrophic_loss_rate": (
+                    _safe_optional_float(best_record.get("catastrophic_loss_rate"))
                     if self._is_valid_gate_record(best_record)
                     else None
                 ),
@@ -1073,6 +1101,8 @@ class LoggedParallelEvaluator:
                 "mean_mean_gold_delta": None,
                 "mean_p10_gold_delta": None,
                 "mean_p50_gold_delta": None,
+                "mean_cvar10_gold_delta": None,
+                "mean_catastrophic_loss_rate": None,
                 "mean_imitation_weighted_score": None,
                 "mean_gold_core": None,
                 "mean_expected_result": None,
@@ -1085,6 +1115,8 @@ class LoggedParallelEvaluator:
                 "best_mean_gold_delta": None,
                 "best_p10_gold_delta": None,
                 "best_p50_gold_delta": None,
+                "best_cvar10_gold_delta": None,
+                "best_catastrophic_loss_rate": None,
                 "best_imitation_weighted_score": None,
                 "best_gold_core": None,
                 "best_expected_result": None,

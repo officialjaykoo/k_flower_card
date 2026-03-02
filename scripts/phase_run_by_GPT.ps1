@@ -37,6 +37,31 @@ function To-PositiveIntOrDefault {
   return $DefaultValue
 }
 
+function To-BoolOrDefault {
+  param(
+    [Parameter(Mandatory = $false)]$Value,
+    [Parameter(Mandatory = $true)][bool]$DefaultValue
+  )
+  if ($null -eq $Value) {
+    return $DefaultValue
+  }
+  $s = [string]$Value
+  if ([string]::IsNullOrWhiteSpace($s)) {
+    return $DefaultValue
+  }
+  switch ($s.Trim().ToLowerInvariant()) {
+    "1" { return $true }
+    "true" { return $true }
+    "yes" { return $true }
+    "on" { return $true }
+    "0" { return $false }
+    "false" { return $false }
+    "no" { return $false }
+    "off" { return $false }
+    default { return $DefaultValue }
+  }
+}
+
 function Resolve-PreviousCheckpoint {
   param(
     [Parameter(Mandatory = $true)][string]$CheckpointDir,
@@ -89,6 +114,44 @@ function Get-OptionalDouble {
   }
 }
 
+function Get-PropertyValue {
+  param(
+    [Parameter(Mandatory = $false)]$Object,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+  if ($null -eq $Object) {
+    return $null
+  }
+  if ($Object.PSObject.Properties.Name -contains $Name) {
+    return $Object.$Name
+  }
+  return $null
+}
+
+function Invoke-TrainingRun {
+  param(
+    [Parameter(Mandatory = $true)][string]$Python,
+    [Parameter(Mandatory = $true)][string[]]$Arguments
+  )
+  $result = & $Python @Arguments | Out-String
+  $exitCode = $LASTEXITCODE
+  if ($exitCode -ne 0) {
+    if (-not [string]::IsNullOrWhiteSpace($result)) {
+      Write-Host $result.Trim()
+    }
+    exit $exitCode
+  }
+  try {
+    return ($result | ConvertFrom-Json)
+  }
+  catch {
+    if (-not [string]::IsNullOrWhiteSpace($result)) {
+      Write-Host $result.Trim()
+    }
+    throw "failed to parse neat_train_worker_by_GPT output as JSON"
+  }
+}
+
 function Get-BestGenomeGoMetrics {
   param([Parameter(Mandatory = $true)]$Summary)
 
@@ -113,8 +176,8 @@ function Get-BestGenomeGoMetrics {
     luck_gold_volatility_norm = $null
   }
 
-  $generationMetricsPathRaw = [string]$Summary.generation_metrics_log
-  $evalMetricsPathRaw = [string]$Summary.eval_metrics_log
+  $generationMetricsPathRaw = [string](Get-PropertyValue -Object $Summary -Name "generation_metrics_log")
+  $evalMetricsPathRaw = [string](Get-PropertyValue -Object $Summary -Name "eval_metrics_log")
   if ([string]::IsNullOrWhiteSpace($generationMetricsPathRaw) -or [string]::IsNullOrWhiteSpace($evalMetricsPathRaw)) {
     return $empty
   }
@@ -144,25 +207,28 @@ function Get-BestGenomeGoMetrics {
     return $empty
   }
 
+  $fitnessComponents = Get-PropertyValue -Object $bestEvalRecord -Name "fitness_components"
+  $luckComponents = Get-PropertyValue -Object $bestEvalRecord -Name "luck_components"
+
   return [ordered]@{
     available = $true
-    fitness_model = [string]$bestEvalRecord.fitness_model
-    fitness_profile = [string]$bestEvalRecord.fitness_profile
-    mean_gold_delta = [double]$bestEvalRecord.mean_gold_delta
-    p10_gold_delta = [double]$bestEvalRecord.p10_gold_delta
-    p50_gold_delta = [double]$bestEvalRecord.p50_gold_delta
-    gold_core = [double]$bestEvalRecord.fitness_components.gold_core
-    expected_result = [double]$bestEvalRecord.fitness_components.expected_result
-    bankrupt_rate = [double]$bestEvalRecord.fitness_components.bankrupt_rate
-    bankrupt_penalty = [double]$bestEvalRecord.fitness_components.bankrupt_penalty
-    go_count = [int]$bestEvalRecord.go_count
-    go_games = [int]$bestEvalRecord.go_games
-    go_fail_count = [int]$bestEvalRecord.go_fail_count
-    go_fail_rate = [double]$bestEvalRecord.go_fail_rate
-    go_rate = [double]$bestEvalRecord.go_rate
-    luck_proxy = [double]$bestEvalRecord.luck_proxy
-    luck_seat_win_rate_gap = [double]$bestEvalRecord.luck_components.seat_win_rate_gap
-    luck_gold_volatility_norm = [double]$bestEvalRecord.luck_components.gold_volatility_norm
+    fitness_model = [string](Get-PropertyValue -Object $bestEvalRecord -Name "fitness_model")
+    fitness_profile = [string](Get-PropertyValue -Object $bestEvalRecord -Name "fitness_profile")
+    mean_gold_delta = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "mean_gold_delta")
+    p10_gold_delta = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "p10_gold_delta")
+    p50_gold_delta = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "p50_gold_delta")
+    gold_core = Get-OptionalDouble -Value (Get-PropertyValue -Object $fitnessComponents -Name "gold_core")
+    expected_result = Get-OptionalDouble -Value (Get-PropertyValue -Object $fitnessComponents -Name "expected_result")
+    bankrupt_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $fitnessComponents -Name "bankrupt_rate")
+    bankrupt_penalty = Get-OptionalDouble -Value (Get-PropertyValue -Object $fitnessComponents -Name "bankrupt_penalty")
+    go_count = [int](Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "go_count") -DefaultValue 0.0)
+    go_games = [int](Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "go_games") -DefaultValue 0.0)
+    go_fail_count = [int](Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "go_fail_count") -DefaultValue 0.0)
+    go_fail_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "go_fail_rate")
+    go_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "go_rate")
+    luck_proxy = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "luck_proxy")
+    luck_seat_win_rate_gap = Get-OptionalDouble -Value (Get-PropertyValue -Object $luckComponents -Name "seat_win_rate_gap")
+    luck_gold_volatility_norm = Get-OptionalDouble -Value (Get-PropertyValue -Object $luckComponents -Name "gold_volatility_norm")
   }
 }
 
@@ -183,7 +249,7 @@ function Get-LatestGenerationGoAverages {
     mean_go_fail_rate = $null
   }
 
-  $generationMetricsPathRaw = [string]$Summary.generation_metrics_log
+  $generationMetricsPathRaw = [string](Get-PropertyValue -Object $Summary -Name "generation_metrics_log")
   if ([string]::IsNullOrWhiteSpace($generationMetricsPathRaw)) {
     return $empty
   }
@@ -199,18 +265,28 @@ function Get-LatestGenerationGoAverages {
   }
 
   $generationRecord = $lastGenerationLine | ConvertFrom-Json
+  $meanMeanGoldDelta = Get-PropertyValue -Object $generationRecord -Name "mean_mean_gold_delta"
+  $meanP10GoldDelta = Get-PropertyValue -Object $generationRecord -Name "mean_p10_gold_delta"
+  $meanP50GoldDelta = Get-PropertyValue -Object $generationRecord -Name "mean_p50_gold_delta"
+  $meanGoldCore = Get-PropertyValue -Object $generationRecord -Name "mean_gold_core"
+  $meanExpectedResult = Get-PropertyValue -Object $generationRecord -Name "mean_expected_result"
+  $meanBankruptRate = Get-PropertyValue -Object $generationRecord -Name "mean_bankrupt_rate"
+  $meanBankruptPenalty = Get-PropertyValue -Object $generationRecord -Name "mean_bankrupt_penalty"
+  $meanGoGames = Get-PropertyValue -Object $generationRecord -Name "mean_go_games"
+  $meanGoRate = Get-PropertyValue -Object $generationRecord -Name "mean_go_rate"
+  $meanGoFailRate = Get-PropertyValue -Object $generationRecord -Name "mean_go_fail_rate"
   return [ordered]@{
     available = $true
-    mean_gold_delta = Get-OptionalDouble -Value $generationRecord.mean_mean_gold_delta
-    mean_p10_gold_delta = Get-OptionalDouble -Value $generationRecord.mean_p10_gold_delta
-    mean_p50_gold_delta = Get-OptionalDouble -Value $generationRecord.mean_p50_gold_delta
-    mean_gold_core = Get-OptionalDouble -Value $generationRecord.mean_gold_core
-    mean_expected_result = Get-OptionalDouble -Value $generationRecord.mean_expected_result
-    mean_bankrupt_rate = Get-OptionalDouble -Value $generationRecord.mean_bankrupt_rate
-    mean_bankrupt_penalty = Get-OptionalDouble -Value $generationRecord.mean_bankrupt_penalty
-    mean_go_games = Get-OptionalDouble -Value $generationRecord.mean_go_games
-    mean_go_rate = Get-OptionalDouble -Value $generationRecord.mean_go_rate
-    mean_go_fail_rate = Get-OptionalDouble -Value $generationRecord.mean_go_fail_rate
+    mean_gold_delta = Get-OptionalDouble -Value $meanMeanGoldDelta
+    mean_p10_gold_delta = Get-OptionalDouble -Value $meanP10GoldDelta
+    mean_p50_gold_delta = Get-OptionalDouble -Value $meanP50GoldDelta
+    mean_gold_core = Get-OptionalDouble -Value $meanGoldCore
+    mean_expected_result = Get-OptionalDouble -Value $meanExpectedResult
+    mean_bankrupt_rate = Get-OptionalDouble -Value $meanBankruptRate
+    mean_bankrupt_penalty = Get-OptionalDouble -Value $meanBankruptPenalty
+    mean_go_games = Get-OptionalDouble -Value $meanGoGames
+    mean_go_rate = Get-OptionalDouble -Value $meanGoRate
+    mean_go_fail_rate = Get-OptionalDouble -Value $meanGoFailRate
   }
 }
 
@@ -222,7 +298,7 @@ if (-not (Test-Path $python)) {
   throw "python not found: $python"
 }
 
-$configFeedforward = "scripts/configs/neat_feedforward.ini"
+$configFeedforward = "scripts/configs/neat_feedforward_by_GPT.ini"
 $runtimeConfig = "scripts/configs/runtime_phase${Phase}_by_GPT.json"
 $outputDir = "logs/NEAT_GPT/neat_phase${Phase}_seed$Seed"
 
@@ -236,7 +312,7 @@ if (-not (Test-Path $runtimeConfig)) {
 # ---------------------------------------------------------------------------
 # Section 3) Build training command
 # ---------------------------------------------------------------------------
-$cmd = @(
+$baseCmd = @(
   "scripts/neat_train_worker_by_GPT.py",
   "--config-feedforward", $configFeedforward,
   "--runtime-config", $runtimeConfig,
@@ -245,7 +321,52 @@ $cmd = @(
   "--profile-name", "gpt_phase${Phase}_seed$Seed"
 )
 
-if ($Phase -ne "1") {
+$phaseRunStartedAt = Get-Date
+$summary = $null
+$phase1StageASummary = $null
+
+if ($Phase -eq "1") {
+  $phase1Runtime = Read-JsonFile -Path $runtimeConfig
+  $phase1Curriculum = Get-PropertyValue -Object $phase1Runtime -Name "phase1_curriculum"
+  $phase1CurriculumEnabled = To-BoolOrDefault -Value (Get-PropertyValue -Object $phase1Curriculum -Name "enabled") -DefaultValue $false
+
+  if ($phase1CurriculumEnabled) {
+    $phase1Generations = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $phase1Runtime -Name "generations") -DefaultValue 20
+    $phase1StageAGenerations = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $phase1Curriculum -Name "stage_a_generations") -DefaultValue 8
+    if ($phase1StageAGenerations -ge $phase1Generations) {
+      throw "invalid phase1_curriculum: stage_a_generations ($phase1StageAGenerations) must be less than generations ($phase1Generations)"
+    }
+    $phase1StageAOpponentPolicy = [string](Get-PropertyValue -Object $phase1Curriculum -Name "stage_a_opponent_policy")
+    if ([string]::IsNullOrWhiteSpace($phase1StageAOpponentPolicy)) {
+      $phase1StageAOpponentPolicy = "H-Gemini"
+    }
+    $phase1StageBGenerations = $phase1Generations - $phase1StageAGenerations
+
+    Write-Host "Phase1 curriculum enabled: stageA=$phase1StageAGenerations (opponent=$phase1StageAOpponentPolicy), stageB=$phase1StageBGenerations (runtime mix)"
+
+    $phase1StageACmd = $baseCmd + @(
+      "--generations", "$phase1StageAGenerations",
+      "--opponent-policy", "$phase1StageAOpponentPolicy",
+      "--profile-name", "gpt_phase1a_seed$Seed"
+    )
+    $phase1StageASummary = Invoke-TrainingRun -Python $python -Arguments $phase1StageACmd
+
+    $phase1CheckpointDir = Join-Path $outputDir "checkpoints"
+    $phase1Resume = Resolve-PreviousCheckpoint -CheckpointDir $phase1CheckpointDir -PreferredGeneration $phase1StageAGenerations -Label "phase1-stageA"
+
+    $phase1StageBCmd = $baseCmd + @(
+      "--generations", "$phase1StageBGenerations",
+      "--resume", "$($phase1Resume.path)",
+      "--base-generation", "$($phase1Resume.generation)",
+      "--profile-name", "gpt_phase1b_seed$Seed"
+    )
+    $summary = Invoke-TrainingRun -Python $python -Arguments $phase1StageBCmd
+  }
+  else {
+    $summary = Invoke-TrainingRun -Python $python -Arguments $baseCmd
+  }
+}
+else {
   $previousPhase = [int]$Phase - 1
   $previousLabel = "phase$previousPhase"
   $previousRuntimePath = "scripts/configs/runtime_phase${previousPhase}_by_GPT.json"
@@ -253,35 +374,19 @@ if ($Phase -ne "1") {
   $previousGenerations = To-PositiveIntOrDefault -Value $previousRuntime.generations -DefaultValue 20
   $previousCheckpointDir = "logs/NEAT_GPT/neat_phase${previousPhase}_seed$Seed/checkpoints"
   $resume = Resolve-PreviousCheckpoint -CheckpointDir $previousCheckpointDir -PreferredGeneration $previousGenerations -Label $previousLabel
-
-  $cmd += @(
+  $cmd = $baseCmd + @(
     "--resume", "$($resume.path)",
     "--base-generation", "$($resume.generation)"
   )
+  $summary = Invoke-TrainingRun -Python $python -Arguments $cmd
 }
 
 # ---------------------------------------------------------------------------
 # Section 4) Execute training and parse summary
 # ---------------------------------------------------------------------------
-$phaseRunStartedAt = Get-Date
-$result = & $python @cmd | Out-String
 $phaseRunElapsedSec = [math]::Round(((Get-Date) - $phaseRunStartedAt).TotalSeconds, 3)
-$exitCode = $LASTEXITCODE
-if ($exitCode -ne 0) {
-  if (-not [string]::IsNullOrWhiteSpace($result)) {
-    Write-Host $result.Trim()
-  }
-  exit $exitCode
-}
-
-try {
-  $summary = $result | ConvertFrom-Json
-}
-catch {
-  if (-not [string]::IsNullOrWhiteSpace($result)) {
-    Write-Host $result.Trim()
-  }
-  throw "failed to parse neat_train_worker_by_GPT output as JSON"
+if ($null -eq $summary) {
+  throw "phase run summary is null"
 }
 
 # ---------------------------------------------------------------------------
@@ -290,10 +395,16 @@ catch {
 $goMetrics = Get-BestGenomeGoMetrics -Summary $summary
 $goAverages = Get-LatestGenerationGoAverages -Summary $summary
 $summaryElapsedSec = Get-OptionalDouble -Value $summary.run_elapsed_sec -DefaultValue $phaseRunElapsedSec
+if ($null -ne $phase1StageASummary) {
+  $summaryElapsedSec = $phaseRunElapsedSec
+}
 
 Write-Host "=== Phase$Phase GPT Summary (Seed=$Seed) ==="
+if ($null -ne $phase1StageASummary) {
+  Write-Host "StageA latest win: $($phase1StageASummary.gate_state.latest_win_rate)"
+  Write-Host "StageA best fit:   $($phase1StageASummary.best_fitness)"
+  }
 Write-Host "EMA win rate:     $($summary.gate_state.ema_win_rate)"
-Write-Host "EMA imitation:    $($summary.gate_state.ema_imitation)"
 Write-Host "Latest win rate:  $($summary.gate_state.latest_win_rate)"
 Write-Host "Win slope(5):     $($summary.gate_state.latest_win_rate_slope_5)"
 Write-Host "Transition ready: $($summary.gate_state.transition_ready)"
@@ -305,9 +416,7 @@ if ([bool]$goAverages.available) {
   Write-Host "Mean p10 delta:   $($goAverages.mean_p10_gold_delta)"
   Write-Host "Mean p50 delta:   $($goAverages.mean_p50_gold_delta)"
   Write-Host "Mean gold core:   $($goAverages.mean_gold_core)"
-  Write-Host "Mean exp result:  $($goAverages.mean_expected_result)"
   Write-Host "Mean bankrupt:    $($goAverages.mean_bankrupt_rate)"
-  Write-Host "Mean bk penalty:  $($goAverages.mean_bankrupt_penalty)"
   Write-Host "GO mean games:    $($goAverages.mean_go_games)"
   Write-Host "GO mean fail:     $($goAverages.mean_go_fail_rate)"
   Write-Host "GO mean rate:     $($goAverages.mean_go_rate)"
@@ -317,31 +426,23 @@ else {
   Write-Host "Mean p10 delta:   N/A"
   Write-Host "Mean p50 delta:   N/A"
   Write-Host "Mean gold core:   N/A"
-  Write-Host "Mean exp result:  N/A"
   Write-Host "Mean bankrupt:    N/A"
-  Write-Host "Mean bk penalty:  N/A"
   Write-Host "GO mean games:    N/A"
   Write-Host "GO mean fail:     N/A"
   Write-Host "GO mean rate:     N/A"
 }
 if ([bool]$goMetrics.available) {
   Write-Host "Fitness model:    $($goMetrics.fitness_model)"
-  Write-Host "Fitness profile:  $($goMetrics.fitness_profile)"
   Write-Host "Best gold delta:  $($goMetrics.mean_gold_delta)"
   Write-Host "Best p10 delta:   $($goMetrics.p10_gold_delta)"
   Write-Host "Best p50 delta:   $($goMetrics.p50_gold_delta)"
   Write-Host "Best gold core:   $($goMetrics.gold_core)"
-  Write-Host "Best exp result:  $($goMetrics.expected_result)"
   Write-Host "Best bankrupt:    $($goMetrics.bankrupt_rate)"
-  Write-Host "Best bk penalty:  $($goMetrics.bankrupt_penalty)"
   Write-Host "GO count:         $($goMetrics.go_count)"
   Write-Host "GO games:         $($goMetrics.go_games)"
   Write-Host "GO fail count:    $($goMetrics.go_fail_count)"
   Write-Host "GO fail rate:     $($goMetrics.go_fail_rate)"
   Write-Host "GO rate:          $($goMetrics.go_rate)"
-  Write-Host "Luck proxy:       $($goMetrics.luck_proxy)"
-  Write-Host "Luck seat gap:    $($goMetrics.luck_seat_win_rate_gap)"
-  Write-Host "Luck volatility:  $($goMetrics.luck_gold_volatility_norm)"
 }
 else {
   Write-Host "GO/Luck metrics:  unavailable"
