@@ -1,204 +1,284 @@
-﻿// heuristicGPT.js - Matgo Heuristic GPT
+﻿// heuristicGPT.js - Matgo Heuristic GPT (rule-tree v1)
 /* ============================================================================
- * Heuristic GPT
- * - risk-adjusted expected utility
- * - phase profile + pressure model + optional rollout blending
+ * Heuristic GPT (no rollout)
+ * - Layer 1: hard safety gates
+ * - Layer 2: risk-adjusted utility
+ * - Layer 3: deterministic decision tree
  * - exported decisions: rank / match / go / bomb / shaking / president / gukjin
  * ========================================================================== */
-const GUKJIN_CARD_ID = "I0";
 
-/* 1) Tunable parameter set */
+const GUKJIN_CARD_ID = "I0";
+const TRACE_STORE = new Map();
+const CORE_GO_FEATURE_KEYS = Object.freeze([
+  "myScore",
+  "oppScore",
+  "lead",
+  "selfPi",
+  "oppPi",
+  "selfFive",
+  "oppFive",
+  "goCount",
+  "carry",
+  "deckCount",
+  "threat",
+  "oneAwayProb",
+  "selfJokboTotal",
+  "selfJokboOneAway",
+  "oppJokboTotal",
+  "oppJokboOneAway",
+  "secondMover",
+  "desperate"
+]);
+
+// Tunable parameter set consumed by runtime + optimizer scripts.
 export const DEFAULT_PARAMS = {
   // phase
-  phaseEarlyDeck: 13,
-  phaseLateDeck: 6,
-  phaseEndDeck: 4,
 
   // profile weights
   attackBase: 1.0,
   defenseBase: 1.0,
   riskBase: 1.0,
   tempoBase: 1.0,
-  trailingAttackBoost: 0.008872760195410128,
-  trailingTempoBoost: 0.38505936587117007,
-  leadingDefenseBoost: 0.292593042179272,
-  leadingRiskBoost: 0.2783896824374792,
-  highPressureDefenseBoost: 0.16358117776570796,
-  highPressureRiskBoost: 0.06931772802833831,
-  secondMoverTempoBoost: 0.08,
+  secondMoverTempoBoost: 0.05,
 
   // card utility
-  noMatchBase: -10.592066615960226,
-  matchOneBase: 5.501457388987572,
-  matchTwoBase: 12.393813317648963,
-  matchThreeBase: 17.145959227000624,
-  captureGainMul: 1.4262171143895044,
-  kwangCaptureBonus: 6.0,
-  fiveCaptureBonus: 4.4,
-  ribbonCaptureBonus: 2.0,
-  junkPiMul: 3.679603381675657,
-  selfPiWindowMul: 2.3277844490611104,
-  oppPiWindowMul: 1.7806350667132298,
-  doublePiBonus: 5.0,
-  doublePiNoMatchHoldPenalty: 4.2,
-  doublePiMonthPairHoldPenalty: 2.8,
-  doublePiMonthTripleHoldPenalty: 2.2,
-  doublePiPairMonthHoldPenalty: 1.8,
-  doublePiMonthAnchorHoldPenalty: 2.0,
-  doublePiHoldRiskRelease: 8.5,
-  doublePiHoldRiskReleaseMul: 0.45,
-  comboOpportunityMul: 5.103301341324105,
-  blockBase: 6.893765969874818,
-  blockUrgencyMul: 1.4392001248555797,
-  blockThreatMul: 1.8404701559048615,
-  blockNoMatchPenalty: 4.8,
-  firstTurnPlanBonus: 6.5,
-  knownMonthSafeBonus: 2.5,
-  unknownMonthPenalty: 1.8,
-  trailPiTempoMul: 1.8,
-  leadNoMatchTempoPenalty: 2.2,
-  endgameSafeDiscardBonus: 1.5,
-  endgameUnknownPenalty: 2.2,
-  bonusCardUseBase: 3.6,
-  bonusCardStealPiMul: 1.7,
-  bonusCardExtraTurnTempo: 1.2,
-  bonusCardEarlyHoldBias: 1.0,
-  bonusCardLateUseBonus: 1.4,
-  bonusCardHoldPenaltyMul: 0.12,
-  bonusCardRiskMul: 0.18,
-  bonusCardOppPiEmptyPenalty: 0.6,
-
-  // risk
-  feedRiskNoMatchMul: 3.8138224112332004,
-  feedRiskMatchMul: 1.5641229988358645,
-  dangerNoMatchMul: 0.6561346056560479,
-  dangerMatchMul: 0.2625016967096827,
-  releaseRiskFloor: 0.6,
-  releaseRiskMul: 2.552031704261033,
-  pukRiskMul: 1.2036440115948506,
-  pukOpportunityMul: 1.4,
+  noMatchBase: -4.0792449011398091,
+  kwangCaptureBonus: 4.4,
+  fiveCaptureBonus: 3.2,
+  ribbonCaptureBonus: 1.4,
+  selfPiWindowMul: 1.4,
+  oppPiWindowMul: 1.2,
+  doublePiBonus: 3.2,
+  blockNoMatchPenalty: 2.0,
+  firstTurnPlanBonus: 3.5,
+  knownMonthSafeBonus: 1.2,
+  unknownMonthPenalty: 1.0,
+  trailPiTempoMul: 0.9,
+  leadNoMatchTempoPenalty: 1.1,
+  endgameSafeDiscardBonus: 0.8,
+  endgameUnknownPenalty: 1.2,
+  releaseRiskFloor: 0.55,
+  pukOpportunityMul: 1.0,
+  doublePiNoMatchHoldPenalty: 2.6,
+  doublePiMonthPairHoldPenalty: 1.8,
+  doublePiMonthTripleHoldPenalty: 1.3,
+  phaseMidPiMul: 1.0,
+  phaseEarlyTempoMul: 1.08,
+  phaseMidTempoMul: 1.0,
+  phaseLateTempoMul: 0.96,
+  phaseEndTempoMul: 0.92,
+  phaseEarlyRiskMul: 0.94,
+  phaseMidRiskMul: 1.0,
+  phaseEarlyBlockMul: 0.95,
+  phaseMidBlockMul: 1.0,
 
   // choose-match
   chooseMatchBaseMul: 1.0,
-  chooseMatchPiMul: 5.0,
-  chooseMatchKwangBonus: 5.0,
-  chooseMatchFiveBonus: 3.5,
-  chooseMatchRibbonBonus: 1.8,
-  chooseMatchBlockMul: 1.8,
-  chooseMatchComboMul: 2.8,
-  chooseMatchOppShakeMonthBonus: 1.05,
+  chooseMatchPiMul: 4.0,
+  chooseMatchKwangBonus: 4.5,
+  chooseMatchFiveBonus: 3.0,
+  chooseMatchRibbonBonus: 1.6,
+  chooseMatchBlockMul: 1.7,
+  chooseMatchComboMul: 2.4,
+  tieScoreEpsilon: 0.000001,
 
-  // go model
-  goMinPi: 3,
-  goMinPiDesperate: 7,
-  goMinPiSecondTrailingDelta: 2,
+  // go model (hard gates)
   goHardThreatCut: 1.0,
-  goHardThreatDeckCut: 7,
-  goHardOppFiveCut: 7,
-  goHardOppScoreCut: 9,
-  goHardLateOneAwayCut: 58,
-  goHardLateOneAwayDeckCut: 8,
-  goHardGoCountCap: 3,
+  goHardOppLeadGrace: 1,
   goHardGoCountThreatCut: 0.72,
-  goUpsideScoreMul: 0.13265527008132086,
-  goUpsidePiMul: 0.05925605015660167,
-  goUpsideSelfJokboMul: 0.44243820377938115,
-  goUpsideOneAwayMul: 0.12,
-  goUpsideTrailBonus: 0.15,
-  goRiskPressureMul: 0.17826732852080118,
-  goRiskOneAwayMul: 0.01678201275303764,
-  goRiskOppJokboMul: 0.31040947392931106,
-  goRiskOppOneAwayMul: 0.05117633658380274,
+  goDesperateThreatCap: 0.62,
+  goDesperateOneAwayCap: 48,
+  goHardRiskOppHighPiPenalty: 0.08,
+  goHardRiskLeadSafetyRelief: 0.12,
+
+  // go model (utility)
+  goUpsideTrailBonus: 0.12,
   goRiskGoCountMul: 0.11,
-  goRiskLateDeckBonus: 0.12,
-  stopLeadMul: 0.06,
-  stopCarryMul: 0.10,
+  goRiskLateDeckBonus: 0.1,
+  stopLeadMul: 0.07,
+  stopCarryMul: 0.1,
   stopTenBonus: 0.16,
-  goBaseThreshold: 0.00015549477139192607,
-  goThresholdLeadUp: 0.0797009468794747,
-  goThresholdTrailDown: 0.1231700196104433,
-  goThresholdPressureUp: 0.12701873017352877,
-  goSecondTrailBonus: 0.05,
+  goCoreThreatClamp: 1.8,
+  goCoreOneAwayClamp: 100,
+
+  // go model (threshold)
+  goBaseThreshold: -0.088202235346907271,
+  goSecondTrailBonus: 0.04,
   goRallyPiWindowBonus: 0.02,
   goRallySecondBonus: 0.01,
   goRallyTrailBonus: 0.02,
-  goRallyEndDeckBonus: 0.00,
-  goSoftHighPiThreatCap: 0.90,
+  goRallyEndDeckBonus: 0.0,
+  goSoftHighPiThreatCap: 0.9,
   goSoftHighPiOneAwayCap: 66,
   goSoftHighPiMargin: 0.06,
   goSoftTrailHighPiMargin: 0.04,
   goSoftValueMargin: 0.02,
 
-  // rollout (2-ply, selective)
-  rolloutEnabled: 1,
-  rolloutTopK: 2,
-  rolloutMaxSteps: 8,
-  rolloutSamples: 4,
-  rolloutCardWeight: 1.2564898411883223,
-  rolloutGoWeight: 1.3904323579427342,
-  rolloutGoDeltaCap: 0.3,
-  rolloutSelectiveEnabled: 1,
-  rolloutCardScoreGap: 1.25,
-  rolloutCardThreatCut: 0.78,
-  rolloutGoMargin: 0.06,
-  rolloutGoThreatCut: 0.72,
-  rolloutGoOneAwayCut: 60,
-
-  // hard stop gate + lightweight go replacement signals
+  // go hard safe-stop + light penalties
   goHardSafeStopEnabled: 1,
   goHardSafeStopMinScore: 7,
-  goHardSafeStopDeckCut: 7,
-  goHardSafeStopLeadMin: 2,
+  goHardSafeStopDeckCut: 9,
+  goHardSafeStopLeadMin: 1,
   goLiteScoreDiffMul: 0.04,
-  goLiteThreatPenaltyMul: 0.05,
-  goLiteOneAwayPenaltyMul: 0.04,
-  goLiteLatePenalty: 0.045,
-  goLiteOppCanStopPenalty: 0.1,
   goLiteSelfCanStopPenalty: 0.01,
-  goLiteSafeAttackBonus: 0.06,
   goLiteSafeAttackThreatCap: 0.58,
   goLiteSafeAttackOneAwayCap: 45,
   goLiteSafeAttackDeckMin: 5,
+  goSafeGoSwingProbCut: 0.05,
+
+  // optimizer compatibility knobs
+  goScoreDiffBonus: 0.01,
+  goDeckLowBonus: 0.02,
+  goUnseeHighPiPenalty: 0.04,
 
   // bomb
   bombImmediateMul: 0.9,
   bombBoardGainMul: 0.8,
-  bombHighImpactBonus: 3.2,
-  bombTrailBonus: 1.2,
+  bombHighImpactBonus: 2.8,
+  bombTrailBonus: 1.0,
   bombRiskMul: 1.0,
-  bombThreshold: 3.5,
-  bombDefenseThreshold: 5.0,
+  bombThreshold: 3.0,
+  bombDefenseThreshold: 4.5,
 
   // shaking
-  shakeImmediateMul: 0.7770168166124757,
-  shakeComboMul: 1.1244576604770598,
-  shakeImpactBonus: 0.7,
-  shakePiLineBonus: 0.45,
-  shakeDirectGwangBonus: 0.45,
-  shakeKnownLowBonus: 0.25,
-  shakeKnownHighPenalty: 0.2,
-  shakeRiskMul: 0.8136178904285073,
-  shakeTrailingBonus: 0.22,
-  shakeFirstPlanBonus: 0.28,
-  shakeThreshold: 0.7025090068640703,
-  shakeLeadThresholdUp: 0.18,
-  shakePressureThresholdUp: 0.15,
-
-  // opponent shaking awareness (small tuning)
-  oppShakeRecentWindow: 8,
-  oppShakeBlockBonus: 1.15,
-  oppShakeNoMatchRiskBonus: 0.45,
+  shakeImpactBonus: 0.65,
+  shakePiLineBonus: 0.4,
+  shakeDirectGwangBonus: 0.4,
+  shakeKnownLowBonus: 0.22,
+  shakeKnownHighPenalty: 0.18,
+  shakeTrailingBonus: 0.2,
+  shakeFirstPlanBonus: 0.25,
 
   // president and gukjin
   presidentStopLead: 3,
   presidentCarryStopMax: 1,
+  presidentThreatStop: 1.0,
   gukjinScoreDiffMul: 1.0,
   gukjinPiDiffMul: 0.22,
   gukjinMongBakBonus: 1.8,
-  gukjinMongRiskPenalty: 2.2
+  gukjinMongRiskPenalty: 2.2,
+
+  // trial 114 tuned params
+  blockBase: 3.6389093404465638,
+  blockThreatMul: 2.925693242333967,
+  blockUrgencyMul: 1.6657156721216619,
+  captureGainMul: 0.8685039095454038,
+  comboOpportunityMul: 5.2576241793437317,
+  dangerMatchMul: 1.254023424815037,
+  dangerNoMatchMul: 0.60006369148644045,
+  desperateAttackBoost: 0.18574008728141175,
+  desperateRiskDown: 0.18141389141866276,
+  desperateTempoBoost: 0.0300786761264036,
+  feedRiskMatchMul: 1.7141622867335182,
+  feedRiskNoMatchMul: 1.1521460372219654,
+  goHardGoCountCap: 4,
+  goHardJokboOneAwayCountCut: 1,
+  goHardJokboOneAwayCut: 68,
+  goHardJokboOneAwayDeckCut: 7,
+  goHardJokboOneAwaySwingCut: 0.45964118755905231,
+  goHardLateOneAwayCut: 47,
+  goHardLateOneAwayDeckCut: 8,
+  goHardOppFiveCut: 7,
+  goHardOppScoreCut: 8,
+  goHardRiskOneAwayMul: 0.67869959500383537,
+  goHardRiskOppStopPenalty: 0.43208757051963176,
+  goHardRiskThreatMul: 0.21781498975205768,
+  goHardRiskThreshold: 0.58761093591951763,
+  goHardThreatDeckCut: 10,
+  goLiteLatePenalty: 0.18125403165573611,
+  goLiteOneAwayPenaltyMul: 0.11608197553448872,
+  goLiteOppCanStopPenalty: 0.3,
+  goLiteSafeAttackBonus: 0.15494875441940156,
+  goLiteThreatPenaltyMul: 0.13560896875251968,
+  goLookaheadThresholdMul: 0.059459872467595147,
+  goMinPi: 6,
+  goMinPiDesperate: 6,
+  goMinPiSecondTrailingDelta: 2,
+  goRiskOneAwayMul: 0.17410107037517836,
+  goRiskOppJokboMul: 0.34749337695693389,
+  goRiskOppOneAwayMul: 0.13405521881051077,
+  goRiskPressureMul: 0.37751193247462522,
+  goSafeGoBonus: 0.26164359701018652,
+  goThresholdLeadUp: 0.17600484318391654,
+  goThresholdPressureUp: 0.0023769481568353054,
+  goThresholdTrailDown: 0.10567145021358916,
+  goUpsideOneAwayMul: 0.11046416616873096,
+  goUpsidePiMul: 0.068238432502096907,
+  goUpsideScoreMul: 0.072204438069289792,
+  goUpsideSelfJokboMul: 0.8700789315322861,
+  goUtilityRiskWeight: 1.3197840792723667,
+  goUtilityStopWeight: 0.95646418729412319,
+  goUtilityThresholdWeight: 1.5189777909051363,
+  goUtilityUpsideWeight: 1.7797317565163624,
+  highPressureDefenseBoost: 0.20342301221416864,
+  highPressureRiskBoost: 0.36360774045397382,
+  junkPiMul: 4.1130591120449651,
+  leadingDefenseBoost: 0.16160416259015861,
+  leadingRiskBoost: 0.20077336223817188,
+  matchOneBase: 3.750945296601202,
+  matchThreeBase: 10.228089029646991,
+  matchTwoBase: 7.7121591289308578,
+  phaseEarlyDeck: 14,
+  phaseEarlyPiMul: 1.3153566274342017,
+  phaseEndBlockMul: 1.7398642134212745,
+  phaseEndDeck: 4,
+  phaseEndPiMul: 0.54813788557403864,
+  phaseEndRiskMul: 1.2088700937680157,
+  phaseLateBlockMul: 2.0967140913210622,
+  phaseLateDeck: 6,
+  phaseLatePiMul: 0.677089810720508,
+  phaseLateRiskMul: 1.9490415108333872,
+  pukRiskMul: 2.2761449473327269,
+  rankReleaseRiskPenaltyMul: 32.151302962826065,
+  releaseRiskMul: 1.6777627628700409,
+  releaseRiskOppScoreExpMul: 0.44282546439954162,
+  selfPukRiskExpMul: 0.1277655427730493,
+  selfPukRiskMul: 0.51006792818624569,
+  selfPukRiskPatternBonus: 0.32796251692829625,
+  shakeComboMul: 0.506422480544727,
+  shakeImmediateMul: 1.7635366633648264,
+  shakeLeadThresholdUp: 0.16094138990062612,
+  shakePressureThresholdUp: 0.015514153919548149,
+  shakeRiskMul: 0.12869190687210985,
+  shakeThreshold: 0.72983558045318309,
+  trailingAttackBoost: 0.22829206981691025,
+  trailingTempoBoost: 0.16126360939155543,
+
+  // structural v3
+  seatSecondAttackDown: 0.12,
+  seatSecondDefenseUp: 0.22,
+  seatSecondRiskUp: 0.22,
+  seatSecondTempoDown: 0.08,
+  seatFirstTrailAttackUp: 0.06,
+  cardSecondBlockThreatBonus: 1.2,
+  cardSecondReleaseRiskMul: 1.35,
+  cardSecondNoMatchRiskMul: 0.2,
+  cardFirstTrailTempoBonus: 0.35,
+  goModeSafeThresholdUp: 0.06,
+  goModeSafeRiskMul: 1.18,
+  goModeSafeStopMul: 1.1,
+  goModeChaseThresholdDown: 0.04,
+  goModeChaseUpsideMul: 1.08,
+  goModeChaseRiskMul: 1.0,
+  goModeChaseStopMul: 0.95,
+  goModeSecondSafeThresholdUp: 0.07,
+  goModeSecondChaseThresholdDown: 0.0,
+  goModeLateSafeThresholdUp: 0.04,
+  goModeLateChaseThresholdDown: 0.0,
+  goHardSecondChaseBlockEnabled: 1,
+  goHardSecondChaseThreatCut: 0.8,
+  goHardSecondChaseLateDeckCut: 7,
+  goHardSecondChaseOneAwayCut: 70,
+  goHardCarryOppStopCarryMin: 1,
+
+  // decision trace
+  decisionTraceEnabled: 0,
+  decisionTraceLimit: 80
 };
 
-/* 2) Core numeric/card helpers */
+// ---------------------------------------------------------------------------
+// Primitive helpers
+// ---------------------------------------------------------------------------
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -212,6 +292,130 @@ function mergedParams(params) {
   return { ...DEFAULT_PARAMS, ...(params || {}) };
 }
 
+// ---------------------------------------------------------------------------
+// Decision trace helpers (debug / explainability)
+// ---------------------------------------------------------------------------
+function shouldTrace(P, deps) {
+  if (safeNum(P?.decisionTraceEnabled, 0) > 0) return true;
+  return typeof deps?.onHeuristicGPTTrace === "function";
+}
+
+function traceKey(decisionType, playerKey) {
+  return `${String(decisionType || "unknown")}:${String(playerKey || "unknown")}`;
+}
+
+function beginTrace(decisionType, playerKey, P, deps) {
+  if (!shouldTrace(P, deps)) return null;
+  return {
+    decisionType,
+    playerKey,
+    at: Date.now(),
+    layers: []
+  };
+}
+
+function traceLayer(trace, layer, detail) {
+  if (!trace) return;
+  trace.layers.push({ layer, ...(detail || {}) });
+}
+
+function pushTrace(trace, decision, reason, P, deps) {
+  if (!trace) return decision;
+  trace.decision = Boolean(decision);
+  trace.reason = String(reason || "");
+
+  const limit = Math.max(1, Math.floor(safeNum(P?.decisionTraceLimit, 80)));
+  const key = traceKey(trace.decisionType, trace.playerKey);
+  const list = TRACE_STORE.get(key) || [];
+  list.push(trace);
+  if (list.length > limit) {
+    list.splice(0, list.length - limit);
+  }
+  TRACE_STORE.set(key, list);
+
+  if (typeof deps?.onHeuristicGPTTrace === "function") {
+    deps.onHeuristicGPTTrace(trace);
+  }
+  return decision;
+}
+
+// ---------------------------------------------------------------------------
+// State adapters and card-map utilities
+// ---------------------------------------------------------------------------
+function otherPlayerKey(deps, playerKey) {
+  if (typeof deps?.otherPlayerKey === "function") return deps.otherPlayerKey(playerKey);
+  return playerKey === "human" ? "ai" : "human";
+}
+
+function asMonthMap(value) {
+  if (value instanceof Map) return value;
+  const out = new Map();
+  if (!value || typeof value !== "object") return out;
+  for (const [k, v] of Object.entries(value)) {
+    const month = Number(k);
+    if (!Number.isInteger(month) || month < 1 || month > 12) continue;
+    out.set(month, safeNum(v));
+  }
+  return out;
+}
+
+function asMonthSet(value) {
+  if (value instanceof Set) return value;
+  const out = new Set();
+  if (Array.isArray(value)) {
+    for (const x of value) {
+      const m = Number(x);
+      if (Number.isInteger(m) && m >= 1 && m <= 12) out.add(m);
+    }
+  }
+  return out;
+}
+
+function countByMonth(cards) {
+  const out = new Map();
+  for (const card of cards || []) {
+    const month = Number(card?.month);
+    if (!Number.isInteger(month) || month < 1 || month > 12) continue;
+    out.set(month, safeNum(out.get(month)) + 1);
+  }
+  return out;
+}
+
+function boardByMonth(state, deps) {
+  const raw = typeof deps?.boardMatchesByMonth === "function" ? deps.boardMatchesByMonth(state) : null;
+  if (raw instanceof Map) return raw;
+  const out = new Map();
+  for (const card of state?.board || []) {
+    const month = Number(card?.month);
+    if (!Number.isInteger(month) || month < 1 || month > 12) continue;
+    if (!out.has(month)) out.set(month, []);
+    out.get(month).push(card);
+  }
+  return out;
+}
+
+function monthCountsWithDeps(deps, cards) {
+  const raw = typeof deps?.monthCounts === "function" ? deps.monthCounts(cards || []) : null;
+  if (raw instanceof Map) return raw;
+  return countByMonth(cards || []);
+}
+
+function capturedMonthCountsWithDeps(state, deps) {
+  const raw = typeof deps?.capturedMonthCounts === "function" ? deps.capturedMonthCounts(state) : null;
+  if (raw instanceof Map) return raw;
+  return new Map();
+}
+
+// ---------------------------------------------------------------------------
+// Threat/profile construction
+// ---------------------------------------------------------------------------
+function classifyPhase(deckCount, P) {
+  if (deckCount <= P.phaseEndDeck) return "end";
+  if (deckCount <= P.phaseLateDeck) return "late";
+  if (deckCount >= P.phaseEarlyDeck) return "early";
+  return "mid";
+}
+
 function isSecondMover(state, playerKey) {
   const first = state?.startingTurnKey;
   if (first !== "human" && first !== "ai") return false;
@@ -222,574 +426,884 @@ function piValue(card, deps) {
   if (!card) return 0;
   if (card.id === GUKJIN_CARD_ID) return 2;
   if (card.category !== "junk") return 0;
-  return safeNum(deps.junkPiValue?.(card));
+  if (typeof deps?.junkPiValue === "function") {
+    const v = safeNum(deps.junkPiValue(card), 1);
+    return Math.max(0, v);
+  }
+  const fallback = safeNum(card?.piValue, 1);
+  return Math.max(0, fallback);
 }
 
 function isDoublePi(card, deps) {
   return piValue(card, deps) >= 2;
 }
 
-function comboTagCount(cards, tag) {
-  return (cards || []).reduce((sum, card) => {
-    if (Array.isArray(card?.comboTags) && card.comboTags.includes(tag)) return sum + 1;
-    return sum;
-  }, 0);
+function categoryCaptureBonus(cards, P) {
+  let bonus = 0;
+  for (const card of cards || []) {
+    if (card?.category === "kwang") bonus += P.kwangCaptureBonus;
+    else if (card?.category === "five") bonus += P.fiveCaptureBonus;
+    else if (card?.category === "ribbon") bonus += P.ribbonCaptureBonus;
+  }
+  return bonus;
 }
 
-/* 3) Pressure and phase profile builders */
-function calcOpponentPressure(state, playerKey, deps) {
-  const opp = deps.otherPlayerKey(playerKey);
-  const jokbo = deps.checkOpponentJokboProgress(state, playerKey);
-  const prog = safeNum(deps.opponentThreatScore(state, playerKey));
-  const next = safeNum(deps.nextTurnThreatScore(state, playerKey));
-  const board = safeNum(deps.boardHighValueThreatForPlayer?.(state, opp));
-  const matchable = safeNum(deps.matchableMonthCountForPlayer?.(state, opp));
-  const deck = safeNum(state.deck?.length);
+function collectThreatSignals(state, playerKey, deps, P) {
+  const jokbo = typeof deps?.checkOpponentJokboProgress === "function"
+    ? deps.checkOpponentJokboProgress(state, playerKey)
+    : null;
+  const jokboThreat = safeNum(jokbo?.threat);
+  const progThreat = typeof deps?.opponentThreatScore === "function"
+    ? safeNum(deps.opponentThreatScore(state, playerKey))
+    : 0;
+  const nextThreat = typeof deps?.nextTurnThreatScore === "function"
+    ? safeNum(deps.nextTurnThreatScore(state, playerKey))
+    : 0;
+  const oppKey = otherPlayerKey(deps, playerKey);
+  const boardThreat = typeof deps?.boardHighValueThreatForPlayer === "function"
+    ? safeNum(deps.boardHighValueThreatForPlayer(state, oppKey))
+    : 0;
+  const matchable = typeof deps?.matchableMonthCountForPlayer === "function"
+    ? safeNum(deps.matchableMonthCountForPlayer(state, oppKey))
+    : 0;
+  const deckCount = safeNum(state?.deck?.length);
 
-  const threatRaw = prog * 0.45 + safeNum(jokbo?.threat) * 0.35 + next * 0.2 + board * 0.12 + matchable * 0.04;
-  const threat = clamp(threatRaw, 0, 1.6);
+  const threat = clamp(
+    progThreat * 0.4 + jokboThreat * 0.3 + nextThreat * 0.2 + boardThreat * 0.08 + matchable * 0.05,
+    0,
+    1.8
+  );
 
-  let oneAwayProb = prog * 38 + safeNum(jokbo?.threat) * 32 + next * 20 + board * 10 + matchable * 4;
-  if (deck <= 10) oneAwayProb += 6;
-  if (deck <= 6) oneAwayProb += 8;
+  let oneAwayProb = progThreat * 34 + jokboThreat * 30 + nextThreat * 20 + boardThreat * 8 + matchable * 4;
+  if (deckCount <= P.phaseLateDeck) oneAwayProb += 8;
+  if (deckCount <= P.phaseEndDeck) oneAwayProb += 8;
   oneAwayProb = clamp(oneAwayProb, 0, 100);
 
   return {
     threat,
     oneAwayProb,
-    jokboThreat: safeNum(jokbo?.threat),
-    monthUrgency: jokbo?.monthUrgency || new Map(),
-    matchableMonths: matchable,
-    deckCount: deck
+    jokboThreat,
+    monthUrgency: asMonthMap(jokbo?.monthUrgency),
+    deckCount
   };
 }
 
-function classifyPhase(deckCount, myScore, oppScore, P) {
-  if (deckCount <= P.phaseEndDeck) return "end";
-  if (deckCount <= P.phaseLateDeck) return "late";
-  if (deckCount >= P.phaseEarlyDeck && myScore + oppScore <= 9) return "early";
-  return "mid";
-}
-
 function buildProfile(state, playerKey, deps, P) {
-  const ctx = deps.analyzeGameContext(state, playerKey);
-  const myScore = safeNum(ctx.myScore);
-  const oppScore = safeNum(ctx.oppScore);
-  const pressure = calcOpponentPressure(state, playerKey, deps);
-  const phase = classifyPhase(pressure.deckCount, myScore, oppScore, P);
-  const trailing = myScore < oppScore;
-  const leading = myScore > oppScore;
+  const ctx = typeof deps?.analyzeGameContext === "function"
+    ? deps.analyzeGameContext(state, playerKey)
+    : {};
+  const myScore = safeNum(ctx?.myScore);
+  const oppScore = safeNum(ctx?.oppScore);
+  const lead = myScore - oppScore;
+  const trailing = lead < 0;
+  const leading = lead > 0;
   const second = isSecondMover(state, playerKey);
+  const signals = collectThreatSignals(state, playerKey, deps, P);
+  const phase = classifyPhase(signals.deckCount, P);
+  const goldRisk = typeof deps?.goldRiskProfile === "function"
+    ? (deps.goldRiskProfile(state, playerKey) || { selfLow: false, oppLow: false })
+    : { selfLow: false, oppLow: false };
+  const desperate = Boolean(goldRisk?.selfLow && !goldRisk?.oppLow);
 
-  let attack = P.attackBase;
+  let aggression = P.attackBase;
   let defense = P.defenseBase;
   let risk = P.riskBase;
   let tempo = P.tempoBase;
 
   if (trailing) {
-    attack += P.trailingAttackBoost;
+    aggression += P.trailingAttackBoost;
     tempo += P.trailingTempoBoost;
   }
   if (leading) {
     defense += P.leadingDefenseBoost;
     risk += P.leadingRiskBoost;
   }
-  if (pressure.threat >= 0.72) {
+  if (signals.threat >= 0.72) {
     defense += P.highPressureDefenseBoost;
     risk += P.highPressureRiskBoost;
   }
   if (second) tempo += P.secondMoverTempoBoost;
-  if (phase === "end") risk += 0.08;
-  if (phase === "early") attack += 0.05;
+  if (phase === "end") {
+    defense += 0.08;
+    risk += 0.1;
+  }
+  if (desperate) {
+    aggression += P.desperateAttackBoost;
+    tempo += P.desperateTempoBoost;
+    risk = Math.max(0.6, risk - P.desperateRiskDown);
+  }
+
+  // Structural split: second-mover and first-mover use different policy posture.
+  if (second) {
+    aggression = Math.max(0.5, aggression - safeNum(P.seatSecondAttackDown, 0.08));
+    defense += safeNum(P.seatSecondDefenseUp, 0.16);
+    risk += safeNum(P.seatSecondRiskUp, 0.14);
+    if (!trailing && !desperate) {
+      tempo = Math.max(0.6, tempo - safeNum(P.seatSecondTempoDown, 0.05));
+    }
+  } else if (trailing) {
+    aggression += safeNum(P.seatFirstTrailAttackUp, 0.06);
+  }
 
   return {
     ctx,
-    pressure,
-    phase,
+    oppKey: otherPlayerKey(deps, playerKey),
+    myScore,
+    oppScore,
+    lead,
     trailing,
     leading,
     second,
-    attack,
+    seatPolicy: second ? "second" : "first",
+    phase,
+    desperate,
+    signals,
+    aggression,
     defense,
     risk,
     tempo
   };
 }
 
-function captureCategoryBonus(cards, P) {
-  let bonus = 0;
-  for (const c of cards || []) {
-    if (c?.category === "kwang") bonus += P.kwangCaptureBonus;
-    else if (c?.category === "five") bonus += P.fiveCaptureBonus;
-    else if (c?.category === "ribbon") bonus += P.ribbonCaptureBonus;
-  }
-  return bonus;
-}
-
-function scoreComboOpportunity(state, playerKey, month, deps) {
-  return safeNum(deps.ownComboOpportunityScore?.(state, playerKey, month));
-}
-
-function getRecentOpponentShaking(state, playerKey, deps, recentWindow) {
-  const kibo = state?.kibo || [];
-  if (!Array.isArray(kibo) || kibo.length <= 0) {
-    return { active: false, month: null, delta: Infinity };
-  }
-  const opp = deps.otherPlayerKey(playerKey);
-  const window = Math.max(1, Math.floor(safeNum(recentWindow, 8)));
-  const nowNo = Math.max(0, Math.floor(safeNum(state?.kiboSeq, kibo.length)));
-
-  for (let i = kibo.length - 1; i >= 0; i -= 1) {
-    const e = kibo[i];
-    if (e?.type !== "shaking_declare") continue;
-    if (e?.playerKey !== opp) continue;
-    const month = Number(e?.month);
-    if (!Number.isInteger(month) || month < 1 || month > 12) {
-      return { active: false, month: null, delta: Infinity };
-    }
-    const evtNo = Math.max(0, Math.floor(safeNum(e?.no, nowNo)));
-    const delta = Math.max(0, nowNo - evtNo);
-    if (delta > window) return { active: false, month: null, delta };
-    return { active: true, month, delta };
-  }
-  return { active: false, month: null, delta: Infinity };
-}
-
-function knownMonthCount(month, boardCountByMonth, handCountByMonth, capturedByMonth) {
-  return (
-    safeNum(boardCountByMonth.get(month)) +
-    safeNum(handCountByMonth.get(month)) +
-    safeNum(capturedByMonth.get(month))
+// ---------------------------------------------------------------------------
+// Rank/choose helpers
+// ---------------------------------------------------------------------------
+function buildRankingCache(state, playerKey, deps, profile) {
+  const player = state?.players?.[playerKey] || {};
+  const board = boardByMonth(state, deps);
+  const handCountByMonth = monthCountsWithDeps(deps, player?.hand || []);
+  const capturedByMonth = capturedMonthCountsWithDeps(state, deps);
+  const oppPlayer = state?.players?.[profile.oppKey];
+  const blockMonths = asMonthSet(
+    typeof deps?.blockingMonthsAgainst === "function"
+      ? deps.blockingMonthsAgainst(oppPlayer, player)
+      : null
   );
+  const blockUrgency = asMonthMap(
+    typeof deps?.blockingUrgencyByMonth === "function"
+      ? deps.blockingUrgencyByMonth(oppPlayer, player)
+      : null
+  );
+
+  const planRaw = typeof deps?.getFirstTurnDoublePiPlan === "function"
+    ? deps.getFirstTurnDoublePiPlan(state, playerKey)
+    : null;
+
+  const firstTurnPlan = {
+    active: Boolean(planRaw?.active),
+    months: asMonthSet(planRaw?.months)
+  };
+
+  return {
+    board,
+    boardCountByMonth: monthCountsWithDeps(deps, state?.board || []),
+    handCountByMonth,
+    capturedByMonth,
+    blockMonths,
+    blockUrgency,
+    firstTurnPlan
+  };
 }
 
-/* 4) Card utility model (single-card evaluation core) */
-function evaluateCardUtility(state, playerKey, card, deps, P, profile, cache) {
-  const matches = cache.boardByMonth.get(card.month) || [];
-  const captureGain = matches.reduce((sum, m) => sum + safeNum(deps.cardCaptureValue(m)), 0);
-  const cardIsDoublePi = isDoublePi(card, deps);
-  const bonusStealPi = safeNum(card?.bonus?.stealPi);
-  const isBonusCard = bonusStealPi > 0;
-  const sameMonthInHand = safeNum(cache.handCountByMonth.get(card.month));
-  const sameMonthDoublePiInHand = safeNum(cache.handDoublePiCountByMonth.get(card.month));
-  const allCaptured = [card, ...matches];
-  const piGain = allCaptured.reduce((sum, c) => sum + piValue(c, deps), 0);
-  const selfPi = safeNum(profile.ctx.selfPi, deps.capturedCountByCategory(state.players?.[playerKey], "junk"));
-  const opp = deps.otherPlayerKey(playerKey);
-  const oppPi = safeNum(profile.ctx.oppPi, deps.capturedCountByCategory(state.players?.[opp], "junk"));
+// Tie-break signature used when primary score is effectively equal.
+function rankTieBreak(entry, P) {
+  const category = String(entry?.card?.category || "");
+  const categoryRank = category === "kwang" ? 3 : category === "five" ? 2 : category === "ribbon" ? 1 : 0;
+  const monthPriority = safeNum(entry?.monthPriority);
+  const piGain = safeNum(entry?.piGain);
+  const matchCount = safeNum(entry?.matches);
+  const safeDiscard = safeNum(entry?.safeDiscardHint);
+  const releaseRisk = safeNum(entry?.releaseRisk);
+  const id = String(entry?.card?.id || "");
+  const releaseRiskPenaltyMul = Math.max(0, safeNum(P?.rankReleaseRiskPenaltyMul, 20.0));
 
-  let immediate =
-    matches.length === 0 ? P.noMatchBase :
-    matches.length === 1 ? P.matchOneBase :
-    matches.length === 2 ? P.matchTwoBase :
-    P.matchThreeBase;
+  // Base rule: capture quality first, safety second, then deterministic id order.
+  const signature =
+    categoryRank * 1000000 +
+    matchCount * 10000 +
+    piGain * 1000 +
+    monthPriority * 100 +
+    safeDiscard * 10 -
+    releaseRisk * releaseRiskPenaltyMul;
+  return { signature, id };
+}
+
+function compareRankEntries(a, b, P) {
+  const eps = Math.max(0, safeNum(P?.tieScoreEpsilon, 0.000001));
+  const delta = safeNum(b?.score) - safeNum(a?.score);
+  if (Math.abs(delta) > eps) return delta;
+
+  const aa = rankTieBreak(a, P);
+  const bb = rankTieBreak(b, P);
+  if (bb.signature !== aa.signature) return bb.signature - aa.signature;
+  return aa.id.localeCompare(bb.id);
+}
+
+function compareMatchChoice(a, b, P) {
+  const eps = Math.max(0, safeNum(P?.tieScoreEpsilon, 0.000001));
+  const delta = safeNum(b?.score) - safeNum(a?.score);
+  if (Math.abs(delta) > eps) return delta;
+  if (safeNum(b?.pi) !== safeNum(a?.pi)) return safeNum(b?.pi) - safeNum(a?.pi);
+  if (safeNum(b?.monthPriority) !== safeNum(a?.monthPriority)) {
+    return safeNum(b?.monthPriority) - safeNum(a?.monthPriority);
+  }
+  return String(a?.id || "").localeCompare(String(b?.id || ""));
+}
+
+// ---------------------------------------------------------------------------
+// GO model helpers
+// ---------------------------------------------------------------------------
+function extractGoCoreFeatures(state, playerKey, deps, profile, P) {
+  const player = state?.players?.[playerKey];
+  const oppPlayer = state?.players?.[profile?.oppKey];
+  const myScore = safeNum(profile?.myScore);
+  const oppScore = safeNum(profile?.oppScore);
+  const lead = myScore - oppScore;
+  const selfPi = safeNum(profile?.ctx?.selfPi, safeNum(deps?.capturedCountByCategory?.(player, "junk")));
+  const oppPi = safeNum(profile?.ctx?.oppPi, safeNum(deps?.capturedCountByCategory?.(oppPlayer, "junk")));
+  const selfFive = safeNum(profile?.ctx?.selfFive);
+  const oppFive = safeNum(profile?.ctx?.oppFive);
+  const goCount = safeNum(player?.goCount);
+  const carry = safeNum(state?.carryOverMultiplier, 1);
+  const deckCount = safeNum(profile?.signals?.deckCount);
+  const threat = clamp(safeNum(profile?.signals?.threat), 0, Math.max(0.1, safeNum(P?.goCoreThreatClamp, 1.8)));
+  const oneAwayProb = clamp(safeNum(profile?.signals?.oneAwayProb), 0, Math.max(1, safeNum(P?.goCoreOneAwayClamp, 100)));
+
+  const selfJokbo = typeof deps?.estimateJokboExpectedPotential === "function"
+    ? (deps.estimateJokboExpectedPotential(state, playerKey, profile?.oppKey) || { total: 0, oneAwayCount: 0 })
+    : { total: 0, oneAwayCount: 0 };
+  const oppJokbo = typeof deps?.estimateOpponentJokboExpectedPotential === "function"
+    ? (deps.estimateOpponentJokboExpectedPotential(state, playerKey) || { total: 0, oneAwayCount: 0 })
+    : { total: 0, oneAwayCount: 0 };
+
+  return {
+    myScore,
+    oppScore,
+    lead,
+    selfPi,
+    oppPi,
+    selfFive,
+    oppFive,
+    goCount,
+    carry,
+    deckCount,
+    threat,
+    oneAwayProb,
+    selfJokboTotal: safeNum(selfJokbo?.total),
+    selfJokboOneAway: safeNum(selfJokbo?.oneAwayCount),
+    oppJokboTotal: safeNum(oppJokbo?.total),
+    oppJokboOneAway: safeNum(oppJokbo?.oneAwayCount),
+    secondMover: profile?.second ? 1 : 0,
+    desperate: profile?.desperate ? 1 : 0
+  };
+}
+
+function buildGoFlags(core, P) {
+  const lead = safeNum(core?.lead);
+  const trailing = lead < 0;
+  const leading = lead > 0;
+  const desperate = safeNum(core?.desperate) > 0;
+  const second = safeNum(core?.secondMover) > 0;
+  const selfCanStop = safeNum(core?.myScore) >= safeNum(P?.goHardSafeStopMinScore, 7);
+  const oppCanStop = safeNum(core?.oppScore) >= safeNum(P?.goHardSafeStopMinScore, 7);
+  let minPi = desperate ? safeNum(P?.goMinPiDesperate, 4) : safeNum(P?.goMinPi, 5);
+  if (second && trailing) minPi -= safeNum(P?.goMinPiSecondTrailingDelta, 1);
+  minPi = Math.max(3, minPi);
+
+  return {
+    lead,
+    trailing,
+    leading,
+    desperate,
+    second,
+    selfCanStop,
+    oppCanStop,
+    minPi
+  };
+}
+
+function coreFeatureSnapshot(core) {
+  const out = {};
+  for (const key of CORE_GO_FEATURE_KEYS) {
+    out[key] = safeNum(core?.[key]);
+  }
+  return out;
+}
+
+// Layer-1 hard-risk model (single-turn static risk).
+function calcHardStopRiskScore(core, flags, P) {
+  const oneAwayNorm = safeNum(core?.oneAwayProb) / 100;
+  const threat = safeNum(core?.threat);
+  const lead = safeNum(flags?.lead);
+  let riskScore =
+    threat * safeNum(P.goHardRiskThreatMul, 0.36) +
+    oneAwayNorm * safeNum(P.goHardRiskOneAwayMul, 0.34) +
+    (flags?.oppCanStop ? safeNum(P.goHardRiskOppStopPenalty, 0.26) : 0) +
+    (safeNum(core?.oppPi) >= 9 ? safeNum(P.goHardRiskOppHighPiPenalty, 0.08) : 0);
+
+  if (lead >= 2 && safeNum(core?.selfPi) >= 8) {
+    riskScore -= safeNum(P.goHardRiskLeadSafetyRelief, 0.12);
+  }
+  if (safeNum(core?.goCount) >= safeNum(P.goHardGoCountCap, 3)) {
+    riskScore += 0.05;
+  }
+  return riskScore;
+}
+
+function deriveGoMode(core, flags, P) {
+  const lateDeck = safeNum(core?.deckCount) <= safeNum(P?.phaseLateDeck, 6);
+  const chaseMode = Boolean(flags?.desperate || flags?.trailing);
+  const safeMode = Boolean(!chaseMode && (flags?.leading || flags?.selfCanStop || safeNum(core?.selfPi) >= 8));
+  const mode = chaseMode ? "chase" : safeMode ? "safe" : "neutral";
+
+  let upsideMul = 1.0;
+  let riskMul = 1.0;
+  let stopMul = 1.0;
+  let thresholdShift = 0.0;
+
+  if (mode === "safe") {
+    thresholdShift += safeNum(P?.goModeSafeThresholdUp, 0.05);
+    riskMul *= Math.max(0.5, safeNum(P?.goModeSafeRiskMul, 1.12));
+    stopMul *= Math.max(0.5, safeNum(P?.goModeSafeStopMul, 1.06));
+    if (flags?.second) thresholdShift += safeNum(P?.goModeSecondSafeThresholdUp, 0.03);
+    if (lateDeck) thresholdShift += safeNum(P?.goModeLateSafeThresholdUp, 0.03);
+  } else if (mode === "chase") {
+    thresholdShift -= safeNum(P?.goModeChaseThresholdDown, 0.07);
+    upsideMul *= Math.max(0.5, safeNum(P?.goModeChaseUpsideMul, 1.15));
+    riskMul *= Math.max(0.5, safeNum(P?.goModeChaseRiskMul, 0.9));
+    stopMul *= Math.max(0.2, safeNum(P?.goModeChaseStopMul, 0.86));
+    if (flags?.second) thresholdShift -= safeNum(P?.goModeSecondChaseThresholdDown, 0.02);
+    if (lateDeck) thresholdShift -= safeNum(P?.goModeLateChaseThresholdDown, 0.02);
+  }
+
+  return { mode, upsideMul, riskMul, stopMul, thresholdShift };
+}
+
+// ---------------------------------------------------------------------------
+// Card scoring helpers
+// ---------------------------------------------------------------------------
+function cardPhaseScales(phase, P) {
+  if (phase === "early") {
+    return {
+      piMul: safeNum(P.phaseEarlyPiMul, 1.25),
+      tempoMul: safeNum(P.phaseEarlyTempoMul, 1.08),
+      riskMul: safeNum(P.phaseEarlyRiskMul, 0.94),
+      blockMul: safeNum(P.phaseEarlyBlockMul, 0.95)
+    };
+  }
+  if (phase === "late") {
+    return {
+      piMul: safeNum(P.phaseLatePiMul, 0.95),
+      tempoMul: safeNum(P.phaseLateTempoMul, 0.96),
+      riskMul: safeNum(P.phaseLateRiskMul, 1.15),
+      blockMul: safeNum(P.phaseLateBlockMul, 1.35)
+    };
+  }
+  if (phase === "end") {
+    return {
+      piMul: safeNum(P.phaseEndPiMul, 0.85),
+      tempoMul: safeNum(P.phaseEndTempoMul, 0.92),
+      riskMul: safeNum(P.phaseEndRiskMul, 1.35),
+      blockMul: safeNum(P.phaseEndBlockMul, 2.0)
+    };
+  }
+  return {
+    piMul: safeNum(P.phaseMidPiMul, 1.0),
+    tempoMul: safeNum(P.phaseMidTempoMul, 1.0),
+    riskMul: safeNum(P.phaseMidRiskMul, 1.0),
+    blockMul: safeNum(P.phaseMidBlockMul, 1.0)
+  };
+}
+
+function estimateSelfPukRisk(month, cache, profile, P) {
+  const boardCnt = safeNum(cache?.boardCountByMonth?.get(month));
+  const handCnt = safeNum(cache?.handCountByMonth?.get(month));
+  const capturedCnt = safeNum(cache?.capturedByMonth?.get(month));
+  const known = boardCnt + handCnt + capturedCnt;
+  const unseen = Math.max(0, 4 - known);
+  const oppScore = safeNum(profile?.oppScore);
+
+  let base = 0;
+  if (boardCnt === 1 && handCnt >= 2) {
+    base += 0.52 + Math.max(0, handCnt - 2) * 0.1;
+    base += safeNum(P.selfPukRiskPatternBonus, 0.22);
+  } else if (boardCnt === 0 && handCnt >= 3) {
+    base += 0.28;
+  }
+
+  if (unseen <= 1) base += 0.22;
+  else if (unseen === 2) base += 0.12;
+
+  if (profile?.phase === "late") base += 0.08;
+  if (profile?.phase === "end") base += 0.14;
+
+  const oppPressure = clamp((oppScore - 4) / 6, 0, 2.0);
+  const expMul = safeNum(P.selfPukRiskExpMul, 0.42);
+  const risk = base * (1 + Math.expm1(oppPressure) * expMul);
+  return clamp(risk, 0, 3.2);
+}
+
+function estimateNextTurnSwingProb(core, flags, P) {
+  const threatNorm = clamp(safeNum(core?.threat) / 1.8, 0, 1);
+  const oneAwayNorm = clamp(safeNum(core?.oneAwayProb) / 100, 0, 1);
+  const jokboNorm = clamp(safeNum(core?.oppJokboOneAway) / 2, 0, 1);
+  let prob =
+    threatNorm * 0.45 +
+    oneAwayNorm * 0.35 +
+    jokboNorm * 0.20;
+  if (safeNum(core?.deckCount) <= safeNum(P.phaseLateDeck, 6)) {
+    prob += 0.06;
+  }
+  if (safeNum(core?.oppScore) >= 6) {
+    prob += 0.08;
+  }
+  if (flags?.oppCanStop) prob += 0.03;
+  return clamp(prob, 0, 1);
+}
+
+// Main card evaluator for hand ranking.
+function evaluateCard(state, playerKey, card, deps, P, profile, cache) {
+  const month = Number(card?.month);
+  const matches = cache.board.get(month) || [];
+  const captured = [card, ...matches];
+  const phaseScale = cardPhaseScales(profile.phase, P);
+  const captureGain = captured.reduce((acc, c) => acc + safeNum(deps?.cardCaptureValue?.(c)), 0);
+  const piGain = captured.reduce((acc, c) => acc + piValue(c, deps), 0);
+  const monthPriority = safeNum(deps?.monthStrategicPriority?.(month));
+  const selfPi = safeNum(profile.ctx?.selfPi, safeNum(deps?.capturedCountByCategory?.(state?.players?.[playerKey], "junk")));
+  const oppPi = safeNum(profile.ctx?.oppPi, safeNum(deps?.capturedCountByCategory?.(state?.players?.[profile.oppKey], "junk")));
+
+  let immediate = matches.length === 0
+    ? P.noMatchBase
+    : matches.length === 1
+      ? P.matchOneBase
+      : matches.length === 2
+        ? P.matchTwoBase
+        : P.matchThreeBase;
 
   immediate += captureGain * P.captureGainMul;
-  immediate += captureCategoryBonus(matches, P);
-  immediate += piGain * P.junkPiMul;
-
+  immediate += categoryCaptureBonus(matches, P);
+  immediate += piGain * P.junkPiMul * phaseScale.piMul;
   if (selfPi >= 7 && selfPi <= 9) immediate += piGain * P.selfPiWindowMul;
   if (oppPi <= 5) immediate += piGain * P.oppPiWindowMul;
-  if (matches.length > 0 && allCaptured.some((c) => isDoublePi(c, deps))) immediate += P.doublePiBonus;
-  if (isBonusCard) {
-    immediate += P.bonusCardUseBase + bonusStealPi * P.bonusCardStealPiMul;
-    if (profile.phase === "late" || profile.phase === "end") immediate += P.bonusCardLateUseBonus;
-    if (oppPi <= 0) immediate -= P.bonusCardOppPiEmptyPenalty;
-  }
+  if (captured.some((c) => isDoublePi(c, deps))) immediate += P.doublePiBonus;
 
-  const comboOpportunity = scoreComboOpportunity(state, playerKey, card.month, deps);
+  const comboOpportunity = safeNum(deps?.ownComboOpportunityScore?.(state, playerKey, month));
   immediate += comboOpportunity * P.comboOpportunityMul;
 
-  let risk = 0;
   let deny = 0;
-  if (cache.blockMonths.has(card.month)) {
-    const urgency =
-      Math.max(
-        safeNum(cache.blockUrgency.get(card.month)),
-        safeNum(profile.pressure.monthUrgency.get(card.month)) / 10
-      );
-    deny += P.blockBase + urgency * P.blockUrgencyMul + profile.pressure.threat * P.blockThreatMul;
+  if (cache.blockMonths.has(month)) {
+    const urgency = Math.max(safeNum(cache.blockUrgency.get(month)), safeNum(profile.signals.monthUrgency.get(month)) / 10);
+    deny += P.blockBase + urgency * P.blockUrgencyMul + profile.signals.threat * P.blockThreatMul;
     if (matches.length === 0) deny -= P.blockNoMatchPenalty;
   }
-
-  if (cache.recentOppShake.active && cache.recentOppShake.month === card.month) {
-    const freshness = clamp(
-      1 - safeNum(cache.recentOppShake.delta) / Math.max(1, safeNum(P.oppShakeRecentWindow, 8)),
-      0.2,
-      1.0
-    );
-    if (matches.length > 0) {
-      deny += P.oppShakeBlockBonus * freshness;
-    } else {
-      risk += P.oppShakeNoMatchRiskBonus * freshness;
-    }
+  if (profile.second) {
+    const oneAwayNorm = clamp(safeNum(profile.signals.oneAwayProb) / 100, 0, 1);
+    deny += oneAwayNorm * safeNum(P.cardSecondBlockThreatBonus, 0.9);
   }
 
   let tempo = 0;
-  const known = knownMonthCount(card.month, cache.boardCountByMonth, cache.handCountByMonth, cache.capturedByMonth);
+  const knownMonth = safeNum(cache.boardCountByMonth.get(month)) + safeNum(cache.handCountByMonth.get(month)) + safeNum(cache.capturedByMonth.get(month));
   if (matches.length === 0) {
-    if (known >= 3) tempo += P.knownMonthSafeBonus;
-    else if (known <= 1) tempo -= P.unknownMonthPenalty;
+    if (knownMonth >= 3) tempo += P.knownMonthSafeBonus;
+    else if (knownMonth <= 1) tempo -= P.unknownMonthPenalty;
   }
   if (profile.trailing && piGain > 0) tempo += piGain * P.trailPiTempoMul;
   if (profile.leading && matches.length === 0) tempo -= P.leadNoMatchTempoPenalty;
   if (profile.phase === "end" && matches.length === 0) {
-    if (known >= 3) tempo += P.endgameSafeDiscardBonus;
+    if (knownMonth >= 3) tempo += P.endgameSafeDiscardBonus;
     else tempo -= P.endgameUnknownPenalty;
   }
-  if (isBonusCard) {
-    tempo += P.bonusCardExtraTurnTempo;
-    if (profile.phase === "early" && oppPi <= 2) tempo -= P.bonusCardEarlyHoldBias;
+  if (!profile.second && profile.trailing && comboOpportunity > 0) {
+    tempo += comboOpportunity * safeNum(P.cardFirstTrailTempoBonus, 0.35);
   }
-  if (cache.firstTurnPlan.active && cache.firstTurnPlan.months.has(card.month)) tempo += P.firstTurnPlanBonus;
+  if (cache.firstTurnPlan.active && cache.firstTurnPlan.months.has(month)) {
+    tempo += P.firstTurnPlanBonus;
+  }
+  tempo += monthPriority * 0.2;
 
-  const feedRisk = safeNum(deps.estimateOpponentImmediateGainIfDiscard(state, playerKey, card.month));
-  risk += feedRisk * (matches.length === 0 ? P.feedRiskNoMatchMul : P.feedRiskMatchMul);
+  let risk = 0;
+  risk += safeNum(deps?.estimateOpponentImmediateGainIfDiscard?.(state, playerKey, month))
+    * (matches.length === 0 ? P.feedRiskNoMatchMul : P.feedRiskMatchMul);
+  risk += safeNum(deps?.estimateDangerMonthRisk?.(
+    state,
+    playerKey,
+    month,
+    cache.boardCountByMonth,
+    cache.handCountByMonth,
+    cache.capturedByMonth
+  )) * (matches.length === 0 ? P.dangerNoMatchMul : P.dangerMatchMul);
 
-  const danger = safeNum(
-    deps.estimateDangerMonthRisk?.(
-      state,
-      playerKey,
-      card.month,
-      cache.boardCountByMonth,
-      cache.handCountByMonth,
-      cache.capturedByMonth
-    )
-  );
-  risk += danger * (matches.length === 0 ? P.dangerNoMatchMul : P.dangerMatchMul);
-
-  const releasePunishProb = safeNum(
-    deps.estimateReleasePunishProb?.(
-      state,
-      playerKey,
-      card.month,
-      cache.jokboThreat,
-      profile.ctx
-    )
-  );
-  if (matches.length === 0 && releasePunishProb >= P.releaseRiskFloor) {
-    risk += (releasePunishProb - P.releaseRiskFloor) * P.releaseRiskMul;
+  const releaseRisk = safeNum(deps?.estimateReleasePunishProb?.(state, playerKey, month, profile.signals.jokboThreat, profile.ctx));
+  if (matches.length === 0 && releaseRisk >= P.releaseRiskFloor) {
+    const oppScoreExp = 1 + Math.expm1(clamp((profile.oppScore - 4) / 6, 0, 2.0)) * safeNum(P.releaseRiskOppScoreExpMul, 0.34);
+    risk += (releaseRisk - P.releaseRiskFloor) * P.releaseRiskMul * oppScoreExp;
+    if (profile.second) {
+      risk += (releaseRisk - P.releaseRiskFloor) * safeNum(P.cardSecondReleaseRiskMul, 1.1);
+    }
   }
 
-  const pukRisk = safeNum(
-    deps.isRiskOfPuk(
-      state,
-      playerKey,
-      card,
-      cache.boardCountByMonth,
-      cache.handCountByMonth
-    )
-  );
+  const pukRisk = safeNum(deps?.isRiskOfPuk?.(state, playerKey, card, cache.boardCountByMonth, cache.handCountByMonth));
   if (pukRisk > 0) risk += pukRisk * P.pukRiskMul;
   else if (pukRisk < 0) immediate += -pukRisk * P.pukOpportunityMul;
 
+  const selfPukRisk = estimateSelfPukRisk(month, cache, profile, P);
+  risk += selfPukRisk * safeNum(P.selfPukRiskMul, 1.0);
+
   let holdPenalty = 0;
-  if (matches.length === 0) {
-    if (cardIsDoublePi) {
-      holdPenalty += P.doublePiNoMatchHoldPenalty;
-      if (sameMonthInHand >= 2) holdPenalty += P.doublePiMonthPairHoldPenalty;
-      if (sameMonthInHand >= 3) holdPenalty += P.doublePiMonthTripleHoldPenalty;
-    }
-    if (sameMonthDoublePiInHand >= 2) holdPenalty += P.doublePiPairMonthHoldPenalty;
-    if (!cardIsDoublePi && sameMonthInHand >= 2 && sameMonthDoublePiInHand >= 1) {
-      holdPenalty += P.doublePiMonthAnchorHoldPenalty;
-    }
-    if (risk >= P.doublePiHoldRiskRelease) {
-      holdPenalty *= P.doublePiHoldRiskReleaseMul;
-    }
+  if (matches.length === 0 && isDoublePi(card, deps)) {
+    holdPenalty += P.doublePiNoMatchHoldPenalty;
+    const sameMonth = safeNum(cache.handCountByMonth.get(month));
+    if (sameMonth >= 2) holdPenalty += P.doublePiMonthPairHoldPenalty;
+    if (sameMonth >= 3) holdPenalty += P.doublePiMonthTripleHoldPenalty;
   }
-  if (isBonusCard) {
-    risk *= P.bonusCardRiskMul;
-    holdPenalty *= P.bonusCardHoldPenaltyMul;
+
+  let seatRiskMul = 1.0;
+  if (profile.second && matches.length === 0) {
+    seatRiskMul += safeNum(P.cardSecondNoMatchRiskMul, 0.12);
   }
 
   const score =
-    immediate * profile.attack +
-    deny * profile.defense +
-    tempo * profile.tempo -
-    risk * profile.risk -
+    immediate * profile.aggression +
+    deny * profile.defense * phaseScale.blockMul +
+    tempo * profile.tempo * phaseScale.tempoMul -
+    risk * profile.risk * phaseScale.riskMul * seatRiskMul -
     holdPenalty;
 
   return {
     card,
     score,
     matches: matches.length,
-    releasePunishProb
+    piGain,
+    monthPriority,
+    safeDiscardHint: knownMonth,
+    releaseRisk
   };
 }
 
-/* 5) Exported policy decisions */
+// ---------------------------------------------------------------------------
+// Policy exports
+// ---------------------------------------------------------------------------
 export function rankHandCardsGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
-  const player = state.players?.[playerKey];
-  if (!player?.hand?.length) return [];
+  const player = state?.players?.[playerKey];
+  if (!Array.isArray(player?.hand) || player.hand.length <= 0) return [];
 
   const P = mergedParams(params);
-  const opp = deps.otherPlayerKey(playerKey);
   const profile = buildProfile(state, playerKey, deps, P);
-  const jokboThreat = deps.checkOpponentJokboProgress(state, playerKey);
+  const cache = buildRankingCache(state, playerKey, deps, profile);
 
-  const cache = {
-    boardByMonth: deps.boardMatchesByMonth(state),
-    boardCountByMonth: deps.monthCounts(state.board || []),
-    handCountByMonth: deps.monthCounts(player.hand || []),
-    handDoublePiCountByMonth: (() => {
-      const out = new Map();
-      for (const c of player.hand || []) {
-        if (!isDoublePi(c, deps)) continue;
-        out.set(c.month, safeNum(out.get(c.month)) + 1);
-      }
-      return out;
-    })(),
-    capturedByMonth: deps.capturedMonthCounts(state),
-    blockMonths: deps.blockingMonthsAgainst(state.players?.[opp], player),
-    blockUrgency: deps.blockingUrgencyByMonth(state.players?.[opp], player),
-    firstTurnPlan: deps.getFirstTurnDoublePiPlan(state, playerKey),
-    recentOppShake: getRecentOpponentShaking(state, playerKey, deps, P.oppShakeRecentWindow),
-    jokboThreat
-  };
-
-  const ranked = player.hand.map((card) => evaluateCardUtility(state, playerKey, card, deps, P, profile, cache));
-  ranked.sort((a, b) => b.score - a.score);
-
-  if (safeNum(P.rolloutEnabled, 1) > 0 && typeof deps.rolloutCardValueGPT === "function") {
-    const leadGap =
-      ranked.length >= 2 ? Math.abs(safeNum(ranked[0]?.score) - safeNum(ranked[1]?.score)) : Number.POSITIVE_INFINITY;
-    const selectiveOn = safeNum(P.rolloutSelectiveEnabled, 1) > 0;
-    const closeTop = leadGap <= safeNum(P.rolloutCardScoreGap, 1.25);
-    const highThreat =
-      safeNum(profile.pressure?.threat) >= safeNum(P.rolloutCardThreatCut, 0.78) ||
-      profile.phase === "late" ||
-      profile.phase === "end";
-    const shouldRollout = !selectiveOn || closeTop || highThreat;
-
-    if (shouldRollout) {
-      const baseTopK = Math.max(1, Math.floor(safeNum(P.rolloutTopK, 1)));
-      const topK = Math.max(1, Math.min(ranked.length, closeTop ? Math.max(2, baseTopK) : baseTopK));
-      const baseline =
-        typeof deps.rolloutStateUtilityGPT === "function"
-          ? safeNum(deps.rolloutStateUtilityGPT(state, playerKey))
-          : 0;
-      for (let i = 0; i < topK; i += 1) {
-        const cand = ranked[i];
-        const rv = deps.rolloutCardValueGPT(state, playerKey, cand.card?.id, {
-          maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 12)),
-          samples: Math.floor(safeNum(P.rolloutSamples, 2))
-        });
-        if (Number.isFinite(rv)) {
-          cand.score += (rv - baseline) * safeNum(P.rolloutCardWeight, 0.7);
-        }
-      }
-      ranked.sort((a, b) => b.score - a.score);
-    }
-  }
-
+  const ranked = player.hand.map((card) => evaluateCard(state, playerKey, card, deps, P, profile, cache));
+  ranked.sort((a, b) => compareRankEntries(a, b, P));
   return ranked;
 }
 
-/* choose-match policy for pending TWO-match selections */
+// Resolve pending two-match board choice.
 export function chooseMatchHeuristicGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
-  const ids = state.pendingMatch?.boardCardIds || [];
-  if (!ids.length) return null;
+  const ids = state?.pendingMatch?.boardCardIds || [];
+  if (!Array.isArray(ids) || ids.length <= 0) return null;
 
   const P = mergedParams(params);
   const profile = buildProfile(state, playerKey, deps, P);
-  const opp = deps.otherPlayerKey(playerKey);
-  const blockMonths = deps.blockingMonthsAgainst(state.players?.[opp], state.players?.[playerKey]);
-  const blockUrgency = deps.blockingUrgencyByMonth(state.players?.[opp], state.players?.[playerKey]);
-  const recentOppShake = getRecentOpponentShaking(state, playerKey, deps, P.oppShakeRecentWindow);
+  const oppPlayer = state?.players?.[profile.oppKey];
+  const selfPlayer = state?.players?.[playerKey];
+  const blockMonths = asMonthSet(
+    typeof deps?.blockingMonthsAgainst === "function"
+      ? deps.blockingMonthsAgainst(oppPlayer, selfPlayer)
+      : null
+  );
+  const blockUrgency = asMonthMap(
+    typeof deps?.blockingUrgencyByMonth === "function"
+      ? deps.blockingUrgencyByMonth(oppPlayer, selfPlayer)
+      : null
+  );
 
-  let bestId = null;
-  let bestScore = -Infinity;
-
-  for (const card of (state.board || []).filter((c) => ids.includes(c.id))) {
+  const candidates = [];
+  for (const card of (state?.board || []).filter((c) => ids.includes(c?.id))) {
+    const month = Number(card?.month);
     const pi = piValue(card, deps);
-    let score = safeNum(deps.cardCaptureValue(card)) * P.chooseMatchBaseMul + pi * P.chooseMatchPiMul;
-    if (card.category === "kwang") score += P.chooseMatchKwangBonus;
-    if (card.category === "five") score += P.chooseMatchFiveBonus;
-    if (card.category === "ribbon") score += P.chooseMatchRibbonBonus;
-    score += scoreComboOpportunity(state, playerKey, card.month, deps) * P.chooseMatchComboMul;
+    const monthPriority = safeNum(deps?.monthStrategicPriority?.(month));
+    let score = safeNum(deps?.cardCaptureValue?.(card)) * P.chooseMatchBaseMul + pi * P.chooseMatchPiMul;
+    if (card?.category === "kwang") score += P.chooseMatchKwangBonus;
+    if (card?.category === "five") score += P.chooseMatchFiveBonus;
+    if (card?.category === "ribbon") score += P.chooseMatchRibbonBonus;
 
-    if (blockMonths.has(card.month)) {
-      const urgency = Math.max(
-        safeNum(blockUrgency.get(card.month)),
-        safeNum(profile.pressure.monthUrgency.get(card.month)) / 10
-      );
-      score += (urgency + profile.pressure.threat) * P.chooseMatchBlockMul;
+    score += safeNum(deps?.ownComboOpportunityScore?.(state, playerKey, month)) * P.chooseMatchComboMul;
+    if (blockMonths.has(month)) {
+      const urgency = Math.max(safeNum(blockUrgency.get(month)), safeNum(profile.signals.monthUrgency.get(month)) / 10);
+      score += (urgency + profile.signals.threat) * P.chooseMatchBlockMul;
     }
-    if (recentOppShake.active && recentOppShake.month === card.month) {
-      const freshness = clamp(
-        1 - safeNum(recentOppShake.delta) / Math.max(1, safeNum(P.oppShakeRecentWindow, 8)),
-        0.2,
-        1.0
-      );
-      score += P.chooseMatchOppShakeMonthBonus * freshness;
-    }
-
-    score += safeNum(deps.monthStrategicPriority?.(card.month)) * 0.22;
-    if (score > bestScore) {
-      bestScore = score;
-      bestId = card.id;
-    }
+    score += monthPriority * 0.22;
+    candidates.push({ id: card?.id || null, score, pi, monthPriority });
   }
 
-  return bestId;
+  if (candidates.length <= 0) return null;
+  candidates.sort((a, b) => compareMatchChoice(a, b, P));
+  return candidates[0].id || null;
 }
 
-/* GO/STOP utility model with optional rollout delta blending */
+// GO decision tree:
+// - layer0 precheck
+// - layer1 hard stop gates
+// - layer2 utility vs threshold
+// - layer3 final soft gates
 export function shouldGoGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = mergedParams(params);
-  if (deps.canBankruptOpponentByStop?.(state, playerKey)) return false;
+  const trace = beginTrace("go", playerKey, P, deps);
 
-  const player = state.players?.[playerKey];
-  const opp = deps.otherPlayerKey(playerKey);
-  const oppPlayer = state.players?.[opp];
+  if (typeof deps?.canBankruptOpponentByStop === "function" && deps.canBankruptOpponentByStop(state, playerKey)) {
+    traceLayer(trace, "layer0_precheck", { canBankruptOpponentByStop: 1 });
+    return pushTrace(trace, false, "bankrupt_stop", P, deps);
+  }
+
   const profile = buildProfile(state, playerKey, deps, P);
-  const ctx = profile.ctx;
-  const pressure = profile.pressure;
-  const myScore = safeNum(ctx.myScore);
-  const oppScore = safeNum(ctx.oppScore);
-  const selfPi = safeNum(ctx.selfPi, deps.capturedCountByCategory(player, "junk"));
-  const oppPi = safeNum(ctx.oppPi, deps.capturedCountByCategory(oppPlayer, "junk"));
-  const selfFive = safeNum(ctx.selfFive);
-  const oppFive = safeNum(ctx.oppFive);
-  const goCount = safeNum(player?.goCount);
-  const carry = safeNum(state.carryOverMultiplier, 1);
-  const goldRisk = deps.goldRiskProfile?.(state, playerKey) || { selfLow: false, oppLow: false };
-  const desperateGo = !!goldRisk.selfLow && !goldRisk.oppLow;
+  const core = extractGoCoreFeatures(state, playerKey, deps, profile, P);
+  const flags = buildGoFlags(core, P);
 
-  let minPi = desperateGo ? P.goMinPiDesperate : P.goMinPi;
-  if (profile.second && profile.trailing) minPi -= P.goMinPiSecondTrailingDelta;
-  minPi = Math.max(3, minPi);
-  if (selfPi < minPi) return false;
+  traceLayer(trace, "layer1_core_features", {
+    features: coreFeatureSnapshot(core),
+    minPi: flags.minPi
+  });
 
-  const selfCanStop = myScore >= safeNum(P.goHardSafeStopMinScore, 7);
-  const oppCanStop = oppScore >= safeNum(P.goHardSafeStopMinScore, 7);
-  if (safeNum(P.goHardSafeStopEnabled, 1) > 0 && !desperateGo) {
+  if (core.selfPi < flags.minPi) {
+    traceLayer(trace, "layer1_hard_stop", { reason: "min_pi_gate", selfPi: core.selfPi, minPi: flags.minPi });
+    return pushTrace(trace, false, "min_pi_gate", P, deps);
+  }
+
+  if (safeNum(P.goHardSafeStopEnabled, 1) > 0 && !flags.desperate) {
     if (
-      selfCanStop &&
-      !oppCanStop &&
-      pressure.deckCount <= safeNum(P.goHardSafeStopDeckCut, 10) &&
-      myScore >= oppScore + safeNum(P.goHardSafeStopLeadMin, 1)
+      flags.selfCanStop &&
+      !flags.oppCanStop &&
+      core.deckCount <= safeNum(P.goHardSafeStopDeckCut, 7) &&
+      core.myScore >= core.oppScore + safeNum(P.goHardSafeStopLeadMin, 2)
     ) {
-      return false;
+      traceLayer(trace, "layer1_hard_stop", {
+        reason: "safe_stop_lock",
+        selfCanStop: 1,
+        oppCanStop: 0,
+        deckCount: core.deckCount,
+        lead: flags.lead
+      });
+      return pushTrace(trace, false, "safe_stop_lock", P, deps);
     }
   }
 
-  if (!desperateGo) {
-    if (oppScore >= P.goHardOppScoreCut && myScore <= oppScore + 1) return false;
-    if (selfFive === 0 && oppFive >= P.goHardOppFiveCut) return false;
-    if (pressure.threat >= P.goHardThreatCut && pressure.deckCount <= P.goHardThreatDeckCut) return false;
-    if (pressure.oneAwayProb >= P.goHardLateOneAwayCut && pressure.deckCount <= P.goHardLateOneAwayDeckCut) {
-      return false;
+  const swingProb = estimateNextTurnSwingProb(core, flags, P);
+  const hardRiskScore = calcHardStopRiskScore(core, flags, P);
+  traceLayer(trace, "layer1_hard_risk", {
+    swingProb,
+    score: hardRiskScore,
+    threshold: safeNum(P.goHardRiskThreshold, 0.62)
+  });
+
+  // Layer 1: deterministic hard-stop cutoff.
+  if (!flags.desperate) {
+    let hardReason = "";
+    if (core.oppScore >= P.goHardOppScoreCut && core.myScore <= core.oppScore + safeNum(P.goHardOppLeadGrace, 1)) {
+      hardReason = "opp_score_cut";
+    } else if (
+      flags.oppCanStop &&
+      core.carry >= safeNum(P.goHardCarryOppStopCarryMin, 1)
+    ) {
+      hardReason = "carry_opp_stop_hard";
+    } else if (core.selfFive === 0 && core.oppFive >= P.goHardOppFiveCut) {
+      hardReason = "opp_five_cut";
+    } else if (core.threat >= P.goHardThreatCut && core.deckCount <= P.goHardThreatDeckCut) {
+      hardReason = "threat_deck_cut";
+    } else if (core.oneAwayProb >= P.goHardLateOneAwayCut && core.deckCount <= P.goHardLateOneAwayDeckCut) {
+      hardReason = "late_one_away_cut";
+    } else if (
+      core.oppJokboOneAway >= safeNum(P.goHardJokboOneAwayCountCut, 1) &&
+      core.deckCount <= safeNum(P.goHardJokboOneAwayDeckCut, 10) &&
+      (
+        core.oneAwayProb >= safeNum(P.goHardJokboOneAwayCut, 64) ||
+        swingProb >= safeNum(P.goHardJokboOneAwaySwingCut, 0.62)
+      )
+    ) {
+      hardReason = "jokbo_one_away_hard_stop";
+    } else if (core.goCount >= P.goHardGoCountCap && core.threat >= P.goHardGoCountThreatCut) {
+      hardReason = "go_count_threat_cut";
+    } else if (hardRiskScore >= safeNum(P.goHardRiskThreshold, 0.62)) {
+      hardReason = "hard_risk_score";
     }
-    if (goCount >= P.goHardGoCountCap && pressure.threat >= P.goHardGoCountThreatCut) return false;
+    if (hardReason) {
+      traceLayer(trace, "layer1_hard_stop", { reason: hardReason, swingProb, hardRiskScore });
+      return pushTrace(trace, false, hardReason, P, deps);
+    }
   }
 
-  const selfJokbo = deps.estimateJokboExpectedPotential?.(state, playerKey, opp) || { total: 0, oneAwayCount: 0 };
-  const oppJokbo =
-    deps.estimateOpponentJokboExpectedPotential?.(state, playerKey) ||
-    { total: 0, oneAwayCount: 0 };
+  const goMode = deriveGoMode(core, flags, P);
+  traceLayer(trace, "layer1_mode", {
+    mode: goMode.mode,
+    upsideMul: goMode.upsideMul,
+    riskMul: goMode.riskMul,
+    stopMul: goMode.stopMul,
+    thresholdShift: goMode.thresholdShift
+  });
 
-  const upside =
-    Math.max(0, myScore - 6) * P.goUpsideScoreMul +
-    selfPi * P.goUpsidePiMul +
-    safeNum(selfJokbo.total) * P.goUpsideSelfJokboMul +
-    safeNum(selfJokbo.oneAwayCount) * P.goUpsideOneAwayMul +
-    (profile.trailing ? P.goUpsideTrailBonus : 0) +
-    (oppPi <= 5 ? 0.03 : 0);
-
-  const oneAwayProbNorm = pressure.oneAwayProb / 100;
-  const risk =
-    pressure.threat * P.goRiskPressureMul +
-    oneAwayProbNorm * P.goRiskOneAwayMul +
-    safeNum(oppJokbo.total) * P.goRiskOppJokboMul +
-    safeNum(oppJokbo.oneAwayCount) * P.goRiskOppOneAwayMul +
-    goCount * P.goRiskGoCountMul +
-    (pressure.deckCount <= P.phaseLateDeck ? P.goRiskLateDeckBonus : 0);
-
-  const stopValueRaw =
-    Math.max(0, myScore - oppScore) * P.stopLeadMul +
-    Math.max(0, carry - 1) * P.stopCarryMul +
-    (myScore >= 10 ? P.stopTenBonus : 0);
-  const stopValue = stopValueRaw * (profile.leading ? 1 : 0.35);
-
-  let threshold = P.goBaseThreshold;
-  if (profile.leading) threshold += P.goThresholdLeadUp;
-  if (profile.trailing) threshold -= P.goThresholdTrailDown;
-  if (pressure.threat >= 0.72) threshold += P.goThresholdPressureUp;
-
-  let goValue = upside - risk - stopValue;
-  if (profile.second && profile.trailing) goValue += P.goSecondTrailBonus;
-  if (selfPi >= 8) goValue += P.goRallyPiWindowBonus;
-  if (profile.second) goValue += P.goRallySecondBonus;
-  if (profile.trailing) goValue += P.goRallyTrailBonus;
-  if (pressure.deckCount <= 6) goValue += P.goRallyEndDeckBonus;
-
-  // Lightweight replacement signals to preserve GO quality with reduced rollout.
-  const scoreDiffNorm = clamp((myScore - oppScore) / 10, -1, 1);
-  goValue += scoreDiffNorm * safeNum(P.goLiteScoreDiffMul, 0.04);
-  goValue -= pressure.threat * safeNum(P.goLiteThreatPenaltyMul, 0.08);
-  goValue -= oneAwayProbNorm * safeNum(P.goLiteOneAwayPenaltyMul, 0.06);
-  if (pressure.deckCount <= P.phaseLateDeck) goValue -= safeNum(P.goLiteLatePenalty, 0.03);
-  if (oppCanStop) goValue -= safeNum(P.goLiteOppCanStopPenalty, 0.05);
-  if (selfCanStop && !profile.trailing) goValue -= safeNum(P.goLiteSelfCanStopPenalty, 0.04);
+  // Structural hard gate: block second-seat chase GO unless desperate mode.
   if (
-    selfCanStop &&
-    !oppCanStop &&
-    pressure.threat <= safeNum(P.goLiteSafeAttackThreatCap, 0.58) &&
-    pressure.oneAwayProb <= safeNum(P.goLiteSafeAttackOneAwayCap, 45) &&
-    pressure.deckCount >= safeNum(P.goLiteSafeAttackDeckMin, 5)
+    safeNum(P.goHardSecondChaseBlockEnabled, 1) > 0 &&
+    flags.second &&
+    goMode.mode === "chase" &&
+    !flags.desperate &&
+    flags.oppCanStop &&
+    (
+      core.threat >= safeNum(P.goHardSecondChaseThreatCut, 0.8) ||
+      (
+        core.deckCount <= safeNum(P.goHardSecondChaseLateDeckCut, 7) &&
+        core.oneAwayProb >= safeNum(P.goHardSecondChaseOneAwayCut, 70)
+      )
+    )
+  ) {
+    traceLayer(trace, "layer1_hard_stop", { reason: "second_chase_block" });
+    return pushTrace(trace, false, "second_chase_block", P, deps);
+  }
+
+  // Layer 2 fast-pass: emergency comeback mode.
+  if (
+    flags.desperate &&
+    core.selfPi >= (flags.minPi + 1) &&
+    core.threat <= safeNum(P.goDesperateThreatCap, 0.62) &&
+    core.oneAwayProb <= safeNum(P.goDesperateOneAwayCap, 48)
+  ) {
+    traceLayer(trace, "layer2_desperate", { fastPass: 1 });
+    return pushTrace(trace, true, "desperate_fast_go", P, deps);
+  }
+
+  // Layer 2: value/risk composition.
+  const oneAwayNorm = core.oneAwayProb / 100;
+  const upside =
+    Math.max(0, core.myScore - 6) * P.goUpsideScoreMul +
+    core.selfPi * P.goUpsidePiMul +
+    core.selfJokboTotal * P.goUpsideSelfJokboMul +
+    core.selfJokboOneAway * P.goUpsideOneAwayMul +
+    (flags.trailing ? P.goUpsideTrailBonus : 0);
+
+  const risk =
+    core.threat * P.goRiskPressureMul +
+    oneAwayNorm * P.goRiskOneAwayMul +
+    core.oppJokboTotal * P.goRiskOppJokboMul +
+    core.oppJokboOneAway * P.goRiskOppOneAwayMul +
+    core.goCount * P.goRiskGoCountMul +
+    (core.deckCount <= P.phaseLateDeck ? P.goRiskLateDeckBonus : 0);
+
+  const stopValue =
+    Math.max(0, flags.lead) * P.stopLeadMul +
+    Math.max(0, core.carry - 1) * P.stopCarryMul +
+    (core.myScore >= 10 ? P.stopTenBonus : 0);
+
+  const utilityUpsideWeight = safeNum(P.goUtilityUpsideWeight, 1.0);
+  const utilityRiskWeight = safeNum(P.goUtilityRiskWeight, 1.0);
+  const utilityStopWeight = safeNum(P.goUtilityStopWeight, 1.0);
+  const modeUpside = upside * goMode.upsideMul;
+  const modeRisk = risk * goMode.riskMul;
+  const modeStopValue = stopValue * goMode.stopMul;
+  let goValue =
+    modeUpside * utilityUpsideWeight -
+    modeRisk * utilityRiskWeight -
+    modeStopValue * utilityStopWeight;
+  goValue -= clamp(flags.lead / 10, -1, 1) * safeNum(P.goLiteScoreDiffMul, 0.04);
+  if (flags.second && flags.trailing) goValue += P.goSecondTrailBonus;
+  if (core.selfPi >= 8) goValue += P.goRallyPiWindowBonus;
+  if (flags.second) goValue += P.goRallySecondBonus;
+  if (flags.trailing) goValue += P.goRallyTrailBonus;
+  if (core.deckCount <= 6) goValue += P.goRallyEndDeckBonus;
+  if (
+    core.myScore > 0 &&
+    core.oppScore === 0 &&
+    swingProb <= safeNum(P.goSafeGoSwingProbCut, 0.05)
+  ) {
+    goValue += safeNum(P.goSafeGoBonus, 0.14);
+  }
+
+  let threshold = P.goBaseThreshold + goMode.thresholdShift;
+  if (flags.leading) threshold += P.goThresholdLeadUp;
+  if (flags.trailing) threshold -= P.goThresholdTrailDown;
+  if (core.threat >= 0.72) threshold += P.goThresholdPressureUp;
+
+  threshold += core.threat * safeNum(P.goLiteThreatPenaltyMul, 0.05);
+  threshold += oneAwayNorm * safeNum(P.goLiteOneAwayPenaltyMul, 0.04);
+  threshold += swingProb * safeNum(P.goLookaheadThresholdMul, 0.09);
+  if (core.deckCount <= P.phaseLateDeck) {
+    threshold += safeNum(P.goLiteLatePenalty, 0.045);
+    threshold -= safeNum(P.goDeckLowBonus, 0.02);
+  }
+  if (flags.oppCanStop) threshold += safeNum(P.goLiteOppCanStopPenalty, 0.1);
+  if (flags.selfCanStop && !flags.trailing) threshold += safeNum(P.goLiteSelfCanStopPenalty, 0.01);
+
+  threshold += Math.max(0, flags.lead) * safeNum(P.goScoreDiffBonus, 0.01);
+  threshold -= Math.max(0, -flags.lead) * safeNum(P.goScoreDiffBonus, 0.01) * 0.5;
+  if (core.oppPi >= 9 && core.selfPi <= flags.minPi + 1) threshold += safeNum(P.goUnseeHighPiPenalty, 0.04);
+  threshold *= Math.max(0.1, safeNum(P.goUtilityThresholdWeight, 1.0));
+
+  if (
+    flags.selfCanStop &&
+    !flags.oppCanStop &&
+    core.threat <= safeNum(P.goLiteSafeAttackThreatCap, 0.58) &&
+    core.oneAwayProb <= safeNum(P.goLiteSafeAttackOneAwayCap, 45) &&
+    core.deckCount >= safeNum(P.goLiteSafeAttackDeckMin, 5)
   ) {
     goValue += safeNum(P.goLiteSafeAttackBonus, 0.06);
   }
 
-  if (safeNum(P.rolloutEnabled, 1) > 0 && typeof deps.rolloutGoStopValueGPT === "function") {
-    // GO/STOP rollout is always evaluated to preserve GPT identity.
-    const goRv = deps.rolloutGoStopValueGPT(state, playerKey, true, {
-      maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 8)),
-      samples: Math.floor(safeNum(P.rolloutSamples, 5))
-    });
-    const stopRv = deps.rolloutGoStopValueGPT(state, playerKey, false, {
-      maxSteps: Math.floor(safeNum(P.rolloutMaxSteps, 8)),
-      samples: Math.floor(safeNum(P.rolloutSamples, 5))
-    });
-    if (Number.isFinite(goRv) && Number.isFinite(stopRv)) {
-      const deltaCap = Math.max(0.05, safeNum(P.rolloutGoDeltaCap, 0.3));
-      const rolloutDelta = clamp(goRv - stopRv, -deltaCap, deltaCap);
-      goValue += rolloutDelta * safeNum(P.rolloutGoWeight, 0.18);
-    }
+  traceLayer(trace, "layer2_utility", {
+    mode: goMode.mode,
+    upside,
+    risk,
+    stopValue,
+    modeUpside,
+    modeRisk,
+    modeStopValue,
+    swingProb,
+    goValue,
+    threshold,
+    margin: goValue - threshold
+  });
+
+  if (goValue < threshold) {
+    return pushTrace(trace, false, "utility_below_threshold", P, deps);
   }
 
-  if (goValue < threshold) return false;
+  const modeMarginAdj =
+    goMode.mode === "safe" ? 0.02 :
+    goMode.mode === "chase" ? -0.01 : 0;
 
-  if (selfPi >= 9) {
+  // Layer 3: soft guards for high-pi and trailing windows.
+  if (core.selfPi >= 9) {
     if (
-      pressure.threat >= safeNum(P.goSoftHighPiThreatCap, 0.90) ||
-      pressure.oneAwayProb >= safeNum(P.goSoftHighPiOneAwayCap, 66)
+      core.threat >= safeNum(P.goSoftHighPiThreatCap, 0.9) ||
+      core.oneAwayProb >= safeNum(P.goSoftHighPiOneAwayCap, 66)
     ) {
-      return false;
+      return pushTrace(trace, false, "soft_cap_high_pi", P, deps);
     }
-    return goValue >= threshold + safeNum(P.goSoftHighPiMargin, 0.06);
+    const ok = goValue >= threshold + Math.max(0, safeNum(P.goSoftHighPiMargin, 0.06) + modeMarginAdj);
+    traceLayer(trace, "layer3_final", { mode: "high_pi", decision: ok ? 1 : 0 });
+    return pushTrace(trace, ok, ok ? "high_pi_margin_pass" : "high_pi_margin_fail", P, deps);
   }
 
-  if (profile.trailing && selfPi >= 8 && pressure.threat < 1.0 && pressure.oneAwayProb < 72) {
-    return goValue >= threshold + safeNum(P.goSoftTrailHighPiMargin, 0.04);
+  if (flags.trailing && core.selfPi >= 8) {
+    const ok = goValue >= threshold + Math.max(0, safeNum(P.goSoftTrailHighPiMargin, 0.04) + modeMarginAdj);
+    traceLayer(trace, "layer3_final", { mode: "trail_high_pi", decision: ok ? 1 : 0 });
+    return pushTrace(trace, ok, ok ? "trail_high_pi_pass" : "trail_high_pi_fail", P, deps);
   }
 
-  if (selfPi >= 8 && pressure.threat < 0.95) {
-    return goValue >= threshold + safeNum(P.goSoftValueMargin, 0.02);
+  if (core.selfPi >= 8) {
+    const ok = goValue >= threshold + Math.max(0, safeNum(P.goSoftValueMargin, 0.02) + modeMarginAdj);
+    traceLayer(trace, "layer3_final", { mode: "high_pi_soft", decision: ok ? 1 : 0 });
+    return pushTrace(trace, ok, ok ? "high_pi_soft_pass" : "high_pi_soft_fail", P, deps);
   }
 
-  return true;
+  traceLayer(trace, "layer3_final", { mode: "base", decision: 1 });
+  return pushTrace(trace, true, "base_pass", P, deps);
 }
 
-/* Bomb month picker + bomb gate */
+// Choose best bomb month by immediate board gain.
 export function selectBombMonthGPT(state, _playerKey, bombMonths, deps) {
-  if (!bombMonths?.length) return null;
+  if (!Array.isArray(bombMonths) || bombMonths.length <= 0) return null;
   let best = bombMonths[0];
-  let bestScore = safeNum(deps.monthBoardGain(state, best));
+  let bestScore = safeNum(deps?.monthBoardGain?.(state, best));
   for (const month of bombMonths.slice(1)) {
-    const score = safeNum(deps.monthBoardGain(state, month));
+    const score = safeNum(deps?.monthBoardGain?.(state, month));
     if (score > bestScore) {
       bestScore = score;
       best = month;
@@ -798,43 +1312,60 @@ export function selectBombMonthGPT(state, _playerKey, bombMonths, deps) {
   return best;
 }
 
+// Bomb decision gate.
 export function shouldBombGPT(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
-  if (!bombMonths?.length) return false;
+  if (!Array.isArray(bombMonths) || bombMonths.length <= 0) return false;
   const P = mergedParams(params);
   const profile = buildProfile(state, playerKey, deps, P);
-  const ctx = profile.ctx;
-  const plan = deps.getFirstTurnDoublePiPlan(state, playerKey);
-  if (plan?.active && bombMonths.some((m) => plan.months.has(m))) return true;
 
-  const bestMonth = selectBombMonthGPT(state, playerKey, bombMonths, deps);
-  if (bestMonth == null) return false;
+  const planRaw = typeof deps?.getFirstTurnDoublePiPlan === "function"
+    ? deps.getFirstTurnDoublePiPlan(state, playerKey)
+    : null;
+  const planMonths = asMonthSet(planRaw?.months);
+  if (Boolean(planRaw?.active) && bombMonths.some((m) => planMonths.has(Number(m)))) return true;
 
-  const impact = deps.isHighImpactBomb(state, playerKey, bestMonth);
-  const immediateGain = safeNum(impact?.immediateGain);
-  const boardGain = safeNum(deps.monthBoardGain(state, bestMonth));
+  const month = selectBombMonthGPT(state, playerKey, bombMonths, deps);
+  if (month == null) return false;
+
+  const impact = typeof deps?.isHighImpactBomb === "function"
+    ? deps.isHighImpactBomb(state, playerKey, month)
+    : null;
+  const immediate = safeNum(impact?.immediateGain);
+  const boardGain = safeNum(deps?.monthBoardGain?.(state, month));
   const value =
-    immediateGain * P.bombImmediateMul +
+    immediate * P.bombImmediateMul +
     boardGain * P.bombBoardGainMul +
     (impact?.highImpact ? P.bombHighImpactBonus : 0) +
     (profile.trailing ? P.bombTrailBonus : 0) -
-    profile.pressure.threat * P.bombRiskMul;
+    profile.signals.threat * P.bombRiskMul;
 
-  if (ctx.defenseOpening && !impact?.highImpact) return value >= P.bombDefenseThreshold;
+  if (safeNum(profile.ctx?.defenseOpening) > 0 && !impact?.highImpact) {
+    return value >= P.bombDefenseThreshold;
+  }
   return value >= P.bombThreshold;
 }
 
+// Shaking decision + selected month payload.
 export function decideShakingGPT(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
-  if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
+  if (!Array.isArray(shakingMonths) || shakingMonths.length <= 0) {
+    return { allow: false, month: null, score: -Infinity };
+  }
+
   const P = mergedParams(params);
   const profile = buildProfile(state, playerKey, deps, P);
-  const plan = deps.getFirstTurnDoublePiPlan(state, playerKey);
+  const planRaw = typeof deps?.getFirstTurnDoublePiPlan === "function"
+    ? deps.getFirstTurnDoublePiPlan(state, playerKey)
+    : null;
+  const planMonths = asMonthSet(planRaw?.months);
 
   let best = { allow: false, month: null, score: -Infinity, highImpact: false };
   for (const month of shakingMonths) {
-    const immediate = safeNum(deps.shakingImmediateGainScore(state, playerKey, month));
-    const combo = safeNum(deps.ownComboOpportunityScore(state, playerKey, month));
-    const impact = deps.isHighImpactShaking(state, playerKey, month);
-    const known = safeNum(deps.countKnownMonthCards?.(state, month));
+    const immediate = safeNum(deps?.shakingImmediateGainScore?.(state, playerKey, month));
+    const combo = safeNum(deps?.ownComboOpportunityScore?.(state, playerKey, month));
+    const impact = typeof deps?.isHighImpactShaking === "function"
+      ? deps.isHighImpactShaking(state, playerKey, month)
+      : null;
+    const known = safeNum(deps?.countKnownMonthCards?.(state, month));
 
     let score =
       immediate * P.shakeImmediateMul +
@@ -842,47 +1373,58 @@ export function decideShakingGPT(state, playerKey, shakingMonths, deps, params =
       (impact?.highImpact ? P.shakeImpactBonus : 0) +
       (impact?.hasDoublePiLine ? P.shakePiLineBonus : 0) +
       (impact?.directThreeGwang ? P.shakeDirectGwangBonus : 0) -
-      profile.pressure.threat * P.shakeRiskMul;
+      profile.signals.threat * P.shakeRiskMul;
 
     if (profile.trailing) score += P.shakeTrailingBonus;
-    if (plan?.active && plan.months.has(month)) score += P.shakeFirstPlanBonus;
+    if (Boolean(planRaw?.active) && planMonths.has(Number(month))) score += P.shakeFirstPlanBonus;
     if (known <= 2) score += P.shakeKnownLowBonus;
     if (known >= 4) score -= P.shakeKnownHighPenalty;
 
     if (score > best.score) {
-      best = { allow: false, month, score, highImpact: !!impact?.highImpact };
+      best = {
+        allow: false,
+        month,
+        score,
+        highImpact: Boolean(impact?.highImpact)
+      };
     }
   }
 
   let threshold = P.shakeThreshold;
   if (profile.leading) threshold += P.shakeLeadThresholdUp;
-  if (profile.pressure.threat >= 0.72) threshold += P.shakePressureThresholdUp;
+  if (profile.signals.threat >= 0.72) threshold += P.shakePressureThresholdUp;
   if (profile.trailing) threshold -= 0.08;
 
   return { ...best, allow: best.score >= threshold };
 }
 
-/* President/Gukjin late decision helpers */
+// President hold/stop option gate.
 export function shouldPresidentStopGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = mergedParams(params);
-  const ctx = deps.analyzeGameContext(state, playerKey);
-  const carry = safeNum(state.carryOverMultiplier, 1);
-  const diff = safeNum(ctx.myScore) - safeNum(ctx.oppScore);
-  if (diff >= P.presidentStopLead && carry <= P.presidentCarryStopMax) return true;
+  const profile = buildProfile(state, playerKey, deps, P);
+  const carry = safeNum(state?.carryOverMultiplier, 1);
+  if (profile.lead >= P.presidentStopLead && carry <= P.presidentCarryStopMax) return true;
+  if (profile.signals.threat >= P.presidentThreatStop && profile.lead >= 1) return true;
   return false;
 }
 
+// Gukjin mode selector.
 export function chooseGukjinHeuristicGPT(state, playerKey, deps, params = DEFAULT_PARAMS) {
   const P = mergedParams(params);
-  const ctx = deps.analyzeGameContext(state, playerKey);
-  const selfFive = safeNum(ctx.selfFive);
-  const oppFive = safeNum(ctx.oppFive);
-  const branch = deps.analyzeGukjinBranches(state, playerKey);
+  const ctx = typeof deps?.analyzeGameContext === "function"
+    ? deps.analyzeGameContext(state, playerKey)
+    : {};
+  const selfFive = safeNum(ctx?.selfFive);
+  const oppFive = safeNum(ctx?.oppFive);
 
   if (selfFive <= 0 && oppFive >= 6) return "junk";
   if (selfFive >= 7 && oppFive <= 1) return "five";
 
-  if (branch?.enabled && Array.isArray(branch.scenarios) && branch.scenarios.length) {
+  const branch = typeof deps?.analyzeGukjinBranches === "function"
+    ? deps.analyzeGukjinBranches(state, playerKey)
+    : null;
+
+  if (branch?.enabled && Array.isArray(branch.scenarios) && branch.scenarios.length > 0) {
     let bestMode = "junk";
     let bestScore = -Infinity;
     for (const s of branch.scenarios) {
@@ -900,4 +1442,33 @@ export function chooseGukjinHeuristicGPT(state, playerKey, deps, params = DEFAUL
   }
 
   return selfFive >= 6 ? "five" : "junk";
+}
+
+// ---------------------------------------------------------------------------
+// External trace access API
+// ---------------------------------------------------------------------------
+export function getDecisionTraceGPT(decisionType = null, playerKey = null) {
+  const all = [];
+  for (const [key, traces] of TRACE_STORE.entries()) {
+    const [kind, actor] = key.split(":");
+    if (decisionType != null && String(kind) !== String(decisionType)) continue;
+    if (playerKey != null && String(actor) !== String(playerKey)) continue;
+    for (const t of traces || []) all.push(t);
+  }
+  all.sort((a, b) => safeNum(a?.at) - safeNum(b?.at));
+  return all;
+}
+
+// Clear all or filtered traces.
+export function clearDecisionTraceGPT(decisionType = null, playerKey = null) {
+  if (decisionType == null && playerKey == null) {
+    TRACE_STORE.clear();
+    return;
+  }
+  for (const key of [...TRACE_STORE.keys()]) {
+    const [kind, actor] = key.split(":");
+    if (decisionType != null && String(kind) !== String(decisionType)) continue;
+    if (playerKey != null && String(actor) !== String(playerKey)) continue;
+    TRACE_STORE.delete(key);
+  }
 }
