@@ -2,7 +2,7 @@
 
 ## 결론
 - 현재 학습/평가 기준 파이프라인은 `scripts/neat_train.py -> scripts/neat_eval_worker.mjs -> scripts/model_duel_worker.mjs`다.
-- Phase 1/2 실행·평가는 공통 래퍼(`scripts/phase_run.ps1`, `scripts/phase_eval.ps1`)로 통합되었다.
+- Phase 실행·평가는 단일 진입점(`scripts/phase_run.ps1`, `scripts/phase_eval.ps1`)으로 통합되었다.
 - 모든 런타임 설정은 `scripts/configs/runtime_phase*.json`을 단일 기준(Source of Truth)으로 사용한다.
 
 ## 1. 문서 범위
@@ -11,11 +11,8 @@
 
 ## 2. 현재 기준 파일 맵 (SoT)
 ### 2-1. 오케스트레이션 스크립트 (`scripts/`)
-- `phase_run.ps1`: Phase 1/2 공통 학습 실행 래퍼
-- `phase_eval.ps1`: Phase 1/2 공통 평가 실행 래퍼
-- `phase1_run.ps1`, `phase2_run.ps1`: 공통 학습 래퍼 위임 진입점
-- `phase1_eval.ps1`, `phase2_eval.ps1`: 공통 평가 래퍼 위임 진입점
-- `phase3_run.ps1`, `phase3_eval.ps1`: Phase 3 학습/평가
+- `phase_run.ps1`: Phase 1/2/3 공통 학습 실행 진입점 (`-Phase`, `-Seed` 필수)
+- `phase_eval.ps1`: Phase 1/2/3 공통 평가 실행 진입점 (`-Phase`, `-Seed` 필수)
 
 ### 2-2. 코어 실행기
 - `neat_train.py`: NEAT 러너, 병렬 평가, 게이트/실패 감지, 체크포인트/요약 저장
@@ -30,34 +27,33 @@
 
 ## 3. 파이프라인 흐름
 ### 3-1. Phase 1
-1. `phase1_run.ps1 -Seed <N>`
-2. `phase1_eval.ps1 -Seed <N>`
+1. `phase_run.ps1 -Phase 1 -Seed <N>`
+2. `phase_eval.ps1 -Phase 1 -Seed <N>`
 
 ### 3-2. Phase 2
-1. `phase2_run.ps1 -Seed <N>`
-2. `phase2_eval.ps1 -Seed <N>`
+1. `phase_run.ps1 -Phase 2 -Seed <N>`
+2. `phase_eval.ps1 -Phase 2 -Seed <N>`
 
 참고:
 - `phase_run.ps1`는 Phase 2 실행 시 Phase 1 체크포인트를 자동 탐색한다.
 - 우선순위: `runtime_phase1.json.generations`에 해당하는 체크포인트 -> 없으면 최신 세대 체크포인트.
 
 ### 3-3. Phase 3
-- `phase3_run.ps1`는 phase2 체크포인트 디렉터리에서 최신 체크포인트를 자동 선택한다.
-- 세대 수는 `-Generations` 인자로 조정한다.
+- `phase_run.ps1 -Phase 3`는 phase2 체크포인트 디렉터리에서 우선순위(목표 세대 -> 최신)로 재개 체크포인트를 자동 선택한다.
 
 ## 4. 실행 명령
 ### 4-1. 학습
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/phase1_run.ps1 -Seed 9
-powershell -ExecutionPolicy Bypass -File scripts/phase2_run.ps1 -Seed 9
-powershell -ExecutionPolicy Bypass -File scripts/phase3_run.ps1 -Seed 9 -Generations 25
+powershell -ExecutionPolicy Bypass -File scripts/phase_run.ps1 -Phase 1 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase_run.ps1 -Phase 2 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase_run.ps1 -Phase 3 -Seed 9
 ```
 
 ### 4-2. 평가 (고정 1000게임)
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/phase1_eval.ps1 -Seed 9
-powershell -ExecutionPolicy Bypass -File scripts/phase2_eval.ps1 -Seed 9
-powershell -ExecutionPolicy Bypass -File scripts/phase3_eval.ps1 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase_eval.ps1 -Phase 1 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase_eval.ps1 -Phase 2 -Seed 9
+powershell -ExecutionPolicy Bypass -File scripts/phase_eval.ps1 -Phase 3 -Seed 9
 ```
 
 ### 4-3. 휴리스틱 대전 (고정 1000게임)
@@ -98,7 +94,7 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase3_seed5 --game
 - `eval_metrics.ndjson`
 - `eval_failures.log`
 - `phase*_eval_1000.json` (평가 실행 시)
-- `phase*_pass_state.json` (phase1/2 평가 실행 시)
+- `phase*_pass_state.json` (phase 평가 실행 시)
 
 ## 7. Worker 동작 메모
 상세 포맷 문서:
@@ -168,5 +164,5 @@ node scripts/model_duel_worker.mjs --human heuristic_v5 --ai phase3_seed5 --game
 2. 시뮬레이션/평가 테스트는 1000게임 규칙을 유지한다.
 3. 설정 변경 시 문서와 phase 래퍼 스크립트를 같이 갱신한다.
 4. 결과 검증은 `run_summary.json`, `gate_state.json`, `phase*_eval_1000.json` 순으로 확인한다.
-5. 풀리그 산출물은 `logs/model_duel/full_league/` 경로에 저장한다.
+5. 풀리그 산출물은 `logs/full_league/` 경로에 저장한다.
 6. 저장 인코딩은 UTF-8 BOM을 유지한다.

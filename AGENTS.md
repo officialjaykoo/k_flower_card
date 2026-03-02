@@ -1,17 +1,15 @@
 ﻿# Project Agent Rules
 
 These rules are mandatory for this repository.
+If rules conflict, the smaller section number takes precedence.
 
-0. Primary objective
+1. Primary objective
 - The top priority is to find the strongest Matgo AI model.
 - A strong model is defined by maximizing gold while minimizing gold loss.
-- Development path (phase 1): use Heuristic + Optuna and NEAT in early head-to-head runs to build initial strong models.
-- Development path (phase 2): after initial modeling, prioritize model-vs-model league matches to iteratively select and improve stronger models.
+- Development path (phase 1-3): prioritize training/evaluation against heuristic policies.
+- Development path (phase 4+): TBD (not fixed yet).
 
-1. Response clarity first
-- Always answer clearly and state the conclusion first.
-
-2. Deletion safety
+2. Safety and irreversible actions
 - Before deleting anything, always provide a detailed delete list to the user.
 - The list must include paths and clear scope.
 - Do not delete until the user explicitly approves.
@@ -23,21 +21,31 @@ These rules are mandatory for this repository.
 - Run simulation only when the user explicitly requests it in the current conversation.
 - When simulation is requested, prefer parallel/multi-worker execution to utilize available CPU resources.
 - Avoid single-worker simulation unless the user explicitly asks for single-worker mode.
-
-4. Test game count lock
 - For testing simulations, use exactly 1000 games.
-- Full-league runs must save outputs under `logs/heuristic_duel/full_league/`.
+- Full-league runs must save outputs under `logs/full_league/`.
 - If a planned test simulation uses a different game count, stop and ask the user first.
+- Clarification: training-time internal evaluator loops (e.g., `games_per_genome`) are not treated as "test simulation" in this lock.
 
-5. Encoding lock
-- Save files as UTF-8 with BOM (EF BB BF).
-- Keep this encoding so IDEs detect Korean text correctly.
+4. Fail-fast and development posture
+- Prefer fail-fast over compatibility fallbacks in all runtime/evaluation scripts.
+- If behavior is ambiguous, throw an explicit error instead of guessing.
+- If a result is uncertain or validation fails, do not mark the run as success.
+- Do not silently swallow action-resolution failures; surface context in the error (`seed`, `step`, `actor`, `phase`).
+- In development stage, do not add compatibility branches or silent default masking for invalid/missing inputs; stop with an explicit error.
+- If the new direction is clearly correct, do not delay structural refactoring.
+- Do not keep obsolete structure only for short-term convenience during development stage.
+- If the full structural change is too large for one pass, split it into up to 5 explicit steps and instruct the user to run/approve each step in sequence.
 
-6. Path structure lock
+5. Path and structure lock
 - Keep all runtime/config files under `scripts/configs/`.
-- Keep orchestration/entry scripts under `scripts/` (e.g., `phase1_run.ps1`, `phase1_eval.ps1`, `phase2_run.ps1`, `phase2_eval.ps1`).
+- Keep orchestration/entry scripts under `scripts/` (e.g., `phase_run.ps1`, `phase_eval.ps1`).
+- Prefer a single entry script with explicit required arguments over per-phase wrapper scripts when logic is shared.
 - Do not create or reference root-level `configs/` paths.
 - Use repository-relative paths consistently in scripts.
+
+6. Encoding lock
+- Save files as UTF-8 with BOM (EF BB BF).
+- Keep this encoding so IDEs detect Korean text correctly.
 
 7. Fair-teacher hidden-information rule
 - For imperfect-information gameplay and training, decisions must use `PublicState` only.
@@ -46,7 +54,7 @@ These rules are mandatory for this repository.
 - GO decisions must reintroduce rollout contribution with a small weight (recommended range: `0.2` to `0.4`) to reflect probabilistic future value without freezing GO behavior.
 - Any logic that directly relies on hidden opponent/deck card identities for decision-making is prohibited in fair-teacher mode.
 
-8. CLI list-argument single-format rule
+8. CLI argument strictness
 - For list-type CLI inputs, use exactly one canonical format only. Do not support multiple calling styles for compatibility.
 - `scripts/heuristic_full_league_1000.ps1` must receive policies as one CSV string:
   - `-Policies "H-V4,H-V5,H-V5P,H-V6"`
@@ -76,10 +84,7 @@ These rules are mandatory for this repository.
     - `후공: 승률 <...>, 평균 골드델타 <...>`
   - Final line:
     - `핵심 한줄: <single-sentence conclusion>`
-
-10. `neat_eval_worker.mjs` result summary lock
-- After a `scripts/neat_eval_worker.mjs` run completes, always present the result in the compact duel block format first.
-- Use this exact header/body order:
+- After a `scripts/neat_eval_worker.mjs` run completes, always present this compact duel block first:
   - `=== Model Duel (<Model A> vs <Model B>, games=<N>) ===`
   - `Win/Loss/Draw(A):  <...> / <...> / <...>  (WR=<...>)`
   - `Win/Loss/Draw(B):  <...> / <...> / <...>  (WR=<...>)`
@@ -95,8 +100,5 @@ These rules are mandatory for this repository.
   - `===========================================================`
 - After the block, add one short Korean conclusion line.
 
-11. Fail-fast execution principle
-- Prefer fail-fast over compatibility fallbacks in all runtime/evaluation scripts.
-- If behavior is ambiguous, throw an explicit error instead of guessing.
-- If a result is uncertain or validation fails, do not mark the run as success.
-- Do not silently swallow action-resolution failures; surface context in the error (`seed`, `step`, `actor`, `phase`).
+10. Response clarity
+- Always answer clearly and state the conclusion first.

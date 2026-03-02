@@ -1,5 +1,5 @@
 ﻿param(
-  [Parameter(Mandatory = $true)][ValidateSet("1", "2")][string]$Phase,
+  [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed
 )
 
@@ -15,7 +15,7 @@ function Read-JsonFile {
 }
 
 function To-PositiveIntOrDefault {
-  param(
+param(
     [Parameter(Mandatory = $false)]$Value,
     [Parameter(Mandatory = $true)][int]$DefaultValue
   )
@@ -28,13 +28,14 @@ function To-PositiveIntOrDefault {
   return $DefaultValue
 }
 
-function Resolve-Phase1Checkpoint {
+function Resolve-PreviousCheckpoint {
   param(
     [Parameter(Mandatory = $true)][string]$CheckpointDir,
-    [Parameter(Mandatory = $true)][int]$PreferredGeneration
+    [Parameter(Mandatory = $true)][int]$PreferredGeneration,
+    [Parameter(Mandatory = $true)][string]$Label
   )
   if (-not (Test-Path $CheckpointDir)) {
-    throw "phase1 checkpoint directory not found: $CheckpointDir"
+    throw "$Label checkpoint directory not found: $CheckpointDir"
   }
 
   $preferred = Join-Path $CheckpointDir "neat-checkpoint-gen$PreferredGeneration"
@@ -59,9 +60,84 @@ function Resolve-Phase1Checkpoint {
     Select-Object -First 1
 
   if ($null -eq $latest) {
-    throw "phase1 checkpoint not found in: $CheckpointDir"
+    throw "$Label checkpoint not found in: $CheckpointDir"
   }
   return $latest
+}
+
+function Get-BestGenomeGoMetrics {
+  param([Parameter(Mandatory = $true)]$Summary)
+
+  $empty = [ordered]@{
+    available = $false
+    go_count = $null
+    go_games = $null
+    go_fail_count = $null
+    go_fail_rate = $null
+    go_rate = $null
+    luck_proxy = $null
+    luck_seat_win_rate_gap = $null
+    luck_gold_volatility_norm = $null
+  }
+
+  $generationMetricsPathRaw = [string]$Summary.generation_metrics_log
+  $evalMetricsPathRaw = [string]$Summary.eval_metrics_log
+  if ([string]::IsNullOrWhiteSpace($generationMetricsPathRaw) -or [string]::IsNullOrWhiteSpace($evalMetricsPathRaw)) {
+    return $empty
+  }
+
+  $generationMetricsPath = [System.IO.Path]::GetFullPath($generationMetricsPathRaw)
+  $evalMetricsPath = [System.IO.Path]::GetFullPath($evalMetricsPathRaw)
+  if (-not (Test-Path $generationMetricsPath) -or -not (Test-Path $evalMetricsPath)) {
+    return $empty
+  }
+
+  $lastGenerationLine = Get-Content $generationMetricsPath | Select-Object -Last 1
+  if ([string]::IsNullOrWhiteSpace($lastGenerationLine)) {
+    return $empty
+  }
+
+  $generationRecord = $lastGenerationLine | ConvertFrom-Json
+  $targetGeneration = [int]$generationRecord.generation
+  $targetGenomeKey = [int]$generationRecord.best_genome_key
+
+  $bestEvalRecord =
+    Get-Content $evalMetricsPath |
+      ForEach-Object { $_ | ConvertFrom-Json } |
+      Where-Object { [int]$_.generation -eq $targetGeneration -and [int]$_.genome_key -eq $targetGenomeKey } |
+      Select-Object -First 1
+
+  if ($null -eq $bestEvalRecord) {
+    return $empty
+  }
+
+  return [ordered]@{
+    available = $true
+    go_count = [int]$bestEvalRecord.go_count
+    go_games = [int]$bestEvalRecord.go_games
+    go_fail_count = [int]$bestEvalRecord.go_fail_count
+    go_fail_rate = [double]$bestEvalRecord.go_fail_rate
+    go_rate = [double]$bestEvalRecord.go_rate
+    luck_proxy = [double]$bestEvalRecord.luck_proxy
+    luck_seat_win_rate_gap = [double]$bestEvalRecord.luck_components.seat_win_rate_gap
+    luck_gold_volatility_norm = [double]$bestEvalRecord.luck_components.gold_volatility_norm
+  }
+}
+
+function Get-OptionalDouble {
+  param(
+    [Parameter(Mandatory = $false)]$Value,
+    [Parameter(Mandatory = $false)][double]$DefaultValue = [double]::NaN
+  )
+  if ($null -eq $Value) {
+    return $DefaultValue
+  }
+  try {
+    return [double]$Value
+  }
+  catch {
+    return $DefaultValue
+  }
 }
 
 $python = ".venv\Scripts\python.exe"
@@ -89,12 +165,14 @@ $cmd = @(
   "--profile-name", "phase${Phase}_seed$Seed"
 )
 
-if ($Phase -eq "2") {
-  $phase1RuntimePath = "scripts/configs/runtime_phase1.json"
-  $phase1Runtime = Read-JsonFile -Path $phase1RuntimePath
-  $phase1Generations = To-PositiveIntOrDefault -Value $phase1Runtime.generations -DefaultValue 20
-  $phase1CheckpointDir = "logs/NEAT/neat_phase1_seed$Seed/checkpoints"
-  $resume = Resolve-Phase1Checkpoint -CheckpointDir $phase1CheckpointDir -PreferredGeneration $phase1Generations
+if ($Phase -ne "1") {
+  $previousPhase = [int]$Phase - 1
+  $previousLabel = "phase$previousPhase"
+  $previousRuntimePath = "scripts/configs/runtime_phase$previousPhase.json"
+  $previousRuntime = Read-JsonFile -Path $previousRuntimePath
+  $previousGenerations = To-PositiveIntOrDefault -Value $previousRuntime.generations -DefaultValue 20
+  $previousCheckpointDir = "logs/NEAT/neat_phase${previousPhase}_seed$Seed/checkpoints"
+  $resume = Resolve-PreviousCheckpoint -CheckpointDir $previousCheckpointDir -PreferredGeneration $previousGenerations -Label $previousLabel
 
   $cmd += @(
     "--resume", "$($resume.path)",
@@ -102,7 +180,9 @@ if ($Phase -eq "2") {
   )
 }
 
+$phaseRunStartedAt = Get-Date
 $result = & $python @cmd | Out-String
+$phaseRunElapsedSec = [math]::Round(((Get-Date) - $phaseRunStartedAt).TotalSeconds, 3)
 $exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
   if (-not [string]::IsNullOrWhiteSpace($result)) {
@@ -121,6 +201,9 @@ catch {
   throw "failed to parse neat_train output as JSON"
 }
 
+$goMetrics = Get-BestGenomeGoMetrics -Summary $summary
+$summaryElapsedSec = Get-OptionalDouble -Value $summary.run_elapsed_sec -DefaultValue $phaseRunElapsedSec
+
 Write-Host "=== Phase$Phase Summary (Seed=$Seed) ==="
 Write-Host "EMA win rate:     $($summary.gate_state.ema_win_rate)"
 Write-Host "EMA imitation:    $($summary.gate_state.ema_imitation)"
@@ -129,6 +212,20 @@ Write-Host "Win slope(5):     $($summary.gate_state.latest_win_rate_slope_5)"
 Write-Host "Transition ready: $($summary.gate_state.transition_ready)"
 Write-Host "Transition gen:   $($summary.gate_state.transition_generation)"
 Write-Host "Best fitness:     $($summary.best_fitness)"
+Write-Host "Elapsed time:     $summaryElapsedSec s"
+if ([bool]$goMetrics.available) {
+  Write-Host "GO count:         $($goMetrics.go_count)"
+  Write-Host "GO games:         $($goMetrics.go_games)"
+  Write-Host "GO fail count:    $($goMetrics.go_fail_count)"
+  Write-Host "GO fail rate:     $($goMetrics.go_fail_rate)"
+  Write-Host "GO rate:          $($goMetrics.go_rate)"
+  Write-Host "Luck proxy:       $($goMetrics.luck_proxy)"
+  Write-Host "Luck seat gap:    $($goMetrics.luck_seat_win_rate_gap)"
+  Write-Host "Luck volatility:  $($goMetrics.luck_gold_volatility_norm)"
+}
+else {
+  Write-Host "GO/Luck metrics:  unavailable"
+}
 Write-Host "================================"
 
 exit 0
