@@ -1,5 +1,5 @@
 ﻿{
-  "format_version": "neat_runtime_phase2_v2",
+  "format_version": "neat_runtime_gpt_phase2_v1",
   "generations": 9,
   "eval_workers": 6,
   "games_per_genome": 180,
@@ -35,3 +35,4 @@
   "failure_generation_min": 30,
   "failure_slope_5_max": 0.0
 }
+

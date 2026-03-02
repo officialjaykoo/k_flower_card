@@ -65,8 +65,8 @@ function ConvertTo-NativeJsonArg {
   return $JsonText.Replace('"', '\"')
 }
 
-$runtimeConfigPath = "scripts/configs/runtime_phase$Phase.json"
-$outputDir = "logs/NEAT/neat_phase${Phase}_seed$Seed"
+$runtimeConfigPath = "scripts/configs/runtime_gpt_phase$Phase.json"
+$outputDir = "logs/NEAT_GPT/neat_phase${Phase}_seed$Seed"
 $gateStatePath = Join-Path $outputDir "gate_state.json"
 $genomePath = Join-Path $outputDir "models/winner_genome.json"
 
@@ -85,7 +85,7 @@ $gate = Read-JsonFile -Path $gateStatePath
 $passRule = Resolve-EvalGateRule -Runtime $runtime
 
 $games = 1000
-$seedTag = "phase${Phase}_eval_$Seed"
+$seedTag = "gpt_phase${Phase}_eval_$Seed"
 $policyValue = ""
 if ($runtime.PSObject.Properties.Name -contains "opponent_policy") {
   $policyValue = [string]$runtime.opponent_policy
@@ -237,3 +237,4 @@ if ($passed) {
 }
 
 exit 2
+
