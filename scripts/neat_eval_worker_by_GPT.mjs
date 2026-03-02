@@ -8,31 +8,29 @@ import path from "node:path";
 import {
   initSimulationGame,
   startSimulationGame,
-  createSeededRng,
-  playTurn,
-  chooseMatch,
-  chooseGo,
-  chooseStop,
-  chooseShakingYes,
-  chooseShakingNo,
-  choosePresidentStop,
-  choosePresidentHold,
-  chooseGukjinMode,
+  createSeededRng
 } from "../src/engine/index.js";
 import { getActionPlayerKey } from "../src/engine/runner.js";
-import { aiPlay } from "../src/ai/aiPlay.js";
+import { aiPlay } from "../src/ai/aiPlay_by_GPT.js";
+import { stateProgressKey } from "../src/ai/decisionRuntime_by_GPT.js";
 
 // Quick Read Map (top-down):
 // 1) parseArgs(): strict CLI parsing + validation
 // 2) playSingleRound(): single-game simulation loop
-// 3) decision helpers: candidate/legal transition inference
-// 4) main(): N-game aggregate -> fitness -> summary JSON
+// 3) main(): N-game aggregate -> fitness -> summary JSON
 
 // =============================================================================
 // Section 1. CLI
 // =============================================================================
 function normalizePolicyName(policy) {
   return String(policy || "").trim().toLowerCase();
+}
+
+function parseContinuousSeriesValue(value) {
+  const raw = String(value ?? "1").trim();
+  if (raw === "" || raw === "1") return true;
+  if (raw === "2") return false;
+  throw new Error(`invalid --continuous-series: ${raw} (allowed: 1=true, 2=false)`);
 }
 
 function parseArgs(argv) {
@@ -103,11 +101,7 @@ function parseArgs(argv) {
     }
     else if (key === "--first-turn-policy") out.firstTurnPolicy = String(value || "alternate").trim().toLowerCase();
     else if (key === "--fixed-first-turn") out.fixedFirstTurn = String(value || "human").trim().toLowerCase();
-    else if (key === "--switch-seats") {
-      // Backward compatibility: legacy seat switch now maps to first-turn policy.
-      out.firstTurnPolicy = String(value || "1").trim() === "0" ? "fixed" : "alternate";
-    }
-    else if (key === "--continuous-series") out.continuousSeries = !(String(value || "1").trim() === "0");
+    else if (key === "--continuous-series") out.continuousSeries = parseContinuousSeriesValue(value);
     else throw new Error(`Unknown argument: ${key}`);
   }
 
@@ -139,159 +133,8 @@ function parseArgs(argv) {
 }
 
 // =============================================================================
-// Section 2. Engine Action Helpers + Feature Helpers
+// Section 2. Round Simulation + Metrics
 // =============================================================================
-function canonicalOptionAction(action) {
-  const a = String(action || "").trim();
-  if (!a) return "";
-  const aliases = {
-    choose_go: "go",
-    choose_stop: "stop",
-    choose_shaking_yes: "shaking_yes",
-    choose_shaking_no: "shaking_no",
-    choose_president_stop: "president_stop",
-    choose_president_hold: "president_hold",
-    choose_five: "five",
-    choose_junk: "junk",
-  };
-  return aliases[a] || a;
-}
-
-function normalizeOptionCandidates(items) {
-  if (!Array.isArray(items)) return [];
-  const out = [];
-  const seen = new Set();
-  for (const raw of items) {
-    const v = canonicalOptionAction(raw);
-    if (!v || seen.has(v)) continue;
-    seen.add(v);
-    out.push(v);
-  }
-  return out;
-}
-
-function selectPool(state, actor) {
-  if (state.phase === "playing" && state.currentTurn === actor) {
-    return { cards: (state.players?.[actor]?.hand || []).map((c) => c.id) };
-  }
-  if (state.phase === "select-match" && state.pendingMatch?.playerKey === actor) {
-    return { boardCardIds: state.pendingMatch.boardCardIds || [] };
-  }
-  if (state.phase === "go-stop" && state.pendingGoStop === actor) {
-    return { options: ["go", "stop"] };
-  }
-  if (state.phase === "president-choice" && state.pendingPresident?.playerKey === actor) {
-    return { options: ["president_stop", "president_hold"] };
-  }
-  if (state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey === actor) {
-    return { options: ["five", "junk"] };
-  }
-  if (state.phase === "shaking-confirm" && state.pendingShakingConfirm?.playerKey === actor) {
-    return { options: ["shaking_yes", "shaking_no"] };
-  }
-  return {};
-}
-
-function legalCandidatesForDecision(sp, decisionType) {
-  if (decisionType === "play") {
-    return (sp.cards || []).map((x) => String(x)).filter((x) => x.length > 0);
-  }
-  if (decisionType === "match") {
-    return (sp.boardCardIds || []).map((x) => String(x)).filter((x) => x.length > 0);
-  }
-  if (decisionType === "option") {
-    return normalizeOptionCandidates(sp.options || []);
-  }
-  return [];
-}
-
-function applyAction(state, actor, decisionType, rawAction) {
-  let action = String(rawAction || "").trim();
-  if (!action) return state;
-  if (decisionType === "play") return playTurn(state, action);
-  if (decisionType === "match") return chooseMatch(state, action);
-  if (decisionType !== "option") return state;
-
-  action = canonicalOptionAction(action);
-  if (action === "go") return chooseGo(state, actor);
-  if (action === "stop") return chooseStop(state, actor);
-  if (action === "shaking_yes") return chooseShakingYes(state, actor);
-  if (action === "shaking_no") return chooseShakingNo(state, actor);
-  if (action === "president_stop") return choosePresidentStop(state, actor);
-  if (action === "president_hold") return choosePresidentHold(state, actor);
-  if (action === "five" || action === "junk") return chooseGukjinMode(state, actor, action);
-  return state;
-}
-
-function stateProgressKey(state) {
-  if (!state) return "null";
-  const hh = Number(state?.players?.human?.hand?.length || 0);
-  const ah = Number(state?.players?.ai?.hand?.length || 0);
-  const d = Number(state?.deck?.length || 0);
-  return [
-    String(state.phase || ""),
-    String(state.currentTurn || ""),
-    String(state.pendingGoStop || ""),
-    String(state.pendingMatch?.stage || ""),
-    String(state.pendingPresident?.playerKey || ""),
-    String(state.pendingShakingConfirm?.playerKey || ""),
-    String(state.pendingGukjinChoice?.playerKey || ""),
-    String(state.turnSeq || 0),
-    String(state.kiboSeq || 0),
-    String(hh),
-    String(ah),
-    String(d),
-  ].join("|");
-}
-
-// =============================================================================
-// Section 3. Decision Inference Helpers
-// =============================================================================
-function normalizeDecisionCandidate(decisionType, candidate) {
-  if (decisionType === "option") return canonicalOptionAction(candidate);
-  return String(candidate || "").trim();
-}
-
-function heuristicCandidateForDecision(state, actor, decisionType, candidates, heuristicPolicy) {
-  if (!Array.isArray(candidates) || !candidates.length) return null;
-  const nextByHeuristic = aiPlay(state, actor, {
-    source: "heuristic",
-    heuristicPolicy: heuristicPolicy || "H-J2",
-  });
-  if (!nextByHeuristic || stateProgressKey(nextByHeuristic) === stateProgressKey(state)) {
-    return null;
-  }
-  const target = stateProgressKey(nextByHeuristic);
-  for (const c of candidates) {
-    const simulated = applyAction(state, actor, decisionType, c);
-    if (simulated && stateProgressKey(simulated) === target) {
-      return normalizeDecisionCandidate(decisionType, c);
-    }
-  }
-  return null;
-}
-
-function inferChosenCandidateFromTransition(stateBefore, actor, decisionType, candidates, stateAfter) {
-  if (!stateAfter || !Array.isArray(candidates) || !candidates.length) return null;
-  const target = stateProgressKey(stateAfter);
-  for (const candidate of candidates) {
-    const simulated = applyAction(stateBefore, actor, decisionType, candidate);
-    if (simulated && stateProgressKey(simulated) === target) {
-      return normalizeDecisionCandidate(decisionType, candidate);
-    }
-  }
-  return null;
-}
-
-// =============================================================================
-// Section 4. Round Simulation + Metrics
-// =============================================================================
-function randomChoice(arr, rng) {
-  if (!arr.length) return null;
-  const idx = Math.max(0, Math.min(arr.length - 1, Math.floor(Number(rng() || 0) * arr.length)));
-  return arr[idx];
-}
-
 function selectOpponentPolicyForGame(opts, gameIndex) {
   const fixedPolicy = String(opts.opponentPolicy || "").trim();
   if (fixedPolicy) {
@@ -319,20 +162,6 @@ function selectOpponentPolicyForGame(opts, gameIndex) {
   }
   return String(opts.opponentPolicyMix[opts.opponentPolicyMix.length - 1].policy || "").trim();
 }
-
-function randomLegalAction(state, actor, rng) {
-  const sp = selectPool(state, actor);
-  const cards = sp.cards || null;
-  const boardCardIds = sp.boardCardIds || null;
-  const options = sp.options || null;
-  const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
-  if (!decisionType) return state;
-  const candidates = legalCandidatesForDecision(sp, decisionType);
-  if (!candidates.length) return state;
-  const picked = randomChoice(candidates, rng);
-  return applyAction(state, actor, decisionType, picked);
-}
-
 function resolveFirstTurnKey(opts, gameIndex) {
   if (opts.firstTurnPolicy === "fixed") return opts.fixedFirstTurn;
   return gameIndex % 2 === 0 ? "ai" : "human";
@@ -370,33 +199,25 @@ function playSingleRound(
   maxSteps,
   opponentModel
 ) {
-  const rng = createSeededRng(`${seed}|rng`);
   let state = initialState;
-  const imitation = {
-    totals: { play: 0, match: 0, option: 0 },
-    matches: { play: 0, match: 0, option: 0 },
-  };
 
   let steps = 0;
   while (state.phase !== "resolution" && steps < maxSteps) {
     const actor = getActionPlayerKey(state);
     if (!actor) break;
 
-    const before = stateProgressKey(state);
-    const sp = selectPool(state, actor);
-    const cards = sp.cards || null;
-    const boardCardIds = sp.boardCardIds || null;
-    const options = sp.options || null;
-    const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
-    const candidates = decisionType ? legalCandidatesForDecision(sp, decisionType) : [];
+    const before = stateProgressKey(state, { includeKiboSeq: true });
     let next = state;
+    let actionSource = "heuristic";
 
     if (actor === controlActor) {
+      actionSource = "model_control";
       next = aiPlay(state, actor, {
         source: "model",
         model: controlModel,
       });
     } else if (normalizePolicyName(opponentPolicy) === "genome") {
+      actionSource = "model_opponent";
       next = aiPlay(state, actor, {
         source: "model",
         model: opponentModel,
@@ -408,49 +229,17 @@ function playSingleRound(
       });
     }
 
-    if (!next || stateProgressKey(next) === before) {
-      next = randomLegalAction(state, actor, rng);
-    }
-    if (!next || stateProgressKey(next) === before) {
+    if (!next || stateProgressKey(next, { includeKiboSeq: true }) === before) {
       throw new Error(
-        `action resolution failed after fallback: seed=${seed}, step=${steps}, actor=${actor}, phase=${String(state?.phase || "")}`
+        `action resolution failed: seed=${seed}, step=${steps}, actor=${actor}, phase=${String(state?.phase || "")}, policy=${String(opponentPolicy || "")}, source=${actionSource}`
       );
-    }
-
-    if (actor === controlActor && decisionType && candidates.length > 0) {
-      const chosen = inferChosenCandidateFromTransition(
-        state,
-        actor,
-        decisionType,
-        candidates,
-        next
-      );
-      if (chosen) {
-        const imitationRefPolicy =
-          normalizePolicyName(opponentPolicy) === "genome"
-            ? "H-J2"
-            : opponentPolicy;
-        const refCandidate = heuristicCandidateForDecision(
-          state,
-          actor,
-          decisionType,
-          candidates,
-          imitationRefPolicy
-        );
-        if (refCandidate) {
-          imitation.totals[decisionType] += 1;
-          if (chosen === refCandidate) {
-            imitation.matches[decisionType] += 1;
-          }
-        }
-      }
     }
 
     state = next;
     steps += 1;
   }
 
-  return { endState: state, imitation };
+  return state;
 }
 
 function quantile(values, q) {
@@ -460,69 +249,17 @@ function quantile(values, q) {
   return sorted[idx];
 }
 
-function mean(values) {
-  if (!Array.isArray(values) || values.length <= 0) return 0;
-  return values.reduce((acc, v) => acc + Number(v || 0), 0) / values.length;
-}
-
-function standardDeviation(values) {
-  if (!Array.isArray(values) || values.length <= 1) return 0;
-  const mu = mean(values);
-  const variance = values.reduce((acc, v) => {
-    const d = Number(v || 0) - mu;
-    return acc + (d * d);
-  }, 0) / values.length;
-  return Math.sqrt(Math.max(0, variance));
-}
-
 function clamp01(v) {
   const x = Number(v || 0);
   if (x <= 0) return 0;
   if (x >= 1) return 1;
   return x;
 }
-
-function cloneDecisionCounters(src) {
-  return {
-    play: Number(src?.play || 0),
-    match: Number(src?.match || 0),
-    option: Number(src?.option || 0),
-  };
-}
-
-function buildImitationMetrics(totals, matches) {
-  const t = cloneDecisionCounters(totals);
-  const m = cloneDecisionCounters(matches);
-  const ratio = (num, den) => (den > 0 ? num / den : 0);
-  const playRatio = ratio(m.play, t.play);
-  const matchRatio = ratio(m.match, t.match);
-  const optionRatio = ratio(m.option, t.option);
-  const weights = { play: 0.5, match: 0.3, option: 0.2 };
-  let weightSum = 0;
-  for (const k of ["play", "match", "option"]) {
-    if (Number(t[k] || 0) > 0) weightSum += Number(weights[k] || 0);
-  }
-  const weightedRaw =
-    weights.play * playRatio +
-    weights.match * matchRatio +
-    weights.option * optionRatio;
-  const weightedScore = weightSum > 0 ? weightedRaw / weightSum : 0;
-  return {
-    totals: t,
-    matches: m,
-    playRatio,
-    matchRatio,
-    optionRatio,
-    weights,
-    weightedScore,
-  };
-}
-
 // =============================================================================
-// Section 5. Entrypoint
+// Section 4. Entrypoint
 // =============================================================================
 function main() {
-  // 5-1) Parse options and load genome/opponent models.
+  // 4-1) Parse options and load genome/opponent models.
   const evalStartMs = Date.now();
   const opts = parseArgs(process.argv.slice(2));
   const full = path.resolve(opts.genomePath);
@@ -559,23 +296,17 @@ function main() {
   let goCount = 0;
   let goGames = 0;
   let goFailCount = 0;
-  const simImitationTotals = { play: 0, match: 0, option: 0 };
-  const simImitationMatches = { play: 0, match: 0, option: 0 };
   const firstTurnCounts = {
     human: 0,
     ai: 0,
   };
   const opponentPolicyCounts = {};
-  const controlSeatStats = {
-    first: { games: 0, wins: 0, goldDeltas: [] },
-    second: { games: 0, wins: 0, goldDeltas: [] },
-  };
   const seriesSession = {
     roundsPlayed: 0,
     previousEndState: null,
   };
 
-  // 5-2) Run per-game simulations and accumulate metrics.
+  // 4-2) Run per-game simulations and accumulate metrics.
   for (let gi = 0; gi < games; gi += 1) {
     const firstTurnKey = resolveFirstTurnKey(opts, gi);
     const opponentPolicyForGame = selectOpponentPolicyForGame(opts, gi);
@@ -583,8 +314,6 @@ function main() {
       throw new Error("resolved empty opponent policy");
     }
     opponentPolicyCounts[opponentPolicyForGame] = Number(opponentPolicyCounts[opponentPolicyForGame] || 0) + 1;
-    const controlSeat = firstTurnKey === controlActor ? "first" : "second";
-    controlSeatStats[controlSeat].games += 1;
     firstTurnCounts[firstTurnKey] += 1;
     const seed = `${opts.seed}|g=${gi}|first=${firstTurnKey}|sr=${seriesSession.roundsPlayed}`;
     const roundStart = opts.continuousSeries
@@ -602,11 +331,10 @@ function main() {
       maxSteps,
       opponentModel
     );
-    const endState = gameResult?.endState || gameResult;
+    const endState = gameResult;
     const afterGoldDiff = controlGoldDiff(endState, controlActor);
     const goldDelta = afterGoldDiff - beforeGoldDiff;
     goldDeltas.push(goldDelta);
-    controlSeatStats[controlSeat].goldDeltas.push(goldDelta);
     const controlGold = Number(endState?.players?.[controlActor]?.gold || 0);
     const opponentGold = Number(endState?.players?.[opponentActor]?.gold || 0);
     const controlBankrupt = controlGold <= 0;
@@ -631,7 +359,6 @@ function main() {
     const winner = endState?.result?.winner || "unknown";
     if (winner === controlActor) {
       wins += 1;
-      controlSeatStats[controlSeat].wins += 1;
     }
     else if (winner === opponentActor) losses += 1;
     else draws += 1;
@@ -639,15 +366,9 @@ function main() {
       goFailCount += 1;
     }
 
-    const gt = gameResult?.imitation?.totals || {};
-    const gm = gameResult?.imitation?.matches || {};
-    for (const k of ["play", "match", "option"]) {
-      simImitationTotals[k] += Number(gt[k] || 0);
-      simImitationMatches[k] += Number(gm[k] || 0);
-    }
   }
 
-  // 5-3) Normalize aggregate metrics for fitness computation.
+  // 4-3) Normalize aggregate metrics for fitness computation.
   const meanGoldDelta = goldDeltas.length > 0 ? goldDeltas.reduce((a, b) => a + b, 0) / goldDeltas.length : 0;
   const p10GoldDelta = quantile(goldDeltas, 0.1);
   const p50GoldDelta = quantile(goldDeltas, 0.5);
@@ -746,34 +467,7 @@ function main() {
   const goZeroHardFail = goGames === 0;
   let fitness = goZeroHardFail ? FITNESS_GO_ZERO_FORCE_SCORE : (goldCore + tieBreak - bankruptPenalty);
 
-  // 5-4) Luck proxy is logging-only (not applied directly to fitness).
-  // Luck proxy (logging-only):
-  // - seat_win_rate_gap: sensitivity to turn-order randomness
-  // - gold_volatility_norm: outcome volatility normalized by fitness gold scale
-  const seatFirstWinRate = controlSeatStats.first.games > 0
-    ? controlSeatStats.first.wins / controlSeatStats.first.games
-    : 0;
-  const seatSecondWinRate = controlSeatStats.second.games > 0
-    ? controlSeatStats.second.wins / controlSeatStats.second.games
-    : 0;
-  const seatWinRateGap = Math.abs(seatFirstWinRate - seatSecondWinRate);
-  const seatFirstMeanGoldDelta = mean(controlSeatStats.first.goldDeltas);
-  const seatSecondMeanGoldDelta = mean(controlSeatStats.second.goldDeltas);
-  const goldDeltaStdDev = standardDeviation(goldDeltas);
-  const goldVolatility = FITNESS_GOLD_MEAN_SCALE > 0 ? goldDeltaStdDev / FITNESS_GOLD_MEAN_SCALE : 0;
-  const goldVolatilityNorm = clamp01(goldVolatility / 2.0);
-  const luckProxy = (0.6 * seatWinRateGap) + (0.4 * goldVolatilityNorm);
-
-  const simImitation = buildImitationMetrics(simImitationTotals, simImitationMatches);
-  const imitationTotals = cloneDecisionCounters(simImitation.totals);
-  const imitationMatches = cloneDecisionCounters(simImitation.matches);
-  const imitationPlayRatio = Number(simImitation.playRatio || 0);
-  const imitationMatchRatio = Number(simImitation.matchRatio || 0);
-  const imitationOptionRatio = Number(simImitation.optionRatio || 0);
-  const imitationWeights = simImitation.weights || { play: 0.5, match: 0.3, option: 0.2 };
-  const imitationWeightedScore = Number(simImitation.weightedScore || 0);
-
-  // 5-5) Build final summary contract consumed by phase scripts.
+  // 4-4) Build final summary contract consumed by phase scripts.
   const summary = {
     games,
     control_actor: controlActor,
@@ -781,11 +475,7 @@ function main() {
     opponent_policy: opts.opponentPolicy,
     opponent_policy_mix: opts.opponentPolicyMix,
     opponent_policy_counts: opponentPolicyCounts,
-    opponent_eval_tuning: {
-      fast_path: false,
-      imitation_reference_enabled: true,
-      opponent_heuristic_params: null,
-    },
+    opponent_eval_tuning: { fast_path: false, opponent_heuristic_params: null },
     opponent_genome: String(opts.opponentGenomePath || "") || null,
     first_turn_policy: opts.firstTurnPolicy,
     fixed_first_turn: opts.firstTurnPolicy === "fixed" ? opts.fixedFirstTurn : null,
@@ -810,17 +500,6 @@ function main() {
     p10_gold_delta: p10GoldDelta,
     p50_gold_delta: p50GoldDelta,
     p90_gold_delta: p90GoldDelta,
-    luck_proxy: luckProxy,
-    luck_components: {
-      seat_first_win_rate: seatFirstWinRate,
-      seat_second_win_rate: seatSecondWinRate,
-      seat_win_rate_gap: seatWinRateGap,
-      seat_first_mean_gold_delta: seatFirstMeanGoldDelta,
-      seat_second_mean_gold_delta: seatSecondMeanGoldDelta,
-      gold_delta_stddev: goldDeltaStdDev,
-      gold_volatility: goldVolatility,
-      gold_volatility_norm: goldVolatilityNorm,
-    },
     fitness_model: profile.modelName,
     fitness_profile: opts.fitnessProfile,
     fitness_gold_scale: FITNESS_GOLD_MEAN_SCALE,
@@ -833,21 +512,7 @@ function main() {
     fitness_win_weight: FITNESS_TIE_BREAK_WEIGHT,
     fitness_gold_weight: 1.0,
     fitness_bankrupt_penalty_weight: FITNESS_BANKRUPT_PENALTY_WEIGHT,
-    imitation_source: "opponent_policy",
-    sim_imitation_weighted_score: Number(simImitation.weightedScore || 0),
-    imitation_play_total: imitationTotals.play,
-    imitation_play_matches: imitationMatches.play,
-    imitation_play_ratio: imitationPlayRatio,
-    imitation_match_total: imitationTotals.match,
-    imitation_match_matches: imitationMatches.match,
-    imitation_match_ratio: imitationMatchRatio,
-    imitation_option_total: imitationTotals.option,
-    imitation_option_matches: imitationMatches.option,
-    imitation_option_ratio: imitationOptionRatio,
-    imitation_weight_play: imitationWeights.play,
-    imitation_weight_match: imitationWeights.match,
-    imitation_weight_option: imitationWeights.option,
-    imitation_weighted_score: imitationWeightedScore,
+    imitation_weighted_score: 0,
     fitness_components: {
       gold_mean_norm: goldMeanNorm,
       gold_mean_neutral: FITNESS_GOLD_MEAN_NEUTRAL,
@@ -889,3 +554,7 @@ try {
   process.stderr.write(`${msg}\n`);
   process.exit(1);
 }
+
+
+
+

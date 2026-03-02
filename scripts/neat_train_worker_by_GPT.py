@@ -9,7 +9,7 @@ Quick Read Map (top-down):
 2) LoggedParallelEvaluator: generation metrics + gate tracking
 3) eval_function(): per-genome node-worker evaluation call
 4) runtime/env bridge helpers: strict normalization + fail-fast
-5) teacher dataset cache helpers (optional offline teacher)
+5) legacy teacher-dataset options are hard-disabled at runtime normalization
 """
 
 import argparse
@@ -55,39 +55,18 @@ DEFAULT_RUNTIME = {
     "eval_script": "scripts/neat_eval_worker_by_GPT.mjs",
     "fitness_profile": "phase1",
     "seed": 13,
-    # Gate / transition controls (can be phase-specific via runtime config)
-    "gate_mode": "win_rate_only",  # win_rate_only | hybrid
+    # Gate / transition controls
+    "gate_mode": "win_rate_only",
     "gate_ema_window": 5,
-    "transition_ema_imitation": 0.60,
     "transition_ema_win_rate": 0.45,
     "transition_mean_gold_delta_min": None,
     "transition_best_fitness_min": None,
     "transition_streak": 3,
     "failure_generation_min": 30,
     "failure_ema_win_rate_max": 0.30,
-    "failure_imitation_max": None,
     "failure_slope_5_max": 0.005,
-    "failure_slope_metric": "win_rate",  # win_rate | imitation
-    # Optional offline teacher dataset (phase1 imitation).
-    "teacher_dataset_path": "",
-    "teacher_kibo_path": "",
-    "teacher_kibo_count_records": False,
-    "teacher_dataset_actor": "all",  # all | human | ai
-    "teacher_dataset_decisions": 0,  # 0 disables offline teacher scoring
-    "teacher_dataset_cache_path": "",
+    "failure_slope_metric": "win_rate",
 }
-
-OPTION_CANDIDATE_ALIASES = {
-    "choose_go": "go",
-    "choose_stop": "stop",
-    "choose_shaking_yes": "shaking_yes",
-    "choose_shaking_no": "shaking_no",
-    "choose_president_stop": "president_stop",
-    "choose_president_hold": "president_hold",
-    "choose_five": "five",
-    "choose_junk": "junk",
-}
-
 
 def _to_int(value, default):
     try:
@@ -283,13 +262,10 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["fitness_profile"] = fitness_profile
     cfg["seed"] = _to_seed(cfg.get("seed"), DEFAULT_RUNTIME["seed"])
     gate_mode = str(cfg.get("gate_mode") or DEFAULT_RUNTIME["gate_mode"]).strip().lower()
-    if gate_mode not in ("win_rate_only", "hybrid"):
-        gate_mode = str(DEFAULT_RUNTIME["gate_mode"])
-    cfg["gate_mode"] = gate_mode
+    if gate_mode != "win_rate_only":
+        raise RuntimeError("runtime gate_mode must be win_rate_only for GPT line")
+    cfg["gate_mode"] = "win_rate_only"
     cfg["gate_ema_window"] = max(2, _to_int(cfg.get("gate_ema_window"), DEFAULT_RUNTIME["gate_ema_window"]))
-    cfg["transition_ema_imitation"] = _to_optional_float(
-        cfg.get("transition_ema_imitation"), DEFAULT_RUNTIME["transition_ema_imitation"]
-    )
     cfg["transition_ema_win_rate"] = _to_optional_float(
         cfg.get("transition_ema_win_rate"), DEFAULT_RUNTIME["transition_ema_win_rate"]
     )
@@ -308,36 +284,28 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["failure_ema_win_rate_max"] = _to_optional_float(
         cfg.get("failure_ema_win_rate_max"), DEFAULT_RUNTIME["failure_ema_win_rate_max"]
     )
-    cfg["failure_imitation_max"] = _to_optional_float(
-        cfg.get("failure_imitation_max"), DEFAULT_RUNTIME["failure_imitation_max"]
-    )
     cfg["failure_slope_5_max"] = _to_float(
         cfg.get("failure_slope_5_max"), DEFAULT_RUNTIME["failure_slope_5_max"]
     )
     failure_slope_metric = str(
         cfg.get("failure_slope_metric") or DEFAULT_RUNTIME["failure_slope_metric"]
     ).strip().lower()
-    if failure_slope_metric not in ("win_rate", "imitation"):
-        failure_slope_metric = str(DEFAULT_RUNTIME["failure_slope_metric"])
-    cfg["failure_slope_metric"] = failure_slope_metric
+    if failure_slope_metric != "win_rate":
+        raise RuntimeError("runtime failure_slope_metric must be win_rate for GPT line")
+    cfg["failure_slope_metric"] = "win_rate"
 
-    cfg["teacher_dataset_path"] = str(cfg.get("teacher_dataset_path") or "").strip()
-    cfg["teacher_kibo_path"] = str(cfg.get("teacher_kibo_path") or "").strip()
-    cfg["teacher_kibo_count_records"] = _to_bool(
-        cfg.get("teacher_kibo_count_records"),
-        DEFAULT_RUNTIME["teacher_kibo_count_records"],
-    )
-
-    teacher_actor = str(
-        cfg.get("teacher_dataset_actor") or DEFAULT_RUNTIME["teacher_dataset_actor"]
-    ).strip().lower()
-    if teacher_actor not in ("all", "human", "ai"):
-        teacher_actor = str(DEFAULT_RUNTIME["teacher_dataset_actor"])
-    cfg["teacher_dataset_actor"] = teacher_actor
-    cfg["teacher_dataset_decisions"] = max(
-        0, _to_int(cfg.get("teacher_dataset_decisions"), DEFAULT_RUNTIME["teacher_dataset_decisions"])
-    )
-    cfg["teacher_dataset_cache_path"] = str(cfg.get("teacher_dataset_cache_path") or "").strip()
+    # GPT line cleanup: offline teacher dataset path is disabled.
+    teacher_dataset_path = str(cfg.get("teacher_dataset_path") or "").strip()
+    teacher_kibo_path = str(cfg.get("teacher_kibo_path") or "").strip()
+    teacher_dataset_decisions = max(0, _to_int(cfg.get("teacher_dataset_decisions"), 0))
+    if teacher_dataset_path or teacher_kibo_path or teacher_dataset_decisions > 0:
+        raise RuntimeError("teacher_dataset_* options are disabled in GPT line runtime")
+    cfg["teacher_dataset_path"] = ""
+    cfg["teacher_kibo_path"] = ""
+    cfg["teacher_kibo_count_records"] = False
+    cfg["teacher_dataset_actor"] = "all"
+    cfg["teacher_dataset_decisions"] = 0
+    cfg["teacher_dataset_cache_path"] = ""
 
     if "output_dir" in cfg:
         cfg["output_dir"] = str(cfg.get("output_dir") or "").strip()
@@ -363,18 +331,6 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}SWITCH_SEATS"] = "1" if bool(runtime["switch_seats"]) else "0"
     os.environ[f"{ENV_PREFIX}SEED"] = str(runtime["seed"])
     os.environ[f"{ENV_PREFIX}OUTPUT_DIR"] = os.path.abspath(output_dir)
-    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_PATH"] = str(runtime.get("teacher_dataset_path") or "")
-    os.environ[f"{ENV_PREFIX}TEACHER_KIBO_PATH"] = str(runtime.get("teacher_kibo_path") or "")
-    os.environ[f"{ENV_PREFIX}TEACHER_KIBO_COUNT_RECORDS"] = (
-        "1" if bool(runtime.get("teacher_kibo_count_records")) else "0"
-    )
-    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_ACTOR"] = str(runtime.get("teacher_dataset_actor") or "all")
-    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_DECISIONS"] = str(
-        int(runtime.get("teacher_dataset_decisions") or 0)
-    )
-    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_CACHE_PATH"] = str(
-        runtime.get("teacher_dataset_cache_path") or ""
-    )
 
 
 def _runtime_from_env() -> Dict[str, object]:
@@ -390,12 +346,6 @@ def _runtime_from_env() -> Dict[str, object]:
         "switch_seats": os.environ.get(f"{ENV_PREFIX}SWITCH_SEATS"),
         "seed": os.environ.get(f"{ENV_PREFIX}SEED"),
         "output_dir": os.environ.get(f"{ENV_PREFIX}OUTPUT_DIR") or os.getcwd(),
-        "teacher_dataset_path": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_PATH") or "",
-        "teacher_kibo_path": os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_PATH") or "",
-        "teacher_kibo_count_records": os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_COUNT_RECORDS") or "0",
-        "teacher_dataset_actor": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_ACTOR"),
-        "teacher_dataset_decisions": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_DECISIONS"),
-        "teacher_dataset_cache_path": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_CACHE_PATH") or "",
     }
     return _normalize_runtime_values(raw)
 
@@ -408,194 +358,6 @@ def _runtime_from_env_cached(force_reload: bool = False) -> Dict[str, object]:
     if force_reload or _RUNTIME_FROM_ENV_CACHE is None:
         _RUNTIME_FROM_ENV_CACHE = _runtime_from_env()
     return _RUNTIME_FROM_ENV_CACHE
-
-
-# =============================================================================
-# Section 4. Teacher Dataset Token Normalization
-# =============================================================================
-def _normalize_decision_type(value: object) -> str:
-    dt = str(value or "").strip().lower()
-    if dt in ("play", "match", "option"):
-        return dt
-    return ""
-
-
-def _normalize_candidate_token(decision_type: str, value: object) -> str:
-    token = str(value or "").strip()
-    if not token:
-        return ""
-    if decision_type == "option":
-        key = token.lower()
-        return OPTION_CANDIDATE_ALIASES.get(key, key)
-    return token
-
-
-def _count_jsonl_records(path: str) -> int:
-    count = 0
-    with open(path, "r", encoding="utf-8-sig") as f:
-        for line in f:
-            if str(line).strip():
-                count += 1
-    return int(count)
-
-
-# =============================================================================
-# Section 5. Teacher Dataset Cache Build
-# =============================================================================
-def _build_teacher_dataset_cache(runtime: dict, output_dir: str) -> None:
-    dataset_path = str(runtime.get("teacher_dataset_path") or "").strip()
-    kibo_path = str(runtime.get("teacher_kibo_path") or "").strip()
-    actor_filter = str(runtime.get("teacher_dataset_actor") or "all").strip().lower()
-    if actor_filter not in ("all", "human", "ai"):
-        actor_filter = "all"
-    runtime["teacher_dataset_actor"] = actor_filter
-    max_decisions = max(0, _to_int(runtime.get("teacher_dataset_decisions"), 0))
-    runtime["teacher_dataset_decisions"] = int(max_decisions)
-
-    runtime["teacher_dataset_cache_path"] = ""
-    runtime["teacher_dataset_decisions_loaded"] = 0
-    runtime["teacher_dataset_rows_scanned"] = 0
-    runtime["teacher_dataset_rows_used"] = 0
-    runtime["teacher_kibo_records"] = 0
-
-    if kibo_path:
-        kibo_abs = os.path.abspath(kibo_path)
-        if not os.path.exists(kibo_abs):
-            raise RuntimeError(f"teacher kibo not found: {kibo_abs}")
-        runtime["teacher_kibo_path"] = kibo_abs
-        if bool(runtime.get("teacher_kibo_count_records")):
-            runtime["teacher_kibo_records"] = _count_jsonl_records(kibo_abs)
-    else:
-        runtime["teacher_kibo_path"] = ""
-
-    if not dataset_path or max_decisions <= 0:
-        runtime["teacher_dataset_path"] = os.path.abspath(dataset_path) if dataset_path else ""
-        return
-
-    dataset_abs = os.path.abspath(dataset_path)
-    if not os.path.exists(dataset_abs):
-        raise RuntimeError(f"teacher dataset not found: {dataset_abs}")
-    runtime["teacher_dataset_path"] = dataset_abs
-
-    groups: Dict[str, Dict[str, Any]] = {}
-    rows_scanned = 0
-    rows_used = 0
-
-    with open(dataset_abs, "r", encoding="utf-8-sig") as f:
-        for raw_line in f:
-            line = str(raw_line).strip()
-            if not line:
-                continue
-            rows_scanned += 1
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(row, dict):
-                continue
-
-            actor = str(row.get("actor") or "").strip().lower()
-            if actor_filter != "all" and actor != actor_filter:
-                continue
-
-            decision_type = _normalize_decision_type(row.get("decision_type"))
-            if not decision_type:
-                continue
-
-            candidate = _normalize_candidate_token(decision_type, row.get("candidate"))
-            if not candidate:
-                continue
-
-            features_raw = row.get("features")
-            if not isinstance(features_raw, list) or len(features_raw) <= 0:
-                continue
-            features = []
-            feature_ok = True
-            for v in features_raw:
-                fv = _safe_optional_float(v)
-                if fv is None:
-                    feature_ok = False
-                    break
-                features.append(float(fv))
-            if not feature_ok:
-                continue
-
-            seed = str(row.get("seed") or "").strip()
-            game_index = _to_int(row.get("game_index"), -1)
-            step = _to_int(row.get("step"), -1)
-            legal_count = max(1, _to_int(row.get("legal_count"), 1))
-            group_key = (
-                f"{seed}|g={int(game_index)}|s={int(step)}|a={actor}|d={decision_type}|l={int(legal_count)}"
-            )
-
-            group = groups.get(group_key)
-            if group is None:
-                if len(groups) >= max_decisions:
-                    break
-                group = {
-                    "decision_type": decision_type,
-                    "chosen_candidate": "",
-                    "candidates": [],
-                    "candidate_set": set(),
-                }
-                groups[group_key] = group
-
-            if candidate not in group["candidate_set"]:
-                group["candidate_set"].add(candidate)
-                group["candidates"].append({"candidate": candidate, "features": features})
-                rows_used += 1
-
-            chosen_flag = _to_int(row.get("chosen"), 0) == 1
-            if chosen_flag:
-                group["chosen_candidate"] = candidate
-            elif not group["chosen_candidate"]:
-                chosen_candidate = _normalize_candidate_token(decision_type, row.get("chosen_candidate"))
-                if chosen_candidate:
-                    group["chosen_candidate"] = chosen_candidate
-
-    decisions = []
-    for group in groups.values():
-        decision_type = str(group.get("decision_type") or "")
-        chosen_candidate = _normalize_candidate_token(decision_type, group.get("chosen_candidate"))
-        candidates = list(group.get("candidates") or [])
-        if not chosen_candidate or not candidates:
-            continue
-        candidate_set = {str(c.get("candidate") or "") for c in candidates}
-        if chosen_candidate not in candidate_set:
-            continue
-        decisions.append(
-            {
-                "decision_type": decision_type,
-                "chosen_candidate": chosen_candidate,
-                "candidates": candidates,
-            }
-        )
-
-    if not decisions:
-        raise RuntimeError(
-            "teacher dataset cache build failed: no valid teacher decisions were extracted"
-        )
-
-    cache_path = os.path.join(output_dir, "teacher_dataset_cache.json")
-    cache_payload = {
-        "format_version": "teacher_dataset_cache_v1",
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-        "source_dataset_path": dataset_abs,
-        "source_kibo_path": str(runtime.get("teacher_kibo_path") or ""),
-        "actor_filter": actor_filter,
-        "requested_max_decisions": int(max_decisions),
-        "decisions_loaded": len(decisions),
-        "rows_scanned": int(rows_scanned),
-        "rows_used": int(rows_used),
-        "decisions": decisions,
-    }
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(cache_payload, f, ensure_ascii=False, separators=(",", ":"))
-
-    runtime["teacher_dataset_cache_path"] = cache_path
-    runtime["teacher_dataset_decisions_loaded"] = len(decisions)
-    runtime["teacher_dataset_rows_scanned"] = int(rows_scanned)
-    runtime["teacher_dataset_rows_used"] = int(rows_used)
 
 
 # =============================================================================
@@ -756,9 +518,6 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
         genome_key=int(genome_key),
     )
     opponent_genome = str(runtime.get("opponent_genome") or "").strip()
-    teacher_dataset_path = str(runtime.get("teacher_dataset_path") or "").strip()
-    teacher_kibo_path = str(runtime.get("teacher_kibo_path") or "").strip()
-    teacher_dataset_cache = str(runtime.get("teacher_dataset_cache_path") or "").strip()
     failure_meta = {
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "generation": int(generation),
@@ -795,24 +554,6 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
                 ),
             )
             return {"fitness": -1e9, "seed_used": seed_text, "eval_ok": False}
-
-    if teacher_dataset_cache:
-        teacher_dataset_cache = os.path.abspath(teacher_dataset_cache)
-        if not os.path.exists(teacher_dataset_cache):
-            _append_eval_failure_log(
-                output_dir,
-                dict(
-                    failure_meta,
-                    reason="teacher_dataset_cache_not_found",
-                    teacher_dataset_cache=teacher_dataset_cache,
-                ),
-            )
-            return {"fitness": -1e9, "seed_used": seed_text, "eval_ok": False}
-
-    if teacher_dataset_path:
-        teacher_dataset_path = os.path.abspath(teacher_dataset_path)
-    if teacher_kibo_path:
-        teacher_kibo_path = os.path.abspath(teacher_kibo_path)
 
     try:
         with tempfile.NamedTemporaryFile(
@@ -852,9 +593,11 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             str(int(runtime["max_eval_steps"])),
             "--fitness-profile",
             str(runtime["fitness_profile"]),
-            "--switch-seats",
-            "1" if bool(runtime["switch_seats"]) else "0",
+            "--first-turn-policy",
+            "alternate" if bool(runtime["switch_seats"]) else "fixed",
         ]
+        if not bool(runtime["switch_seats"]):
+            cmd.extend(["--fixed-first-turn", "human"])
         if has_runtime_policy:
             cmd.extend(["--opponent-policy", opponent_policy])
         elif has_runtime_mix:
@@ -864,12 +607,6 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             ])
         if opponent_policy == "genome":
             cmd.extend(["--opponent-genome", opponent_genome])
-        if teacher_dataset_cache:
-            cmd.extend(["--teacher-dataset-cache", teacher_dataset_cache])
-        if teacher_dataset_path:
-            cmd.extend(["--teacher-dataset-path", teacher_dataset_path])
-        if teacher_kibo_path:
-            cmd.extend(["--teacher-kibo-path", teacher_kibo_path])
 
         proc = subprocess.run(
             cmd,
@@ -931,22 +668,18 @@ class LoggedParallelEvaluator:
         self.gate_mode = str(runtime["gate_mode"])
         self.ema_window = int(runtime["gate_ema_window"])
         self.ema_alpha = 2.0 / (float(self.ema_window) + 1.0)
-        self.transition_ema_imitation = runtime.get("transition_ema_imitation")
         self.transition_ema_win_rate = runtime.get("transition_ema_win_rate")
         self.transition_mean_gold_delta_min = runtime.get("transition_mean_gold_delta_min")
         self.transition_best_fitness_min = runtime.get("transition_best_fitness_min")
         self.transition_streak = int(runtime["transition_streak"])
         self.failure_generation_min = int(runtime["failure_generation_min"])
         self.failure_ema_win_rate_max = runtime.get("failure_ema_win_rate_max")
-        self.failure_imitation_max = runtime.get("failure_imitation_max")
         self.failure_slope_5_max = float(runtime["failure_slope_5_max"])
         self.failure_slope_metric = str(runtime["failure_slope_metric"])
-        self.ema_imitation = None
         self.ema_win_rate = None
         self.gate_streak = 0
         self.transition_generation = None
         self.failure_generation = None
-        self.best_imitation_history = []
         self.best_win_rate_history = []
         self.gate_state = {}
 
@@ -962,11 +695,6 @@ class LoggedParallelEvaluator:
         return {
             "gate_mode": self.gate_mode,
             "ema_window": int(self.ema_window),
-            "transition_ema_imitation": (
-                float(self.transition_ema_imitation)
-                if self.transition_ema_imitation is not None
-                else None
-            ),
             "transition_ema_win_rate": (
                 float(self.transition_ema_win_rate)
                 if self.transition_ema_win_rate is not None
@@ -989,21 +717,9 @@ class LoggedParallelEvaluator:
                 if self.failure_ema_win_rate_max is not None
                 else None
             ),
-            "failure_imitation_max": (
-                float(self.failure_imitation_max)
-                if self.failure_imitation_max is not None
-                else None
-            ),
             "failure_slope_5_max": float(self.failure_slope_5_max),
             "failure_slope_metric": self.failure_slope_metric,
         }
-
-    def _is_imitation_required(self) -> bool:
-        return (
-            self.gate_mode == "hybrid"
-            or self.failure_slope_metric == "imitation"
-            or self.failure_imitation_max is not None
-        )
 
     def _is_valid_gate_record(self, record: dict) -> bool:
         if not bool(record.get("eval_ok")):
@@ -1013,12 +729,6 @@ class LoggedParallelEvaluator:
         win_rate = _safe_float(record.get("win_rate"), float("nan"))
         if win_rate != win_rate:
             return False
-        if self._is_imitation_required():
-            if "imitation_weighted_score" not in record:
-                return False
-            imitation = _safe_float(record.get("imitation_weighted_score"), float("nan"))
-            if imitation != imitation:
-                return False
         return True
 
     def _update_gate(self, best_record: Optional[dict], valid_count: int, total_count: int):
@@ -1033,31 +743,25 @@ class LoggedParallelEvaluator:
                 "total_record_count": int(total_count),
                 "ema_window": int(self.ema_window),
                 "ema_alpha": float(self.ema_alpha),
-                "ema_imitation": float(self.ema_imitation) if self.ema_imitation is not None else None,
                 "ema_win_rate": float(self.ema_win_rate) if self.ema_win_rate is not None else None,
                 "gate_streak": int(self.gate_streak),
                 "transition_ready": bool(self.transition_generation is not None),
                 "transition_generation": self.transition_generation,
                 "failure_triggered": bool(self.failure_generation is not None),
                 "failure_generation": self.failure_generation,
-                "latest_imitation": None,
                 "latest_win_rate": None,
                 "latest_mean_gold_delta": None,
                 "latest_best_fitness": None,
-                "latest_imitation_slope_5": None,
                 "latest_win_rate_slope_5": None,
                 "thresholds": self._thresholds(),
             }
             return
 
-        imitation = _safe_float(best_record.get("imitation_weighted_score"), 0.0)
         win_rate = _safe_float(best_record.get("win_rate"), 0.0)
         mean_gold_delta = _safe_float(best_record.get("mean_gold_delta"), float("nan"))
         best_fitness = _safe_float(best_record.get("fitness"), -1e9)
-        self.best_imitation_history.append(imitation)
         self.best_win_rate_history.append(win_rate)
 
-        self.ema_imitation = _ema(self.ema_imitation, imitation, self.ema_alpha)
         self.ema_win_rate = _ema(self.ema_win_rate, win_rate, self.ema_alpha)
 
         transition_ok = True
@@ -1068,8 +772,6 @@ class LoggedParallelEvaluator:
                 mean_gold_delta == mean_gold_delta
                 and mean_gold_delta > self.transition_mean_gold_delta_min
             )
-        if self.gate_mode == "hybrid" and self.transition_ema_imitation is not None:
-            transition_ok = transition_ok and (self.ema_imitation >= self.transition_ema_imitation)
         if self.transition_best_fitness_min is not None:
             transition_ok = transition_ok and (best_fitness >= self.transition_best_fitness_min)
 
@@ -1081,14 +783,11 @@ class LoggedParallelEvaluator:
         if self.transition_generation is None and self.gate_streak >= self.transition_streak:
             self.transition_generation = self.generation
 
-        imitation_slope_5 = _five_gen_slope(self.best_imitation_history)
         win_rate_slope_5 = _five_gen_slope(self.best_win_rate_history)
-        slope_5 = win_rate_slope_5 if self.failure_slope_metric == "win_rate" else imitation_slope_5
+        slope_5 = win_rate_slope_5
         metric_checks = []
         if self.failure_ema_win_rate_max is not None:
             metric_checks.append(self.ema_win_rate < self.failure_ema_win_rate_max)
-        if self.failure_imitation_max is not None:
-            metric_checks.append(imitation < self.failure_imitation_max)
         metric_low = all(metric_checks) if metric_checks else False
 
         is_failure = (
@@ -1108,18 +807,15 @@ class LoggedParallelEvaluator:
             "total_record_count": int(total_count),
             "ema_window": int(self.ema_window),
             "ema_alpha": float(self.ema_alpha),
-            "ema_imitation": float(self.ema_imitation),
             "ema_win_rate": float(self.ema_win_rate),
             "gate_streak": int(self.gate_streak),
             "transition_ready": bool(self.transition_generation is not None),
             "transition_generation": self.transition_generation,
             "failure_triggered": bool(self.failure_generation is not None),
             "failure_generation": self.failure_generation,
-            "latest_imitation": float(imitation),
             "latest_win_rate": float(win_rate),
             "latest_mean_gold_delta": float(mean_gold_delta) if mean_gold_delta == mean_gold_delta else None,
             "latest_best_fitness": float(best_fitness),
-            "latest_imitation_slope_5": float(imitation_slope_5),
             "latest_win_rate_slope_5": float(win_rate_slope_5),
             "thresholds": self._thresholds(),
         }
@@ -1182,7 +878,6 @@ class LoggedParallelEvaluator:
             fitness_values = [_safe_float(r.get("fitness"), -1e9) for r in records]
             valid_fitness_values = [_safe_float(r.get("fitness"), -1e9) for r in valid_records]
             valid_win_values = [_safe_float(r.get("win_rate"), 0.0) for r in valid_records]
-            valid_imit_values = []
             valid_go_games_values = []
             valid_go_rate_values = []
             valid_go_fail_rate_values = []
@@ -1194,12 +889,6 @@ class LoggedParallelEvaluator:
             valid_bankrupt_rate_values = []
             valid_bankrupt_penalty_values = []
             for r in valid_records:
-                if "imitation_weighted_score" not in r:
-                    pass
-                else:
-                    v = _safe_float(r.get("imitation_weighted_score"), float("nan"))
-                    if v == v:
-                        valid_imit_values.append(v)
                 mean_gold_delta = _safe_optional_float(r.get("mean_gold_delta"))
                 if mean_gold_delta is not None:
                     valid_mean_gold_delta_values.append(mean_gold_delta)
@@ -1271,11 +960,7 @@ class LoggedParallelEvaluator:
                     if len(valid_p50_gold_delta_values) > 0
                     else None
                 ),
-                "mean_imitation_weighted_score": (
-                    sum(valid_imit_values) / max(1, len(valid_imit_values))
-                    if len(valid_imit_values) > 0
-                    else None
-                ),
+                "mean_imitation_weighted_score": None,
                 "mean_gold_core": (
                     sum(valid_gold_core_values) / max(1, len(valid_gold_core_values))
                     if len(valid_gold_core_values) > 0
@@ -1331,14 +1016,7 @@ class LoggedParallelEvaluator:
                     if self._is_valid_gate_record(best_record)
                     else None
                 ),
-                "best_imitation_weighted_score": (
-                    _safe_optional_float(best_record.get("imitation_weighted_score"))
-                    if (
-                        self._is_valid_gate_record(best_record)
-                        and "imitation_weighted_score" in best_record
-                    )
-                    else None
-                ),
+                "best_imitation_weighted_score": None,
                 "best_gold_core": (
                     _safe_optional_float((best_record.get("fitness_components") or {}).get("gold_core"))
                     if self._is_valid_gate_record(best_record)
@@ -1450,7 +1128,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="neat-python training runner for k_flower_card")
     parser.add_argument(
         "--config-feedforward",
-        default="scripts/configs/neat_feedforward.ini",
+        default="scripts/configs/neat_feedforward_by_GPT.ini",
         help="Path to neat-python config file",
     )
     parser.add_argument(
@@ -1725,8 +1403,6 @@ def main() -> None:
     models_dir = os.path.join(args.output_dir, "models")
     os.makedirs(checkpoints_dir, exist_ok=True)
     os.makedirs(models_dir, exist_ok=True)
-
-    _build_teacher_dataset_cache(runtime, args.output_dir)
 
     cfg = _build_config(args.config_feedforward)
     if len(cfg.genome_config.output_keys) != 1:
