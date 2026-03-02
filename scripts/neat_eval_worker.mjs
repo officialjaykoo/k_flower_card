@@ -693,7 +693,7 @@ function main() {
   let goFailBonus = 0.0;
   let goFailBonusTier = "none";
   if (goGames === 0) {
-    fitness = -1.0;
+    fitness = -0.3;
   } else if (goGames < fitnessGoMinGames) {
     goLowGamesPenalty = fitnessGoLowGamesPenalty;
     fitness -= goLowGamesPenalty;
