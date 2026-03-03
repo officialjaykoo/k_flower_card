@@ -21,6 +21,7 @@ import {
   POLICY_HEURISTIC_J1,
   POLICY_HEURISTIC_J2,
   POLICY_HEURISTIC_CL,
+  POLICY_HEURISTIC_ANTICL,
   POLICY_HEURISTIC_NEXG,
   POLICY_HEURISTIC_GPT,
   POLICY_HEURISTIC_GEMINI,
@@ -57,6 +58,17 @@ import {
   shouldPresidentStopCL,
   DEFAULT_PARAMS as V5_DEFAULT_PARAMS
 } from "../heuristics/heuristicCL.js";
+import {
+  chooseGukjinHeuristicAntiCL,
+  chooseMatchHeuristicAntiCL,
+  decideShakingAntiCL,
+  rankHandCardsAntiCL,
+  selectBombMonthAntiCL,
+  shouldBombAntiCL,
+  shouldGoAntiCL,
+  shouldPresidentStopAntiCL,
+  DEFAULT_PARAMS as ANTICL_DEFAULT_PARAMS
+} from "../heuristics/heuristicAntiCL.js";
 import {
   rankHandCardsNEXg,
   chooseMatchHeuristicNEXg,
@@ -142,6 +154,20 @@ function loadNEXgParams() {
   return { ...NEXG_DEFAULT_PARAMS };
 }
 
+function loadAntiCLParams() {
+  try {
+    const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_ANTICL_PARAMS) || "";
+    if (!raw) return { ...ANTICL_DEFAULT_PARAMS };
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { ...ANTICL_DEFAULT_PARAMS, ...parsed };
+    }
+  } catch {
+    // Fall through to defaults on parse/runtime errors.
+  }
+  return { ...ANTICL_DEFAULT_PARAMS };
+}
+
 function loadGPTParams() {
   try {
     const raw = (typeof process !== "undefined" && process.env?.HEURISTIC_GPT_PARAMS) || "";
@@ -171,6 +197,7 @@ function loadGeminiParams() {
 }
 
 const HEURISTIC_CL_PARAMS = Object.freeze(loadCLParams());
+const HEURISTIC_ANTICL_PARAMS = Object.freeze(loadAntiCLParams());
 const HEURISTIC_NEXG_PARAMS = Object.freeze(loadNEXgParams());
 const HEURISTIC_GPT_PARAMS = Object.freeze(loadGPTParams());
 const HEURISTIC_GEMINI_PARAMS = Object.freeze(loadGeminiParams());
@@ -180,6 +207,7 @@ export {
   POLICY_HEURISTIC_J1,
   POLICY_HEURISTIC_J2,
   POLICY_HEURISTIC_CL,
+  POLICY_HEURISTIC_ANTICL,
   POLICY_HEURISTIC_NEXG,
   POLICY_HEURISTIC_GPT,
   POLICY_HEURISTIC_GEMINI
@@ -1820,6 +1848,14 @@ function resolveHeuristicDecisionContext(
       params: paramsOverride ? { ...HEURISTIC_NEXG_PARAMS, ...paramsOverride } : HEURISTIC_NEXG_PARAMS
     };
   }
+  if (resolvedPolicy === POLICY_HEURISTIC_ANTICL) {
+    return {
+      policy: POLICY_HEURISTIC_ANTICL,
+      decisionState,
+      deps: HEURISTIC_CL_DEPS,
+      params: paramsOverride ? { ...HEURISTIC_ANTICL_PARAMS, ...paramsOverride } : HEURISTIC_ANTICL_PARAMS
+    };
+  }
   if (resolvedPolicy === POLICY_HEURISTIC_CL) {
     return {
       policy: POLICY_HEURISTIC_CL,
@@ -1848,6 +1884,7 @@ function dispatchHeuristicPolicyCall(ctx, handlers) {
   if (ctx.policy === POLICY_HEURISTIC_GEMINI && typeof handlers.gemini === "function") return handlers.gemini(ctx);
   if (ctx.policy === POLICY_HEURISTIC_GPT && typeof handlers.gpt === "function") return handlers.gpt(ctx);
   if (ctx.policy === POLICY_HEURISTIC_NEXG && typeof handlers.nexg === "function") return handlers.nexg(ctx);
+  if (ctx.policy === POLICY_HEURISTIC_ANTICL && typeof handlers.anticl === "function") return handlers.anticl(ctx);
   if (ctx.policy === POLICY_HEURISTIC_CL && typeof handlers.cl === "function") return handlers.cl(ctx);
   if (ctx.policy === POLICY_HEURISTIC_J2 && typeof handlers.j2 === "function") return handlers.j2(ctx);
   return handlers.j1(ctx);
@@ -1859,6 +1896,7 @@ function chooseGukjinByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heu
     gemini: ({ decisionState, deps, params }) => chooseGukjinHeuristicGemini(decisionState, playerKey, deps, params),
     gpt: ({ decisionState, deps, params }) => chooseGukjinHeuristicGPT(decisionState, playerKey, deps, params),
     nexg: ({ decisionState, deps, params }) => chooseGukjinHeuristicNEXg(decisionState, playerKey, deps, params),
+    anticl: ({ decisionState, deps, params }) => chooseGukjinHeuristicAntiCL(decisionState, playerKey, deps, params),
     cl: ({ decisionState, deps, params }) => chooseGukjinHeuristicCL(decisionState, playerKey, deps, params),
     j2: ({ decisionState, deps }) => chooseGukjinHeuristicJ2(decisionState, playerKey, deps),
     j1: ({ decisionState, deps }) => chooseGukjinHeuristicJ1(decisionState, playerKey, deps)
@@ -1871,6 +1909,7 @@ function shouldPresidentStopByPolicy(state, playerKey, policy = DEFAULT_BOT_POLI
     gemini: ({ decisionState, deps, params }) => shouldPresidentStopGemini(decisionState, playerKey, deps, params),
     gpt: ({ decisionState, deps, params }) => shouldPresidentStopGPT(decisionState, playerKey, deps, params),
     nexg: ({ decisionState, deps, params }) => shouldPresidentStopNEXg(decisionState, playerKey, deps, params),
+    anticl: ({ decisionState, deps, params }) => shouldPresidentStopAntiCL(decisionState, playerKey, deps, params),
     cl: ({ decisionState, deps, params }) => shouldPresidentStopCL(decisionState, playerKey, deps, params),
     j2: ({ decisionState, deps }) => shouldPresidentStopJ2(decisionState, playerKey, deps),
     j1: ({ decisionState, deps }) => shouldPresidentStopJ1(decisionState, playerKey, deps)
@@ -1883,6 +1922,7 @@ function chooseMatchByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heur
     gemini: ({ decisionState, deps, params }) => chooseMatchHeuristicGemini(decisionState, playerKey, deps, params),
     gpt: ({ decisionState, deps, params }) => chooseMatchHeuristicGPT(decisionState, playerKey, deps, params),
     nexg: ({ decisionState, deps, params }) => chooseMatchHeuristicNEXg(decisionState, playerKey, deps, params),
+    anticl: ({ decisionState, deps, params }) => chooseMatchHeuristicAntiCL(decisionState, playerKey, deps, params),
     cl: ({ decisionState, deps, params }) => chooseMatchHeuristicCL(decisionState, playerKey, deps, params),
     j2: ({ decisionState, deps }) => chooseMatchHeuristicJ2(decisionState, playerKey, deps),
     j1: ({ decisionState, deps }) => chooseMatchHeuristicJ1(decisionState, playerKey, deps)
@@ -1895,6 +1935,7 @@ function shouldGoByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heurist
     gemini: ({ decisionState, deps, params }) => shouldGoGemini(decisionState, playerKey, deps, params),
     gpt: ({ decisionState, deps, params }) => shouldGoGPT(decisionState, playerKey, deps, params),
     nexg: ({ decisionState, deps, params }) => shouldGoNEXg(decisionState, playerKey, deps, params),
+    anticl: ({ decisionState, deps, params }) => shouldGoAntiCL(decisionState, playerKey, deps, params),
     cl: ({ decisionState, deps, params }) => shouldGoCL(decisionState, playerKey, deps, params),
     j2: ({ decisionState, deps }) => shouldGoJ2(decisionState, playerKey, deps),
     j1: ({ decisionState, deps }) => shouldGoJ1(decisionState, playerKey, deps)
@@ -1913,6 +1954,7 @@ function selectBombMonthByPolicy(
     gemini: ({ decisionState, deps }) => selectBombMonthGemini(decisionState, playerKey, bombMonths, deps),
     gpt: ({ decisionState, deps }) => selectBombMonthGPT(decisionState, playerKey, bombMonths, deps),
     nexg: ({ decisionState, deps }) => selectBombMonthNEXg(decisionState, playerKey, bombMonths, deps),
+    anticl: ({ decisionState, deps, params }) => selectBombMonthAntiCL(decisionState, playerKey, bombMonths, deps, params),
     cl: ({ decisionState, deps }) => selectBombMonthCL(decisionState, playerKey, bombMonths, deps),
     j2: ({ decisionState, deps }) => selectBombMonthJ2(decisionState, playerKey, bombMonths, deps),
     j1: ({ decisionState, deps }) => selectBombMonthJ1(decisionState, playerKey, bombMonths, deps)
@@ -1931,6 +1973,7 @@ function shouldBombByPolicy(
     gemini: ({ decisionState, deps, params }) => shouldBombGemini(decisionState, playerKey, bombMonths, deps, params),
     gpt: ({ decisionState, deps, params }) => shouldBombGPT(decisionState, playerKey, bombMonths, deps, params),
     nexg: ({ decisionState, deps, params }) => shouldBombNEXg(decisionState, playerKey, bombMonths, deps, params),
+    anticl: ({ decisionState, deps, params }) => shouldBombAntiCL(decisionState, playerKey, bombMonths, deps, params),
     cl: ({ decisionState, deps, params }) => shouldBombCL(decisionState, playerKey, bombMonths, deps, params),
     j2: ({ decisionState, deps }) => shouldBombJ2(decisionState, playerKey, bombMonths, deps),
     j1: ({ decisionState, deps }) => shouldBombJ1(decisionState, playerKey, bombMonths, deps)
@@ -1949,6 +1992,7 @@ function decideShakingByPolicy(
     gemini: ({ decisionState, deps, params }) => decideShakingGemini(decisionState, playerKey, shakingMonths, deps, params),
     gpt: ({ decisionState, deps, params }) => decideShakingGPT(decisionState, playerKey, shakingMonths, deps, params),
     nexg: ({ decisionState, deps, params }) => decideShakingNEXg(decisionState, playerKey, shakingMonths, deps, params),
+    anticl: ({ decisionState, deps, params }) => decideShakingAntiCL(decisionState, playerKey, shakingMonths, deps, params),
     cl: ({ decisionState, deps, params }) => decideShakingCL(decisionState, playerKey, shakingMonths, deps, params),
     j2: ({ decisionState, deps }) => decideShakingJ2(decisionState, playerKey, shakingMonths, deps),
     j1: ({ decisionState, deps }) => decideShakingJ1(decisionState, playerKey, shakingMonths, deps)
@@ -1961,6 +2005,7 @@ function rankHandCardsByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, he
     gemini: ({ decisionState, deps, params }) => rankHandCardsGemini(decisionState, playerKey, deps, params),
     gpt: ({ decisionState, deps, params }) => rankHandCardsGPT(decisionState, playerKey, deps, params),
     nexg: ({ decisionState, deps, params }) => rankHandCardsNEXg(decisionState, playerKey, deps, params),
+    anticl: ({ decisionState, deps, params }) => rankHandCardsAntiCL(decisionState, playerKey, deps, params),
     cl: ({ decisionState, deps, params }) => rankHandCardsCL(decisionState, playerKey, deps, params),
     j2: ({ decisionState, deps }) => rankHandCardsJ2(decisionState, playerKey, deps),
     j1: ({ decisionState, deps }) => rankHandCardsJ1(decisionState, playerKey, deps)

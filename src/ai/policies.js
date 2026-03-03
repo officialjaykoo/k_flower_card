@@ -4,6 +4,7 @@
 export const POLICY_HEURISTIC_J1 = "H-J1";
 export const POLICY_HEURISTIC_J2 = "H-J2";
 export const POLICY_HEURISTIC_CL = "H-CL";
+export const POLICY_HEURISTIC_ANTICL = "H-AntiCL";
 export const POLICY_HEURISTIC_GPT = "H-GPT";
 export const POLICY_HEURISTIC_GEMINI = "H-Gemini";
 export const POLICY_HEURISTIC_NEXG = "H-NEXg";
@@ -18,6 +19,7 @@ export const BOT_POLICIES = Object.freeze([
   POLICY_HEURISTIC_J1,
   POLICY_HEURISTIC_J2,
   POLICY_HEURISTIC_CL,
+  POLICY_HEURISTIC_ANTICL,
   POLICY_HEURISTIC_NEXG,
   POLICY_HEURISTIC_GPT,
   POLICY_HEURISTIC_GEMINI
@@ -41,6 +43,11 @@ export const MODEL_CATALOG = Object.freeze({
     labelKey: "model.heuristicCL",
     kind: "bot_policy",
     botPolicy: POLICY_HEURISTIC_CL
+  },
+  [POLICY_HEURISTIC_ANTICL]: {
+    labelKey: "model.heuristicAntiCL",
+    kind: "bot_policy",
+    botPolicy: POLICY_HEURISTIC_ANTICL
   },
   [POLICY_HEURISTIC_NEXG]: {
     labelKey: "model.heuristicNEXg",

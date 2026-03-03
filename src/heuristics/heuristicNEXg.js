@@ -26,8 +26,8 @@ const SSANGPI_WITH_GUKJIN_ID_SET = Object.freeze(new Set(["K1", "L3", GUKJIN_CAR
 /* 2) Parameter defaults (CL base + NEXg additions) */
 export const DEFAULT_PARAMS = {
   // ── phase boundaries ──
-  phaseEarlyDeck: 18,          // deck >= this => early
-  phaseMidDeck: 10,            // deck >= this => mid, otherwise late
+  phaseEarlyDeck: 20,          // deck >= this => early
+  phaseMidDeck: 9,             // deck >= this => mid, otherwise late
 
   // ── rankHandCards (same baseline as CL) ──
   matchZeroBase: -48.1,
@@ -36,19 +36,19 @@ export const DEFAULT_PARAMS = {
   matchThreeBase: 12.89,
   captureGainMulThree: 1.15,
   highValueMatchBonus: 3.77,
-  piGainMul: 6.25,
+  piGainMul: 8.677154465089783,
   piGainSelfHighMul: 1.8,
   piGainOppLowMul: 1.4,
-  doublePiMatchBonus: 16.49,
+  doublePiMatchBonus: 18.000719931700605,
   doublePiMatchExtra: 6.0,
   doublePiNoMatchPenalty: 14.0,
   comboFinishBirds: 30.0,  comboFinishRed: 27.0,  comboFinishBlue: 27.0,
   comboFinishPlain: 27.0,  comboFinishKwang: 32.0,
-  comboBlockBase: 19.08,
+  comboBlockBase: 33.94565462003304,
   comboBlockUrgencyMul: 0.51,
   comboBlockNextThreatMul: 4.5,
   ribbonFourBonus: 34.0,   fiveFourBonus: 36.0,
-  mongBakFiveBonus: 33.83,
+  mongBakFiveBonus: 37.57367050737562,
   mongBakPiPenalty: 8.0,
   discardLivePiPenalty: 24.0,       discardLivePiPenaltyLate: 36.0,
   discardDoublePiLivePenalty: 16.0, discardDoublePiLivePenaltyLate: 26.0,
@@ -58,59 +58,61 @@ export const DEFAULT_PARAMS = {
   discardBlockMedPenalty: 20.0,     discardBlockMedPenaltyLate: 30.0,
   discardMongBakFivePenalty: 28.0,  discardBonusPiBonus: 26.0,
   discardKnownMonthBonus: 1.9,      discardUnknownMonthPenalty: 1.8,
-  feedRiskNoMatchMul: 4.51,
-  feedRiskMatchMul: 1.05,
+  feedRiskNoMatchMul: 3.88731406846192,
+  feedRiskMatchMul: 2.339791176285915,
   pukRiskHighMul: 3.99,
   pukRiskNormalMul: 3.33,
   firstTurnPiPlanBonus: 7.46,
   lockedMonthPenalty: 6.0,
-  secondMoverGoGateShrink: 4.0,  secondMoverBlockBonus: 2.0,  secondMoverPiBonus: 1.5,
+  secondMoverGoGateShrink: 5.811311002900569,  secondMoverBlockBonus: 6.024638514530961,  secondMoverPiBonus: 3.151823873038763,
 
   // ── phase multipliers (NEXg additions) ──
   // early phase: bias toward combo building
-  phaseEarlyComboMul: 1.20,     // increase combo score
-  phaseEarlyBlockMul: 0.90,     // slightly relax blocking pressure
+  phaseEarlyComboMul: 0.9855615576897289,  // tuned
+  phaseEarlyBlockMul: 1.021161151157597,   // tuned
   phaseEarlyFeedMul: 0.85,      // relax feed risk
   // mid phase: defaults
   // late phase: stronger defense and safer value
-  phaseLateComboMul: 0.85,      // de-prioritize hard combo completion
-  phaseLateBlockMul: 1.35,      // strengthen blocking
+  phaseLateComboMul: 0.917617695663598,    // tuned
+  phaseLateBlockMul: 1.726310856138415,    // tuned
   phaseLateFeedMul: 1.40,       // increase feed risk cost
-  phaseLateDoublePiMul: 1.50,   // increase double-pi value
+  phaseLateDoublePiMul: 1.2661482601065202, // tuned
 
   // ── chooseMatch (same baseline as CL) ──
-  matchPiGainMul: 6.25,
+  matchPiGainMul: 6.33597537317284,
   matchKwangBonus: 15.02,
   matchRibbonBonus: 10.02,
   matchFiveBonus: 8.0,
   matchDoublePiBonus: 18.0,
-  matchMongBakFiveBonus: 33.83,
+  matchMongBakFiveBonus: 46.779041313852225,
   // chooseMatch forward blocking (NEXg addition)
-  matchFwdBlockMul: 1.45,       // bonus multiplier when blocking opponent combo lines
+  matchFwdBlockMul: 1.8781811305859943,   // tuned
 
   // ── shouldGo (CL gate + NEXg first-mover guard) ──
   // Base gate (close to CL)
   goMinPi: 8,
-  goOppOneAwayGate: 100,
-  goScoreDiffBonus: 0.055,
-  goDeckLowBonus: 0.08,
-  goUnseeHighPiPenalty: 0.08,
-  goBaseThreshold: -0.08,
-  goOppScoreGateHigh: 6,
+  goOppOneAwayGate: 35.7764184072923,
+  goScoreDiffBonus: 0.11748949812215076,
+  goDeckLowBonus: 0.12803239323821397,
+  goUnseeHighPiPenalty: 0.1951450847948243,
+  goBaseThreshold: 0.5993684105971784,
+  goOppScoreGateHigh: 7,
   goOppScoreGateLow: 4,
   goBigLeadScoreDiff: 4,
   goBigLeadMinScore: 8,
   goBigLeadOneAwayLate: 35,
   goBigLeadOneAwayEarly: 55,
-  goBigLeadJokboThresh: 0.45,
-  goBigLeadNextThresh: 0.45,
-  goOneAwayThreshOpp4Late: 40,
-  goOneAwayThreshOpp4Early: 60,
-  goOneAwayThreshOpp3: 65,
-  goOneAwayThreshOpp2: 75,
-  goOneAwayThreshOpp1: 85,
-  goOpp12JokboThresh: 0.55,
-  goOpp12NextThresh: 0.55,
+  goBigLeadJokboThresh: 0.31612024031011765,
+  goBigLeadNextThresh: 0.326132528114719,
+  goOneAwayThreshOpp4Late: 17,
+  goOneAwayThreshOpp4Early: 43,
+  goOneAwayThreshOpp3: 38,
+  goOneAwayThreshOpp2: 44,
+  goOneAwayThreshOpp1: 39,
+  goOpp0JokboThresh: 0.6391579072632629,
+  goOpp0NextThresh: 0.5784686748906424,
+  goOpp12JokboThresh: 0.45658568870393673,
+  goOpp12NextThresh: 0.5301927681620219,
   goZeroOppOneAwayLate: 88,
   goZeroOppOneAwayEarly: 95,
   lateDeckMax: 10,
@@ -130,22 +132,38 @@ export const DEFAULT_PARAMS = {
   stopLeadMul: 0.09,
   stopCarryMul: 0.12,
   stopTenBonus: 0.20,
-  goUtilityThreshold: 0.10,
+  goUtilityThreshold: 0.19503534053039293,
 
   // Additional GO suppression after CL gate pass (first mover only)
-  plusFirstGoMinDeck: 7,
+  plusFirstGoMinDeck: 8,
 
   // ── shouldBomb / selectBombMonth ──
   bombMinPiAdvantage: 1,
   bombOpponentJokboBlock: 0.4,
 
   // ── decideShaking ──
-  shakingImmediateGainMul: 1.35,
-  shakingComboGainMul: 1.15,
+  shakingImmediateGainMul: 1.429467008457678,
+  shakingComboGainMul: 1.2294225898162396,
   shakingTempoBonusMul: 0.28,
-  shakingScoreThreshold: 0.65,
-  shakingAheadPenalty: 0.05,
+  shakingScoreThreshold: 0.4128042736868245,
+  shakingAheadPenalty: 0.1359668182520461,
 };
+
+/* 2b) Runtime param override via HEURISTIC_NEXG_PARAMS env variable
+ *  Optuna tuning injects optimized params through this env var.
+ *  Usage: HEURISTIC_NEXG_PARAMS='{"goBaseThreshold":0.45,...}' node ...
+ */
+export function getRuntimeParams() {
+  try {
+    const raw =
+      (typeof process !== "undefined" && process.env?.HEURISTIC_NEXG_PARAMS) || "";
+    if (!raw) return { ...DEFAULT_PARAMS };
+    const overrides = JSON.parse(raw);
+    return { ...DEFAULT_PARAMS, ...overrides };
+  } catch {
+    return { ...DEFAULT_PARAMS };
+  }
+}
 
 /* 3) Shared helpers */
 function safeNum(v, def = 0) {
@@ -278,7 +296,8 @@ function resolvePhase(deckCount, P) {
 }
 
 /* 4) Hand ranking (phase-aware CL baseline) */
-function rankHandCardsNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function rankHandCardsNEXg(state, playerKey, deps, params = null) {
+  params = params ?? getRuntimeParams();
   const P = { ...DEFAULT_PARAMS, ...params };
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
@@ -436,7 +455,8 @@ function rankHandCardsNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
 }
 
 /* 5) Pending match-card selection (forward-blocking) */
-function chooseMatchHeuristicNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function chooseMatchHeuristicNEXg(state, playerKey, deps, params = null) {
+  params = params ?? getRuntimeParams();
   const P = { ...DEFAULT_PARAMS, ...params };
   const ids = state.pendingMatch?.boardCardIds || [];
   if (!ids.length) return null;
@@ -485,7 +505,8 @@ function chooseMatchHeuristicNEXg(state, playerKey, deps, params = DEFAULT_PARAM
 }
 
 /* 6) GO/STOP decision (CL gate + first-mover suppression filter) */
-function shouldGoNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function shouldGoNEXg(state, playerKey, deps, params = null) {
+  params = params ?? getRuntimeParams();
   const P = { ...DEFAULT_PARAMS, ...params };
 
   if (deps.canBankruptOpponentByStop?.(state, playerKey)) return false;
@@ -572,7 +593,8 @@ function shouldGoNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
 }
 
 /* 7) President/Gukjin decisions */
-function shouldPresidentStopNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function shouldPresidentStopNEXg(state, playerKey, deps, params = null) {
+  params = params ?? getRuntimeParams();
   const ctx = deps.analyzeGameContext(state, playerKey);
   const diff = safeNum(ctx.myScore) - safeNum(ctx.oppScore);
   const co = safeNum(state.carryOverMultiplier, 1);
@@ -582,7 +604,8 @@ function shouldPresidentStopNEXg(state, playerKey, deps, params = DEFAULT_PARAMS
   return diff >= 1;
 }
 
-function chooseGukjinHeuristicNEXg(state, playerKey, deps, params = DEFAULT_PARAMS) {
+function chooseGukjinHeuristicNEXg(state, playerKey, deps, params = null) {
+  params = params ?? getRuntimeParams();
   const ctx = deps.analyzeGameContext(state, playerKey);
   const br = deps.analyzeGukjinBranches(state, playerKey);
   const sf = safeNum(ctx.selfFive), of_ = safeNum(ctx.oppFive);
@@ -597,14 +620,16 @@ function chooseGukjinHeuristicNEXg(state, playerKey, deps, params = DEFAULT_PARA
 }
 
 /* 8) Bomb decision helpers */
-function selectBombMonthNEXg(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
+function selectBombMonthNEXg(state, playerKey, bombMonths, deps, params = null) {
+  params = params ?? getRuntimeParams();
   if (!bombMonths?.length) return null;
   const months = [...bombMonths];
   return months.length === 1 ? months[0]
     : months.reduce((b, m) => safeNum(deps.monthBoardGain(state, m)) > safeNum(deps.monthBoardGain(state, b)) ? m : b, months[0]);
 }
 
-function shouldBombNEXg(state, playerKey, bombMonths, deps, params = DEFAULT_PARAMS) {
+function shouldBombNEXg(state, playerKey, bombMonths, deps, params = null) {
+  params = params ?? getRuntimeParams();
   if (!bombMonths?.length) return false;
   const P = { ...DEFAULT_PARAMS, ...params };
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -624,7 +649,8 @@ function shouldBombNEXg(state, playerKey, bombMonths, deps, params = DEFAULT_PAR
 }
 
 /* 9) Shaking decision */
-function decideShakingNEXg(state, playerKey, shakingMonths, deps, params = DEFAULT_PARAMS) {
+function decideShakingNEXg(state, playerKey, shakingMonths, deps, params = null) {
+  params = params ?? getRuntimeParams();
   const P = { ...DEFAULT_PARAMS, ...params };
   if (!shakingMonths?.length) return { allow: false, month: null, score: -Infinity };
   const bbm = deps.boardMatchesByMonth(state);
