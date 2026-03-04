@@ -48,6 +48,49 @@ function fail(message) {
   throw new Error(String(message || "unknown failure"));
 }
 
+function formatConsoleArgs(args) {
+  return args
+    .map((arg) => {
+      if (typeof arg === "string") return arg;
+      try {
+        return JSON.stringify(arg);
+      } catch (_) {
+        return String(arg);
+      }
+    })
+    .join(" ");
+}
+
+function redirectConsoleToStderr() {
+  const forward = (level, args) => {
+    const text = formatConsoleArgs(args);
+    process.stderr.write(`[bridge:${level}] ${text}\n`);
+  };
+  console.log = (...args) => forward("log", args);
+  console.info = (...args) => forward("info", args);
+  console.debug = (...args) => forward("debug", args);
+  console.warn = (...args) => forward("warn", args);
+  console.error = (...args) => forward("error", args);
+}
+
+function silenceConsole() {
+  const noop = () => {};
+  console.log = noop;
+  console.info = noop;
+  console.debug = noop;
+  console.warn = noop;
+  console.error = noop;
+}
+
+function configureConsoleForBridge() {
+  const mode = String(process.env.PPO_BRIDGE_CONSOLE_MODE || "drop").trim().toLowerCase();
+  if (mode === "stderr") {
+    redirectConsoleToStderr();
+    return;
+  }
+  silenceConsole();
+}
+
 function toPositiveInt(raw, name) {
   const n = Number(raw);
   if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
@@ -810,6 +853,7 @@ function send(obj) {
 }
 
 const cli = parseArgs(process.argv.slice(2));
+configureConsoleForBridge();
 const runtime = buildRuntime(cli);
 
 process.on("uncaughtException", (err) => {

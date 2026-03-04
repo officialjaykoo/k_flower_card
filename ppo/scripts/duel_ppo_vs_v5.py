@@ -279,7 +279,7 @@ class BridgeEnv:
             cwd=repo_root,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             bufsize=1,
@@ -366,11 +366,6 @@ class BridgeEnv:
         try:
             if self.proc.stdout:
                 self.proc.stdout.close()
-        except Exception:
-            pass
-        try:
-            if self.proc.stderr:
-                self.proc.stderr.close()
         except Exception:
             pass
         try:

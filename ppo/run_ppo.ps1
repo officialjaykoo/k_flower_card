@@ -3,7 +3,8 @@ param(
   [Parameter(Mandatory = $false)][string]$Python = ".\.venv\Scripts\python",
   [Parameter(Mandatory = $false)][string]$Seed = "",
   [Parameter(Mandatory = $false)][string]$OutputDir = "",
-  [Parameter(Mandatory = $false)][string]$ResumeCheckpoint = ""
+  [Parameter(Mandatory = $false)][string]$ResumeCheckpoint = "",
+  [Parameter(Mandatory = $false)][switch]$DisableTorchCompile = $true
 )
 
 Set-StrictMode -Version Latest
@@ -86,6 +87,12 @@ if (-not [string]::IsNullOrWhiteSpace($OutputDir)) { Write-Host "Output override
 elseif (-not [string]::IsNullOrWhiteSpace($autoOutputDir)) { Write-Host "Output auto: $autoOutputDir" }
 if (-not [string]::IsNullOrWhiteSpace($ResumeCheckpoint)) { Write-Host "Resume: $ResumeCheckpoint" }
 elseif (-not [string]::IsNullOrWhiteSpace($autoResumeCheckpoint)) { Write-Host "Resume auto: $autoResumeCheckpoint" }
+
+if ($DisableTorchCompile) {
+  $env:TORCH_COMPILE_DISABLE = "1"
+  $env:TORCHDYNAMO_DISABLE = "1"
+  Write-Host "Torch compile: disabled (TORCH_COMPILE_DISABLE=1, TORCHDYNAMO_DISABLE=1)"
+}
 
 & $Python @args
 if ($LASTEXITCODE -ne 0) {

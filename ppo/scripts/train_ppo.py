@@ -341,7 +341,7 @@ class BridgeEnv:
             cwd=repo_root,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             bufsize=1,
@@ -366,26 +366,49 @@ class BridgeEnv:
         self.proc.stdin.write(json.dumps(payload, ensure_ascii=True) + "\n")
         self.proc.stdin.flush()
 
-        line = self.proc.stdout.readline()
-        if not line:
-            stderr_text = ""
-            if self.proc.stderr is not None:
-                try:
-                    stderr_text = self.proc.stderr.read()
-                except Exception:
-                    stderr_text = ""
-            fail(
-                f"bridge response missing: worker={self.worker_id}, code={self.proc.poll()}, stderr={stderr_text}"
-            )
-        try:
-            resp = json.loads(line)
-        except Exception as err:
-            fail(f"bridge returned invalid JSON: worker={self.worker_id}, line={line.strip()}, err={err}")
-        if not isinstance(resp, dict):
-            fail(f"bridge response is not object: worker={self.worker_id}, response={resp}")
-        if not resp.get("ok", False):
-            fail(f"bridge error: worker={self.worker_id}, detail={resp.get('error')}")
-        return resp
+        noise_samples: List[str] = []
+        noise_count = 0
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                stderr_text = ""
+                if self.proc.stderr is not None:
+                    try:
+                        stderr_text = self.proc.stderr.read()
+                    except Exception:
+                        stderr_text = ""
+                fail(
+                    f"bridge response missing: worker={self.worker_id}, code={self.proc.poll()}, stderr={stderr_text}"
+                )
+
+            raw_line = line.strip()
+            try:
+                resp = json.loads(line)
+            except Exception:
+                noise_count += 1
+                if len(noise_samples) < 3:
+                    noise_samples.append(raw_line[:300])
+                if noise_count >= 20:
+                    fail(
+                        "bridge protocol noise overflow: "
+                        f"worker={self.worker_id}, cmd={payload.get('cmd')}, samples={noise_samples}"
+                    )
+                continue
+
+            if not isinstance(resp, dict) or "ok" not in resp:
+                noise_count += 1
+                if len(noise_samples) < 3:
+                    noise_samples.append(raw_line[:300])
+                if noise_count >= 20:
+                    fail(
+                        "bridge protocol object noise overflow: "
+                        f"worker={self.worker_id}, cmd={payload.get('cmd')}, samples={noise_samples}"
+                    )
+                continue
+
+            if not resp.get("ok", False):
+                fail(f"bridge error: worker={self.worker_id}, detail={resp.get('error')}")
+            return resp
 
     def reset(self, episode: int) -> EnvReply:
         resp = self._request({"cmd": "reset", "episode": int(episode)})
@@ -422,11 +445,6 @@ class BridgeEnv:
         try:
             if self.proc.stdout:
                 self.proc.stdout.close()
-        except Exception:
-            pass
-        try:
-            if self.proc.stderr:
-                self.proc.stderr.close()
         except Exception:
             pass
         try:
