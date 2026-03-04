@@ -19,6 +19,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+# Execution order (duel):
+# run_duel_ppo.ps1 -> duel_ppo_vs_v5.py -> BridgeEnv(node) -> ppo_env_bridge.mjs -> engine/ai runtime.
+
 try:
     import torch
     import torch.nn as nn
@@ -46,6 +49,8 @@ REQUIRED_KEYS = [
     "reward_scale",
     "downside_penalty_scale",
     "terminal_bonus_scale",
+    "terminal_win_bonus",
+    "terminal_loss_penalty",
     "catastrophic_loss_threshold",
     "device",
     "result_out",
@@ -175,6 +180,8 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     rt["reward_scale"] = as_finite_float(cfg, "reward_scale")
     rt["downside_penalty_scale"] = as_finite_float(cfg, "downside_penalty_scale")
     rt["terminal_bonus_scale"] = as_finite_float(cfg, "terminal_bonus_scale")
+    rt["terminal_win_bonus"] = as_finite_float(cfg, "terminal_win_bonus")
+    rt["terminal_loss_penalty"] = as_finite_float(cfg, "terminal_loss_penalty")
     rt["catastrophic_loss_threshold"] = as_finite_float(cfg, "catastrophic_loss_threshold")
     rt["device"] = as_non_empty_str(cfg, "device")
     rt["result_out"] = as_non_empty_str(cfg, "result_out")
@@ -193,6 +200,10 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
         fail("reward_scale must be non-zero")
     if rt["downside_penalty_scale"] < 0:
         fail("downside_penalty_scale must be >= 0")
+    if rt["terminal_win_bonus"] < 0:
+        fail("terminal_win_bonus must be >= 0")
+    if rt["terminal_loss_penalty"] < 0:
+        fail("terminal_loss_penalty must be >= 0")
 
     bridge_abs = os.path.abspath(rt["env_bridge_script"])
     if not os.path.exists(bridge_abs):
@@ -254,6 +265,10 @@ class BridgeEnv:
             str(runtime["downside_penalty_scale"]),
             "--terminal-bonus-scale",
             str(runtime["terminal_bonus_scale"]),
+            "--terminal-win-bonus",
+            str(runtime["terminal_win_bonus"]),
+            "--terminal-loss-penalty",
+            str(runtime["terminal_loss_penalty"]),
             "--first-turn-policy",
             runtime["first_turn_policy"],
             "--fixed-first-turn",
@@ -458,6 +473,7 @@ def run_block(
     control_actor: str,
     games: int,
 ) -> Dict[str, Any]:
+    # Run one seat block (control_actor fixed) with multi-worker parallel environments.
     if games <= 0:
         return {"results": [], "summary": summarize_block([], runtime["catastrophic_loss_threshold"])}
 

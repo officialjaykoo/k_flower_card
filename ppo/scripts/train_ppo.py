@@ -18,6 +18,10 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+# Execution order (training):
+# run_ppo.ps1 -> train_ppo.py -> BridgeEnv(node) -> ppo_env_bridge.mjs -> engine/ai runtime.
+# This file is the single source of truth for PPO update logic and checkpoint lifecycle.
+
 try:
     import torch
     import torch.nn as nn
@@ -41,6 +45,8 @@ REQUIRED_KEYS = [
     "reward_scale",
     "downside_penalty_scale",
     "terminal_bonus_scale",
+    "terminal_win_bonus",
+    "terminal_loss_penalty",
     "env_workers",
     "total_updates",
     "rollout_steps",
@@ -50,9 +56,17 @@ REQUIRED_KEYS = [
     "gae_lambda",
     "clip_coef",
     "learning_rate",
+    "learning_rate_final",
     "entropy_coef",
     "value_coef",
+    "value_clip_coef",
+    "target_kl",
     "max_grad_norm",
+    "catastrophic_loss_threshold",
+    "catastrophic_penalty_scale",
+    "best_gold_tolerance",
+    "early_stop_patience_updates",
+    "early_stop_min_updates",
     "hidden_size",
     "device",
     "log_every_updates",
@@ -162,7 +176,9 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     runtime["max_episode_steps"] = as_pos_int(cfg, "max_episode_steps")
     runtime["reward_scale"] = as_finite_float(cfg, "reward_scale")
     runtime["downside_penalty_scale"] = as_nonneg_float(cfg, "downside_penalty_scale")
-    runtime["terminal_bonus_scale"] = as_finite_float(cfg, "terminal_bonus_scale")
+    runtime["terminal_bonus_scale"] = as_nonneg_float(cfg, "terminal_bonus_scale")
+    runtime["terminal_win_bonus"] = as_nonneg_float(cfg, "terminal_win_bonus")
+    runtime["terminal_loss_penalty"] = as_nonneg_float(cfg, "terminal_loss_penalty")
     if abs(runtime["reward_scale"]) <= 0:
         fail("reward_scale must be non-zero")
 
@@ -176,9 +192,17 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     runtime["gae_lambda"] = as_finite_float(cfg, "gae_lambda")
     runtime["clip_coef"] = as_nonneg_float(cfg, "clip_coef")
     runtime["learning_rate"] = as_nonneg_float(cfg, "learning_rate")
+    runtime["learning_rate_final"] = as_nonneg_float(cfg, "learning_rate_final")
     runtime["entropy_coef"] = as_nonneg_float(cfg, "entropy_coef")
     runtime["value_coef"] = as_nonneg_float(cfg, "value_coef")
+    runtime["value_clip_coef"] = as_nonneg_float(cfg, "value_clip_coef")
+    runtime["target_kl"] = as_nonneg_float(cfg, "target_kl")
     runtime["max_grad_norm"] = as_nonneg_float(cfg, "max_grad_norm")
+    runtime["catastrophic_loss_threshold"] = as_finite_float(cfg, "catastrophic_loss_threshold")
+    runtime["catastrophic_penalty_scale"] = as_nonneg_float(cfg, "catastrophic_penalty_scale")
+    runtime["best_gold_tolerance"] = as_nonneg_float(cfg, "best_gold_tolerance")
+    runtime["early_stop_patience_updates"] = as_pos_int(cfg, "early_stop_patience_updates")
+    runtime["early_stop_min_updates"] = as_pos_int(cfg, "early_stop_min_updates")
     runtime["hidden_size"] = as_pos_int(cfg, "hidden_size")
     runtime["log_every_updates"] = as_pos_int(cfg, "log_every_updates")
     runtime["save_every_updates"] = as_pos_int(cfg, "save_every_updates")
@@ -190,6 +214,18 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
         fail(f"gamma out of range: {runtime['gamma']}")
     if not (0 < runtime["gae_lambda"] <= 1):
         fail(f"gae_lambda out of range: {runtime['gae_lambda']}")
+    if runtime["learning_rate_final"] > runtime["learning_rate"]:
+        fail(
+            "learning_rate_final must be <= learning_rate "
+            f"({runtime['learning_rate_final']} > {runtime['learning_rate']})"
+        )
+    if runtime["target_kl"] <= 0:
+        fail(f"target_kl must be > 0, got={runtime['target_kl']}")
+    if runtime["early_stop_min_updates"] > runtime["total_updates"]:
+        fail(
+            "early_stop_min_updates must be <= total_updates "
+            f"({runtime['early_stop_min_updates']} > {runtime['total_updates']})"
+        )
     if runtime["minibatch_size"] > runtime["rollout_steps"] * runtime["env_workers"]:
         fail(
             "minibatch_size must be <= rollout_steps * env_workers "
@@ -214,6 +250,52 @@ class EnvReply:
     info: Dict[str, Any]
 
 
+def validate_env_reply_shape(
+    reply: EnvReply,
+    obs_dim: int,
+    action_dim: int,
+    *,
+    worker_id: int,
+    stage: str,
+    allow_empty_mask: bool,
+) -> None:
+    if len(reply.obs) != obs_dim:
+        fail(
+            f"obs dim mismatch from bridge: worker={worker_id}, stage={stage}, "
+            f"got={len(reply.obs)}, expected={obs_dim}"
+        )
+    if len(reply.action_mask) != action_dim:
+        fail(
+            f"action mask dim mismatch from bridge: worker={worker_id}, stage={stage}, "
+            f"got={len(reply.action_mask)}, expected={action_dim}"
+        )
+
+    for idx, raw in enumerate(reply.obs):
+        try:
+            v = float(raw)
+        except Exception:
+            fail(f"obs value is not numeric: worker={worker_id}, stage={stage}, index={idx}, value={raw}")
+        if not math.isfinite(v):
+            fail(f"obs value is non-finite: worker={worker_id}, stage={stage}, index={idx}, value={v}")
+
+    valid_actions = 0
+    for idx, raw in enumerate(reply.action_mask):
+        try:
+            v = int(raw)
+        except Exception:
+            fail(
+                f"action mask value is not integer-like: worker={worker_id}, stage={stage}, index={idx}, value={raw}"
+            )
+        if v not in (0, 1):
+            fail(
+                f"action mask must be binary 0/1: worker={worker_id}, stage={stage}, index={idx}, value={v}"
+            )
+        if v == 1:
+            valid_actions += 1
+    if not allow_empty_mask and valid_actions <= 0:
+        fail(f"empty action mask from bridge: worker={worker_id}, stage={stage}")
+
+
 class BridgeEnv:
     def __init__(self, runtime: Dict[str, Any], worker_id: int, repo_root: str):
         self.runtime = runtime
@@ -236,6 +318,10 @@ class BridgeEnv:
             str(runtime["downside_penalty_scale"]),
             "--terminal-bonus-scale",
             str(runtime["terminal_bonus_scale"]),
+            "--terminal-win-bonus",
+            str(runtime["terminal_win_bonus"]),
+            "--terminal-loss-penalty",
+            str(runtime["terminal_loss_penalty"]),
             "--first-turn-policy",
             runtime["first_turn_policy"],
             "--fixed-first-turn",
@@ -448,6 +534,71 @@ def save_checkpoint(
     torch.save(payload, path)
 
 
+def quantile(values: List[float], q: float) -> float:
+    if len(values) <= 0:
+        return 0.0
+    s = sorted(float(v) for v in values)
+    qn = max(0.0, min(1.0, float(q)))
+    idx = int(math.floor((len(s) - 1) * qn))
+    return float(s[idx])
+
+
+def tail_mean(values: List[float], ratio: float) -> float:
+    if len(values) <= 0:
+        return 0.0
+    r = max(0.01, min(1.0, float(ratio)))
+    s = sorted(float(v) for v in values)
+    n = max(1, int(math.ceil(len(s) * r)))
+    return float(sum(s[:n]) / n)
+
+
+def rate_at_or_below(values: List[float], threshold: float) -> float:
+    if len(values) <= 0:
+        return 0.0
+    t = float(threshold)
+    hit = 0
+    for v in values:
+        if float(v) <= t:
+            hit += 1
+    return float(hit / len(values))
+
+
+def metric_as_float(metrics: Dict[str, Any], key: str, default: float) -> float:
+    try:
+        return float(metrics.get(key, default))
+    except Exception:
+        return float(default)
+
+
+def is_better_update(candidate: Dict[str, Any], best: Dict[str, Any], gold_tolerance: float) -> bool:
+    cand_gold = metric_as_float(candidate, "mean_final_gold_diff_50", -1e18)
+    best_gold = metric_as_float(best, "mean_final_gold_diff_50", -1e18)
+    tol = max(0.0, float(gold_tolerance))
+
+    if cand_gold > best_gold + tol:
+        return True
+    if cand_gold < best_gold - tol:
+        return False
+
+    cand_cata = metric_as_float(candidate, "catastrophic_loss_rate_50", 1.0)
+    best_cata = metric_as_float(best, "catastrophic_loss_rate_50", 1.0)
+    if cand_cata < best_cata - 1e-9:
+        return True
+    if cand_cata > best_cata + 1e-9:
+        return False
+
+    cand_win = metric_as_float(candidate, "win_rate_50", 0.0)
+    best_win = metric_as_float(best, "win_rate_50", 0.0)
+    if cand_win > best_win + 1e-9:
+        return True
+    if cand_win < best_win - 1e-9:
+        return False
+
+    cand_update = int(candidate.get("update", 0))
+    best_update = int(best.get("update", 0))
+    return cand_update < best_update
+
+
 def explained_variance(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
     var_y = torch.var(y_true)
     if float(var_y.item()) <= 1e-12:
@@ -461,6 +612,12 @@ def train(
     repo_root: str,
     resume_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
+    # High-level flow:
+    # 1) create env workers
+    # 2) collect rollout
+    # 3) compute GAE/returns
+    # 4) PPO optimization
+    # 5) save latest/best/checkpoint + metrics
     ensure_dir(output_dir)
     random_seed = int("".join(ch for ch in str(runtime["seed"]) if ch.isdigit())[:9] or "13")
     random.seed(random_seed)
@@ -480,10 +637,14 @@ def train(
             fail(f"invalid dimensions from bridge: obs_dim={obs_dim}, action_dim={action_dim}")
 
         for idx, r in enumerate(reset_replies):
-            if len(r.obs) != obs_dim:
-                fail(f"obs dim mismatch at reset worker={idx}: {len(r.obs)} vs {obs_dim}")
-            if len(r.action_mask) != action_dim:
-                fail(f"mask dim mismatch at reset worker={idx}: {len(r.action_mask)} vs {action_dim}")
+            validate_env_reply_shape(
+                r,
+                obs_dim=obs_dim,
+                action_dim=action_dim,
+                worker_id=idx,
+                stage="reset_init",
+                allow_empty_mask=False,
+            )
 
         model = PolicyValueNet(obs_dim=obs_dim, action_dim=action_dim, hidden_size=runtime["hidden_size"]).to(device)
         optimizer = optim.Adam(model.parameters(), lr=runtime["learning_rate"], eps=1e-5)
@@ -583,11 +744,44 @@ def train(
         completed_returns: List[float] = []
         completed_lengths: List[int] = []
         completed_gold_diff: List[float] = []
+        opponent_episode_counts_total: Dict[str, int] = {}
         global_episode_index = num_envs
 
         train_start = time.time()
+        best_metrics: Optional[Dict[str, Any]] = None
+        best_update = 0
+        updates_since_best = 0
+        best_metrics_path = os.path.join(output_dir, "best_metrics.json")
+
+        if os.path.exists(best_metrics_path):
+            try:
+                with open(best_metrics_path, "r", encoding="utf-8-sig") as f:
+                    best_obj = json.load(f)
+                if isinstance(best_obj, dict) and "mean_final_gold_diff_50" in best_obj:
+                    best_metrics = dict(best_obj)
+                    best_update = int(best_metrics.get("update", 0))
+            except Exception as err:
+                fail(f"failed to read best_metrics.json: {best_metrics_path}, err={err}")
+
+        if resume_payload is not None:
+            ck_metrics = resume_payload.get("metrics") or {}
+            if best_metrics is None and "mean_final_gold_diff_50" in ck_metrics:
+                best_metrics = dict(ck_metrics)
+                try:
+                    best_update = int(best_metrics.get("update", resume_update))
+                except Exception:
+                    best_update = resume_update
+        updates_since_best = max(0, resume_update - best_update)
 
         for update in range(resume_update + 1, runtime["total_updates"] + 1):
+            if runtime["total_updates"] <= 1:
+                lr_now = float(runtime["learning_rate_final"])
+            else:
+                progress = float(update - 1) / float(runtime["total_updates"] - 1)
+                lr_now = float(runtime["learning_rate"] + progress * (runtime["learning_rate_final"] - runtime["learning_rate"]))
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr_now
+
             rollout_obs: List[torch.Tensor] = []
             rollout_masks: List[torch.Tensor] = []
             rollout_actions: List[torch.Tensor] = []
@@ -595,6 +789,9 @@ def train(
             rollout_values: List[torch.Tensor] = []
             rollout_rewards: List[torch.Tensor] = []
             rollout_dones: List[torch.Tensor] = []
+            update_cat_penalty_total = 0.0
+            update_cat_event_count = 0
+            opponent_episode_counts_update: Dict[str, int] = {}
 
             update_begin = time.time()
             for _ in range(runtime["rollout_steps"]):
@@ -619,8 +816,24 @@ def train(
                 action_list = actions.detach().cpu().tolist()
                 for env_idx, env in enumerate(envs):
                     reply = env.step(int(action_list[env_idx]))
-                    reward = float(reply.reward)
+                    validate_env_reply_shape(
+                        reply,
+                        obs_dim=obs_dim,
+                        action_dim=action_dim,
+                        worker_id=env_idx,
+                        stage="step",
+                        allow_empty_mask=bool(reply.done),
+                    )
                     done = bool(reply.done)
+                    reward = float(reply.reward)
+                    if done:
+                        final_gold_diff = float(reply.info.get("final_gold_diff", 0.0))
+                        if final_gold_diff <= runtime["catastrophic_loss_threshold"]:
+                            cat_gap = runtime["catastrophic_loss_threshold"] - final_gold_diff
+                            cat_penalty = cat_gap * runtime["catastrophic_penalty_scale"]
+                            reward -= cat_penalty
+                            update_cat_penalty_total += float(cat_penalty)
+                            update_cat_event_count += 1
 
                     episode_returns[env_idx] += reward
                     episode_lengths[env_idx] += 1
@@ -630,10 +843,31 @@ def train(
                         completed_returns.append(episode_returns[env_idx])
                         completed_lengths.append(episode_lengths[env_idx])
                         completed_gold_diff.append(float(reply.info.get("final_gold_diff", 0.0)))
+                        if runtime["training_mode"] == "single_actor":
+                            opp_policy = str(reply.info.get("opponent_policy", "")).strip()
+                            if not opp_policy:
+                                fail(
+                                    "missing opponent_policy in bridge done info "
+                                    f"(worker={env_idx}, update={update}, step={global_steps})"
+                                )
+                            opponent_episode_counts_update[opp_policy] = (
+                                int(opponent_episode_counts_update.get(opp_policy, 0)) + 1
+                            )
+                            opponent_episode_counts_total[opp_policy] = (
+                                int(opponent_episode_counts_total.get(opp_policy, 0)) + 1
+                            )
                         episode_returns[env_idx] = 0.0
                         episode_lengths[env_idx] = 0
 
                         reset_reply = env.reset(global_episode_index)
+                        validate_env_reply_shape(
+                            reset_reply,
+                            obs_dim=obs_dim,
+                            action_dim=action_dim,
+                            worker_id=env_idx,
+                            stage="reset_after_done",
+                            allow_empty_mask=False,
+                        )
                         global_episode_index += 1
                         next_obs_rows.append(reset_reply.obs)
                         next_mask_rows.append(reset_reply.action_mask)
@@ -699,9 +933,14 @@ def train(
             last_value_loss = 0.0
             last_entropy = 0.0
             last_approx_kl = 0.0
+            approx_kl_sum = 0.0
+            approx_kl_count = 0
+            epochs_ran = 0
+            early_stop_kl = False
 
             model.train()
-            for _ in range(runtime["ppo_epochs"]):
+            for epoch_idx in range(runtime["ppo_epochs"]):
+                epochs_ran = epoch_idx + 1
                 indices = torch.randperm(batch_size, device=device)
                 for start in range(0, batch_size, mb_size):
                     end = min(start + mb_size, batch_size)
@@ -721,7 +960,18 @@ def train(
                     policy_loss = torch.max(pg_loss_1, pg_loss_2).mean()
 
                     v_pred = value_pred.squeeze(-1)
-                    value_loss = ((v_pred - b_returns[mb_idx]) ** 2).mean()
+                    v_old = b_values[mb_idx]
+                    if runtime["value_clip_coef"] > 0:
+                        v_pred_clipped = v_old + torch.clamp(
+                            v_pred - v_old,
+                            -runtime["value_clip_coef"],
+                            runtime["value_clip_coef"],
+                        )
+                        value_loss_unclipped = (v_pred - b_returns[mb_idx]) ** 2
+                        value_loss_clipped = (v_pred_clipped - b_returns[mb_idx]) ** 2
+                        value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
+                    else:
+                        value_loss = 0.5 * ((v_pred - b_returns[mb_idx]) ** 2).mean()
 
                     loss = (
                         policy_loss
@@ -738,11 +988,22 @@ def train(
                         last_policy_loss = float(policy_loss.item())
                         last_value_loss = float(value_loss.item())
                         last_entropy = float(entropy.item())
-                        last_approx_kl = float((b_old_logprob[mb_idx] - new_logprob).mean().item())
+                        approx_kl_val = float((b_old_logprob[mb_idx] - new_logprob).mean().item())
+                        last_approx_kl = approx_kl_val
+                        approx_kl_sum += approx_kl_val
+                        approx_kl_count += 1
+                        if approx_kl_val > runtime["target_kl"]:
+                            early_stop_kl = True
+                            break
+                if early_stop_kl:
+                    break
+
+            if approx_kl_count > 0:
+                last_approx_kl = float(approx_kl_sum / approx_kl_count)
 
             with torch.no_grad():
-                predicted_values = b_values
-                ev = explained_variance(b_returns, predicted_values)
+                _, predicted_values_post = model(b_obs)
+                ev = explained_variance(b_returns, predicted_values_post.squeeze(-1))
 
             wall = max(1e-6, time.time() - update_begin)
             fps = int((runtime["rollout_steps"] * num_envs) / wall)
@@ -750,6 +1011,14 @@ def train(
             mean_return = float(sum(completed_returns[-50:]) / max(1, len(completed_returns[-50:])))
             mean_len = float(sum(completed_lengths[-50:]) / max(1, len(completed_lengths[-50:])))
             mean_gold_diff = float(sum(completed_gold_diff[-50:]) / max(1, len(completed_gold_diff[-50:])))
+            window_gold_diff = completed_gold_diff[-50:]
+            wins_50 = sum(1 for v in window_gold_diff if float(v) > 0)
+            losses_50 = sum(1 for v in window_gold_diff if float(v) < 0)
+            draws_50 = len(window_gold_diff) - wins_50 - losses_50
+            denom_50 = max(1, len(window_gold_diff))
+            p10_gold_diff = quantile(window_gold_diff, 0.1)
+            cvar10_gold_diff = tail_mean(window_gold_diff, 0.1)
+            catastrophic_rate_50 = rate_at_or_below(window_gold_diff, runtime["catastrophic_loss_threshold"])
 
             metrics = {
                 "update": update,
@@ -759,13 +1028,68 @@ def train(
                 "policy_loss": last_policy_loss,
                 "value_loss": last_value_loss,
                 "entropy": last_entropy,
+                "learning_rate": lr_now,
+                "learning_rate_final": runtime["learning_rate_final"],
                 "approx_kl": last_approx_kl,
+                "target_kl": runtime["target_kl"],
+                "early_stop_kl": early_stop_kl,
+                "ppo_epochs_ran": epochs_ran,
                 "explained_variance": ev,
                 "mean_return_50": mean_return,
                 "mean_ep_len_50": mean_len,
                 "mean_final_gold_diff_50": mean_gold_diff,
+                "win_rate_50": float(wins_50 / denom_50),
+                "loss_rate_50": float(losses_50 / denom_50),
+                "draw_rate_50": float(draws_50 / denom_50),
+                "p10_final_gold_diff_50": p10_gold_diff,
+                "cvar10_final_gold_diff_50": cvar10_gold_diff,
+                "catastrophic_loss_threshold": runtime["catastrophic_loss_threshold"],
+                "catastrophic_loss_rate_50": catastrophic_rate_50,
+                "catastrophic_penalty_scale": runtime["catastrophic_penalty_scale"],
+                "catastrophic_penalty_total_update": update_cat_penalty_total,
+                "catastrophic_event_count_update": update_cat_event_count,
+                "value_clip_coef": runtime["value_clip_coef"],
+                "opponent_episode_counts_update": {
+                    k: int(opponent_episode_counts_update[k])
+                    for k in sorted(opponent_episode_counts_update.keys())
+                },
+                "opponent_episode_counts_total": {
+                    k: int(opponent_episode_counts_total[k])
+                    for k in sorted(opponent_episode_counts_total.keys())
+                },
                 "elapsed_sec": train_elapsed_offset_sec + (time.time() - train_start),
             }
+
+            is_best_update = False
+            if best_metrics is None or is_better_update(
+                candidate=metrics,
+                best=best_metrics,
+                gold_tolerance=runtime["best_gold_tolerance"],
+            ):
+                best_metrics = dict(metrics)
+                best_update = int(update)
+                updates_since_best = 0
+                is_best_update = True
+            else:
+                updates_since_best += 1
+
+            metrics["is_best_update"] = is_best_update
+            metrics["best_update_so_far"] = int(best_update)
+            metrics["best_mean_final_gold_diff_50_so_far"] = metric_as_float(
+                best_metrics or {},
+                "mean_final_gold_diff_50",
+                metrics["mean_final_gold_diff_50"],
+            )
+            metrics["updates_since_best"] = int(updates_since_best)
+            metrics["best_gold_tolerance"] = runtime["best_gold_tolerance"]
+
+            stop_by_patience = (
+                update >= runtime["early_stop_min_updates"]
+                and updates_since_best >= runtime["early_stop_patience_updates"]
+            )
+            metrics["early_stop_patience_triggered"] = bool(stop_by_patience)
+            metrics["early_stop_patience_updates"] = runtime["early_stop_patience_updates"]
+            metrics["early_stop_min_updates"] = runtime["early_stop_min_updates"]
 
             if update == 1 or update % runtime["log_every_updates"] == 0 or update == runtime["total_updates"]:
                 print(
@@ -781,6 +1105,21 @@ def train(
                     )
                 )
 
+            if is_best_update:
+                save_checkpoint(
+                    output_dir=output_dir,
+                    filename="best.pt",
+                    model=model,
+                    optimizer=optimizer,
+                    runtime=runtime,
+                    update=update,
+                    obs_dim=obs_dim,
+                    action_dim=action_dim,
+                    metrics=metrics,
+                )
+                with open(os.path.join(output_dir, "best_metrics.json"), "w", encoding="utf-8") as f:
+                    json.dump(metrics, f, ensure_ascii=False, indent=2)
+
             save_checkpoint(
                 output_dir=output_dir,
                 filename="latest.pt",
@@ -793,7 +1132,7 @@ def train(
                 metrics=metrics,
             )
 
-            if update % runtime["save_every_updates"] == 0 or update == runtime["total_updates"]:
+            if update % runtime["save_every_updates"] == 0 or update == runtime["total_updates"] or stop_by_patience:
                 save_checkpoint(
                     output_dir=output_dir,
                     filename=f"checkpoint_update_{update}.pt",
@@ -811,6 +1150,28 @@ def train(
                     encoding="utf-8",
                 ) as f:
                     json.dump(metrics, f, ensure_ascii=False, indent=2)
+
+            if stop_by_patience:
+                print(
+                    json.dumps(
+                        {
+                            "type": "ppo_early_stop",
+                            "reason": "no_improvement_patience",
+                            "update": update,
+                            "best_update": best_update,
+                            "updates_since_best": updates_since_best,
+                            "best_mean_final_gold_diff_50": metric_as_float(
+                                best_metrics or {},
+                                "mean_final_gold_diff_50",
+                                metrics["mean_final_gold_diff_50"],
+                            ),
+                            "patience_updates": runtime["early_stop_patience_updates"],
+                            "min_updates": runtime["early_stop_min_updates"],
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                break
 
     finally:
         for env in envs:

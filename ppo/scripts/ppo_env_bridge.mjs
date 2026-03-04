@@ -2,11 +2,13 @@
 // ppo_env_bridge.mjs
 // - StdIO JSON bridge between Matgo engine and PPO trainer.
 // - Strict CLI/runtime validation + fail-fast errors with context.
+// Execution order:
+// train_ppo.py/duel_ppo_vs_v5.py -> this bridge(reset/step) -> Matgo engine decision runtime.
 
 import { initSimulationGame, createSeededRng, calculateScore, scoringPiCount } from "../../src/engine/index.js";
 import { getActionPlayerKey } from "../../src/engine/runner.js";
 import { aiPlay } from "../../src/ai/aiPlay_by_GPT.js";
-import { normalizeBotPolicy } from "../../src/ai/policies.js";
+import { normalizeBotPolicy, resolveBotPolicy } from "../../src/ai/policies.js";
 import {
   selectDecisionPool,
   resolveDecisionType,
@@ -17,9 +19,12 @@ import {
 } from "../../src/ai/decisionRuntime_by_GPT.js";
 
 const ACTION_DIM = 26;
-const OBS_DIM = 165;
 const PLAY_SLOTS = 10;
 const MATCH_SLOTS = 8;
+const CARD_FEATURE_DIM = 7;
+const PHASE_FEATURE_DIM = 6;
+const DECISION_FEATURE_DIM = 3;
+const MACRO_FEATURE_DIM = 22;
 const OPTION_ORDER = Object.freeze([
   "go",
   "stop",
@@ -30,6 +35,14 @@ const OPTION_ORDER = Object.freeze([
   "five",
   "junk"
 ]);
+const OPTION_FEATURE_DIM = OPTION_ORDER.length;
+const OBS_DIM =
+  PHASE_FEATURE_DIM +
+  DECISION_FEATURE_DIM +
+  MACRO_FEATURE_DIM +
+  PLAY_SLOTS * CARD_FEATURE_DIM +
+  MATCH_SLOTS * CARD_FEATURE_DIM +
+  OPTION_FEATURE_DIM;
 
 function fail(message) {
   throw new Error(String(message || "unknown failure"));
@@ -91,6 +104,8 @@ function parseArgs(argv) {
     rewardScale: null,
     downsidePenaltyScale: null,
     terminalBonusScale: null,
+    terminalWinBonus: null,
+    terminalLossPenalty: null,
     firstTurnPolicy: "",
     fixedFirstTurn: ""
   };
@@ -120,6 +135,10 @@ function parseArgs(argv) {
       out.downsidePenaltyScale = toFiniteNumber(value, "--downside-penalty-scale");
     } else if (key === "--terminal-bonus-scale") {
       out.terminalBonusScale = toFiniteNumber(value, "--terminal-bonus-scale");
+    } else if (key === "--terminal-win-bonus") {
+      out.terminalWinBonus = toFiniteNumber(value, "--terminal-win-bonus");
+    } else if (key === "--terminal-loss-penalty") {
+      out.terminalLossPenalty = toFiniteNumber(value, "--terminal-loss-penalty");
     } else if (key === "--first-turn-policy") {
       out.firstTurnPolicy = normalizeFirstTurnPolicy(value);
     } else if (key === "--fixed-first-turn") {
@@ -139,6 +158,10 @@ function parseArgs(argv) {
   if (out.downsidePenaltyScale < 0) fail("--downside-penalty-scale must be >= 0");
   if (out.terminalBonusScale == null) fail("--terminal-bonus-scale is required");
   if (!Number.isFinite(out.terminalBonusScale)) fail("--terminal-bonus-scale must be finite");
+  if (out.terminalWinBonus == null) fail("--terminal-win-bonus is required");
+  if (out.terminalWinBonus < 0) fail("--terminal-win-bonus must be >= 0");
+  if (out.terminalLossPenalty == null) fail("--terminal-loss-penalty is required");
+  if (out.terminalLossPenalty < 0) fail("--terminal-loss-penalty must be >= 0");
   if (!out.firstTurnPolicy) fail("--first-turn-policy is required");
   if (out.firstTurnPolicy === "fixed" && !out.fixedFirstTurn) {
     fail("--fixed-first-turn is required when --first-turn-policy=fixed");
@@ -156,6 +179,81 @@ function parseArgs(argv) {
   }
 
   return out;
+}
+
+function parseOpponentPolicyPool(raw, argName) {
+  const text = String(raw || "").trim();
+  if (!text) {
+    fail(`${argName} must be non-empty`);
+  }
+  const parts = text.split("|").map((v) => String(v || "").trim()).filter((v) => v.length > 0);
+  if (parts.length <= 0) {
+    fail(`${argName} must contain at least one policy`);
+  }
+  const seen = new Set();
+  const entries = [];
+  let totalWeight = 0;
+  for (const token of parts) {
+    const sep = token.indexOf(":");
+    if (sep <= 0 || sep >= token.length - 1) {
+      fail(`${argName} token must follow POLICY:WEIGHT format, got=${token}`);
+    }
+    if (token.indexOf(":", sep + 1) >= 0) {
+      fail(`${argName} token has multiple ':' separators, got=${token}`);
+    }
+    const policyRaw = token.slice(0, sep).trim();
+    const weightRaw = token.slice(sep + 1).trim();
+    const resolved = resolveBotPolicy(policyRaw);
+    if (!resolved) {
+      fail(`${argName} contains unsupported bot policy: ${policyRaw}`);
+    }
+    const policy = normalizeBotPolicy(resolved);
+    if (seen.has(policy)) {
+      fail(`${argName} contains duplicate policy: ${policy}`);
+    }
+    const weight = Number(weightRaw);
+    if (!Number.isFinite(weight) || weight <= 0) {
+      fail(`${argName} has invalid weight for policy ${policy}: ${weightRaw}`);
+    }
+    totalWeight += weight;
+    seen.add(policy);
+    entries.push({ policy, weight });
+  }
+  if (!Number.isFinite(totalWeight) || totalWeight <= 0) {
+    fail(`${argName} total weight must be > 0`);
+  }
+  let cumulative = 0;
+  const out = [];
+  for (const entry of entries) {
+    const prob = entry.weight / totalWeight;
+    cumulative += prob;
+    out.push({
+      policy: entry.policy,
+      weight: entry.weight,
+      prob,
+      cumulative
+    });
+  }
+  out[out.length - 1].cumulative = 1.0;
+  return out;
+}
+
+function sampleOpponentPolicy(runtime, seedText) {
+  const pool = runtime.opponentPolicyPool;
+  if (!Array.isArray(pool) || pool.length <= 0) {
+    fail(`opponent policy pool is empty: seed=${seedText}`);
+  }
+  const pickRng = createSeededRng(`${seedText}|opp-policy`);
+  const r = Number(pickRng());
+  if (!Number.isFinite(r)) {
+    fail(`opponent policy sampling rng returned non-finite: seed=${seedText}, value=${String(r)}`);
+  }
+  for (const entry of pool) {
+    if (r < Number(entry.cumulative)) {
+      return entry;
+    }
+  }
+  return pool[pool.length - 1];
 }
 
 function clamp01(x) {
@@ -203,6 +301,63 @@ function appendCardSlots(out, cards, maxSlots) {
     const c = i < source.length ? source[i] : null;
     const fv = cardFeatureVector(c);
     for (const v of fv) out.push(Number(v));
+  }
+}
+
+function maskValidCount(mask) {
+  let count = 0;
+  for (const raw of mask) {
+    const v = Number(raw);
+    if (v !== 0 && v !== 1) {
+      fail(`action mask value must be 0 or 1, got=${String(raw)}`);
+    }
+    if (v === 1) count += 1;
+  }
+  return count;
+}
+
+function validateStepView(runtime, view, context) {
+  if (!view || typeof view !== "object") {
+    fail(`invalid step view: ${String(context || "")}`);
+  }
+  if (!Array.isArray(view.obs)) {
+    fail(`obs must be array: ${String(context || "")}`);
+  }
+  if (!Array.isArray(view.action_mask)) {
+    fail(`action_mask must be array: ${String(context || "")}`);
+  }
+  if (view.obs.length !== OBS_DIM) {
+    fail(
+      `obs_dim mismatch: expected=${OBS_DIM}, got=${view.obs.length}, seed=${runtime.seedText}, step=${runtime.actionCount}, ctx=${String(context || "")}`
+    );
+  }
+  if (view.action_mask.length !== ACTION_DIM) {
+    fail(
+      `action_dim mismatch: expected=${ACTION_DIM}, got=${view.action_mask.length}, seed=${runtime.seedText}, step=${runtime.actionCount}, ctx=${String(context || "")}`
+    );
+  }
+  for (const raw of view.obs) {
+    if (!Number.isFinite(Number(raw))) {
+      fail(`obs has non-finite value: seed=${runtime.seedText}, step=${runtime.actionCount}, ctx=${String(context || "")}`);
+    }
+  }
+  const validActions = maskValidCount(view.action_mask);
+  const isTerminal = view.decision_type === "terminal";
+  if (isTerminal) {
+    if (validActions !== 0) {
+      fail(
+        `terminal view must have 0 legal actions: got=${validActions}, seed=${runtime.seedText}, step=${runtime.actionCount}, ctx=${String(context || "")}`
+      );
+    }
+  } else if (validActions <= 0) {
+    fail(`non-terminal view has empty action mask: seed=${runtime.seedText}, step=${runtime.actionCount}, ctx=${String(context || "")}`);
+  }
+  if (runtime.obsDim == null) {
+    runtime.obsDim = view.obs.length;
+  } else if (runtime.obsDim !== view.obs.length) {
+    fail(
+      `runtime obs_dim drift: expected=${runtime.obsDim}, got=${view.obs.length}, seed=${runtime.seedText}, step=${runtime.actionCount}, ctx=${String(context || "")}`
+    );
   }
 }
 
@@ -352,6 +507,9 @@ function buildObservation(state, controlActor, actionCtx) {
       fail(`observation contains non-finite value: phase=${phase}`);
     }
   }
+  if (out.length !== OBS_DIM) {
+    fail(`observation dim mismatch: expected=${OBS_DIM}, got=${out.length}, phase=${phase}`);
+  }
   return out;
 }
 
@@ -389,7 +547,7 @@ function runOpponentUntilControl(runtime, seedText) {
     const before = runtime.state;
     const next = aiPlay(runtime.state, actor, {
       source: "heuristic",
-      heuristicPolicy: runtime.opponentPolicy
+      heuristicPolicy: runtime.currentOpponentPolicy
     });
     progressOrThrow(before, next, {
       seed: seedText,
@@ -422,6 +580,14 @@ function initEpisode(runtime) {
       firstTurnKey
     });
     runtime.seedText = seedText;
+    if (runtime.trainingMode === "single_actor") {
+      const picked = sampleOpponentPolicy(runtime, seedText);
+      runtime.currentOpponentPolicy = picked.policy;
+      runtime.currentOpponentPolicyProb = Number(picked.prob);
+    } else {
+      runtime.currentOpponentPolicy = null;
+      runtime.currentOpponentPolicyProb = 0;
+    }
     runtime.actionCount = 0;
     if (runtime.trainingMode === "single_actor") {
       runOpponentUntilControl(runtime, seedText);
@@ -432,23 +598,32 @@ function initEpisode(runtime) {
 }
 
 function buildRuntime(cli) {
+  const opponentPolicyPool =
+    cli.trainingMode === "single_actor"
+      ? parseOpponentPolicyPool(cli.opponentPolicy, "--opponent-policy")
+      : [];
   return {
     trainingMode: cli.trainingMode,
     seedBase: cli.seedBase,
     ruleKey: cli.ruleKey,
     controlActor: cli.controlActor || null,
-    opponentPolicy: cli.opponentPolicy ? normalizeBotPolicy(cli.opponentPolicy) : null,
+    opponentPolicyPool,
+    currentOpponentPolicy: opponentPolicyPool.length > 0 ? opponentPolicyPool[0].policy : null,
+    currentOpponentPolicyProb: opponentPolicyPool.length > 0 ? Number(opponentPolicyPool[0].prob) : 0,
     maxSteps: cli.maxSteps,
     rewardScale: cli.rewardScale,
     downsidePenaltyScale: cli.downsidePenaltyScale,
     terminalBonusScale: cli.terminalBonusScale,
+    terminalWinBonus: cli.terminalWinBonus,
+    terminalLossPenalty: cli.terminalLossPenalty,
     firstTurnPolicy: cli.firstTurnPolicy,
     fixedFirstTurn: cli.fixedFirstTurn || "human",
     state: null,
     seedText: "",
     episodeIndex: 0,
     resetCount: 0,
-    actionCount: 0
+    actionCount: 0,
+    obsDim: null
   };
 }
 
@@ -478,6 +653,7 @@ function handleReset(runtime, payload) {
     fail(`actor_to_act unresolved on reset: seed=${runtime.seedText}, phase=${String(runtime.state?.phase || "")}`);
   }
   const view = buildStepView(runtime.state, actorToAct);
+  validateStepView(runtime, view, "reset");
   return {
     ok: true,
     type: "reset",
@@ -488,13 +664,14 @@ function handleReset(runtime, payload) {
       episode: runtime.episodeIndex,
       training_mode: runtime.trainingMode,
       control_actor: runtime.controlActor,
-      opponent_policy: runtime.opponentPolicy,
+      opponent_policy: runtime.currentOpponentPolicy,
+      opponent_policy_prob: runtime.currentOpponentPolicyProb,
       actor_to_act: actorToAct,
       phase: runtime.state.phase,
       decision_type: view.decision_type,
       legal_actions: view.legal_actions,
       action_dim: ACTION_DIM,
-      obs_dim: view.obs.length
+      obs_dim: runtime.obsDim
     }
   };
 }
@@ -516,6 +693,7 @@ function handleStep(runtime, payload) {
     fail(`acting actor unresolved: seed=${runtime.seedText}, step=${runtime.actionCount}, phase=${String(runtime.state?.phase || "")}`);
   }
 
+  // Policy takes exactly one legal action, then bridge applies it and auto-plays opponent when needed.
   const beforeState = runtime.state;
   const beforeDiff = goldDiff(beforeState, actingActor);
   const actionCtx = buildActionContext(beforeState, actingActor);
@@ -548,10 +726,21 @@ function handleStep(runtime, payload) {
   const done = runtime.state.phase === "resolution" || truncated;
 
   const afterDiff = goldDiff(runtime.state, actingActor);
-  let reward = (afterDiff - beforeDiff) * runtime.rewardScale;
+  const rewardGoldDelta = (afterDiff - beforeDiff) * runtime.rewardScale;
+  let rewardTerminalBonus = 0;
+  let rewardDownsidePenalty = 0;
+  let rewardOutcomeWinBonus = 0;
+  let rewardOutcomeLossPenalty = 0;
+  let reward = rewardGoldDelta;
   if (done) {
-    reward += afterDiff * runtime.terminalBonusScale;
-    reward -= Math.max(0, -afterDiff) * runtime.downsidePenaltyScale;
+    rewardTerminalBonus = afterDiff * runtime.terminalBonusScale;
+    rewardDownsidePenalty = Math.max(0, -afterDiff) * runtime.downsidePenaltyScale;
+    if (afterDiff > 0) rewardOutcomeWinBonus = runtime.terminalWinBonus;
+    if (afterDiff < 0) rewardOutcomeLossPenalty = runtime.terminalLossPenalty;
+    reward += rewardTerminalBonus;
+    reward -= rewardDownsidePenalty;
+    reward += rewardOutcomeWinBonus;
+    reward -= rewardOutcomeLossPenalty;
   }
 
   let view = null;
@@ -564,13 +753,20 @@ function handleStep(runtime, payload) {
       fail(`actor_to_act unresolved after step: seed=${runtime.seedText}, step=${runtime.actionCount}, phase=${String(runtime.state?.phase || "")}`);
     }
     view = buildStepView(runtime.state, actorToAct);
+    validateStepView(runtime, view, "step");
   } else {
+    if (runtime.obsDim == null || runtime.obsDim !== OBS_DIM) {
+      fail(
+        `terminal obs_dim unresolved: obsDim=${String(runtime.obsDim)}, expected=${OBS_DIM}, seed=${runtime.seedText}, step=${runtime.actionCount}`
+      );
+    }
     view = {
-      obs: new Array(OBS_DIM).fill(0),
+      obs: new Array(runtime.obsDim).fill(0),
       action_mask: new Array(ACTION_DIM).fill(0),
       decision_type: "terminal",
       legal_actions: []
     };
+    validateStepView(runtime, view, "terminal");
   }
 
   return {
@@ -585,6 +781,8 @@ function handleStep(runtime, payload) {
       seed: runtime.seedText,
       episode: runtime.episodeIndex,
       training_mode: runtime.trainingMode,
+      opponent_policy: runtime.currentOpponentPolicy,
+      opponent_policy_prob: runtime.currentOpponentPolicyProb,
       step: runtime.actionCount,
       acted_actor: actingActor,
       actor_to_act: done ? null : getActionPlayerKey(runtime.state),
@@ -593,7 +791,12 @@ function handleStep(runtime, payload) {
       legal_actions: view.legal_actions,
       control_gold: Number(runtime.state?.players?.[actingActor]?.gold || 0),
       opponent_gold: Number(runtime.state?.players?.[otherActor(actingActor)]?.gold || 0),
-      final_gold_diff: afterDiff
+      final_gold_diff: afterDiff,
+      reward_gold_delta: rewardGoldDelta,
+      reward_terminal_bonus: rewardTerminalBonus,
+      reward_downside_penalty: rewardDownsidePenalty,
+      reward_outcome_win_bonus: rewardOutcomeWinBonus,
+      reward_outcome_loss_penalty: rewardOutcomeLossPenalty
     }
   };
 }

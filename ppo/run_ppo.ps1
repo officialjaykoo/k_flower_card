@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)][string]$RuntimeConfig,
-  [Parameter(Mandatory = $false)][string]$Python = "python",
+  [Parameter(Mandatory = $false)][string]$Python = ".\.venv\Scripts\python",
   [Parameter(Mandatory = $false)][string]$Seed = "",
   [Parameter(Mandatory = $false)][string]$OutputDir = "",
   [Parameter(Mandatory = $false)][string]$ResumeCheckpoint = ""
@@ -11,6 +11,9 @@ $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path $RuntimeConfig)) {
   throw "runtime config not found: $RuntimeConfig"
+}
+if (-not (Get-Command $Python -ErrorAction SilentlyContinue)) {
+  throw "python executable not found: $Python"
 }
 
 function Resolve-SeedPath {
