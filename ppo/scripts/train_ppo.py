@@ -52,7 +52,6 @@ REQUIRED_KEYS = [
     "terminal_win_bonus",
     "terminal_loss_penalty",
     "go_action_bonus",
-    "go_stop_penalty",
     "go_explore_prob",
     "env_workers",
     "total_updates",
@@ -233,6 +232,15 @@ def resolve_opponent_policy_for_update(schedule: List[Dict[str, Any]], update: i
     return active_policy, active_start
 
 
+def resolve_stage_index_for_start_update(schedule: List[Dict[str, Any]], start_update: int) -> int:
+    target = int(start_update)
+    for idx, entry in enumerate(schedule):
+        if int(entry.get("start_update", 0)) == target:
+            return int(idx + 1)
+    fail(f"stage start_update not found in opponent_policy_schedule: start_update={start_update}")
+    return 0
+
+
 def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     require_keys(cfg, REQUIRED_KEYS, cfg_path)
     runtime: Dict[str, Any] = {}
@@ -290,7 +298,6 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     runtime["terminal_win_bonus"] = as_nonneg_float(cfg, "terminal_win_bonus")
     runtime["terminal_loss_penalty"] = as_nonneg_float(cfg, "terminal_loss_penalty")
     runtime["go_action_bonus"] = as_nonneg_float(cfg, "go_action_bonus")
-    runtime["go_stop_penalty"] = as_nonneg_float(cfg, "go_stop_penalty")
     runtime["go_explore_prob"] = as_nonneg_float(cfg, "go_explore_prob")
     if abs(runtime["reward_scale"]) <= 0:
         fail("reward_scale must be non-zero")
@@ -424,6 +431,8 @@ class BridgeEnv:
             runtime["env_bridge_script"],
             "--training-mode",
             runtime["training_mode"],
+            "--phase",
+            str(runtime["phase"]),
             "--seed-base",
             seed_base,
             "--rule-key",
@@ -442,8 +451,6 @@ class BridgeEnv:
             str(runtime["terminal_loss_penalty"]),
             "--go-action-bonus",
             str(runtime["go_action_bonus"]),
-            "--go-stop-penalty",
-            str(runtime["go_stop_penalty"]),
             "--first-turn-policy",
             runtime["first_turn_policy"],
             "--fixed-first-turn",
@@ -916,30 +923,42 @@ def train(
         global_episode_index = num_envs
 
         train_start = time.time()
-        best_metrics: Optional[Dict[str, Any]] = None
-        best_update = 0
-        updates_since_best = 0
-        best_metrics_path = os.path.join(output_dir, "best_metrics.json")
+        stage_best_metrics: Optional[Dict[str, Any]] = None
+        stage_best_update = 0
+        stage_updates_since_best = 0
+        active_stage_index = 1
+        active_stage_start_update = 1
 
-        if os.path.exists(best_metrics_path):
+        overall_best_metrics: Optional[Dict[str, Any]] = None
+        overall_best_update = 0
+        overall_best_metrics_path = os.path.join(output_dir, "best_overall_metrics.json")
+        legacy_best_metrics_path = os.path.join(output_dir, "best_metrics.json")
+
+        def stage_best_metrics_path(stage_index: int) -> str:
+            return os.path.join(output_dir, f"best_metrics_stage{int(stage_index)}.json")
+
+        def stage_best_checkpoint_name(stage_index: int) -> str:
+            return f"best_stage{int(stage_index)}.pt"
+
+        if os.path.exists(overall_best_metrics_path):
             try:
-                with open(best_metrics_path, "r", encoding="utf-8-sig") as f:
+                with open(overall_best_metrics_path, "r", encoding="utf-8-sig") as f:
                     best_obj = json.load(f)
                 if isinstance(best_obj, dict) and "mean_final_gold_diff_1000" in best_obj:
-                    best_metrics = dict(best_obj)
-                    best_update = int(best_metrics.get("update", 0))
+                    overall_best_metrics = dict(best_obj)
+                    overall_best_update = int(overall_best_metrics.get("update", 0))
             except Exception as err:
-                fail(f"failed to read best_metrics.json: {best_metrics_path}, err={err}")
-
-        if resume_payload is not None:
-            ck_metrics = resume_payload.get("metrics") or {}
-            if best_metrics is None and "mean_final_gold_diff_1000" in ck_metrics:
-                best_metrics = dict(ck_metrics)
-                try:
-                    best_update = int(best_metrics.get("update", resume_update))
-                except Exception:
-                    best_update = resume_update
-        updates_since_best = max(0, resume_update - best_update)
+                fail(f"failed to read best_overall_metrics.json: {overall_best_metrics_path}, err={err}")
+        elif os.path.exists(legacy_best_metrics_path):
+            # Legacy pre-stage file is treated as overall-best snapshot.
+            try:
+                with open(legacy_best_metrics_path, "r", encoding="utf-8-sig") as f:
+                    best_obj = json.load(f)
+                if isinstance(best_obj, dict) and "mean_final_gold_diff_1000" in best_obj:
+                    overall_best_metrics = dict(best_obj)
+                    overall_best_update = int(overall_best_metrics.get("update", 0))
+            except Exception as err:
+                fail(f"failed to read legacy best_metrics.json: {legacy_best_metrics_path}, err={err}")
 
         if runtime["training_mode"] == "single_actor":
             start_update = int(resume_update + 1)
@@ -947,7 +966,9 @@ def train(
                 schedule=runtime["opponent_policy_schedule"],
                 update=start_update,
             )
-            if target_policy != active_opponent_policy:
+            policy_changed = target_policy != active_opponent_policy
+            stage_changed = int(target_start) != int(active_policy_start_update)
+            if policy_changed:
                 for env in envs:
                     env.close()
                 runtime["opponent_policy"] = target_policy
@@ -972,10 +993,68 @@ def train(
                 episode_go_attempts = [0 for _ in range(num_envs)]
                 episode_go_not_selected = [0 for _ in range(num_envs)]
                 global_episode_index = num_envs
+            if policy_changed or stage_changed:
                 active_opponent_policy = target_policy
                 active_policy_start_update = int(target_start)
-            else:
-                active_policy_start_update = int(target_start)
+
+            active_stage_start_update = int(active_policy_start_update)
+            active_stage_index = resolve_stage_index_for_start_update(
+                schedule=runtime["opponent_policy_schedule"],
+                start_update=active_stage_start_update,
+            )
+        else:
+            active_stage_start_update = 1
+            active_stage_index = 1
+
+        active_stage_metrics_path = stage_best_metrics_path(active_stage_index)
+        if os.path.exists(active_stage_metrics_path):
+            try:
+                with open(active_stage_metrics_path, "r", encoding="utf-8-sig") as f:
+                    best_obj = json.load(f)
+                if isinstance(best_obj, dict) and "mean_final_gold_diff_1000" in best_obj:
+                    stage_best_metrics = dict(best_obj)
+                    stage_best_update = int(stage_best_metrics.get("update", 0))
+            except Exception as err:
+                fail(
+                    "failed to read stage best metrics: "
+                    f"path={active_stage_metrics_path}, stage={active_stage_index}, err={err}"
+                )
+
+        if resume_payload is not None:
+            ck_metrics = resume_payload.get("metrics") or {}
+            if overall_best_metrics is None and "mean_final_gold_diff_1000" in ck_metrics:
+                overall_best_metrics = dict(ck_metrics)
+                try:
+                    overall_best_update = int(overall_best_metrics.get("update", resume_update))
+                except Exception:
+                    overall_best_update = resume_update
+
+            if stage_best_metrics is None and "mean_final_gold_diff_1000" in ck_metrics:
+                ck_stage_index_raw = ck_metrics.get("stage_index", 0)
+                ck_stage_start_raw = ck_metrics.get("stage_start_update", ck_metrics.get("active_opponent_policy_stage_start_update", 0))
+                try:
+                    ck_stage_index = int(ck_stage_index_raw)
+                except Exception:
+                    ck_stage_index = 0
+                try:
+                    ck_stage_start = int(ck_stage_start_raw)
+                except Exception:
+                    ck_stage_start = 0
+                same_stage = (
+                    (ck_stage_index > 0 and ck_stage_index == int(active_stage_index))
+                    or (ck_stage_start > 0 and ck_stage_start == int(active_stage_start_update))
+                )
+                if same_stage:
+                    stage_best_metrics = dict(ck_metrics)
+                    try:
+                        stage_best_update = int(stage_best_metrics.get("update", resume_update))
+                    except Exception:
+                        stage_best_update = resume_update
+
+        if stage_best_update > 0:
+            stage_updates_since_best = max(0, resume_update - stage_best_update)
+        else:
+            stage_updates_since_best = 0
 
         for update in range(resume_update + 1, runtime["total_updates"] + 1):
             if runtime["training_mode"] == "single_actor":
@@ -983,8 +1062,11 @@ def train(
                     schedule=runtime["opponent_policy_schedule"],
                     update=update,
                 )
-                if target_policy != active_opponent_policy:
-                    prev_policy = active_opponent_policy
+                target_start = int(target_start)
+                policy_changed = target_policy != active_opponent_policy
+                stage_changed = target_start != int(active_policy_start_update)
+
+                if policy_changed:
                     for env in envs:
                         env.close()
                     runtime["opponent_policy"] = target_policy
@@ -1009,22 +1091,68 @@ def train(
                     episode_go_attempts = [0 for _ in range(num_envs)]
                     episode_go_not_selected = [0 for _ in range(num_envs)]
                     global_episode_index += num_envs
-                    active_opponent_policy = target_policy
-                    active_policy_start_update = int(target_start)
                     print(
                         json.dumps(
                             {
                                 "type": "ppo_opponent_policy_switch",
                                 "update": update,
-                                "from_policy": prev_policy,
+                                "from_policy": active_opponent_policy,
                                 "to_policy": target_policy,
-                                "stage_start_update": int(target_start),
+                                "stage_start_update": target_start,
                             },
                             ensure_ascii=False,
                         )
                     )
+
+                if policy_changed or stage_changed:
+                    prev_stage_index = int(active_stage_index)
+                    prev_stage_start = int(active_stage_start_update)
+                    active_opponent_policy = target_policy
+                    active_policy_start_update = target_start
+                    active_stage_start_update = target_start
+                    active_stage_index = resolve_stage_index_for_start_update(
+                        schedule=runtime["opponent_policy_schedule"],
+                        start_update=active_stage_start_update,
+                    )
+                    stage_best_metrics = None
+                    stage_best_update = 0
+                    stage_updates_since_best = 0
+                    switched_stage_metrics_path = stage_best_metrics_path(active_stage_index)
+                    if os.path.exists(switched_stage_metrics_path):
+                        try:
+                            with open(switched_stage_metrics_path, "r", encoding="utf-8-sig") as f:
+                                best_obj = json.load(f)
+                            if isinstance(best_obj, dict) and "mean_final_gold_diff_1000" in best_obj:
+                                stage_best_metrics = dict(best_obj)
+                                stage_best_update = int(stage_best_metrics.get("update", 0))
+                                stage_updates_since_best = max(0, (update - 1) - stage_best_update)
+                        except Exception as err:
+                            fail(
+                                "failed to read stage best metrics on stage switch: "
+                                f"path={switched_stage_metrics_path}, update={update}, stage={active_stage_index}, err={err}"
+                            )
+                    if stage_changed:
+                        print(
+                            json.dumps(
+                                {
+                                    "type": "ppo_stage_switch",
+                                    "update": update,
+                                    "from_stage_index": prev_stage_index,
+                                    "from_stage_start_update": prev_stage_start,
+                                    "to_stage_index": int(active_stage_index),
+                                    "to_stage_start_update": int(active_stage_start_update),
+                                    "to_policy": target_policy,
+                                },
+                                ensure_ascii=False,
+                            )
+                        )
                 else:
-                    active_policy_start_update = int(target_start)
+                    active_policy_start_update = target_start
+                    active_stage_start_update = target_start
+
+            if runtime["training_mode"] != "single_actor":
+                active_stage_index = 1
+                active_stage_start_update = 1
 
             if runtime["total_updates"] <= 1:
                 lr_now = float(runtime["learning_rate_final"])
@@ -1300,6 +1428,7 @@ def train(
             episodes_finished_total = int(finished_episode_offset + len(completed_returns))
             metric_window_games = len(window_gold_diff)
             best_eval_ready = metric_window_games >= MIN_METRIC_WINDOW_GAMES
+            stage_update_index = int(update - int(active_stage_start_update) + 1)
 
             metrics = {
                 "update": update,
@@ -1310,8 +1439,14 @@ def train(
                 "win_rate_1000": float(wins_1000 / denom_1000),
                 "catastrophic_loss_rate_1000": catastrophic_rate_1000,
                 "metric_window_games": metric_window_games,
-                "best_update_so_far": int(best_update),
-                "updates_since_best": int(updates_since_best),
+                "stage_index": int(active_stage_index),
+                "stage_start_update": int(active_stage_start_update),
+                "stage_update_index": int(stage_update_index),
+                "best_update_so_far": int(stage_best_update),
+                "updates_since_best": int(stage_updates_since_best),
+                "stage_best_update_so_far": int(stage_best_update),
+                "stage_updates_since_best": int(stage_updates_since_best),
+                "overall_best_update_so_far": int(overall_best_update),
                 "early_stop_patience_triggered": False,
                 "go_opportunity_games": go_opportunity_games,
                 "go_games": go_games,
@@ -1333,25 +1468,37 @@ def train(
                 },
             }
 
-            # 5) Best-update tracking + early-stop gate.
-            is_best_update = False
+            # 5) Stage-best / overall-best tracking + stage-scoped early-stop gate.
+            is_stage_best_update = False
+            is_overall_best_update = False
             if best_eval_ready:
-                if best_metrics is None or is_better_update(candidate=metrics, best=best_metrics):
-                    best_metrics = dict(metrics)
-                    best_update = int(update)
-                    updates_since_best = 0
-                    is_best_update = True
+                if stage_best_metrics is None or is_better_update(candidate=metrics, best=stage_best_metrics):
+                    stage_best_update = int(update)
+                    stage_updates_since_best = 0
+                    is_stage_best_update = True
                 else:
-                    updates_since_best += 1
+                    stage_updates_since_best += 1
 
-            metrics["best_update_so_far"] = int(best_update)
-            metrics["updates_since_best"] = int(updates_since_best)
+                if overall_best_metrics is None or is_better_update(candidate=metrics, best=overall_best_metrics):
+                    overall_best_update = int(update)
+                    is_overall_best_update = True
+
+            metrics["best_update_so_far"] = int(stage_best_update)
+            metrics["updates_since_best"] = int(stage_updates_since_best)
+            metrics["stage_best_update_so_far"] = int(stage_best_update)
+            metrics["stage_updates_since_best"] = int(stage_updates_since_best)
+            metrics["overall_best_update_so_far"] = int(overall_best_update)
+
+            if is_stage_best_update:
+                stage_best_metrics = dict(metrics)
+            if is_overall_best_update:
+                overall_best_metrics = dict(metrics)
 
             stop_by_patience = (
                 best_eval_ready
                 and
-                update >= runtime["early_stop_min_updates"]
-                and updates_since_best >= runtime["early_stop_patience_updates"]
+                stage_update_index >= runtime["early_stop_min_updates"]
+                and stage_updates_since_best >= runtime["early_stop_patience_updates"]
             )
             metrics["early_stop_patience_triggered"] = bool(stop_by_patience)
 
@@ -1369,7 +1516,7 @@ def train(
                     )
                 )
 
-            if is_best_update:
+            if is_stage_best_update:
                 save_checkpoint(
                     output_dir=output_dir,
                     filename="best.pt",
@@ -1381,7 +1528,35 @@ def train(
                     action_dim=action_dim,
                     metrics=metrics,
                 )
+                save_checkpoint(
+                    output_dir=output_dir,
+                    filename=stage_best_checkpoint_name(active_stage_index),
+                    model=model,
+                    optimizer=optimizer,
+                    runtime=runtime,
+                    update=update,
+                    obs_dim=obs_dim,
+                    action_dim=action_dim,
+                    metrics=metrics,
+                )
                 with open(os.path.join(output_dir, "best_metrics.json"), "w", encoding="utf-8") as f:
+                    json.dump(metrics, f, ensure_ascii=False, indent=2)
+                with open(stage_best_metrics_path(active_stage_index), "w", encoding="utf-8") as f:
+                    json.dump(metrics, f, ensure_ascii=False, indent=2)
+
+            if is_overall_best_update:
+                save_checkpoint(
+                    output_dir=output_dir,
+                    filename="best_overall.pt",
+                    model=model,
+                    optimizer=optimizer,
+                    runtime=runtime,
+                    update=update,
+                    obs_dim=obs_dim,
+                    action_dim=action_dim,
+                    metrics=metrics,
+                )
+                with open(overall_best_metrics_path, "w", encoding="utf-8") as f:
                     json.dump(metrics, f, ensure_ascii=False, indent=2)
 
             save_checkpoint(
@@ -1416,17 +1591,24 @@ def train(
                     json.dump(metrics, f, ensure_ascii=False, indent=2)
 
             if stop_by_patience:
-                best_mean_gold = metric_as_float(best_metrics or {}, "mean_final_gold_diff_1000", metrics["mean_final_gold_diff_1000"])
+                best_mean_gold = metric_as_float(
+                    stage_best_metrics or {},
+                    "mean_final_gold_diff_1000",
+                    metrics["mean_final_gold_diff_1000"],
+                )
                 print(
                     json.dumps(
                         {
                             "type": "ppo_early_stop",
                             "reason": "no_improvement_patience",
                             "update": update,
-                            "best_update": best_update,
-                            "updates_since_best": updates_since_best,
+                            "stage_index": int(active_stage_index),
+                            "stage_start_update": int(active_stage_start_update),
+                            "stage_update_index": int(stage_update_index),
+                            "best_update": stage_best_update,
+                            "updates_since_best": stage_updates_since_best,
                             "best_mean_final_gold_diff_1000": best_mean_gold,
-                            "best_score": _best_score(best_metrics or metrics),
+                            "best_score": _best_score(stage_best_metrics or metrics),
                             "patience_updates": runtime["early_stop_patience_updates"],
                             "min_updates": runtime["early_stop_min_updates"],
                         },

@@ -68,7 +68,6 @@ REQUIRED_KEYS = [
     "terminal_win_bonus",
     "terminal_loss_penalty",
     "go_action_bonus",
-    "go_stop_penalty",
     "catastrophic_loss_threshold",
     "device",
     "result_out",
@@ -209,7 +208,6 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     rt["terminal_win_bonus"] = as_finite_float(cfg, "terminal_win_bonus")
     rt["terminal_loss_penalty"] = as_finite_float(cfg, "terminal_loss_penalty")
     rt["go_action_bonus"] = as_finite_float(cfg, "go_action_bonus")
-    rt["go_stop_penalty"] = as_finite_float(cfg, "go_stop_penalty")
     rt["catastrophic_loss_threshold"] = as_finite_float(cfg, "catastrophic_loss_threshold")
     rt["device"] = as_non_empty_str(cfg, "device")
     rt["result_out"] = as_non_empty_str(cfg, "result_out")
@@ -234,8 +232,6 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
         fail("terminal_loss_penalty must be >= 0")
     if rt["go_action_bonus"] < 0:
         fail("go_action_bonus must be >= 0")
-    if rt["go_stop_penalty"] < 0:
-        fail("go_stop_penalty must be >= 0")
 
     bridge_abs = os.path.abspath(rt["env_bridge_script"])
     if not os.path.exists(bridge_abs):
@@ -290,6 +286,8 @@ class BridgeEnv:
             runtime["env_bridge_script"],
             "--training-mode",
             "single_actor",
+            "--phase",
+            "0",
             "--seed-base",
             seed_base,
             "--rule-key",
@@ -312,8 +310,6 @@ class BridgeEnv:
             str(runtime["terminal_loss_penalty"]),
             "--go-action-bonus",
             str(runtime["go_action_bonus"]),
-            "--go-stop-penalty",
-            str(runtime["go_stop_penalty"]),
             "--first-turn-policy",
             runtime["first_turn_policy"],
             "--fixed-first-turn",
@@ -802,7 +798,6 @@ def main() -> None:
                 "policy_mode": runtime["policy_mode"],
                 "switch_seats": runtime["switch_seats"],
                 "go_action_bonus": runtime["go_action_bonus"],
-                "go_stop_penalty": runtime["go_stop_penalty"],
                 "checkpoint": runtime["checkpoint_path"],
                 "model_meta": model_meta,
             },
@@ -841,7 +836,6 @@ def main() -> None:
         "temperature": runtime["temperature"],
         "switch_seats": runtime["switch_seats"],
         "go_action_bonus": runtime["go_action_bonus"],
-        "go_stop_penalty": runtime["go_stop_penalty"],
         "games": total_games,
         "workers": runtime["workers"],
         "elapsed_sec": elapsed,

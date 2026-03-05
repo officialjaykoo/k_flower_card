@@ -58,6 +58,34 @@ const OBS_DIM =
   MATCH_SLOTS * CARD_FEATURE_DIM +
   OPTION_FEATURE_DIM;
 
+const PHASE1_SHAPING = Object.freeze({
+  godoriComplete: 0.18,
+  cheongdanComplete: 0.16,
+  hongdanComplete: 0.16,
+  chodanComplete: 0.16,
+  gwang3Complete: 0.20,
+  gwang4Complete: 0.32,
+  gwang5Complete: 0.50,
+  jjob: 0.04,
+  ppuk: 0.03,
+  yeonPpuk: 0.07,
+  ddadak: 0.04,
+  jabbeok: 0.04,
+  pansseul: 0.05,
+  shaking: 0.05,
+  bomb: 0.05,
+  goScoreUp: 0.12,
+  goWin: 0.20,
+  goLoss: -0.12,
+  doublePiGet: 0.03,
+  pi10Reached: 0.06,
+  piBakRisk: -0.10,
+  gwangBakRisk: -0.10,
+  piBakSuffered: -0.40,
+  gwangBakSuffered: -0.40,
+  mongBakSuffered: -0.40
+});
+
 // =============================================================================
 // Section 1. Console/CLI Validation Helpers
 // =============================================================================
@@ -117,6 +145,14 @@ function toPositiveInt(raw, name) {
   return n;
 }
 
+function toNonNegativeInt(raw, name) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+    fail(`invalid ${name}: ${raw}`);
+  }
+  return n;
+}
+
 function toFiniteNumber(raw, name) {
   const n = Number(raw);
   if (!Number.isFinite(n)) {
@@ -158,6 +194,7 @@ function parseArgs(argv) {
   const args = [...argv];
   const out = {
     trainingMode: "",
+    phase: null,
     seedBase: "",
     ruleKey: "",
     controlActor: "",
@@ -169,7 +206,6 @@ function parseArgs(argv) {
     terminalWinBonus: null,
     terminalLossPenalty: null,
     goActionBonus: null,
-    goStopPenalty: null,
     firstTurnPolicy: "",
     fixedFirstTurn: ""
   };
@@ -189,6 +225,7 @@ function parseArgs(argv) {
     }
 
     if (key === "--training-mode") out.trainingMode = normalizeTrainingMode(value);
+    else if (key === "--phase") out.phase = toNonNegativeInt(value, "--phase");
     else if (key === "--seed-base") out.seedBase = String(value || "").trim();
     else if (key === "--rule-key") out.ruleKey = String(value || "").trim();
     else if (key === "--control-actor") out.controlActor = normalizeActor(value, "--control-actor");
@@ -205,8 +242,6 @@ function parseArgs(argv) {
       out.terminalLossPenalty = toFiniteNumber(value, "--terminal-loss-penalty");
     } else if (key === "--go-action-bonus") {
       out.goActionBonus = toFiniteNumber(value, "--go-action-bonus");
-    } else if (key === "--go-stop-penalty") {
-      out.goStopPenalty = toFiniteNumber(value, "--go-stop-penalty");
     } else if (key === "--first-turn-policy") {
       out.firstTurnPolicy = normalizeFirstTurnPolicy(value);
     } else if (key === "--fixed-first-turn") {
@@ -217,6 +252,7 @@ function parseArgs(argv) {
   }
 
   if (!out.trainingMode) fail("--training-mode is required");
+  if (out.phase == null) fail("--phase is required");
   if (!out.seedBase) fail("--seed-base is required");
   if (!out.ruleKey) fail("--rule-key is required");
   if (out.maxSteps == null) fail("--max-steps is required");
@@ -232,8 +268,6 @@ function parseArgs(argv) {
   if (out.terminalLossPenalty < 0) fail("--terminal-loss-penalty must be >= 0");
   if (out.goActionBonus == null) fail("--go-action-bonus is required");
   if (out.goActionBonus < 0) fail("--go-action-bonus must be >= 0");
-  if (out.goStopPenalty == null) fail("--go-stop-penalty is required");
-  if (out.goStopPenalty < 0) fail("--go-stop-penalty must be >= 0");
   if (!out.firstTurnPolicy) fail("--first-turn-policy is required");
   if (out.firstTurnPolicy === "fixed" && !out.fixedFirstTurn) {
     fail("--fixed-first-turn is required when --first-turn-policy=fixed");
@@ -674,6 +708,174 @@ function goldDiff(state, controlActor) {
   return selfGold - oppGold;
 }
 
+function uniqueCardCount(cards) {
+  if (!Array.isArray(cards)) return 0;
+  const seen = new Set();
+  let count = 0;
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    count += 1;
+  }
+  return count;
+}
+
+function eventDeltaCount(beforePlayer, afterPlayer, key) {
+  const before = Number(beforePlayer?.events?.[key] || 0);
+  const after = Number(afterPlayer?.events?.[key] || 0);
+  const delta = after - before;
+  return delta > 0 ? delta : 0;
+}
+
+function countNewDoublePiCards(beforePlayer, afterPlayer) {
+  const beforeCards = Array.isArray(beforePlayer?.captured?.junk) ? beforePlayer.captured.junk : [];
+  const afterCards = Array.isArray(afterPlayer?.captured?.junk) ? afterPlayer.captured.junk : [];
+  const beforeIds = new Set();
+  const seenBefore = new Set();
+  for (const card of beforeCards) {
+    const id = String(card?.id || "");
+    if (!id || seenBefore.has(id)) continue;
+    seenBefore.add(id);
+    beforeIds.add(id);
+  }
+  const seenAfter = new Set();
+  let count = 0;
+  for (const card of afterCards) {
+    const id = String(card?.id || "");
+    if (!id || seenAfter.has(id)) continue;
+    seenAfter.add(id);
+    if (beforeIds.has(id)) continue;
+    const piValue = Number(card?.piValue || 0);
+    if (Number.isFinite(piValue) && piValue >= 2) count += 1;
+  }
+  return count;
+}
+
+function isPiBakRiskState(controlPlayer, oppPlayer) {
+  const selfPi = Number(scoringPiCount(controlPlayer) || 0);
+  const oppPi = Number(scoringPiCount(oppPlayer) || 0);
+  return selfPi >= 1 && selfPi <= 7 && oppPi >= 10;
+}
+
+function isGwangBakRiskState(controlPlayer, oppPlayer) {
+  const selfGwang = uniqueCardCount(controlPlayer?.captured?.kwang || []);
+  const oppGwang = uniqueCardCount(oppPlayer?.captured?.kwang || []);
+  return selfGwang <= 0 && oppGwang >= 3;
+}
+
+function phase1RewardShapingDelta({
+  runtime,
+  beforeState,
+  afterState,
+  controlActor,
+  done,
+  truncated,
+  isGoStopDecision,
+  selectedOption,
+  afterDiff
+}) {
+  if (Number(runtime?.phase || 0) !== 1 || runtime?.trainingMode !== "single_actor") {
+    return { total: 0.0, breakdown: {} };
+  }
+
+  const w = PHASE1_SHAPING;
+  const beforePlayer = beforeState?.players?.[controlActor];
+  const afterPlayer = afterState?.players?.[controlActor];
+  const opp = otherActor(controlActor);
+  const beforeOpp = beforeState?.players?.[opp];
+  const afterOpp = afterState?.players?.[opp];
+  if (!beforePlayer || !afterPlayer || !beforeOpp || !afterOpp) {
+    fail(
+      `phase1 shaping player resolve failed: seed=${runtime.seedText}, step=${runtime.actionCount}, actor=${controlActor}`
+    );
+  }
+
+  const breakdown = {};
+  let total = 0;
+  const add = (key, value) => {
+    const v = Number(value || 0);
+    if (!Number.isFinite(v) || Math.abs(v) <= 0) return;
+    breakdown[key] = Number((breakdown[key] || 0) + v);
+    total += v;
+  };
+
+  const beforeGodori = countCapturedComboTag(beforePlayer, "five", "fiveBirds");
+  const afterGodori = countCapturedComboTag(afterPlayer, "five", "fiveBirds");
+  if (beforeGodori < 3 && afterGodori >= 3) add("godori_complete", w.godoriComplete);
+
+  const beforeCheong = countCapturedComboTag(beforePlayer, "ribbon", "blueRibbons");
+  const afterCheong = countCapturedComboTag(afterPlayer, "ribbon", "blueRibbons");
+  if (beforeCheong < 3 && afterCheong >= 3) add("cheongdan_complete", w.cheongdanComplete);
+
+  const beforeHong = countCapturedComboTag(beforePlayer, "ribbon", "redRibbons");
+  const afterHong = countCapturedComboTag(afterPlayer, "ribbon", "redRibbons");
+  if (beforeHong < 3 && afterHong >= 3) add("hongdan_complete", w.hongdanComplete);
+
+  const beforeCho = countCapturedComboTag(beforePlayer, "ribbon", "plainRibbons");
+  const afterCho = countCapturedComboTag(afterPlayer, "ribbon", "plainRibbons");
+  if (beforeCho < 3 && afterCho >= 3) add("chodan_complete", w.chodanComplete);
+
+  const beforeGwang = uniqueCardCount(beforePlayer?.captured?.kwang || []);
+  const afterGwang = uniqueCardCount(afterPlayer?.captured?.kwang || []);
+  if (beforeGwang < 3 && afterGwang >= 3) add("gwang3_complete", w.gwang3Complete);
+  if (beforeGwang < 4 && afterGwang >= 4) add("gwang4_complete", w.gwang4Complete);
+  if (beforeGwang < 5 && afterGwang >= 5) add("gwang5_complete", w.gwang5Complete);
+
+  const eventWeights = {
+    jjob: w.jjob,
+    ppuk: w.ppuk,
+    yeonPpuk: w.yeonPpuk,
+    ddadak: w.ddadak,
+    jabbeok: w.jabbeok,
+    pansseul: w.pansseul,
+    shaking: w.shaking,
+    bomb: w.bomb
+  };
+  for (const [eventKey, weight] of Object.entries(eventWeights)) {
+    const delta = eventDeltaCount(beforePlayer, afterPlayer, eventKey);
+    if (delta > 0) add(eventKey, weight * delta);
+  }
+
+  if (isGoStopDecision && selectedOption === "go") {
+    const beforeScoreSelf = Number(calculateScore(beforePlayer, beforeOpp, beforeState?.ruleKey).total || 0);
+    const afterScoreSelf = Number(calculateScore(afterPlayer, afterOpp, afterState?.ruleKey).total || 0);
+    if (afterScoreSelf > beforeScoreSelf) add("go_score_up", w.goScoreUp);
+  }
+
+  const beforePi = Number(scoringPiCount(beforePlayer) || 0);
+  const afterPi = Number(scoringPiCount(afterPlayer) || 0);
+  const newDoublePi = countNewDoublePiCards(beforePlayer, afterPlayer);
+  if (newDoublePi > 0) add("double_pi_get", w.doublePiGet * newDoublePi);
+  if (beforePi < 10 && afterPi >= 10) add("pi10_reached", w.pi10Reached);
+
+  const beforePiRisk = isPiBakRiskState(beforePlayer, beforeOpp);
+  const afterPiRisk = isPiBakRiskState(afterPlayer, afterOpp);
+  if (!beforePiRisk && afterPiRisk) add("pibak_risk", w.piBakRisk);
+
+  const beforeGwangRisk = isGwangBakRiskState(beforePlayer, beforeOpp);
+  const afterGwangRisk = isGwangBakRiskState(afterPlayer, afterOpp);
+  if (!beforeGwangRisk && afterGwangRisk) add("gwangbak_risk", w.gwangBakRisk);
+
+  if (done && !truncated && runtime.controlGoDeclaredInEpisode) {
+    if (afterDiff > 0) add("go_win", w.goWin);
+    else if (afterDiff < 0) add("go_loss", w.goLoss);
+  }
+
+  if (done && !truncated && afterDiff < 0) {
+    const winnerKey = String(afterState?.result?.winner || "");
+    if (winnerKey === opp) {
+      const winnerScore = afterState?.result?.[winnerKey] || {};
+      const winnerBak = winnerScore?.bak || {};
+      if (winnerBak.pi) add("pibak_suffered", w.piBakSuffered);
+      if (winnerBak.gwang) add("gwangbak_suffered", w.gwangBakSuffered);
+      if (winnerBak.mongBak) add("mongbak_suffered", w.mongBakSuffered);
+    }
+  }
+
+  return { total, breakdown };
+}
+
 function buildObservation(state, controlActor, actionCtx) {
   const opp = otherActor(controlActor);
   const scoreSelf = calculateScore(state.players[controlActor], state.players[opp], state.ruleKey);
@@ -878,6 +1080,7 @@ function initEpisode(runtime) {
       runtime.currentOpponentPolicyProb = 0;
     }
     runtime.actionCount = 0;
+    runtime.controlGoDeclaredInEpisode = false;
     if (runtime.trainingMode === "single_actor") {
       runOpponentUntilControl(runtime, seedText);
     }
@@ -893,6 +1096,7 @@ function buildRuntime(cli) {
       : [];
   return {
     trainingMode: cli.trainingMode,
+    phase: cli.phase,
     seedBase: cli.seedBase,
     ruleKey: cli.ruleKey,
     controlActor: cli.controlActor || null,
@@ -906,7 +1110,6 @@ function buildRuntime(cli) {
     terminalWinBonus: cli.terminalWinBonus,
     terminalLossPenalty: cli.terminalLossPenalty,
     goActionBonus: cli.goActionBonus,
-    goStopPenalty: cli.goStopPenalty,
     firstTurnPolicy: cli.firstTurnPolicy,
     fixedFirstTurn: cli.fixedFirstTurn || "human",
     state: null,
@@ -914,7 +1117,8 @@ function buildRuntime(cli) {
     episodeIndex: 0,
     resetCount: 0,
     actionCount: 0,
-    obsDim: null
+    obsDim: null,
+    controlGoDeclaredInEpisode: false
   };
 }
 
@@ -1027,16 +1231,15 @@ function handleStep(runtime, payload) {
   let rewardOutcomeWinBonus = 0;
   let rewardOutcomeLossPenalty = 0;
   let rewardGoActionBonus = 0;
-  let rewardGoStopPenalty = 0;
+  let rewardPhase1ShapingTotal = 0;
+  let rewardPhase1ShapingBreakdown = {};
   const isGoStopDecision = actionCtx.decisionType === "option" && String(beforeState?.phase || "") === "go-stop";
   const selectedOption = actionCtx.decisionType === "option" ? String(candidate) : "";
   let reward = rewardGoldDelta;
   if (isGoStopDecision && selectedOption === "go") {
+    runtime.controlGoDeclaredInEpisode = true;
     rewardGoActionBonus = runtime.goActionBonus;
     reward += rewardGoActionBonus;
-  } else if (isGoStopDecision && selectedOption === "stop") {
-    rewardGoStopPenalty = runtime.goStopPenalty;
-    reward -= rewardGoStopPenalty;
   }
   if (done) {
     rewardTerminalBonus = afterDiff * runtime.terminalBonusScale;
@@ -1048,6 +1251,21 @@ function handleStep(runtime, payload) {
     reward += rewardOutcomeWinBonus;
     reward -= rewardOutcomeLossPenalty;
   }
+
+  const phase1Shaping = phase1RewardShapingDelta({
+    runtime,
+    beforeState,
+    afterState: runtime.state,
+    controlActor: actingActor,
+    done,
+    truncated,
+    isGoStopDecision,
+    selectedOption,
+    afterDiff
+  });
+  rewardPhase1ShapingTotal = Number(phase1Shaping.total || 0);
+  rewardPhase1ShapingBreakdown = phase1Shaping.breakdown || {};
+  reward += rewardPhase1ShapingTotal;
 
   let view = null;
   if (!done) {
@@ -1104,7 +1322,8 @@ function handleStep(runtime, payload) {
       reward_outcome_win_bonus: rewardOutcomeWinBonus,
       reward_outcome_loss_penalty: rewardOutcomeLossPenalty,
       reward_go_action_bonus: rewardGoActionBonus,
-      reward_go_stop_penalty: rewardGoStopPenalty,
+      reward_phase1_shaping_total: rewardPhase1ShapingTotal,
+      reward_phase1_shaping_breakdown: rewardPhase1ShapingBreakdown,
       go_stop_decision: isGoStopDecision,
       go_option_selected: selectedOption
     }

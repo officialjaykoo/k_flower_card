@@ -15,6 +15,10 @@
         },
         {
             "start_update":  501,
+            "opponent_policy":  "H-CL:0.375|H-J2:0.375|H-AntiCL:0.15|H-NEXg:0.10"
+        },
+        {
+            "start_update":  1001,
             "opponent_policy":  "H-CL:0.60|H-J2:0.15|H-AntiCL:0.15|H-NEXg:0.10"
         }
     ],
@@ -27,8 +31,7 @@
     "terminal_win_bonus":  1.0,
     "terminal_loss_penalty":  1.0,
     "go_action_bonus":  0.2,
-    "go_stop_penalty":  0.05,
-    "go_explore_prob":  0.20,
+    "go_explore_prob":  0.25,
     "env_workers":  6,
     "total_updates":  2000,
     "rollout_steps":  512,
@@ -41,13 +44,13 @@
     "learning_rate_final":  0.00005,
     "entropy_coef":  0.01,
     "value_coef":  0.5,
-    "value_clip_coef":  0.2,
+    "value_clip_coef":  0.0,
     "target_kl":  0.02,
     "max_grad_norm":  0.5,
     "catastrophic_loss_threshold":  -7000,
     "catastrophic_penalty_scale":  0.0002,
-    "early_stop_patience_updates":  200,
-    "early_stop_min_updates":  150,
+    "early_stop_patience_updates":  300,
+    "early_stop_min_updates":  200,
     "hidden_size":  256,
     "device":  "cpu",
     "log_every_updates":  20,
