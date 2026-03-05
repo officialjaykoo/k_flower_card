@@ -1,4 +1,5 @@
 ﻿// GO/STOP analyzer
+// Pipeline Stage: analysis utility (offline diagnostics from duel logs)
 // Fixed outputs:
 // 1) go_stop_summary.txt
 // 2) go_stop_param_suggestions.json
@@ -8,6 +9,19 @@
 // - Analyzer numbers are directional hints only.
 // - Final decisions must be validated by real match reruns (1000 games).
 // - If analyzer forecast and real rerun conflict, trust real rerun results.
+//
+// Execution Flow Map:
+// 1) parse inputs + load kibo/dataset
+// 2) aggregate GO/STOP stats and risk zones
+// 3) build parameter suggestions
+// 4) write summary text + suggestion JSON
+//
+// File Layout Map (top-down):
+// 1) CLI/IO helpers
+// 2) numeric/stat helpers
+// 3) kibo/dataset extraction helpers
+// 4) zone diagnostics + suggestion builders
+// 5) summary rendering + main pipeline
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -22,9 +36,9 @@ const DEFAULT_INPUT = {
   outRoot: null
 };
 
-// ---------------------------------------------------------------------------
-// CLI / IO helpers
-// ---------------------------------------------------------------------------
+// =============================================================================
+// Section 1. CLI / IO Helpers
+// =============================================================================
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -59,9 +73,9 @@ function readJsonl(path) {
     .map((line) => JSON.parse(line));
 }
 
-// ---------------------------------------------------------------------------
-// Numeric helpers
-// ---------------------------------------------------------------------------
+// =============================================================================
+// Section 2. Numeric / Statistical Helpers
+// =============================================================================
 function round(v, d = 3) {
   if (!Number.isFinite(v)) return 0;
   const s = 10 ** d;
@@ -109,9 +123,9 @@ function wilsonBounds(successes, n, z = 1.96) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Core metric helpers
-// ---------------------------------------------------------------------------
+// =============================================================================
+// Section 3. Core Metric Helpers
+// =============================================================================
 function calcStats(records) {
   const n = records.length;
   if (!n) {
@@ -164,9 +178,9 @@ function calcStats(records) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Kibo / dataset extraction helpers
-// ---------------------------------------------------------------------------
+// =============================================================================
+// Section 4. Kibo / Dataset Extraction Helpers
+// =============================================================================
 function buildPayoutMap(kiboList, actor) {
   const opp = actor === "ai" ? "human" : "ai";
   const out = new Map();
@@ -349,9 +363,9 @@ function summarizeThreatIndicators(records) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Zone diagnostics and impact estimation
-// ---------------------------------------------------------------------------
+// =============================================================================
+// Section 5. Zone Diagnostics + Impact Estimation
+// =============================================================================
 function zoneStats(records, key, label, fn, baseline) {
   const sub = records.filter(fn);
   const s = calcStats(sub);
@@ -889,9 +903,9 @@ function buildSuggestions(currentParams, referencedParamKeys, goRecs, stopRecs, 
   };
 }
 
-// ---------------------------------------------------------------------------
-// Report rendering
-// ---------------------------------------------------------------------------
+// =============================================================================
+// Section 6. Report Rendering
+// =============================================================================
 function buildSummaryText(payload) {
   const lines = [];
   lines.push("GO/STOP Analysis Summary");
@@ -1040,9 +1054,9 @@ function buildSummaryText(payload) {
   return `${lines.join("\n")}\n`;
 }
 
-// ---------------------------------------------------------------------------
-// Main pipeline
-// ---------------------------------------------------------------------------
+// =============================================================================
+// Section 7. Main Pipeline
+// =============================================================================
 const argv = parseArgs(process.argv.slice(2));
 if (argv.help) {
   console.log(`Usage:

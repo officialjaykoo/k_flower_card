@@ -4,12 +4,15 @@ from __future__ import annotations
 """
 Pipeline Stage: 1/3 (neat_train_worker_by_GPT.py -> neat_eval_worker_by_GPT.mjs -> phase_eval_by_GPT.ps1)
 
-Quick Read Map (top-down):
-1) parse_args()/main(): runtime/bootstrap and training orchestration
+Execution Flow Map:
+1) parse_args()/main(): runtime bootstrap and training orchestration
 2) LoggedParallelEvaluator: generation metrics + gate tracking
 3) eval_function(): per-genome node-worker evaluation call
-4) runtime/env bridge helpers: strict normalization + fail-fast
-5) legacy teacher-dataset options are hard-disabled at runtime normalization
+
+File Layout Map (top-down):
+1) runtime defaults + normalization + env bridge helpers
+2) logging/numeric utilities
+3) eval function + parallel evaluator + CLI entrypoint
 """
 
 import argparse
@@ -361,7 +364,7 @@ def _runtime_from_env_cached(force_reload: bool = False) -> Dict[str, object]:
 
 
 # =============================================================================
-# Section 6. Logging + Numeric Utilities
+# Section 4. Logging + Numeric Utilities
 # =============================================================================
 def _append_eval_failure_log(output_dir: str, record: dict) -> None:
     os.makedirs(output_dir, exist_ok=True)
@@ -501,7 +504,7 @@ def _select_opponent_policy(runtime: dict, seed_text: str, generation: int, geno
 
 
 # =============================================================================
-# Section 7. Single Genome Evaluation Worker
+# Section 5. Single Genome Evaluation Worker
 # - Builds a strict node command per genome.
 # - Returns fitness summary dict; failures are explicit and heavily penalized.
 # =============================================================================
@@ -649,7 +652,7 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
 
 
 # =============================================================================
-# Section 8. Parallel Evaluator + Gate Tracking
+# Section 6. Parallel Evaluator + Gate Tracking
 # - Aggregates generation-level metrics from per-genome evaluation results.
 # =============================================================================
 class LoggedParallelEvaluator:
@@ -1154,7 +1157,7 @@ class LoggedParallelEvaluator:
 
 
 # =============================================================================
-# Section 9. CLI + Config Bootstrap
+# Section 7. CLI + Config Bootstrap
 # =============================================================================
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="neat-python training runner for k_flower_card")
@@ -1357,7 +1360,7 @@ if neat is not None:
 
 
 # =============================================================================
-# Section 10. Entrypoint
+# Section 8. Entrypoint
 # - Loads runtime/config, prepares population, runs NEAT, writes summary artifacts.
 # =============================================================================
 def main() -> None:

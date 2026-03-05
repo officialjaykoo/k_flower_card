@@ -23,12 +23,18 @@ import { aiPlay } from "../src/ai/aiPlay.js";
 import { resolveBotPolicy } from "../src/ai/policies.js";
 
 // Pipeline Stage: 3/3 (neat_train.py -> neat_eval_worker.mjs -> model_duel_worker.mjs)
-// Quick Read Map (top-down):
+// Execution Flow Map:
 // 1) main()
 // 2) playSingleRound(): duel loop + decision callback
 // 3) featureVectorForCandidate(): dataset feature construction
 // 4) inferChosenCandidateFromTransition(): chosen-label reconstruction
-// 5) parseArgs()/state transition helpers
+//
+// File Layout Map (top-down):
+// 1) parseArgs()/spec/path helpers
+// 2) engine action + feature helpers
+// 3) chosen-candidate inference helpers
+// 4) round simulation + summary helpers
+// 5) main() entrypoint
 
 // =============================================================================
 // Section 1. CLI

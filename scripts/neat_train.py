@@ -4,12 +4,15 @@ from __future__ import annotations
 """
 Pipeline Stage: 1/3 (neat_train.py -> neat_eval_worker.mjs -> heuristic_duel_worker.mjs)
 
-Quick Read Map (top-down):
-1) main()
-2) LoggedParallelEvaluator
-3) eval_function()
-4) runtime load/env bridge helpers
-5) teacher dataset cache helpers
+Execution Flow Map:
+1) parse_args()/main(): runtime bootstrap + NEAT train loop
+2) LoggedParallelEvaluator: generation-level metrics and gate tracking
+3) eval_function(): per-genome worker evaluation call
+
+File Layout Map (top-down):
+1) runtime defaults + normalization + env bridge helpers
+2) teacher dataset normalization/cache helpers
+3) eval function + parallel evaluator + CLI entrypoint
 """
 
 import argparse

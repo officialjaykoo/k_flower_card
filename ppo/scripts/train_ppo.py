@@ -31,6 +31,10 @@ except Exception:
     sys.exit(1)
 
 
+# ------------------------------
+# Runtime schema / scoring knobs
+# ------------------------------
+
 REQUIRED_KEYS = [
     "format_version",
     "phase",
@@ -47,6 +51,9 @@ REQUIRED_KEYS = [
     "terminal_bonus_scale",
     "terminal_win_bonus",
     "terminal_loss_penalty",
+    "go_action_bonus",
+    "go_stop_penalty",
+    "go_explore_prob",
     "env_workers",
     "total_updates",
     "rollout_steps",
@@ -64,7 +71,6 @@ REQUIRED_KEYS = [
     "max_grad_norm",
     "catastrophic_loss_threshold",
     "catastrophic_penalty_scale",
-    "best_gold_tolerance",
     "early_stop_patience_updates",
     "early_stop_min_updates",
     "hidden_size",
@@ -74,10 +80,24 @@ REQUIRED_KEYS = [
     "output_dir",
 ]
 
+GO_ACTION_INDEX = 18  # ACTION_DIM=26, option index start(18), OPTION_ORDER[0] == "go"
+ROLLING_METRIC_GAMES = 1000
+MIN_METRIC_WINDOW_GAMES = 300
+BEST_CATA_FILTER = 0.27
+BEST_WIN_BASELINE = 0.30
+BEST_WIN_CLAMP = 0.10
+BEST_WIN_DEADZONE = 0.02
+BEST_WIN_TO_GOLD_SCALE = 35000.0
+BEST_SCORE_MARGIN = 150.0
+
 
 def fail(msg: str) -> None:
     raise RuntimeError(str(msg))
 
+
+# ------------------------------
+# Runtime parsing / validation
+# ------------------------------
 
 def read_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8-sig") as f:
@@ -133,6 +153,86 @@ def as_finite_float(cfg: Dict[str, Any], key: str) -> float:
     return n
 
 
+def parse_opponent_policy_schedule(cfg: Dict[str, Any], training_mode: str, default_policy: str) -> List[Dict[str, Any]]:
+    raw = cfg.get("opponent_policy_schedule", None)
+
+    if training_mode != "single_actor":
+        if raw is None:
+            return []
+        if isinstance(raw, list) and len(raw) <= 0:
+            return []
+        fail("opponent_policy_schedule is only allowed in single_actor mode")
+
+    if raw is None:
+        return [{"start_update": 1, "opponent_policy": default_policy}]
+
+    if not isinstance(raw, list) or len(raw) <= 0:
+        fail("opponent_policy_schedule must be a non-empty array")
+
+    out: List[Dict[str, Any]] = []
+    prev_start = 0
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict):
+            fail(f"opponent_policy_schedule[{idx}] must be object")
+
+        allowed = {"start_update", "opponent_policy"}
+        keys = set(item.keys())
+        extra = sorted(list(keys - allowed))
+        missing = sorted(list(allowed - keys))
+        if len(missing) > 0:
+            fail(f"opponent_policy_schedule[{idx}] missing keys: {missing}")
+        if len(extra) > 0:
+            fail(f"opponent_policy_schedule[{idx}] has unknown keys: {extra}")
+
+        start_raw = item.get("start_update")
+        try:
+            start_update = int(start_raw)
+        except Exception:
+            fail(f"opponent_policy_schedule[{idx}].start_update must be integer, got={start_raw}")
+        if start_update <= 0:
+            fail(f"opponent_policy_schedule[{idx}].start_update must be > 0, got={start_update}")
+        if start_update <= prev_start:
+            fail(
+                f"opponent_policy_schedule must be strictly increasing by start_update: "
+                f"index={idx}, start_update={start_update}, prev_start_update={prev_start}"
+            )
+
+        policy = str(item.get("opponent_policy", "")).strip()
+        if not policy:
+            fail(f"opponent_policy_schedule[{idx}].opponent_policy must be non-empty string")
+
+        out.append({"start_update": int(start_update), "opponent_policy": policy})
+        prev_start = start_update
+
+    if out[0]["start_update"] != 1:
+        fail(
+            "opponent_policy_schedule must start at update 1 "
+            f"(first start_update={out[0]['start_update']})"
+        )
+
+    return out
+
+
+def resolve_opponent_policy_for_update(schedule: List[Dict[str, Any]], update: int) -> tuple[str, int]:
+    if len(schedule) <= 0:
+        fail("opponent_policy_schedule is empty")
+    if int(update) <= 0:
+        fail(f"update must be > 0 for policy schedule, got={update}")
+
+    active_policy = ""
+    active_start = 0
+    for entry in schedule:
+        start_update = int(entry["start_update"])
+        if start_update > int(update):
+            break
+        active_policy = str(entry["opponent_policy"])
+        active_start = start_update
+
+    if not active_policy:
+        fail(f"no opponent policy resolved for update={update}")
+    return active_policy, active_start
+
+
 def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     require_keys(cfg, REQUIRED_KEYS, cfg_path)
     runtime: Dict[str, Any] = {}
@@ -158,6 +258,11 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     if runtime["training_mode"] == "single_actor":
         runtime["control_actor"] = as_non_empty_str(cfg, "control_actor").lower()
         runtime["opponent_policy"] = as_non_empty_str(cfg, "opponent_policy")
+        runtime["opponent_policy_schedule"] = parse_opponent_policy_schedule(
+            cfg=cfg,
+            training_mode=runtime["training_mode"],
+            default_policy=runtime["opponent_policy"],
+        )
         if runtime["control_actor"] not in ("human", "ai"):
             fail(f"invalid control_actor: {runtime['control_actor']}")
     else:
@@ -167,6 +272,11 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
             fail("control_actor must be empty in selfplay mode")
         if opponent_policy:
             fail("opponent_policy must be empty in selfplay mode")
+        runtime["opponent_policy_schedule"] = parse_opponent_policy_schedule(
+            cfg=cfg,
+            training_mode=runtime["training_mode"],
+            default_policy="",
+        )
 
     if runtime["first_turn_policy"] not in ("alternate", "fixed"):
         fail(f"invalid first_turn_policy: {runtime['first_turn_policy']}")
@@ -179,8 +289,13 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     runtime["terminal_bonus_scale"] = as_nonneg_float(cfg, "terminal_bonus_scale")
     runtime["terminal_win_bonus"] = as_nonneg_float(cfg, "terminal_win_bonus")
     runtime["terminal_loss_penalty"] = as_nonneg_float(cfg, "terminal_loss_penalty")
+    runtime["go_action_bonus"] = as_nonneg_float(cfg, "go_action_bonus")
+    runtime["go_stop_penalty"] = as_nonneg_float(cfg, "go_stop_penalty")
+    runtime["go_explore_prob"] = as_nonneg_float(cfg, "go_explore_prob")
     if abs(runtime["reward_scale"]) <= 0:
         fail("reward_scale must be non-zero")
+    if runtime["go_explore_prob"] > 1.0:
+        fail(f"go_explore_prob must be <= 1.0, got={runtime['go_explore_prob']}")
 
     runtime["env_workers"] = as_pos_int(cfg, "env_workers")
     runtime["total_updates"] = as_pos_int(cfg, "total_updates")
@@ -200,7 +315,6 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     runtime["max_grad_norm"] = as_nonneg_float(cfg, "max_grad_norm")
     runtime["catastrophic_loss_threshold"] = as_finite_float(cfg, "catastrophic_loss_threshold")
     runtime["catastrophic_penalty_scale"] = as_nonneg_float(cfg, "catastrophic_penalty_scale")
-    runtime["best_gold_tolerance"] = as_nonneg_float(cfg, "best_gold_tolerance")
     runtime["early_stop_patience_updates"] = as_pos_int(cfg, "early_stop_patience_updates")
     runtime["early_stop_min_updates"] = as_pos_int(cfg, "early_stop_min_updates")
     runtime["hidden_size"] = as_pos_int(cfg, "hidden_size")
@@ -240,6 +354,10 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
         runtime["resume_checkpoint"] = os.path.abspath(runtime["resume_checkpoint"])
     return runtime
 
+
+# ------------------------------
+# Bridge protocol + environment IO
+# ------------------------------
 
 @dataclass
 class EnvReply:
@@ -322,6 +440,10 @@ class BridgeEnv:
             str(runtime["terminal_win_bonus"]),
             "--terminal-loss-penalty",
             str(runtime["terminal_loss_penalty"]),
+            "--go-action-bonus",
+            str(runtime["go_action_bonus"]),
+            "--go-stop-penalty",
+            str(runtime["go_stop_penalty"]),
             "--first-turn-policy",
             runtime["first_turn_policy"],
             "--fixed-first-turn",
@@ -458,6 +580,10 @@ class BridgeEnv:
                 pass
 
 
+# ------------------------------
+# PPO model / tensor helpers
+# ------------------------------
+
 class PolicyValueNet(nn.Module):
     def __init__(self, obs_dim: int, action_dim: int, hidden_size: int):
         super().__init__()
@@ -504,6 +630,10 @@ def tensor_from_rows(rows: List[List[float]], dtype: torch.dtype, device: torch.
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
+
+# ------------------------------
+# Checkpoint / metric helpers
+# ------------------------------
 
 def load_resume_payload(path: str, device: torch.device) -> Dict[str, Any]:
     abs_path = os.path.abspath(path)
@@ -552,24 +682,6 @@ def save_checkpoint(
     torch.save(payload, path)
 
 
-def quantile(values: List[float], q: float) -> float:
-    if len(values) <= 0:
-        return 0.0
-    s = sorted(float(v) for v in values)
-    qn = max(0.0, min(1.0, float(q)))
-    idx = int(math.floor((len(s) - 1) * qn))
-    return float(s[idx])
-
-
-def tail_mean(values: List[float], ratio: float) -> float:
-    if len(values) <= 0:
-        return 0.0
-    r = max(0.01, min(1.0, float(ratio)))
-    s = sorted(float(v) for v in values)
-    n = max(1, int(math.ceil(len(s) * r)))
-    return float(sum(s[:n]) / n)
-
-
 def rate_at_or_below(values: List[float], threshold: float) -> float:
     if len(values) <= 0:
         return 0.0
@@ -588,25 +700,43 @@ def metric_as_float(metrics: Dict[str, Any], key: str, default: float) -> float:
         return float(default)
 
 
-def is_better_update(candidate: Dict[str, Any], best: Dict[str, Any], gold_tolerance: float) -> bool:
-    cand_gold = metric_as_float(candidate, "mean_final_gold_diff_50", -1e18)
-    best_gold = metric_as_float(best, "mean_final_gold_diff_50", -1e18)
-    tol = max(0.0, float(gold_tolerance))
+def _best_win_adjust(win_rate: float) -> float:
+    dw = max(-BEST_WIN_CLAMP, min(BEST_WIN_CLAMP, float(win_rate) - BEST_WIN_BASELINE))
+    if abs(dw) <= BEST_WIN_DEADZONE:
+        return 0.0
+    return float(BEST_WIN_TO_GOLD_SCALE * math.copysign(abs(dw) - BEST_WIN_DEADZONE, dw))
 
-    if cand_gold > best_gold + tol:
+
+def _best_score(metrics: Dict[str, Any]) -> float:
+    gold = metric_as_float(metrics, "mean_final_gold_diff_1000", -1e18)
+    win = metric_as_float(metrics, "win_rate_1000", 0.0)
+    return float(gold + _best_win_adjust(win))
+
+
+def is_better_update(candidate: Dict[str, Any], best: Dict[str, Any]) -> bool:
+    cand_cata = metric_as_float(candidate, "catastrophic_loss_rate_1000", 1.0)
+    best_cata = metric_as_float(best, "catastrophic_loss_rate_1000", 1.0)
+    cand_safe = cand_cata <= BEST_CATA_FILTER
+    best_safe = best_cata <= BEST_CATA_FILTER
+    if cand_safe and not best_safe:
         return True
-    if cand_gold < best_gold - tol:
+    if not cand_safe and best_safe:
         return False
 
-    cand_cata = metric_as_float(candidate, "catastrophic_loss_rate_50", 1.0)
-    best_cata = metric_as_float(best, "catastrophic_loss_rate_50", 1.0)
+    cand_score = _best_score(candidate)
+    best_score = _best_score(best)
+    if cand_score > best_score + BEST_SCORE_MARGIN:
+        return True
+    if cand_score < best_score - BEST_SCORE_MARGIN:
+        return False
+
     if cand_cata < best_cata - 1e-9:
         return True
     if cand_cata > best_cata + 1e-9:
         return False
 
-    cand_win = metric_as_float(candidate, "win_rate_50", 0.0)
-    best_win = metric_as_float(best, "win_rate_50", 0.0)
+    cand_win = metric_as_float(candidate, "win_rate_1000", 0.0)
+    best_win = metric_as_float(best, "win_rate_1000", 0.0)
     if cand_win > best_win + 1e-9:
         return True
     if cand_win < best_win - 1e-9:
@@ -615,13 +745,6 @@ def is_better_update(candidate: Dict[str, Any], best: Dict[str, Any], gold_toler
     cand_update = int(candidate.get("update", 0))
     best_update = int(best.get("update", 0))
     return cand_update < best_update
-
-
-def explained_variance(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
-    var_y = torch.var(y_true)
-    if float(var_y.item()) <= 1e-12:
-        return 0.0
-    return float((1.0 - torch.var(y_true - y_pred) / var_y).item())
 
 
 def train(
@@ -643,6 +766,15 @@ def train(
 
     device = torch.device(runtime["device"])
     num_envs = runtime["env_workers"]
+
+    active_opponent_policy = ""
+    active_policy_start_update = 0
+    if runtime["training_mode"] == "single_actor":
+        active_opponent_policy, active_policy_start_update = resolve_opponent_policy_for_update(
+            schedule=runtime["opponent_policy_schedule"],
+            update=1,
+        )
+        runtime["opponent_policy"] = active_opponent_policy
 
     envs: List[BridgeEnv] = [BridgeEnv(runtime, i, repo_root) for i in range(num_envs)]
     try:
@@ -671,6 +803,7 @@ def train(
         global_steps = 0
         finished_episode_offset = 0
         train_elapsed_offset_sec = 0.0
+        opponent_episode_counts_total: Dict[str, int] = {}
         if resume_payload is not None:
             ck_path = str(resume_payload.get("_resume_path", ""))
             ck_update = int(resume_payload.get("_resume_update", 0))
@@ -740,6 +873,16 @@ def train(
                 train_elapsed_offset_sec = max(0.0, float(ck_metrics.get("elapsed_sec", 0.0)))
             except Exception:
                 train_elapsed_offset_sec = 0.0
+            raw_opp_total = ck_metrics.get("opponent_episode_counts_total", {})
+            if isinstance(raw_opp_total, dict):
+                for k, v in raw_opp_total.items():
+                    key = str(k).strip()
+                    if not key:
+                        continue
+                    try:
+                        opponent_episode_counts_total[key] = max(0, int(v))
+                    except Exception:
+                        continue
             resume_update = ck_update
             print(
                 json.dumps(
@@ -759,10 +902,17 @@ def train(
 
         episode_returns = [0.0 for _ in range(num_envs)]
         episode_lengths = [0 for _ in range(num_envs)]
+        episode_go_opportunities = [0 for _ in range(num_envs)]
+        episode_go_attempts = [0 for _ in range(num_envs)]
+        episode_go_not_selected = [0 for _ in range(num_envs)]
         completed_returns: List[float] = []
         completed_lengths: List[int] = []
         completed_gold_diff: List[float] = []
-        opponent_episode_counts_total: Dict[str, int] = {}
+        completed_go_opportunity_games: List[int] = []
+        completed_go_games: List[int] = []
+        completed_go_attempts: List[int] = []
+        completed_go_not_selected: List[int] = []
+        completed_go_failures: List[int] = []
         global_episode_index = num_envs
 
         train_start = time.time()
@@ -775,7 +925,7 @@ def train(
             try:
                 with open(best_metrics_path, "r", encoding="utf-8-sig") as f:
                     best_obj = json.load(f)
-                if isinstance(best_obj, dict) and "mean_final_gold_diff_50" in best_obj:
+                if isinstance(best_obj, dict) and "mean_final_gold_diff_1000" in best_obj:
                     best_metrics = dict(best_obj)
                     best_update = int(best_metrics.get("update", 0))
             except Exception as err:
@@ -783,7 +933,7 @@ def train(
 
         if resume_payload is not None:
             ck_metrics = resume_payload.get("metrics") or {}
-            if best_metrics is None and "mean_final_gold_diff_50" in ck_metrics:
+            if best_metrics is None and "mean_final_gold_diff_1000" in ck_metrics:
                 best_metrics = dict(ck_metrics)
                 try:
                     best_update = int(best_metrics.get("update", resume_update))
@@ -791,7 +941,91 @@ def train(
                     best_update = resume_update
         updates_since_best = max(0, resume_update - best_update)
 
+        if runtime["training_mode"] == "single_actor":
+            start_update = int(resume_update + 1)
+            target_policy, target_start = resolve_opponent_policy_for_update(
+                schedule=runtime["opponent_policy_schedule"],
+                update=start_update,
+            )
+            if target_policy != active_opponent_policy:
+                for env in envs:
+                    env.close()
+                runtime["opponent_policy"] = target_policy
+                envs = [BridgeEnv(runtime, i, repo_root) for i in range(num_envs)]
+                reset_replies = [env.reset(i) for i, env in enumerate(envs)]
+                for idx, r in enumerate(reset_replies):
+                    validate_env_reply_shape(
+                        r,
+                        obs_dim=obs_dim,
+                        action_dim=action_dim,
+                        worker_id=idx,
+                        stage="reset_schedule_init",
+                        allow_empty_mask=False,
+                    )
+                obs_rows = [r.obs for r in reset_replies]
+                mask_rows = [r.action_mask for r in reset_replies]
+                next_obs = tensor_from_rows(obs_rows, dtype=torch.float32, device=device)
+                next_mask = tensor_from_rows(mask_rows, dtype=torch.float32, device=device)
+                episode_returns = [0.0 for _ in range(num_envs)]
+                episode_lengths = [0 for _ in range(num_envs)]
+                episode_go_opportunities = [0 for _ in range(num_envs)]
+                episode_go_attempts = [0 for _ in range(num_envs)]
+                episode_go_not_selected = [0 for _ in range(num_envs)]
+                global_episode_index = num_envs
+                active_opponent_policy = target_policy
+                active_policy_start_update = int(target_start)
+            else:
+                active_policy_start_update = int(target_start)
+
         for update in range(resume_update + 1, runtime["total_updates"] + 1):
+            if runtime["training_mode"] == "single_actor":
+                target_policy, target_start = resolve_opponent_policy_for_update(
+                    schedule=runtime["opponent_policy_schedule"],
+                    update=update,
+                )
+                if target_policy != active_opponent_policy:
+                    prev_policy = active_opponent_policy
+                    for env in envs:
+                        env.close()
+                    runtime["opponent_policy"] = target_policy
+                    envs = [BridgeEnv(runtime, i, repo_root) for i in range(num_envs)]
+                    reset_replies = [env.reset(global_episode_index + i) for i, env in enumerate(envs)]
+                    for idx, r in enumerate(reset_replies):
+                        validate_env_reply_shape(
+                            r,
+                            obs_dim=obs_dim,
+                            action_dim=action_dim,
+                            worker_id=idx,
+                            stage="reset_policy_switch",
+                            allow_empty_mask=False,
+                        )
+                    obs_rows = [r.obs for r in reset_replies]
+                    mask_rows = [r.action_mask for r in reset_replies]
+                    next_obs = tensor_from_rows(obs_rows, dtype=torch.float32, device=device)
+                    next_mask = tensor_from_rows(mask_rows, dtype=torch.float32, device=device)
+                    episode_returns = [0.0 for _ in range(num_envs)]
+                    episode_lengths = [0 for _ in range(num_envs)]
+                    episode_go_opportunities = [0 for _ in range(num_envs)]
+                    episode_go_attempts = [0 for _ in range(num_envs)]
+                    episode_go_not_selected = [0 for _ in range(num_envs)]
+                    global_episode_index += num_envs
+                    active_opponent_policy = target_policy
+                    active_policy_start_update = int(target_start)
+                    print(
+                        json.dumps(
+                            {
+                                "type": "ppo_opponent_policy_switch",
+                                "update": update,
+                                "from_policy": prev_policy,
+                                "to_policy": target_policy,
+                                "stage_start_update": int(target_start),
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                else:
+                    active_policy_start_update = int(target_start)
+
             if runtime["total_updates"] <= 1:
                 lr_now = float(runtime["learning_rate_final"])
             else:
@@ -800,6 +1034,7 @@ def train(
             for pg in optimizer.param_groups:
                 pg["lr"] = lr_now
 
+            # 1) Rollout buffers for this update.
             rollout_obs: List[torch.Tensor] = []
             rollout_masks: List[torch.Tensor] = []
             rollout_actions: List[torch.Tensor] = []
@@ -807,11 +1042,8 @@ def train(
             rollout_values: List[torch.Tensor] = []
             rollout_rewards: List[torch.Tensor] = []
             rollout_dones: List[torch.Tensor] = []
-            update_cat_penalty_total = 0.0
-            update_cat_event_count = 0
             opponent_episode_counts_update: Dict[str, int] = {}
 
-            update_begin = time.time()
             for _ in range(runtime["rollout_steps"]):
                 rollout_obs.append(next_obs.detach().clone())
                 rollout_masks.append(next_mask.detach().clone())
@@ -819,7 +1051,31 @@ def train(
                 with torch.no_grad():
                     logits, value = model(next_obs)
                     dist = masked_categorical(logits, next_mask)
-                    actions = dist.sample()
+                    sampled_actions = dist.sample()
+
+                action_list = [int(x) for x in sampled_actions.detach().cpu().tolist()]
+                for env_idx in range(num_envs):
+                    go_mask_raw = float(next_mask[env_idx, GO_ACTION_INDEX].item())
+                    go_mask = int(go_mask_raw)
+                    if go_mask not in (0, 1):
+                        fail(
+                            f"invalid go action mask value: worker={env_idx}, update={update}, "
+                            f"step={global_steps}, value={go_mask_raw}"
+                        )
+                    if go_mask != 1:
+                        continue
+                    episode_go_opportunities[env_idx] += 1
+                    if action_list[env_idx] == GO_ACTION_INDEX:
+                        episode_go_attempts[env_idx] += 1
+                        continue
+                    if random.random() < runtime["go_explore_prob"]:
+                        action_list[env_idx] = GO_ACTION_INDEX
+                        episode_go_attempts[env_idx] += 1
+                    else:
+                        episode_go_not_selected[env_idx] += 1
+
+                actions = torch.tensor(action_list, dtype=torch.int64, device=device)
+                with torch.no_grad():
                     logprob = dist.log_prob(actions)
 
                 rollout_actions.append(actions.detach().clone())
@@ -831,7 +1087,6 @@ def train(
                 next_obs_rows: List[List[float]] = []
                 next_mask_rows: List[List[float]] = []
 
-                action_list = actions.detach().cpu().tolist()
                 for env_idx, env in enumerate(envs):
                     reply = env.step(int(action_list[env_idx]))
                     validate_env_reply_shape(
@@ -850,8 +1105,6 @@ def train(
                             cat_gap = runtime["catastrophic_loss_threshold"] - final_gold_diff
                             cat_penalty = cat_gap * runtime["catastrophic_penalty_scale"]
                             reward -= cat_penalty
-                            update_cat_penalty_total += float(cat_penalty)
-                            update_cat_event_count += 1
 
                     episode_returns[env_idx] += reward
                     episode_lengths[env_idx] += 1
@@ -860,7 +1113,19 @@ def train(
                     if done:
                         completed_returns.append(episode_returns[env_idx])
                         completed_lengths.append(episode_lengths[env_idx])
-                        completed_gold_diff.append(float(reply.info.get("final_gold_diff", 0.0)))
+                        final_gold_diff_done = float(reply.info.get("final_gold_diff", 0.0))
+                        completed_gold_diff.append(final_gold_diff_done)
+                        go_attempts_ep = int(episode_go_attempts[env_idx])
+                        go_opportunities_ep = int(episode_go_opportunities[env_idx])
+                        go_not_selected_ep = int(episode_go_not_selected[env_idx])
+                        go_game = 1 if go_attempts_ep > 0 else 0
+                        go_opportunity_game = 1 if go_opportunities_ep > 0 else 0
+                        go_failure = 1 if (go_game == 1 and final_gold_diff_done < 0.0) else 0
+                        completed_go_attempts.append(go_attempts_ep)
+                        completed_go_not_selected.append(go_not_selected_ep)
+                        completed_go_games.append(go_game)
+                        completed_go_opportunity_games.append(go_opportunity_game)
+                        completed_go_failures.append(go_failure)
                         if runtime["training_mode"] == "single_actor":
                             opp_policy = str(reply.info.get("opponent_policy", "")).strip()
                             if not opp_policy:
@@ -876,6 +1141,9 @@ def train(
                             )
                         episode_returns[env_idx] = 0.0
                         episode_lengths[env_idx] = 0
+                        episode_go_opportunities[env_idx] = 0
+                        episode_go_attempts[env_idx] = 0
+                        episode_go_not_selected[env_idx] = 0
 
                         reset_reply = env.reset(global_episode_index)
                         validate_env_reply_shape(
@@ -902,6 +1170,7 @@ def train(
                 next_obs = tensor_from_rows(next_obs_rows, dtype=torch.float32, device=device)
                 next_mask = tensor_from_rows(next_mask_rows, dtype=torch.float32, device=device)
 
+            # 2) Build batch tensors + GAE/returns.
             with torch.no_grad():
                 _, next_value = model(next_obs)
                 next_value = next_value.squeeze(-1)
@@ -947,18 +1216,14 @@ def train(
             if mb_size <= 0 or mb_size > batch_size:
                 fail(f"invalid minibatch size: {mb_size} (batch_size={batch_size})")
 
-            last_policy_loss = 0.0
-            last_value_loss = 0.0
-            last_entropy = 0.0
             last_approx_kl = 0.0
             approx_kl_sum = 0.0
             approx_kl_count = 0
-            epochs_ran = 0
             early_stop_kl = False
 
+            # 3) PPO optimization epochs.
             model.train()
-            for epoch_idx in range(runtime["ppo_epochs"]):
-                epochs_ran = epoch_idx + 1
+            for _ in range(runtime["ppo_epochs"]):
                 indices = torch.randperm(batch_size, device=device)
                 for start in range(0, batch_size, mb_size):
                     end = min(start + mb_size, batch_size)
@@ -1003,9 +1268,6 @@ def train(
                     optimizer.step()
 
                     with torch.no_grad():
-                        last_policy_loss = float(policy_loss.item())
-                        last_value_loss = float(value_loss.item())
-                        last_entropy = float(entropy.item())
                         approx_kl_val = float((b_old_logprob[mb_idx] - new_logprob).mean().item())
                         last_approx_kl = approx_kl_val
                         approx_kl_sum += approx_kl_val
@@ -1019,54 +1281,48 @@ def train(
             if approx_kl_count > 0:
                 last_approx_kl = float(approx_kl_sum / approx_kl_count)
 
-            with torch.no_grad():
-                _, predicted_values_post = model(b_obs)
-                ev = explained_variance(b_returns, predicted_values_post.squeeze(-1))
-
-            wall = max(1e-6, time.time() - update_begin)
-            fps = int((runtime["rollout_steps"] * num_envs) / wall)
-
-            mean_return = float(sum(completed_returns[-50:]) / max(1, len(completed_returns[-50:])))
-            mean_len = float(sum(completed_lengths[-50:]) / max(1, len(completed_lengths[-50:])))
-            mean_gold_diff = float(sum(completed_gold_diff[-50:]) / max(1, len(completed_gold_diff[-50:])))
-            window_gold_diff = completed_gold_diff[-50:]
-            wins_50 = sum(1 for v in window_gold_diff if float(v) > 0)
-            losses_50 = sum(1 for v in window_gold_diff if float(v) < 0)
-            draws_50 = len(window_gold_diff) - wins_50 - losses_50
-            denom_50 = max(1, len(window_gold_diff))
-            p10_gold_diff = quantile(window_gold_diff, 0.1)
-            cvar10_gold_diff = tail_mean(window_gold_diff, 0.1)
-            catastrophic_rate_50 = rate_at_or_below(window_gold_diff, runtime["catastrophic_loss_threshold"])
+            # 4) Rolling metrics over latest N finished games.
+            window_gold_diff = completed_gold_diff[-ROLLING_METRIC_GAMES:]
+            mean_gold_diff = float(sum(window_gold_diff) / max(1, len(window_gold_diff)))
+            wins_1000 = sum(1 for v in window_gold_diff if float(v) > 0)
+            denom_1000 = max(1, len(window_gold_diff))
+            catastrophic_rate_1000 = rate_at_or_below(window_gold_diff, runtime["catastrophic_loss_threshold"])
+            window_go_opportunity_games = completed_go_opportunity_games[-ROLLING_METRIC_GAMES:]
+            window_go_games = completed_go_games[-ROLLING_METRIC_GAMES:]
+            window_go_attempts = completed_go_attempts[-ROLLING_METRIC_GAMES:]
+            window_go_not_selected = completed_go_not_selected[-ROLLING_METRIC_GAMES:]
+            window_go_failures = completed_go_failures[-ROLLING_METRIC_GAMES:]
+            go_opportunity_games = int(sum(window_go_opportunity_games))
+            go_games = int(sum(window_go_games))
+            go_attempts = int(sum(window_go_attempts))
+            go_not_selected = int(sum(window_go_not_selected))
+            go_failures = int(sum(window_go_failures))
+            episodes_finished_total = int(finished_episode_offset + len(completed_returns))
+            metric_window_games = len(window_gold_diff)
+            best_eval_ready = metric_window_games >= MIN_METRIC_WINDOW_GAMES
 
             metrics = {
                 "update": update,
                 "global_steps": global_steps,
-                "episodes_finished": finished_episode_offset + len(completed_returns),
-                "fps": fps,
-                "policy_loss": last_policy_loss,
-                "value_loss": last_value_loss,
-                "entropy": last_entropy,
-                "learning_rate": lr_now,
-                "learning_rate_final": runtime["learning_rate_final"],
+                "episodes_finished": episodes_finished_total,
+                "elapsed_sec": train_elapsed_offset_sec + (time.time() - train_start),
+                "mean_final_gold_diff_1000": mean_gold_diff,
+                "win_rate_1000": float(wins_1000 / denom_1000),
+                "catastrophic_loss_rate_1000": catastrophic_rate_1000,
+                "metric_window_games": metric_window_games,
+                "best_update_so_far": int(best_update),
+                "updates_since_best": int(updates_since_best),
+                "early_stop_patience_triggered": False,
+                "go_opportunity_games": go_opportunity_games,
+                "go_games": go_games,
+                "go_attempts": go_attempts,
+                "go_not_selected": go_not_selected,
+                "go_failures": go_failures,
                 "approx_kl": last_approx_kl,
-                "target_kl": runtime["target_kl"],
-                "early_stop_kl": early_stop_kl,
-                "ppo_epochs_ran": epochs_ran,
-                "explained_variance": ev,
-                "mean_return_50": mean_return,
-                "mean_ep_len_50": mean_len,
-                "mean_final_gold_diff_50": mean_gold_diff,
-                "win_rate_50": float(wins_50 / denom_50),
-                "loss_rate_50": float(losses_50 / denom_50),
-                "draw_rate_50": float(draws_50 / denom_50),
-                "p10_final_gold_diff_50": p10_gold_diff,
-                "cvar10_final_gold_diff_50": cvar10_gold_diff,
-                "catastrophic_loss_threshold": runtime["catastrophic_loss_threshold"],
-                "catastrophic_loss_rate_50": catastrophic_rate_50,
-                "catastrophic_penalty_scale": runtime["catastrophic_penalty_scale"],
-                "catastrophic_penalty_total_update": update_cat_penalty_total,
-                "catastrophic_event_count_update": update_cat_event_count,
-                "value_clip_coef": runtime["value_clip_coef"],
+                "active_opponent_policy": active_opponent_policy if runtime["training_mode"] == "single_actor" else "",
+                "active_opponent_policy_stage_start_update": int(active_policy_start_update)
+                if runtime["training_mode"] == "single_actor"
+                else 0,
                 "opponent_episode_counts_update": {
                     k: int(opponent_episode_counts_update[k])
                     for k in sorted(opponent_episode_counts_update.keys())
@@ -1075,39 +1331,29 @@ def train(
                     k: int(opponent_episode_counts_total[k])
                     for k in sorted(opponent_episode_counts_total.keys())
                 },
-                "elapsed_sec": train_elapsed_offset_sec + (time.time() - train_start),
             }
 
+            # 5) Best-update tracking + early-stop gate.
             is_best_update = False
-            if best_metrics is None or is_better_update(
-                candidate=metrics,
-                best=best_metrics,
-                gold_tolerance=runtime["best_gold_tolerance"],
-            ):
-                best_metrics = dict(metrics)
-                best_update = int(update)
-                updates_since_best = 0
-                is_best_update = True
-            else:
-                updates_since_best += 1
+            if best_eval_ready:
+                if best_metrics is None or is_better_update(candidate=metrics, best=best_metrics):
+                    best_metrics = dict(metrics)
+                    best_update = int(update)
+                    updates_since_best = 0
+                    is_best_update = True
+                else:
+                    updates_since_best += 1
 
-            metrics["is_best_update"] = is_best_update
             metrics["best_update_so_far"] = int(best_update)
-            metrics["best_mean_final_gold_diff_50_so_far"] = metric_as_float(
-                best_metrics or {},
-                "mean_final_gold_diff_50",
-                metrics["mean_final_gold_diff_50"],
-            )
             metrics["updates_since_best"] = int(updates_since_best)
-            metrics["best_gold_tolerance"] = runtime["best_gold_tolerance"]
 
             stop_by_patience = (
+                best_eval_ready
+                and
                 update >= runtime["early_stop_min_updates"]
                 and updates_since_best >= runtime["early_stop_patience_updates"]
             )
             metrics["early_stop_patience_triggered"] = bool(stop_by_patience)
-            metrics["early_stop_patience_updates"] = runtime["early_stop_patience_updates"]
-            metrics["early_stop_min_updates"] = runtime["early_stop_min_updates"]
 
             if update == 1 or update % runtime["log_every_updates"] == 0 or update == runtime["total_updates"]:
                 print(
@@ -1170,6 +1416,7 @@ def train(
                     json.dump(metrics, f, ensure_ascii=False, indent=2)
 
             if stop_by_patience:
+                best_mean_gold = metric_as_float(best_metrics or {}, "mean_final_gold_diff_1000", metrics["mean_final_gold_diff_1000"])
                 print(
                     json.dumps(
                         {
@@ -1178,11 +1425,8 @@ def train(
                             "update": update,
                             "best_update": best_update,
                             "updates_since_best": updates_since_best,
-                            "best_mean_final_gold_diff_50": metric_as_float(
-                                best_metrics or {},
-                                "mean_final_gold_diff_50",
-                                metrics["mean_final_gold_diff_50"],
-                            ),
+                            "best_mean_final_gold_diff_1000": best_mean_gold,
+                            "best_score": _best_score(best_metrics or metrics),
                             "patience_updates": runtime["early_stop_patience_updates"],
                             "min_updates": runtime["early_stop_min_updates"],
                         },
@@ -1195,6 +1439,10 @@ def train(
         for env in envs:
             env.close()
 
+
+# ------------------------------
+# CLI entrypoint
+# ------------------------------
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Masked PPO trainer for Matgo")
@@ -1218,6 +1466,24 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional resume checkpoint path (overrides runtime resume_checkpoint)",
     )
+    parser.add_argument(
+        "--total-updates",
+        type=int,
+        default=None,
+        help="Optional override for runtime total_updates (>0)",
+    )
+    parser.add_argument(
+        "--log-every-updates",
+        type=int,
+        default=None,
+        help="Optional override for runtime log_every_updates (>0)",
+    )
+    parser.add_argument(
+        "--save-every-updates",
+        type=int,
+        default=None,
+        help="Optional override for runtime save_every_updates (>0)",
+    )
     return parser.parse_args()
 
 
@@ -1233,6 +1499,24 @@ def main() -> None:
 
     if str(args.seed).strip():
         runtime["seed"] = str(args.seed).strip()
+
+    if args.total_updates is not None:
+        if int(args.total_updates) <= 0:
+            fail(f"--total-updates must be > 0, got={args.total_updates}")
+        runtime["total_updates"] = int(args.total_updates)
+    if args.log_every_updates is not None:
+        if int(args.log_every_updates) <= 0:
+            fail(f"--log-every-updates must be > 0, got={args.log_every_updates}")
+        runtime["log_every_updates"] = int(args.log_every_updates)
+    if args.save_every_updates is not None:
+        if int(args.save_every_updates) <= 0:
+            fail(f"--save-every-updates must be > 0, got={args.save_every_updates}")
+        runtime["save_every_updates"] = int(args.save_every_updates)
+    if runtime["early_stop_min_updates"] > runtime["total_updates"]:
+        fail(
+            "early_stop_min_updates must be <= total_updates "
+            f"({runtime['early_stop_min_updates']} > {runtime['total_updates']})"
+        )
 
     resume_path = str(args.resume_checkpoint).strip() or str(runtime.get("resume_checkpoint", "")).strip()
     phase_raw = str(runtime.get("phase", "")).strip()

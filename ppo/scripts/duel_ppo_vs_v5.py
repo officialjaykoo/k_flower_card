@@ -5,6 +5,18 @@ from __future__ import annotations
 duel_ppo_vs_v5.py
 - Evaluate PPO checkpoint vs heuristic v5(H-CL) with multi-worker bridge env.
 - Strict runtime config parsing + fail-fast errors with context.
+
+Execution Flow Map:
+1) parse_args()/main(): runtime bootstrap + override processing
+2) load_model(): checkpoint load and shape validation
+3) run_block(): multi-worker duel rollout for one fixed seat
+4) summarize_block(): aggregate duel metrics
+
+File Layout Map (top-down):
+1) runtime parsing/normalization helpers
+2) bridge env + model inference helpers
+3) duel block runner + summary aggregation
+4) CLI entrypoint
 """
 
 import argparse
@@ -30,6 +42,10 @@ except Exception:
     sys.exit(1)
 
 
+# ------------------------------
+# Runtime schema / constants
+# ------------------------------
+
 REQUIRED_KEYS = [
     "format_version",
     "seed",
@@ -51,15 +67,25 @@ REQUIRED_KEYS = [
     "terminal_bonus_scale",
     "terminal_win_bonus",
     "terminal_loss_penalty",
+    "go_action_bonus",
+    "go_stop_penalty",
     "catastrophic_loss_threshold",
     "device",
     "result_out",
 ]
 
+PLAY_SLOTS = 10
+MATCH_SLOTS = 8
+GO_ACTION_INDEX = PLAY_SLOTS + MATCH_SLOTS  # OPTION_ORDER[0] == "go" in ppo_env_bridge.mjs
+
 
 def fail(msg: str) -> None:
     raise RuntimeError(str(msg))
 
+
+# ------------------------------
+# Runtime parsing / validation
+# ------------------------------
 
 def read_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8-sig") as f:
@@ -182,6 +208,8 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     rt["terminal_bonus_scale"] = as_finite_float(cfg, "terminal_bonus_scale")
     rt["terminal_win_bonus"] = as_finite_float(cfg, "terminal_win_bonus")
     rt["terminal_loss_penalty"] = as_finite_float(cfg, "terminal_loss_penalty")
+    rt["go_action_bonus"] = as_finite_float(cfg, "go_action_bonus")
+    rt["go_stop_penalty"] = as_finite_float(cfg, "go_stop_penalty")
     rt["catastrophic_loss_threshold"] = as_finite_float(cfg, "catastrophic_loss_threshold")
     rt["device"] = as_non_empty_str(cfg, "device")
     rt["result_out"] = as_non_empty_str(cfg, "result_out")
@@ -204,6 +232,10 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
         fail("terminal_win_bonus must be >= 0")
     if rt["terminal_loss_penalty"] < 0:
         fail("terminal_loss_penalty must be >= 0")
+    if rt["go_action_bonus"] < 0:
+        fail("go_action_bonus must be >= 0")
+    if rt["go_stop_penalty"] < 0:
+        fail("go_stop_penalty must be >= 0")
 
     bridge_abs = os.path.abspath(rt["env_bridge_script"])
     if not os.path.exists(bridge_abs):
@@ -220,12 +252,17 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     return rt
 
 
+# ------------------------------
+# Bridge protocol + model helpers
+# ------------------------------
+
 @dataclass
 class EnvReply:
     obs: List[float]
     action_mask: List[int]
     reward: float
     done: bool
+    truncated: bool
     info: Dict[str, Any]
 
 
@@ -236,6 +273,10 @@ class SlotState:
     episode_id: int
     step_count: int
     seed_tag: str
+    go_attempt_count: int
+    go_attempted: bool
+    go_opportunity_count: int
+    go_opportunity_seen: bool
 
 
 class BridgeEnv:
@@ -269,6 +310,10 @@ class BridgeEnv:
             str(runtime["terminal_win_bonus"]),
             "--terminal-loss-penalty",
             str(runtime["terminal_loss_penalty"]),
+            "--go-action-bonus",
+            str(runtime["go_action_bonus"]),
+            "--go-stop-penalty",
+            str(runtime["go_stop_penalty"]),
             "--first-turn-policy",
             runtime["first_turn_policy"],
             "--fixed-first-turn",
@@ -338,7 +383,7 @@ class BridgeEnv:
         info = resp.get("info") or {}
         if not isinstance(obs, list) or not isinstance(mask, list):
             fail(f"invalid reset payload: actor={self.control_actor}, worker={self.worker_id}")
-        return EnvReply(obs=obs, action_mask=mask, reward=0.0, done=False, info=info)
+        return EnvReply(obs=obs, action_mask=mask, reward=0.0, done=False, truncated=False, info=info)
 
     def step(self, action: int) -> EnvReply:
         resp = self._request({"cmd": "step", "action": int(action)})
@@ -346,12 +391,13 @@ class BridgeEnv:
         mask = resp.get("action_mask")
         reward = float(resp.get("reward", 0.0))
         done = bool(resp.get("done", False))
+        truncated = bool(resp.get("truncated", False))
         info = resp.get("info") or {}
         if not isinstance(obs, list) or not isinstance(mask, list):
             fail(f"invalid step payload: actor={self.control_actor}, worker={self.worker_id}")
         if not math.isfinite(reward):
             fail(f"non-finite reward: actor={self.control_actor}, worker={self.worker_id}, reward={reward}")
-        return EnvReply(obs=obs, action_mask=mask, reward=reward, done=done, info=info)
+        return EnvReply(obs=obs, action_mask=mask, reward=reward, done=done, truncated=truncated, info=info)
 
     def close(self) -> None:
         try:
@@ -433,14 +479,36 @@ def select_actions(
     return [int(x) for x in acts.cpu().tolist()]
 
 
+def is_go_legal(action_mask: List[int]) -> bool:
+    if len(action_mask) <= GO_ACTION_INDEX:
+        fail(
+            f"action_mask too short for GO index check: len={len(action_mask)}, go_index={GO_ACTION_INDEX}"
+        )
+    raw = action_mask[GO_ACTION_INDEX]
+    try:
+        v = int(raw)
+    except Exception:
+        fail(f"GO action mask value is not int-like: index={GO_ACTION_INDEX}, value={raw}")
+    if v not in (0, 1):
+        fail(f"GO action mask value must be 0 or 1: index={GO_ACTION_INDEX}, value={v}")
+    return v == 1
+
+
 def summarize_block(results: List[Dict[str, Any]], catastrophic_threshold: float) -> Dict[str, Any]:
     diffs = [float(r["gold_diff"]) for r in results]
     wins = sum(1 for v in diffs if v > 0)
     losses = sum(1 for v in diffs if v < 0)
     draws = len(diffs) - wins - losses
+    truncated_games = sum(1 for r in results if bool(r.get("truncated", False)))
+    go_attempts = sum(int(r.get("go_attempts", 0)) for r in results)
+    go_attempt_games = sum(1 for r in results if bool(r.get("go_attempted", False)))
+    go_failures = sum(1 for r in results if bool(r.get("go_failure", False)))
+    go_opportunities = sum(int(r.get("go_opportunities", 0)) for r in results)
+    go_opportunity_games = sum(1 for r in results if bool(r.get("go_opportunity_game", False)))
     wr = float(wins / len(diffs)) if diffs else 0.0
     lr = float(losses / len(diffs)) if diffs else 0.0
     dr = float(draws / len(diffs)) if diffs else 0.0
+    go_failure_rate = float(go_failures / go_attempt_games) if go_attempt_games > 0 else 0.0
     return {
         "games": len(diffs),
         "wins": wins,
@@ -449,6 +517,7 @@ def summarize_block(results: List[Dict[str, Any]], catastrophic_threshold: float
         "win_rate": wr,
         "loss_rate": lr,
         "draw_rate": dr,
+        "truncated_games": int(truncated_games),
         "mean_gold_delta": mean(diffs),
         "std_gold_delta": float(statistics.pstdev(diffs)) if len(diffs) > 0 else 0.0,
         "p10_gold_delta": quantile(diffs, 0.1),
@@ -457,8 +526,18 @@ def summarize_block(results: List[Dict[str, Any]], catastrophic_threshold: float
         "cvar10_gold_delta": tail_mean(diffs, 0.1),
         "catastrophic_loss_rate": rate_at_or_below(diffs, catastrophic_threshold),
         "catastrophic_loss_threshold": float(catastrophic_threshold),
+        "go_attempts": int(go_attempts),
+        "go_attempt_games": int(go_attempt_games),
+        "go_failures": int(go_failures),
+        "go_opportunities": int(go_opportunities),
+        "go_opportunity_games": int(go_opportunity_games),
+        "go_failure_rate": go_failure_rate,
     }
 
+
+# ------------------------------
+# Duel block execution
+# ------------------------------
 
 def run_block(
     runtime: Dict[str, Any],
@@ -495,6 +574,10 @@ def run_block(
                 episode_id=next_episode_id,
                 step_count=0,
                 seed_tag=str(reply.info.get("seed", "")),
+                go_attempt_count=0,
+                go_attempted=False,
+                go_opportunity_count=0,
+                go_opportunity_seen=False,
             )
             next_episode_id += 1
 
@@ -520,7 +603,13 @@ def run_block(
                 slot = slots[env_i]
                 if slot is None:
                     fail(f"internal slot error: actor={control_actor}, env_i={env_i}")
+                if is_go_legal(slot.action_mask):
+                    slot.go_opportunity_count += 1
+                    slot.go_opportunity_seen = True
                 action = actions[local_i]
+                if action == GO_ACTION_INDEX:
+                    slot.go_attempt_count += 1
+                    slot.go_attempted = True
                 reply = envs[env_i].step(action)
                 slot.step_count += 1
 
@@ -541,6 +630,12 @@ def run_block(
                             "win": final_diff > 0,
                             "loss": final_diff < 0,
                             "draw": final_diff == 0,
+                            "truncated": bool(reply.truncated),
+                            "go_attempts": int(slot.go_attempt_count),
+                            "go_attempted": bool(slot.go_attempted),
+                            "go_failure": bool(slot.go_attempted and final_diff < 0),
+                            "go_opportunities": int(slot.go_opportunity_count),
+                            "go_opportunity_game": bool(slot.go_opportunity_seen),
                         }
                     )
                     completed += 1
@@ -553,6 +648,10 @@ def run_block(
                             episode_id=next_episode_id,
                             step_count=0,
                             seed_tag=str(rr.info.get("seed", "")),
+                            go_attempt_count=0,
+                            go_attempted=False,
+                            go_opportunity_count=0,
+                            go_opportunity_seen=False,
                         )
                         next_episode_id += 1
                     else:
@@ -564,6 +663,10 @@ def run_block(
                         episode_id=slot.episode_id,
                         step_count=slot.step_count,
                         seed_tag=slot.seed_tag,
+                        go_attempt_count=slot.go_attempt_count,
+                        go_attempted=slot.go_attempted,
+                        go_opportunity_count=slot.go_opportunity_count,
+                        go_opportunity_seen=slot.go_opportunity_seen,
                     )
 
             if completed - last_log_completed >= 100 or completed == games:
@@ -595,6 +698,10 @@ def run_block(
             env.close()
 
 
+# ------------------------------
+# Checkpoint load + CLI entrypoint
+# ------------------------------
+
 def load_model(checkpoint_path: str, device: torch.device) -> Tuple[PolicyValueNet, Dict[str, Any]]:
     obj = torch.load(checkpoint_path, map_location=device)
     if not isinstance(obj, dict):
@@ -620,6 +727,20 @@ def load_model(checkpoint_path: str, device: torch.device) -> Tuple[PolicyValueN
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="PPO vs v5(H-CL) duel runner")
     p.add_argument("--runtime-config", required=True, help="Path to duel runtime JSON")
+    p.add_argument("--seed", default="", help="Optional override for runtime seed")
+    p.add_argument(
+        "--checkpoint-path",
+        default="",
+        help="Optional override for runtime checkpoint_path",
+    )
+    p.add_argument(
+        "--result-out",
+        default="",
+        help="Optional override for runtime result_out",
+    )
+    p.add_argument("--games", type=int, default=None, help="Optional override for runtime games (>0)")
+    p.add_argument("--workers", type=int, default=None, help="Optional override for runtime workers (>0)")
+    p.add_argument("--opponent-policy", default="", help="Optional override for runtime opponent_policy")
     return p.parse_args()
 
 
@@ -631,6 +752,30 @@ def main() -> None:
         fail(f"runtime config not found: {cfg_path}")
     cfg = read_json(cfg_path)
     runtime = normalize_runtime(cfg, cfg_path)
+
+    if str(args.seed).strip():
+        runtime["seed"] = str(args.seed).strip()
+    if str(args.checkpoint_path).strip():
+        ck_abs = os.path.abspath(str(args.checkpoint_path).strip())
+        if not os.path.exists(ck_abs):
+            fail(f"checkpoint_path not found: {ck_abs}")
+        runtime["checkpoint_path"] = ck_abs
+    if str(args.result_out).strip():
+        result_abs = os.path.abspath(str(args.result_out).strip())
+        result_dir = os.path.dirname(result_abs)
+        if result_dir:
+            os.makedirs(result_dir, exist_ok=True)
+        runtime["result_out"] = result_abs
+    if args.games is not None:
+        if int(args.games) <= 0:
+            fail(f"--games must be > 0, got={args.games}")
+        runtime["games"] = int(args.games)
+    if args.workers is not None:
+        if int(args.workers) <= 0:
+            fail(f"--workers must be > 0, got={args.workers}")
+        runtime["workers"] = int(args.workers)
+    if str(args.opponent_policy).strip():
+        runtime["opponent_policy"] = str(args.opponent_policy).strip()
 
     random_seed = int("".join(ch for ch in runtime["seed"] if ch.isdigit())[:9] or "13")
     random.seed(random_seed)
@@ -656,6 +801,8 @@ def main() -> None:
                 "opponent_policy": runtime["opponent_policy"],
                 "policy_mode": runtime["policy_mode"],
                 "switch_seats": runtime["switch_seats"],
+                "go_action_bonus": runtime["go_action_bonus"],
+                "go_stop_penalty": runtime["go_stop_penalty"],
                 "checkpoint": runtime["checkpoint_path"],
                 "model_meta": model_meta,
             },
@@ -693,6 +840,8 @@ def main() -> None:
         "policy_mode": runtime["policy_mode"],
         "temperature": runtime["temperature"],
         "switch_seats": runtime["switch_seats"],
+        "go_action_bonus": runtime["go_action_bonus"],
+        "go_stop_penalty": runtime["go_stop_penalty"],
         "games": total_games,
         "workers": runtime["workers"],
         "elapsed_sec": elapsed,

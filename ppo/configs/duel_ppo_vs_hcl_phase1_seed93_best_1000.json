@@ -1,9 +1,9 @@
 ﻿{
     "format_version":  "ppo_duel_runtime_v1",
-    "seed":  "ppo_vs_v5_1000_seed90_u1325_best",
+    "seed":  "ppo_vs_hcl_phase1_seed93_best_1000",
     "node_bin":  "node",
     "env_bridge_script":  "ppo/scripts/ppo_env_bridge.mjs",
-    "checkpoint_path":  "logs/PPO/vs_hcl_phase1_seed90/best.pt",
+    "checkpoint_path":  "logs/PPO/vs_hcl_phase1_seed93/best.pt",
     "rule_key":  "A",
     "opponent_policy":  "H-CL:1.0",
     "games":  1000,
@@ -23,5 +23,5 @@
     "go_stop_penalty":  0.0,
     "catastrophic_loss_threshold":  -7000.0,
     "device":  "cpu",
-    "result_out":  "logs/model_duel/ppo_vs_v5_seed90_u1325_best_1000_result.json"
+    "result_out":  "logs/model_duel/ppo_vs_hcl_phase1_seed93_best_1000_result.json"
 }

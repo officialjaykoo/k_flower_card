@@ -4,6 +4,9 @@ param(
   [Parameter(Mandatory = $false)][string]$Seed = "",
   [Parameter(Mandatory = $false)][string]$OutputDir = "",
   [Parameter(Mandatory = $false)][string]$ResumeCheckpoint = "",
+  [Parameter(Mandatory = $false)][Nullable[int]]$TotalUpdates = $null,
+  [Parameter(Mandatory = $false)][Nullable[int]]$LogEveryUpdates = $null,
+  [Parameter(Mandatory = $false)][Nullable[int]]$SaveEveryUpdates = $null,
   [Parameter(Mandatory = $false)][switch]$DisableTorchCompile = $true
 )
 
@@ -15,6 +18,21 @@ if (-not (Test-Path $RuntimeConfig)) {
 }
 if (-not (Get-Command $Python -ErrorAction SilentlyContinue)) {
   throw "python executable not found: $Python"
+}
+
+function Get-OptionalPropertyString {
+  param(
+    [Parameter(Mandatory = $false)]$Object,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+  if ($null -eq $Object) {
+    return ""
+  }
+  $prop = $Object.PSObject.Properties[$Name]
+  if ($null -eq $prop) {
+    return ""
+  }
+  return [string]$prop.Value
 }
 
 function Resolve-SeedPath {
@@ -43,17 +61,21 @@ function Resolve-SeedPath {
 $runtimeObj = Get-Content -Path $RuntimeConfig -Raw -Encoding UTF8 | ConvertFrom-Json
 $autoOutputDir = ""
 $autoResumeCheckpoint = ""
+$runtimeOutputDirTemplate = Get-OptionalPropertyString -Object $runtimeObj -Name "output_dir_template"
+$runtimeOutputDir = Get-OptionalPropertyString -Object $runtimeObj -Name "output_dir"
+$runtimeResumeTemplate = Get-OptionalPropertyString -Object $runtimeObj -Name "resume_checkpoint_template"
+$runtimeResume = Get-OptionalPropertyString -Object $runtimeObj -Name "resume_checkpoint"
 if (-not [string]::IsNullOrWhiteSpace($Seed)) {
   if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $autoOutputDir = Resolve-SeedPath `
-      -Template ([string]($runtimeObj.output_dir_template)) `
-      -Fallback ([string]($runtimeObj.output_dir)) `
+      -Template $runtimeOutputDirTemplate `
+      -Fallback $runtimeOutputDir `
       -SeedValue $Seed
   }
   if ([string]::IsNullOrWhiteSpace($ResumeCheckpoint)) {
     $autoResumeCheckpoint = Resolve-SeedPath `
-      -Template ([string]($runtimeObj.resume_checkpoint_template)) `
-      -Fallback ([string]($runtimeObj.resume_checkpoint)) `
+      -Template $runtimeResumeTemplate `
+      -Fallback $runtimeResume `
       -SeedValue $Seed
   }
 }
@@ -78,6 +100,24 @@ if (-not [string]::IsNullOrWhiteSpace($ResumeCheckpoint)) {
 elseif (-not [string]::IsNullOrWhiteSpace($autoResumeCheckpoint)) {
   $args += @("--resume-checkpoint", "$autoResumeCheckpoint")
 }
+if ($null -ne $TotalUpdates) {
+  if ($TotalUpdates -le 0) {
+    throw "TotalUpdates must be > 0 when provided, got: $TotalUpdates"
+  }
+  $args += @("--total-updates", "$TotalUpdates")
+}
+if ($null -ne $LogEveryUpdates) {
+  if ($LogEveryUpdates -le 0) {
+    throw "LogEveryUpdates must be > 0 when provided, got: $LogEveryUpdates"
+  }
+  $args += @("--log-every-updates", "$LogEveryUpdates")
+}
+if ($null -ne $SaveEveryUpdates) {
+  if ($SaveEveryUpdates -le 0) {
+    throw "SaveEveryUpdates must be > 0 when provided, got: $SaveEveryUpdates"
+  }
+  $args += @("--save-every-updates", "$SaveEveryUpdates")
+}
 
 Write-Host "=== PPO Train Start ==="
 Write-Host "Python: $Python"
@@ -87,6 +127,9 @@ if (-not [string]::IsNullOrWhiteSpace($OutputDir)) { Write-Host "Output override
 elseif (-not [string]::IsNullOrWhiteSpace($autoOutputDir)) { Write-Host "Output auto: $autoOutputDir" }
 if (-not [string]::IsNullOrWhiteSpace($ResumeCheckpoint)) { Write-Host "Resume: $ResumeCheckpoint" }
 elseif (-not [string]::IsNullOrWhiteSpace($autoResumeCheckpoint)) { Write-Host "Resume auto: $autoResumeCheckpoint" }
+if ($null -ne $TotalUpdates) { Write-Host "Total updates override: $TotalUpdates" }
+if ($null -ne $LogEveryUpdates) { Write-Host "Log every updates override: $LogEveryUpdates" }
+if ($null -ne $SaveEveryUpdates) { Write-Host "Save every updates override: $SaveEveryUpdates" }
 
 if ($DisableTorchCompile) {
   $env:TORCH_COMPILE_DISABLE = "1"

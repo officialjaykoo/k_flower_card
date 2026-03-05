@@ -4,8 +4,22 @@
 // - Strict CLI/runtime validation + fail-fast errors with context.
 // Execution order:
 // train_ppo.py/duel_ppo_vs_v5.py -> this bridge(reset/step) -> Matgo engine decision runtime.
+//
+// Execution Flow Map:
+// 1) parseArgs() + buildRuntime(): strict CLI/runtime bootstrap
+// 2) handleReset(): initialize episode and return first observation/mask
+// 3) handleStep(): apply one policy action, auto-run opponent if needed, compute reward
+// 4) stdin command loop: dispatch reset/step/close and stream JSON responses
 
-import { initSimulationGame, createSeededRng, calculateScore, scoringPiCount } from "../../src/engine/index.js";
+import {
+  initSimulationGame,
+  createSeededRng,
+  calculateScore,
+  scoringPiCount,
+  getDeclarableShakingMonths,
+  getDeclarableBombMonths,
+  ruleSets
+} from "../../src/engine/index.js";
 import { getActionPlayerKey } from "../../src/engine/runner.js";
 import { aiPlay } from "../../src/ai/aiPlay_by_GPT.js";
 import { normalizeBotPolicy, resolveBotPolicy } from "../../src/ai/policies.js";
@@ -24,7 +38,7 @@ const MATCH_SLOTS = 8;
 const CARD_FEATURE_DIM = 7;
 const PHASE_FEATURE_DIM = 6;
 const DECISION_FEATURE_DIM = 3;
-const MACRO_FEATURE_DIM = 22;
+const MACRO_FEATURE_DIM = 41;
 const OPTION_ORDER = Object.freeze([
   "go",
   "stop",
@@ -43,6 +57,10 @@ const OBS_DIM =
   PLAY_SLOTS * CARD_FEATURE_DIM +
   MATCH_SLOTS * CARD_FEATURE_DIM +
   OPTION_FEATURE_DIM;
+
+// =============================================================================
+// Section 1. Console/CLI Validation Helpers
+// =============================================================================
 
 function fail(message) {
   throw new Error(String(message || "unknown failure"));
@@ -135,6 +153,7 @@ function normalizeTrainingMode(raw) {
   return v;
 }
 
+// Parses a strict one-format CLI and rejects unknown/missing keys.
 function parseArgs(argv) {
   const args = [...argv];
   const out = {
@@ -149,6 +168,8 @@ function parseArgs(argv) {
     terminalBonusScale: null,
     terminalWinBonus: null,
     terminalLossPenalty: null,
+    goActionBonus: null,
+    goStopPenalty: null,
     firstTurnPolicy: "",
     fixedFirstTurn: ""
   };
@@ -182,6 +203,10 @@ function parseArgs(argv) {
       out.terminalWinBonus = toFiniteNumber(value, "--terminal-win-bonus");
     } else if (key === "--terminal-loss-penalty") {
       out.terminalLossPenalty = toFiniteNumber(value, "--terminal-loss-penalty");
+    } else if (key === "--go-action-bonus") {
+      out.goActionBonus = toFiniteNumber(value, "--go-action-bonus");
+    } else if (key === "--go-stop-penalty") {
+      out.goStopPenalty = toFiniteNumber(value, "--go-stop-penalty");
     } else if (key === "--first-turn-policy") {
       out.firstTurnPolicy = normalizeFirstTurnPolicy(value);
     } else if (key === "--fixed-first-turn") {
@@ -205,6 +230,10 @@ function parseArgs(argv) {
   if (out.terminalWinBonus < 0) fail("--terminal-win-bonus must be >= 0");
   if (out.terminalLossPenalty == null) fail("--terminal-loss-penalty is required");
   if (out.terminalLossPenalty < 0) fail("--terminal-loss-penalty must be >= 0");
+  if (out.goActionBonus == null) fail("--go-action-bonus is required");
+  if (out.goActionBonus < 0) fail("--go-action-bonus must be >= 0");
+  if (out.goStopPenalty == null) fail("--go-stop-penalty is required");
+  if (out.goStopPenalty < 0) fail("--go-stop-penalty must be >= 0");
   if (!out.firstTurnPolicy) fail("--first-turn-policy is required");
   if (out.firstTurnPolicy === "fixed" && !out.fixedFirstTurn) {
     fail("--fixed-first-turn is required when --first-turn-policy=fixed");
@@ -223,6 +252,10 @@ function parseArgs(argv) {
 
   return out;
 }
+
+// =============================================================================
+// Section 2. Opponent Policy Sampling Helpers
+// =============================================================================
 
 function parseOpponentPolicyPool(raw, argName) {
   const text = String(raw || "").trim();
@@ -299,6 +332,10 @@ function sampleOpponentPolicy(runtime, seedText) {
   return pool[pool.length - 1];
 }
 
+// =============================================================================
+// Section 3. Observation / Action Context Builders
+// =============================================================================
+
 function clamp01(x) {
   const n = Number(x || 0);
   if (n <= 0) return 0;
@@ -318,6 +355,169 @@ function findCardById(cards, cardId) {
     if (String(card?.id || "") === target) return card;
   }
   return null;
+}
+
+function countCardsByMonth(cards, month) {
+  const targetMonth = Number(month || 0);
+  if (!Array.isArray(cards) || targetMonth <= 0) return 0;
+  let count = 0;
+  for (const card of cards) {
+    if (Number(card?.month || 0) === targetMonth) count += 1;
+  }
+  return count;
+}
+
+function hasComboTag(card, tag) {
+  return Array.isArray(card?.comboTags) && card.comboTags.includes(tag);
+}
+
+function countCapturedComboTag(player, zone, tag) {
+  const cards = player?.captured?.[zone] || [];
+  if (!Array.isArray(cards)) return 0;
+  const seen = new Set();
+  let count = 0;
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (hasComboTag(card, tag)) count += 1;
+  }
+  return count;
+}
+
+function decisionAvailabilityFlags(state, actor) {
+  if (state?.phase === "shaking-confirm" && state?.pendingShakingConfirm?.playerKey === actor) {
+    return { hasShaking: 1, hasBomb: 0 };
+  }
+  if (state?.phase !== "playing" || state?.currentTurn !== actor) {
+    return { hasShaking: 0, hasBomb: 0 };
+  }
+  const shakingMonths = getDeclarableShakingMonths(state, actor);
+  const bombMonths = getDeclarableBombMonths(state, actor);
+  return {
+    hasShaking: Array.isArray(shakingMonths) && shakingMonths.length > 0 ? 1 : 0,
+    hasBomb: Array.isArray(bombMonths) && bombMonths.length > 0 ? 1 : 0
+  };
+}
+
+function currentMultiplierNorm(state, scoreSelf) {
+  const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
+  const mul = Math.max(1.0, Number(scoreSelf?.multiplier || 1.0));
+  return clamp01((mul * carry - 1.0) / 15.0);
+}
+
+function scoreGapToStopNorm(scoreTotal, goMinScore) {
+  const threshold = Math.max(1, Number(goMinScore || 7));
+  const gap = threshold - Number(scoreTotal || 0);
+  return clamp01(gap / threshold);
+}
+
+function resolveObservationFocusMonth(state, controlActor, actionCtx) {
+  const board = state?.board || [];
+  if (actionCtx?.decisionType === "match") {
+    for (const cardId of actionCtx.candidates || []) {
+      const boardCard = findCardById(board, cardId);
+      const month = Number(boardCard?.month || 0);
+      if (month >= 1) return month;
+    }
+    return 0;
+  }
+
+  if (actionCtx?.decisionType === "option") {
+    if (state?.phase === "shaking-confirm" && state?.pendingShakingConfirm?.playerKey === controlActor) {
+      const month = Number(state?.pendingShakingConfirm?.month || 0);
+      if (month >= 1) return month;
+    }
+    if (state?.phase === "president-choice" && state?.pendingPresident?.playerKey === controlActor) {
+      const month = Number(state?.pendingPresident?.month || 0);
+      if (month >= 1) return month;
+    }
+    return 0;
+  }
+
+  if (actionCtx?.decisionType === "play") {
+    const hand = state?.players?.[controlActor]?.hand || [];
+    let bestMonth = 0;
+    let bestMatchCount = -1;
+    for (const cardId of actionCtx.candidates || []) {
+      const card = findCardById(hand, cardId);
+      const month = Number(card?.month || 0);
+      if (month <= 0) continue;
+      const boardCount = countCardsByMonth(board, month);
+      if (boardCount > bestMatchCount) {
+        bestMatchCount = boardCount;
+        bestMonth = month;
+      }
+    }
+    return bestMonth;
+  }
+
+  return 0;
+}
+
+function immediateMatchPossible(state, decisionType, focusMonth) {
+  if (decisionType === "match") return 1;
+  if (focusMonth <= 0) return 0;
+  return countCardsByMonth(state?.board || [], focusMonth) > 0 ? 1 : 0;
+}
+
+function matchOpportunityDensity(state, focusMonth) {
+  return clamp01(countCardsByMonth(state?.board || [], focusMonth) / 3.0);
+}
+
+function monthTotalCards(month) {
+  const m = Number(month || 0);
+  if (m >= 1 && m <= 12) return 4;
+  if (m === 13) return 2;
+  return 0;
+}
+
+function collectKnownCardsForMonthRatio(state, actor) {
+  const out = [];
+  const pushAll = (cards) => {
+    if (!Array.isArray(cards)) return;
+    for (const card of cards) out.push(card);
+  };
+
+  pushAll(state?.board || []);
+  for (const side of ["human", "ai"]) {
+    const captured = state?.players?.[side]?.captured || {};
+    pushAll(captured.kwang || []);
+    pushAll(captured.five || []);
+    pushAll(captured.ribbon || []);
+    pushAll(captured.junk || []);
+  }
+
+  // Public by rule: self hand is observable to self.
+  pushAll(state?.players?.[actor]?.hand || []);
+
+  // Public by reveal: shaking revealed cards.
+  pushAll(state?.shakingReveal?.cards || []);
+  const kibo = state?.kibo || [];
+  if (Array.isArray(kibo)) {
+    for (const evt of kibo) {
+      if (String(evt?.type || "") === "shaking_declare") {
+        pushAll(evt?.revealCards || []);
+      }
+    }
+  }
+  return out;
+}
+
+function candidateMonthKnownRatio(state, actor, month) {
+  const total = monthTotalCards(month);
+  if (total <= 0) return 0;
+  const cards = collectKnownCardsForMonthRatio(state, actor);
+  const seen = new Set();
+  let known = 0;
+  for (const card of cards) {
+    if (!card) continue;
+    const id = String(card?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (Number(card?.month || 0) === Number(month)) known += 1;
+  }
+  return clamp01(known / total);
 }
 
 function cardFeatureVector(card) {
@@ -478,7 +678,28 @@ function buildObservation(state, controlActor, actionCtx) {
   const opp = otherActor(controlActor);
   const scoreSelf = calculateScore(state.players[controlActor], state.players[opp], state.ruleKey);
   const scoreOpp = calculateScore(state.players[opp], state.players[controlActor], state.ruleKey);
+  const rules = ruleSets[state?.ruleKey];
+  if (!rules) {
+    fail(`rule set not found for observation: ruleKey=${String(state?.ruleKey || "")}`);
+  }
+  const goMinScore = Number(rules.goMinScore || 7);
+  if (!Number.isFinite(goMinScore) || goMinScore <= 0) {
+    fail(`invalid goMinScore in rule set: ruleKey=${String(state?.ruleKey || "")}, goMinScore=${String(rules.goMinScore)}`);
+  }
   const phase = String(state?.phase || "");
+  const focusMonth = resolveObservationFocusMonth(state, controlActor, actionCtx);
+  const legalCountNorm = clamp01(Number(actionCtx?.legalActions?.length || 0) / 10.0);
+  const selfCanStop = Number(scoreSelf?.total || 0) >= goMinScore ? 1 : 0;
+  const oppCanStop = Number(scoreOpp?.total || 0) >= goMinScore ? 1 : 0;
+  const { hasShaking, hasBomb } = decisionAvailabilityFlags(state, controlActor);
+  const selfGodori = clamp01(countCapturedComboTag(state.players?.[controlActor], "five", "fiveBirds") / 3.0);
+  const selfCheongdan = clamp01(countCapturedComboTag(state.players?.[controlActor], "ribbon", "blueRibbons") / 3.0);
+  const selfHongdan = clamp01(countCapturedComboTag(state.players?.[controlActor], "ribbon", "redRibbons") / 3.0);
+  const selfChodan = clamp01(countCapturedComboTag(state.players?.[controlActor], "ribbon", "plainRibbons") / 3.0);
+  const oppGodori = clamp01(countCapturedComboTag(state.players?.[opp], "five", "fiveBirds") / 3.0);
+  const oppCheongdan = clamp01(countCapturedComboTag(state.players?.[opp], "ribbon", "blueRibbons") / 3.0);
+  const oppHongdan = clamp01(countCapturedComboTag(state.players?.[opp], "ribbon", "redRibbons") / 3.0);
+  const oppChodan = clamp01(countCapturedComboTag(state.players?.[opp], "ribbon", "plainRibbons") / 3.0);
   const out = [];
 
   // 1) phase one-hot (6)
@@ -494,7 +715,7 @@ function buildObservation(state, controlActor, actionCtx) {
   out.push(actionCtx.decisionType === "match" ? 1 : 0);
   out.push(actionCtx.decisionType === "option" ? 1 : 0);
 
-  // 3) macro counts/scores (22 total -> now 31 cumulative)
+  // 3) macro counts/scores (41 total -> now 50 cumulative)
   out.push(clamp01(Number(state?.deck?.length || 0) / 30.0));
   out.push(clamp01(Number(state?.players?.[controlActor]?.hand?.length || 0) / 10.0));
   out.push(clamp01(Number(state?.players?.[opp]?.hand?.length || 0) / 10.0));
@@ -525,6 +746,27 @@ function buildObservation(state, controlActor, actionCtx) {
   out.push(clamp01((oppCap.five || []).length / 5.0));
   out.push(clamp01((oppCap.ribbon || []).length / 10.0));
   out.push(clamp01(Number(scoringPiCount(state.players[opp]) || 0) / 20.0));
+
+  // 3-b) added high-signal public features (19)
+  out.push(selfCanStop);
+  out.push(oppCanStop);
+  out.push(legalCountNorm);
+  out.push(immediateMatchPossible(state, actionCtx.decisionType, focusMonth));
+  out.push(matchOpportunityDensity(state, focusMonth));
+  out.push(hasBomb);
+  out.push(hasShaking);
+  out.push(currentMultiplierNorm(state, scoreSelf));
+  out.push(selfGodori);
+  out.push(selfCheongdan);
+  out.push(selfHongdan);
+  out.push(selfChodan);
+  out.push(oppGodori);
+  out.push(oppCheongdan);
+  out.push(oppHongdan);
+  out.push(oppChodan);
+  out.push(scoreGapToStopNorm(Number(scoreSelf?.total || 0), goMinScore));
+  out.push(scoreGapToStopNorm(Number(scoreOpp?.total || 0), goMinScore));
+  out.push(candidateMonthKnownRatio(state, controlActor, focusMonth));
 
   // 4) hand card slots (10 * 7 = 70)
   appendCardSlots(out, state?.players?.[controlActor]?.hand || [], PLAY_SLOTS);
@@ -565,6 +807,10 @@ function buildStepView(state, controlActor) {
     legal_actions: actionCtx.legalActions
   };
 }
+
+// =============================================================================
+// Section 4. Episode Lifecycle Helpers
+// =============================================================================
 
 function resolveFirstTurnKey(runtime) {
   if (runtime.firstTurnPolicy === "fixed") return runtime.fixedFirstTurn;
@@ -659,6 +905,8 @@ function buildRuntime(cli) {
     terminalBonusScale: cli.terminalBonusScale,
     terminalWinBonus: cli.terminalWinBonus,
     terminalLossPenalty: cli.terminalLossPenalty,
+    goActionBonus: cli.goActionBonus,
+    goStopPenalty: cli.goStopPenalty,
     firstTurnPolicy: cli.firstTurnPolicy,
     fixedFirstTurn: cli.fixedFirstTurn || "human",
     state: null,
@@ -680,6 +928,10 @@ function ensureControlTurn(runtime) {
     );
   }
 }
+
+// =============================================================================
+// Section 5. Command Handlers + Transport
+// =============================================================================
 
 function handleReset(runtime, payload) {
   const epRaw = payload && Object.prototype.hasOwnProperty.call(payload, "episode") ? payload.episode : null;
@@ -774,7 +1026,18 @@ function handleStep(runtime, payload) {
   let rewardDownsidePenalty = 0;
   let rewardOutcomeWinBonus = 0;
   let rewardOutcomeLossPenalty = 0;
+  let rewardGoActionBonus = 0;
+  let rewardGoStopPenalty = 0;
+  const isGoStopDecision = actionCtx.decisionType === "option" && String(beforeState?.phase || "") === "go-stop";
+  const selectedOption = actionCtx.decisionType === "option" ? String(candidate) : "";
   let reward = rewardGoldDelta;
+  if (isGoStopDecision && selectedOption === "go") {
+    rewardGoActionBonus = runtime.goActionBonus;
+    reward += rewardGoActionBonus;
+  } else if (isGoStopDecision && selectedOption === "stop") {
+    rewardGoStopPenalty = runtime.goStopPenalty;
+    reward -= rewardGoStopPenalty;
+  }
   if (done) {
     rewardTerminalBonus = afterDiff * runtime.terminalBonusScale;
     rewardDownsidePenalty = Math.max(0, -afterDiff) * runtime.downsidePenaltyScale;
@@ -839,7 +1102,11 @@ function handleStep(runtime, payload) {
       reward_terminal_bonus: rewardTerminalBonus,
       reward_downside_penalty: rewardDownsidePenalty,
       reward_outcome_win_bonus: rewardOutcomeWinBonus,
-      reward_outcome_loss_penalty: rewardOutcomeLossPenalty
+      reward_outcome_loss_penalty: rewardOutcomeLossPenalty,
+      reward_go_action_bonus: rewardGoActionBonus,
+      reward_go_stop_penalty: rewardGoStopPenalty,
+      go_stop_decision: isGoStopDecision,
+      go_option_selected: selectedOption
     }
   };
 }
@@ -852,6 +1119,7 @@ function send(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
+// Bridge process bootstrap + stdin command dispatcher.
 const cli = parseArgs(process.argv.slice(2));
 configureConsoleForBridge();
 const runtime = buildRuntime(cli);
