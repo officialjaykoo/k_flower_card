@@ -51,6 +51,8 @@
     "catastrophic_penalty_scale":  0.0002,
     "early_stop_patience_updates":  300,
     "early_stop_min_updates":  200,
+    "gru_num_layers":  1,
+    "gru_seq_len":  8,
     "hidden_size":  256,
     "device":  "cpu",
     "log_every_updates":  20,

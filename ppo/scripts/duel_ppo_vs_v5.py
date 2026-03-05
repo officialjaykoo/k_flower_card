@@ -422,20 +422,61 @@ class BridgeEnv:
 
 
 class PolicyValueNet(nn.Module):
-    def __init__(self, obs_dim: int, action_dim: int, hidden_size: int):
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_size: int,
+        *,
+        gru_num_layers: int,
+    ):
         super().__init__()
-        self.backbone = nn.Sequential(
-            nn.Linear(obs_dim, hidden_size),
-            nn.Tanh(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.Tanh(),
+        self.obs_dim = int(obs_dim)
+        self.action_dim = int(action_dim)
+        self.hidden_size = int(hidden_size)
+        self.gru_num_layers = int(gru_num_layers)
+        if self.gru_num_layers <= 0:
+            fail(f"gru_num_layers must be > 0, got={self.gru_num_layers}")
+        self.obs_encoder = nn.Linear(self.obs_dim, self.hidden_size)
+        self.gru = nn.GRU(
+            input_size=self.hidden_size,
+            hidden_size=self.hidden_size,
+            num_layers=self.gru_num_layers,
+            batch_first=False,
         )
-        self.policy_head = nn.Linear(hidden_size, action_dim)
-        self.value_head = nn.Linear(hidden_size, 1)
+
+        self.policy_head = nn.Linear(self.hidden_size, self.action_dim)
+        self.value_head = nn.Linear(self.hidden_size, 1)
+
+    def init_recurrent_state(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        b = int(batch_size)
+        if b <= 0:
+            fail(f"batch_size must be > 0 for recurrent state init, got={b}")
+        return torch.zeros(self.gru_num_layers, b, self.hidden_size, dtype=torch.float32, device=device)
 
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        h = self.backbone(obs)
-        return self.policy_head(h), self.value_head(h)
+        fail("forward(obs) is disabled in GRU-only duel model; use forward_gru_step")
+        return torch.empty(0), torch.empty(0)
+
+    def forward_gru_step(
+        self,
+        obs: torch.Tensor,
+        hidden: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if obs.ndim != 2:
+            fail(f"GRU step expects obs shape [B, obs_dim], got={tuple(obs.shape)}")
+        if hidden.ndim != 3:
+            fail(f"GRU hidden rank mismatch: expected 3D, got={tuple(hidden.shape)}")
+        b = obs.shape[0]
+        if hidden.shape[0] != self.gru_num_layers or hidden.shape[1] != b or hidden.shape[2] != self.hidden_size:
+            fail(
+                "GRU hidden shape mismatch: "
+                f"got={tuple(hidden.shape)}, expected=({self.gru_num_layers},{b},{self.hidden_size})"
+            )
+        x = torch.tanh(self.obs_encoder(obs))
+        out, next_hidden = self.gru(x.unsqueeze(0), hidden)
+        feat = out.squeeze(0)
+        return self.policy_head(feat), self.value_head(feat), next_hidden
 
 
 def select_actions(
@@ -445,7 +486,8 @@ def select_actions(
     policy_mode: str,
     temperature: float,
     device: torch.device,
-) -> List[int]:
+    recurrent_state: torch.Tensor,
+) -> Tuple[List[int], torch.Tensor]:
     if len(obs_rows) <= 0:
         fail("select_actions called with empty obs_rows")
     obs = torch.tensor(obs_rows, dtype=torch.float32, device=device)
@@ -461,7 +503,7 @@ def select_actions(
         fail(f"mask has empty legal actions at rows={bad}")
 
     with torch.no_grad():
-        logits, _ = model(obs)
+        logits, _, next_recurrent_state = model.forward_gru_step(obs, recurrent_state)
         if logits.shape != mask.shape:
             fail(f"logits/mask shape mismatch: logits={tuple(logits.shape)}, mask={tuple(mask.shape)}")
         masked_logits = logits.masked_fill(mask <= 0, -1e9)
@@ -472,7 +514,7 @@ def select_actions(
             probs = torch.softmax(masked_logits / float(temperature), dim=1)
             dist = torch.distributions.Categorical(probs=probs)
             acts = dist.sample()
-    return [int(x) for x in acts.cpu().tolist()]
+    return [int(x) for x in acts.cpu().tolist()], next_recurrent_state
 
 
 def is_go_legal(action_mask: List[int]) -> bool:
@@ -553,6 +595,7 @@ def run_block(
 
     envs = [BridgeEnv(runtime, repo_root, worker_id=i, control_actor=control_actor) for i in range(worker_count)]
     slots: List[Optional[SlotState]] = [None for _ in range(worker_count)]
+    slot_hidden: List[Optional[torch.Tensor]] = [None for _ in range(worker_count)]
     try:
         next_episode_id = 0
         completed = 0
@@ -575,6 +618,7 @@ def run_block(
                 go_opportunity_count=0,
                 go_opportunity_seen=False,
             )
+            slot_hidden[wi] = model.init_recurrent_state(batch_size=1, device=device)
             next_episode_id += 1
 
         while completed < games:
@@ -586,19 +630,34 @@ def run_block(
 
             obs_rows = [slots[i].obs for i in active_idx if slots[i] is not None]
             mask_rows = [slots[i].action_mask for i in active_idx if slots[i] is not None]
-            actions = select_actions(
+            hidden_batch_parts: List[torch.Tensor] = []
+            for wi in active_idx:
+                h = slot_hidden[wi]
+                if h is None:
+                    fail(f"missing recurrent hidden state for active slot: actor={control_actor}, env_i={wi}")
+                hidden_batch_parts.append(h)
+            recurrent_batch = torch.cat(hidden_batch_parts, dim=1)
+
+            actions, recurrent_next_batch = select_actions(
                 model=model,
                 obs_rows=obs_rows,
                 mask_rows=mask_rows,
                 policy_mode=runtime["policy_mode"],
                 temperature=runtime["temperature"],
                 device=device,
+                recurrent_state=recurrent_batch,
             )
+            if recurrent_next_batch.shape[1] != len(active_idx):
+                fail(
+                    "recurrent_next_batch batch mismatch: "
+                    f"got={recurrent_next_batch.shape[1]}, expected={len(active_idx)}"
+                )
 
             for local_i, env_i in enumerate(active_idx):
                 slot = slots[env_i]
                 if slot is None:
                     fail(f"internal slot error: actor={control_actor}, env_i={env_i}")
+                slot_hidden[env_i] = recurrent_next_batch[:, local_i : local_i + 1, :].detach().clone()
                 if is_go_legal(slot.action_mask):
                     slot.go_opportunity_count += 1
                     slot.go_opportunity_seen = True
@@ -649,9 +708,11 @@ def run_block(
                             go_opportunity_count=0,
                             go_opportunity_seen=False,
                         )
+                        slot_hidden[env_i] = model.init_recurrent_state(batch_size=1, device=device)
                         next_episode_id += 1
                     else:
                         slots[env_i] = None
+                        slot_hidden[env_i] = None
                 else:
                     slots[env_i] = SlotState(
                         obs=reply.obs,
@@ -710,14 +771,33 @@ def load_model(checkpoint_path: str, device: torch.device) -> Tuple[PolicyValueN
     hidden_size = int(runtime.get("hidden_size", 0))
     if hidden_size <= 0:
         fail(f"invalid hidden_size in checkpoint runtime: {hidden_size}")
+    if "gru_num_layers" not in runtime:
+        fail(f"checkpoint runtime missing gru_num_layers: {checkpoint_path}")
+    gru_num_layers_raw = runtime.get("gru_num_layers")
+    try:
+        gru_num_layers = int(gru_num_layers_raw)
+    except Exception:
+        fail(f"invalid gru_num_layers in checkpoint runtime: {gru_num_layers_raw}")
+    if gru_num_layers <= 0:
+        fail(f"gru_num_layers must be > 0 in checkpoint runtime, got={gru_num_layers}")
     sd = obj.get("model_state_dict")
     if not isinstance(sd, dict):
         fail(f"model_state_dict missing in checkpoint: {checkpoint_path}")
 
-    model = PolicyValueNet(obs_dim=obs_dim, action_dim=action_dim, hidden_size=hidden_size).to(device)
+    model = PolicyValueNet(
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+        hidden_size=hidden_size,
+        gru_num_layers=gru_num_layers,
+    ).to(device)
     model.load_state_dict(sd, strict=True)
     model.eval()
-    return model, {"obs_dim": obs_dim, "action_dim": action_dim, "hidden_size": hidden_size}
+    return model, {
+        "obs_dim": obs_dim,
+        "action_dim": action_dim,
+        "hidden_size": hidden_size,
+        "gru_num_layers": gru_num_layers,
+    }
 
 
 def parse_args() -> argparse.Namespace:

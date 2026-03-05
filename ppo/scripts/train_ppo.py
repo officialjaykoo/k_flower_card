@@ -72,6 +72,8 @@ REQUIRED_KEYS = [
     "catastrophic_penalty_scale",
     "early_stop_patience_updates",
     "early_stop_min_updates",
+    "gru_num_layers",
+    "gru_seq_len",
     "hidden_size",
     "device",
     "log_every_updates",
@@ -325,6 +327,9 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     runtime["early_stop_patience_updates"] = as_pos_int(cfg, "early_stop_patience_updates")
     runtime["early_stop_min_updates"] = as_pos_int(cfg, "early_stop_min_updates")
     runtime["hidden_size"] = as_pos_int(cfg, "hidden_size")
+    runtime["gru_num_layers"] = as_pos_int(cfg, "gru_num_layers")
+    runtime["gru_seq_len"] = as_pos_int(cfg, "gru_seq_len")
+
     runtime["log_every_updates"] = as_pos_int(cfg, "log_every_updates")
     runtime["save_every_updates"] = as_pos_int(cfg, "save_every_updates")
     runtime["output_dir"] = as_non_empty_str(cfg, "output_dir")
@@ -351,6 +356,11 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
         fail(
             "minibatch_size must be <= rollout_steps * env_workers "
             f"({runtime['minibatch_size']} > {runtime['rollout_steps'] * runtime['env_workers']})"
+        )
+    if runtime["gru_seq_len"] > runtime["rollout_steps"]:
+        fail(
+            "gru_seq_len must be <= rollout_steps "
+            f"({runtime['gru_seq_len']} > {runtime['rollout_steps']})"
         )
 
     bridge_abs = os.path.abspath(runtime["env_bridge_script"])
@@ -592,20 +602,112 @@ class BridgeEnv:
 # ------------------------------
 
 class PolicyValueNet(nn.Module):
-    def __init__(self, obs_dim: int, action_dim: int, hidden_size: int):
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_size: int,
+        *,
+        gru_num_layers: int,
+    ):
         super().__init__()
-        self.backbone = nn.Sequential(
-            nn.Linear(obs_dim, hidden_size),
-            nn.Tanh(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.Tanh(),
+        self.obs_dim = int(obs_dim)
+        self.action_dim = int(action_dim)
+        self.hidden_size = int(hidden_size)
+        self.gru_num_layers = int(gru_num_layers)
+        if self.gru_num_layers <= 0:
+            fail(f"gru_num_layers must be > 0, got={self.gru_num_layers}")
+        # GRU-only path: lightweight encoder -> 1-step/sequence GRU -> actor/critic heads.
+        self.obs_encoder = nn.Linear(self.obs_dim, self.hidden_size)
+        self.gru = nn.GRU(
+            input_size=self.hidden_size,
+            hidden_size=self.hidden_size,
+            num_layers=self.gru_num_layers,
+            batch_first=False,
         )
-        self.policy_head = nn.Linear(hidden_size, action_dim)
-        self.value_head = nn.Linear(hidden_size, 1)
+
+        self.policy_head = nn.Linear(self.hidden_size, self.action_dim)
+        self.value_head = nn.Linear(self.hidden_size, 1)
+
+    def init_recurrent_state(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        b = int(batch_size)
+        if b <= 0:
+            fail(f"batch_size must be > 0 for recurrent state init, got={b}")
+        return torch.zeros(self.gru_num_layers, b, self.hidden_size, dtype=torch.float32, device=device)
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        h = self.backbone(obs)
-        return self.policy_head(h), self.value_head(h)
+        fail("forward(obs) is disabled in GRU-only model; use forward_gru_step/forward_gru_sequence")
+        return torch.empty(0), torch.empty(0)
+
+    def forward_gru_step(
+        self,
+        obs: torch.Tensor,
+        hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if obs.ndim != 2:
+            fail(f"GRU step expects obs shape [B, obs_dim], got={tuple(obs.shape)}")
+        if hidden.ndim != 3:
+            fail(f"GRU hidden rank mismatch: expected 3D, got={tuple(hidden.shape)}")
+        b = obs.shape[0]
+        if hidden.shape[0] != self.gru_num_layers or hidden.shape[1] != b or hidden.shape[2] != self.hidden_size:
+            fail(
+                "GRU hidden shape mismatch: "
+                f"got={tuple(hidden.shape)}, expected=({self.gru_num_layers},{b},{self.hidden_size})"
+            )
+        x = torch.tanh(self.obs_encoder(obs))
+        out, next_hidden = self.gru(x.unsqueeze(0), hidden)
+        feat = out.squeeze(0)
+        logits = self.policy_head(feat)
+        values = self.value_head(feat)
+        return logits, values, next_hidden
+
+    def forward_gru_sequence(
+        self,
+        obs_seq: torch.Tensor,
+        hidden_init: torch.Tensor,
+        reset_before_step: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if obs_seq.ndim != 3:
+            fail(f"GRU sequence expects obs_seq [T,B,obs_dim], got={tuple(obs_seq.shape)}")
+        if reset_before_step.ndim != 2:
+            fail(f"reset_before_step expects [T,B], got={tuple(reset_before_step.shape)}")
+        t, b, d = obs_seq.shape
+        if d != self.obs_dim:
+            fail(f"obs_dim mismatch in GRU sequence: got={d}, expected={self.obs_dim}")
+        if reset_before_step.shape[0] != t or reset_before_step.shape[1] != b:
+            fail(
+                "reset_before_step shape mismatch: "
+                f"got={tuple(reset_before_step.shape)}, expected=({t},{b})"
+            )
+        if hidden_init.ndim != 3:
+            fail(f"GRU hidden_init rank mismatch: expected 3D, got={tuple(hidden_init.shape)}")
+        if (
+            hidden_init.shape[0] != self.gru_num_layers
+            or hidden_init.shape[1] != b
+            or hidden_init.shape[2] != self.hidden_size
+        ):
+            fail(
+                "GRU hidden_init shape mismatch: "
+                f"got={tuple(hidden_init.shape)}, expected=({self.gru_num_layers},{b},{self.hidden_size})"
+            )
+
+        hidden = hidden_init
+        logits_steps: List[torch.Tensor] = []
+        value_steps: List[torch.Tensor] = []
+        for step in range(t):
+            reset_mask = (reset_before_step[step] > 0).to(dtype=obs_seq.dtype).view(1, b, 1)
+            if torch.any(reset_mask > 0):
+                hidden = hidden * (1.0 - reset_mask)
+
+            x = torch.tanh(self.obs_encoder(obs_seq[step]))
+            out, hidden = self.gru(x.unsqueeze(0), hidden)
+            feat = out.squeeze(0)
+            logits_steps.append(self.policy_head(feat))
+            value_steps.append(self.value_head(feat).squeeze(-1))
+
+        logits_t = torch.stack(logits_steps, dim=0)
+        values_t = torch.stack(value_steps, dim=0)
+        return logits_t, values_t, hidden
 
 
 def masked_categorical(logits: torch.Tensor, action_mask: torch.Tensor) -> torch.distributions.Categorical:
@@ -803,7 +905,12 @@ def train(
                 allow_empty_mask=False,
             )
 
-        model = PolicyValueNet(obs_dim=obs_dim, action_dim=action_dim, hidden_size=runtime["hidden_size"]).to(device)
+        model = PolicyValueNet(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            hidden_size=runtime["hidden_size"],
+            gru_num_layers=runtime["gru_num_layers"],
+        ).to(device)
         optimizer = optim.Adam(model.parameters(), lr=runtime["learning_rate"], eps=1e-5)
 
         resume_update = 0
@@ -826,6 +933,17 @@ def train(
             if ck_hidden != int(runtime["hidden_size"]):
                 fail(
                     f"resume hidden_size mismatch: ck={ck_hidden}, runtime={runtime['hidden_size']}, path={ck_path}"
+                )
+            if "gru_num_layers" not in ck_runtime:
+                fail(f"resume checkpoint runtime missing gru_num_layers: path={ck_path}")
+            try:
+                ck_gru_layers = int(ck_runtime.get("gru_num_layers"))
+            except Exception:
+                fail(f"invalid gru_num_layers in checkpoint runtime: path={ck_path}")
+            if ck_gru_layers != int(runtime["gru_num_layers"]):
+                fail(
+                    "resume gru_num_layers mismatch: "
+                    f"ck={ck_gru_layers}, runtime={runtime['gru_num_layers']}, path={ck_path}"
                 )
             ck_mode = str(ck_runtime.get("training_mode", "")).strip().lower()
             rt_mode = str(runtime["training_mode"]).strip().lower()
@@ -906,6 +1024,7 @@ def train(
 
         next_obs = tensor_from_rows(obs_rows, dtype=torch.float32, device=device)
         next_mask = tensor_from_rows(mask_rows, dtype=torch.float32, device=device)
+        recurrent_hidden = model.init_recurrent_state(batch_size=num_envs, device=device)
 
         episode_returns = [0.0 for _ in range(num_envs)]
         episode_lengths = [0 for _ in range(num_envs)]
@@ -993,6 +1112,7 @@ def train(
                 episode_go_attempts = [0 for _ in range(num_envs)]
                 episode_go_not_selected = [0 for _ in range(num_envs)]
                 global_episode_index = num_envs
+                recurrent_hidden = model.init_recurrent_state(batch_size=num_envs, device=device)
             if policy_changed or stage_changed:
                 active_opponent_policy = target_policy
                 active_policy_start_update = int(target_start)
@@ -1091,6 +1211,7 @@ def train(
                     episode_go_attempts = [0 for _ in range(num_envs)]
                     episode_go_not_selected = [0 for _ in range(num_envs)]
                     global_episode_index += num_envs
+                    recurrent_hidden = model.init_recurrent_state(batch_size=num_envs, device=device)
                     print(
                         json.dumps(
                             {
@@ -1170,14 +1291,15 @@ def train(
             rollout_values: List[torch.Tensor] = []
             rollout_rewards: List[torch.Tensor] = []
             rollout_dones: List[torch.Tensor] = []
+            rollout_hiddens: List[torch.Tensor] = []
             opponent_episode_counts_update: Dict[str, int] = {}
 
             for _ in range(runtime["rollout_steps"]):
                 rollout_obs.append(next_obs.detach().clone())
                 rollout_masks.append(next_mask.detach().clone())
-
                 with torch.no_grad():
-                    logits, value = model(next_obs)
+                    rollout_hiddens.append(recurrent_hidden.detach().clone())
+                    logits, value, hidden_next = model.forward_gru_step(next_obs, recurrent_hidden)
                     dist = masked_categorical(logits, next_mask)
                     sampled_actions = dist.sample()
 
@@ -1297,11 +1419,13 @@ def train(
                 rollout_dones.append(torch.tensor(step_dones, dtype=torch.float32, device=device))
                 next_obs = tensor_from_rows(next_obs_rows, dtype=torch.float32, device=device)
                 next_mask = tensor_from_rows(next_mask_rows, dtype=torch.float32, device=device)
+                done_mask = torch.tensor(step_dones, dtype=torch.float32, device=device).view(1, num_envs, 1)
+                recurrent_hidden = hidden_next * (1.0 - done_mask)
 
             # 2) Build batch tensors + GAE/returns.
             with torch.no_grad():
-                _, next_value = model(next_obs)
-                next_value = next_value.squeeze(-1)
+                _, next_value_raw, _ = model.forward_gru_step(next_obs, recurrent_hidden.detach().clone())
+                next_value = next_value_raw.squeeze(-1)
 
             obs_t = torch.stack(rollout_obs, dim=0)
             mask_t = torch.stack(rollout_masks, dim=0)
@@ -1310,6 +1434,12 @@ def train(
             values_t = torch.stack(rollout_values, dim=0)
             rewards_t = torch.stack(rollout_rewards, dim=0)
             dones_t = torch.stack(rollout_dones, dim=0)
+            if len(rollout_hiddens) != runtime["rollout_steps"]:
+                fail(
+                    "GRU rollout hidden count mismatch: "
+                    f"got={len(rollout_hiddens)}, expected={runtime['rollout_steps']}"
+                )
+            hidden_t = torch.stack(rollout_hiddens, dim=0)
 
             advantages = torch.zeros_like(rewards_t, device=device)
             last_gae = torch.zeros(num_envs, dtype=torch.float32, device=device)
@@ -1324,13 +1454,7 @@ def train(
                 advantages[t] = last_gae
             returns_t = advantages + values_t
 
-            b_obs = obs_t.reshape(-1, obs_dim)
-            b_mask = mask_t.reshape(-1, action_dim)
-            b_actions = actions_t.reshape(-1)
-            b_old_logprob = old_logprob_t.reshape(-1)
             b_adv = advantages.reshape(-1)
-            b_returns = returns_t.reshape(-1)
-            b_values = values_t.reshape(-1)
 
             adv_mean = b_adv.mean()
             adv_std = b_adv.std(unbiased=False)
@@ -1338,8 +1462,9 @@ def train(
                 b_adv = b_adv - adv_mean
             else:
                 b_adv = (b_adv - adv_mean) / (adv_std + 1e-8)
+            advantages = b_adv.reshape(runtime["rollout_steps"], num_envs)
 
-            batch_size = b_obs.shape[0]
+            batch_size = int(runtime["rollout_steps"]) * int(num_envs)
             mb_size = runtime["minibatch_size"]
             if mb_size <= 0 or mb_size > batch_size:
                 fail(f"invalid minibatch size: {mb_size} (batch_size={batch_size})")
@@ -1351,38 +1476,60 @@ def train(
 
             # 3) PPO optimization epochs.
             model.train()
+            seq_len = int(runtime["gru_seq_len"])
+            rollout_steps = int(runtime["rollout_steps"])
             for _ in range(runtime["ppo_epochs"]):
-                indices = torch.randperm(batch_size, device=device)
-                for start in range(0, batch_size, mb_size):
-                    end = min(start + mb_size, batch_size)
-                    mb_idx = indices[start:end]
+                for start in range(0, rollout_steps, seq_len):
+                    end = min(start + seq_len, rollout_steps)
+                    obs_seq = obs_t[start:end]
+                    mask_seq = mask_t[start:end]
+                    act_seq = actions_t[start:end]
+                    old_logprob_seq = old_logprob_t[start:end]
+                    adv_seq = advantages[start:end]
+                    ret_seq = returns_t[start:end]
+                    old_value_seq = values_t[start:end]
+                    hidden_init = hidden_t[start].detach().clone()
 
-                    logits, value_pred = model(b_obs[mb_idx])
-                    dist = masked_categorical(logits, b_mask[mb_idx])
-                    new_logprob = dist.log_prob(b_actions[mb_idx])
+                    seq_t = end - start
+                    reset_before = torch.zeros(seq_t, num_envs, dtype=torch.float32, device=device)
+                    if seq_t > 1:
+                        reset_before[1:] = dones_t[start : end - 1]
+
+                    logits_seq, value_seq, _ = model.forward_gru_sequence(
+                        obs_seq=obs_seq,
+                        hidden_init=hidden_init,
+                        reset_before_step=reset_before,
+                    )
+                    dist = masked_categorical(
+                        logits_seq.reshape(-1, action_dim),
+                        mask_seq.reshape(-1, action_dim),
+                    )
+                    new_logprob = dist.log_prob(act_seq.reshape(-1))
                     entropy = dist.entropy().mean()
 
-                    ratio = torch.exp(new_logprob - b_old_logprob[mb_idx])
-                    adv_mb = b_adv[mb_idx]
-                    pg_loss_1 = -adv_mb * ratio
-                    pg_loss_2 = -adv_mb * torch.clamp(
+                    old_logprob_flat = old_logprob_seq.reshape(-1)
+                    ratio = torch.exp(new_logprob - old_logprob_flat)
+                    adv_flat = adv_seq.reshape(-1)
+                    pg_loss_1 = -adv_flat * ratio
+                    pg_loss_2 = -adv_flat * torch.clamp(
                         ratio, 1.0 - runtime["clip_coef"], 1.0 + runtime["clip_coef"]
                     )
                     policy_loss = torch.max(pg_loss_1, pg_loss_2).mean()
 
-                    v_pred = value_pred.squeeze(-1)
-                    v_old = b_values[mb_idx]
+                    v_pred = value_seq.reshape(-1)
+                    v_old = old_value_seq.reshape(-1)
+                    ret_flat = ret_seq.reshape(-1)
                     if runtime["value_clip_coef"] > 0:
                         v_pred_clipped = v_old + torch.clamp(
                             v_pred - v_old,
                             -runtime["value_clip_coef"],
                             runtime["value_clip_coef"],
                         )
-                        value_loss_unclipped = (v_pred - b_returns[mb_idx]) ** 2
-                        value_loss_clipped = (v_pred_clipped - b_returns[mb_idx]) ** 2
+                        value_loss_unclipped = (v_pred - ret_flat) ** 2
+                        value_loss_clipped = (v_pred_clipped - ret_flat) ** 2
                         value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
                     else:
-                        value_loss = 0.5 * ((v_pred - b_returns[mb_idx]) ** 2).mean()
+                        value_loss = 0.5 * ((v_pred - ret_flat) ** 2).mean()
 
                     loss = (
                         policy_loss
@@ -1396,7 +1543,7 @@ def train(
                     optimizer.step()
 
                     with torch.no_grad():
-                        approx_kl_val = float((b_old_logprob[mb_idx] - new_logprob).mean().item())
+                        approx_kl_val = float((old_logprob_flat - new_logprob).mean().item())
                         last_approx_kl = approx_kl_val
                         approx_kl_sum += approx_kl_val
                         approx_kl_count += 1
@@ -1454,6 +1601,8 @@ def train(
                 "go_not_selected": go_not_selected,
                 "go_failures": go_failures,
                 "approx_kl": last_approx_kl,
+                "gru_num_layers": int(runtime["gru_num_layers"]),
+                "gru_seq_len": int(runtime["gru_seq_len"]),
                 "active_opponent_policy": active_opponent_policy if runtime["training_mode"] == "single_actor" else "",
                 "active_opponent_policy_stage_start_update": int(active_policy_start_update)
                 if runtime["training_mode"] == "single_actor"
