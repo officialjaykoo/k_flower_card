@@ -38,7 +38,10 @@ const MATCH_SLOTS = 8;
 const CARD_FEATURE_DIM = 7;
 const PHASE_FEATURE_DIM = 6;
 const DECISION_FEATURE_DIM = 3;
-const MACRO_FEATURE_DIM = 41;
+const MONTH_BUCKETS = 12;
+const MONTH_PROFILE_FEATURE_DIM = MONTH_BUCKETS * 5; // board/self_captured/opp_captured/self_hand/opp_shaked
+const STRATEGY_AUX_FEATURE_DIM = 2; // multiplier_risk_norm, go_expected_value_norm
+const MACRO_FEATURE_DIM = 41 + MONTH_PROFILE_FEATURE_DIM + STRATEGY_AUX_FEATURE_DIM;
 const OPTION_ORDER = Object.freeze([
   "go",
   "stop",
@@ -506,6 +509,113 @@ function monthTotalCards(month) {
   return 0;
 }
 
+function uniqueMonthCounts(cards) {
+  const counts = new Array(MONTH_BUCKETS).fill(0);
+  if (!Array.isArray(cards)) return counts;
+  const seen = new Set();
+  for (const card of cards) {
+    if (!card || typeof card !== "object") continue;
+    const month = Number(card?.month || 0);
+    if (!Number.isFinite(month) || month < 1 || month > MONTH_BUCKETS) continue;
+    const id = String(card?.id || "");
+    if (id) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+    }
+    counts[month - 1] += 1;
+  }
+  return counts;
+}
+
+function appendMonthNormFromCards(out, cards, denom) {
+  const d = Math.max(1, Number(denom || 4));
+  const counts = uniqueMonthCounts(cards);
+  for (let m = 0; m < MONTH_BUCKETS; m += 1) {
+    out.push(clamp01(counts[m] / d));
+  }
+}
+
+function collectCapturedCards(player) {
+  const out = [];
+  const pushAll = (cards) => {
+    if (!Array.isArray(cards)) return;
+    for (const card of cards) out.push(card);
+  };
+  const captured = player?.captured || {};
+  pushAll(captured.kwang || []);
+  pushAll(captured.five || []);
+  pushAll(captured.ribbon || []);
+  pushAll(captured.junk || []);
+  return out;
+}
+
+function collectOppShakedMonths(state, oppActor) {
+  const months = new Set();
+  const addMonth = (rawMonth) => {
+    const m = Number(rawMonth || 0);
+    if (Number.isInteger(m) && m >= 1 && m <= MONTH_BUCKETS) months.add(m);
+  };
+
+  const declared = state?.players?.[oppActor]?.shakingDeclaredMonths;
+  if (Array.isArray(declared)) {
+    for (const month of declared) addMonth(month);
+  }
+
+  const reveal = state?.shakingReveal;
+  if (String(reveal?.playerKey || "") === oppActor) {
+    addMonth(reveal?.month);
+  }
+
+  const kibo = state?.kibo;
+  if (Array.isArray(kibo)) {
+    for (const evt of kibo) {
+      if (String(evt?.type || "") !== "shaking_declare") continue;
+      if (String(evt?.playerKey || "") !== oppActor) continue;
+      addMonth(evt?.month);
+    }
+  }
+  return months;
+}
+
+function appendOppShakedMonthFlags(out, state, oppActor) {
+  const months = collectOppShakedMonths(state, oppActor);
+  for (let month = 1; month <= MONTH_BUCKETS; month += 1) {
+    out.push(months.has(month) ? 1 : 0);
+  }
+}
+
+function multiplierRiskNorm(state, scoreSelf, scoreOpp, goMinScore) {
+  const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
+  const selfMul = Math.max(1.0, Number(scoreSelf?.multiplier || 1.0));
+  const currentMul = selfMul * carry;
+  const mulNorm = clamp01((currentMul - 1.0) / 12.0);
+  const selfStopReady = 1.0 - scoreGapToStopNorm(Number(scoreSelf?.total || 0), goMinScore);
+  const oppStopReady = 1.0 - scoreGapToStopNorm(Number(scoreOpp?.total || 0), goMinScore);
+  const leadNorm = clamp01((tanhNorm(Number(scoreSelf?.total || 0) - Number(scoreOpp?.total || 0), 8.0) + 1.0) / 2.0);
+  return clamp01(mulNorm * (0.5 + 0.3 * oppStopReady + 0.2 * (1.0 - leadNorm)) * (0.4 + 0.6 * selfStopReady));
+}
+
+function goExpectedValueNormPublic(state, controlActor, decisionType, focusMonth, scoreSelf, scoreOpp, goMinScore) {
+  const selfScore = Number(scoreSelf?.total || 0);
+  const oppScore = Number(scoreOpp?.total || 0);
+  const lead = tanhNorm(selfScore - oppScore, 8.0); // [-1, +1]
+  const selfStopReady = 1.0 - scoreGapToStopNorm(selfScore, goMinScore); // [0, 1]
+  const oppStopReady = 1.0 - scoreGapToStopNorm(oppScore, goMinScore); // [0, 1]
+  const mulNorm = currentMultiplierNorm(state, scoreSelf);
+  const matchDensity = matchOpportunityDensity(state, focusMonth);
+  const immediate = immediateMatchPossible(state, decisionType, focusMonth);
+  const knownRatio = candidateMonthKnownRatio(state, controlActor, focusMonth);
+
+  const raw =
+    0.40 * lead +
+    0.20 * (selfStopReady - oppStopReady) +
+    0.20 * mulNorm +
+    0.10 * matchDensity +
+    0.05 * immediate +
+    0.05 * knownRatio;
+  return clamp01((Math.tanh(raw) + 1.0) * 0.5);
+}
+
 function collectKnownCardsForMonthRatio(state, actor) {
   const out = [];
   const pushAll = (cards) => {
@@ -917,7 +1027,7 @@ function buildObservation(state, controlActor, actionCtx) {
   out.push(actionCtx.decisionType === "match" ? 1 : 0);
   out.push(actionCtx.decisionType === "option" ? 1 : 0);
 
-  // 3) macro counts/scores (41 total -> now 50 cumulative)
+  // 3) macro counts/scores/public strategy block (103 total -> 112 cumulative)
   out.push(clamp01(Number(state?.deck?.length || 0) / 30.0));
   out.push(clamp01(Number(state?.players?.[controlActor]?.hand?.length || 0) / 10.0));
   out.push(clamp01(Number(state?.players?.[opp]?.hand?.length || 0) / 10.0));
@@ -969,6 +1079,19 @@ function buildObservation(state, controlActor, actionCtx) {
   out.push(scoreGapToStopNorm(Number(scoreSelf?.total || 0), goMinScore));
   out.push(scoreGapToStopNorm(Number(scoreOpp?.total || 0), goMinScore));
   out.push(candidateMonthKnownRatio(state, controlActor, focusMonth));
+
+  // 3-c) public month distributions (48)
+  appendMonthNormFromCards(out, state?.board || [], 4.0); // board_month_1..12_norm
+  appendMonthNormFromCards(out, collectCapturedCards(state?.players?.[controlActor]), 4.0); // self_captured_month_1..12
+  appendMonthNormFromCards(out, collectCapturedCards(state?.players?.[opp]), 4.0); // opp_captured_month_1..12
+  appendMonthNormFromCards(out, state?.players?.[controlActor]?.hand || [], 4.0); // self_hand_month_1..12
+
+  // 3-d) opponent shaking-declared months (12), public-only.
+  appendOppShakedMonthFlags(out, state, opp);
+
+  // 3-e) public-only strategic auxiliaries (2)
+  out.push(multiplierRiskNorm(state, scoreSelf, scoreOpp, goMinScore));
+  out.push(goExpectedValueNormPublic(state, controlActor, actionCtx.decisionType, focusMonth, scoreSelf, scoreOpp, goMinScore));
 
   // 4) hand card slots (10 * 7 = 70)
   appendCardSlots(out, state?.players?.[controlActor]?.hand || [], PLAY_SLOTS);

@@ -52,7 +52,7 @@ This folder is the PPO pipeline for Matgo. The priority is:
 ```
 
 ```powershell
-.\ppo\run_duel_ppo.ps1 -RuntimeConfig .\ppo\configs\duel_ppo_vs_v5_1000.json -Seed ppo_vs_hcl_phase1_seed93_best_1000 -CheckpointPath .\logs\PPO\vs_hcl_phase1_seed93\best.pt -ResultOut .\logs\model_duel\ppo_vs_hcl_phase1_seed93_best_1000_result.json -Games 1000 -OpponentPolicy H-CL:1.0
+.\ppo\run_duel_ppo.ps1 -RuntimeConfig .\ppo\configs\duel_ppo_vs_v5_1000.json -Seed ppo_vs_hcl_phase1_seed93_best_1000 -CheckpointPath .\logs\PPO\vs_hcl_phase1_seed93\best_stage1.pt -ResultOut .\logs\model_duel\ppo_vs_hcl_phase1_seed93_best_1000_result.json -Games 1000 -OpponentPolicy H-CL:1.0
 ```
 
 ## Opponent Policy Format (Single Canonical)

@@ -3,7 +3,7 @@
     "seed":  "ppo_vs_hcl_phase1_seed93_best_1000",
     "node_bin":  "node",
     "env_bridge_script":  "ppo/scripts/ppo_env_bridge.mjs",
-    "checkpoint_path":  "logs/PPO/vs_hcl_phase1_seed93/best.pt",
+    "checkpoint_path":  "logs/PPO/vs_hcl_phase1_seed93/best_stage1.pt",
     "rule_key":  "A",
     "opponent_policy":  "H-CL:1.0",
     "games":  1000,

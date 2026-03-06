@@ -90,6 +90,8 @@ BEST_WIN_CLAMP = 0.10
 BEST_WIN_DEADZONE = 0.02
 BEST_WIN_TO_GOLD_SCALE = 35000.0
 BEST_SCORE_MARGIN = 150.0
+GRU_BURN_IN_STEPS = 4
+STAGE_DECAY_RATIO = 0.70
 
 
 def fail(msg: str) -> None:
@@ -241,6 +243,19 @@ def resolve_stage_index_for_start_update(schedule: List[Dict[str, Any]], start_u
             return int(idx + 1)
     fail(f"stage start_update not found in opponent_policy_schedule: start_update={start_update}")
     return 0
+
+
+def resolve_next_stage_start_update(
+    schedule: List[Dict[str, Any]],
+    stage_start_update: int,
+    total_updates: int,
+) -> int:
+    current_start = int(stage_start_update)
+    for entry in schedule:
+        start_update = int(entry.get("start_update", 0))
+        if start_update > current_start:
+            return start_update
+    return int(total_updates) + 1
 
 
 def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
@@ -1033,12 +1048,12 @@ def train(
         episode_go_not_selected = [0 for _ in range(num_envs)]
         completed_returns: List[float] = []
         completed_lengths: List[int] = []
-        completed_gold_diff: List[float] = []
-        completed_go_opportunity_games: List[int] = []
-        completed_go_games: List[int] = []
-        completed_go_attempts: List[int] = []
-        completed_go_not_selected: List[int] = []
-        completed_go_failures: List[int] = []
+        stage_window_gold_diff: List[float] = []
+        stage_window_go_opportunity_games: List[int] = []
+        stage_window_go_games: List[int] = []
+        stage_window_go_attempts: List[int] = []
+        stage_window_go_not_selected: List[int] = []
+        stage_window_go_failures: List[int] = []
         global_episode_index = num_envs
 
         train_start = time.time()
@@ -1048,36 +1063,11 @@ def train(
         active_stage_index = 1
         active_stage_start_update = 1
 
-        overall_best_metrics: Optional[Dict[str, Any]] = None
-        overall_best_update = 0
-        overall_best_metrics_path = os.path.join(output_dir, "best_overall_metrics.json")
-        legacy_best_metrics_path = os.path.join(output_dir, "best_metrics.json")
-
         def stage_best_metrics_path(stage_index: int) -> str:
             return os.path.join(output_dir, f"best_metrics_stage{int(stage_index)}.json")
 
         def stage_best_checkpoint_name(stage_index: int) -> str:
             return f"best_stage{int(stage_index)}.pt"
-
-        if os.path.exists(overall_best_metrics_path):
-            try:
-                with open(overall_best_metrics_path, "r", encoding="utf-8-sig") as f:
-                    best_obj = json.load(f)
-                if isinstance(best_obj, dict) and "mean_final_gold_diff_1000" in best_obj:
-                    overall_best_metrics = dict(best_obj)
-                    overall_best_update = int(overall_best_metrics.get("update", 0))
-            except Exception as err:
-                fail(f"failed to read best_overall_metrics.json: {overall_best_metrics_path}, err={err}")
-        elif os.path.exists(legacy_best_metrics_path):
-            # Legacy pre-stage file is treated as overall-best snapshot.
-            try:
-                with open(legacy_best_metrics_path, "r", encoding="utf-8-sig") as f:
-                    best_obj = json.load(f)
-                if isinstance(best_obj, dict) and "mean_final_gold_diff_1000" in best_obj:
-                    overall_best_metrics = dict(best_obj)
-                    overall_best_update = int(overall_best_metrics.get("update", 0))
-            except Exception as err:
-                fail(f"failed to read legacy best_metrics.json: {legacy_best_metrics_path}, err={err}")
 
         if runtime["training_mode"] == "single_actor":
             start_update = int(resume_update + 1)
@@ -1142,13 +1132,6 @@ def train(
 
         if resume_payload is not None:
             ck_metrics = resume_payload.get("metrics") or {}
-            if overall_best_metrics is None and "mean_final_gold_diff_1000" in ck_metrics:
-                overall_best_metrics = dict(ck_metrics)
-                try:
-                    overall_best_update = int(overall_best_metrics.get("update", resume_update))
-                except Exception:
-                    overall_best_update = resume_update
-
             if stage_best_metrics is None and "mean_final_gold_diff_1000" in ck_metrics:
                 ck_stage_index_raw = ck_metrics.get("stage_index", 0)
                 ck_stage_start_raw = ck_metrics.get("stage_start_update", ck_metrics.get("active_opponent_policy_stage_start_update", 0))
@@ -1171,10 +1154,9 @@ def train(
                     except Exception:
                         stage_best_update = resume_update
 
-        if stage_best_update > 0:
-            stage_updates_since_best = max(0, resume_update - stage_best_update)
-        else:
-            stage_updates_since_best = 0
+        # Stage rolling windows are rebuilt per process, so patience counter must
+        # restart at resume to avoid inheriting stale "updates_since_best".
+        stage_updates_since_best = 0
 
         for update in range(resume_update + 1, runtime["total_updates"] + 1):
             if runtime["training_mode"] == "single_actor":
@@ -1238,6 +1220,13 @@ def train(
                     stage_best_metrics = None
                     stage_best_update = 0
                     stage_updates_since_best = 0
+                    # Stage boundary hard reset: 1000-game metric window must not cross stages.
+                    stage_window_gold_diff.clear()
+                    stage_window_go_opportunity_games.clear()
+                    stage_window_go_games.clear()
+                    stage_window_go_attempts.clear()
+                    stage_window_go_not_selected.clear()
+                    stage_window_go_failures.clear()
                     switched_stage_metrics_path = stage_best_metrics_path(active_stage_index)
                     if os.path.exists(switched_stage_metrics_path):
                         try:
@@ -1246,7 +1235,8 @@ def train(
                             if isinstance(best_obj, dict) and "mean_final_gold_diff_1000" in best_obj:
                                 stage_best_metrics = dict(best_obj)
                                 stage_best_update = int(stage_best_metrics.get("update", 0))
-                                stage_updates_since_best = max(0, (update - 1) - stage_best_update)
+                                # Stage switched and windows were reset above; restart patience counter.
+                                stage_updates_since_best = 0
                         except Exception as err:
                             fail(
                                 "failed to read stage best metrics on stage switch: "
@@ -1275,13 +1265,44 @@ def train(
                 active_stage_index = 1
                 active_stage_start_update = 1
 
-            if runtime["total_updates"] <= 1:
-                lr_now = float(runtime["learning_rate_final"])
+            if runtime["training_mode"] == "single_actor":
+                stage_idx = max(1, int(active_stage_index))
+                stage_lr_start = float(runtime["learning_rate"]) * (STAGE_DECAY_RATIO ** max(0, stage_idx - 1))
+                schedule = runtime["opponent_policy_schedule"]
+                next_stage_start = resolve_next_stage_start_update(
+                    schedule=schedule,
+                    stage_start_update=int(active_stage_start_update),
+                    total_updates=int(runtime["total_updates"]),
+                )
+                if stage_idx < len(schedule):
+                    stage_lr_end = float(runtime["learning_rate"]) * (STAGE_DECAY_RATIO ** stage_idx)
+                else:
+                    stage_lr_end = float(runtime["learning_rate_final"])
+                stage_lr_end = max(stage_lr_end, float(runtime["learning_rate_final"]))
+                if stage_lr_start < stage_lr_end:
+                    stage_lr_start = stage_lr_end
+                stage_span = max(1, int(next_stage_start) - int(active_stage_start_update))
+                stage_progress = float(update - int(active_stage_start_update)) / float(max(1, stage_span - 1))
+                stage_progress = max(0.0, min(1.0, stage_progress))
+                lr_now = float(stage_lr_start + stage_progress * (stage_lr_end - stage_lr_start))
             else:
-                progress = float(update - 1) / float(runtime["total_updates"] - 1)
-                lr_now = float(runtime["learning_rate"] + progress * (runtime["learning_rate_final"] - runtime["learning_rate"]))
+                if runtime["total_updates"] <= 1:
+                    lr_now = float(runtime["learning_rate_final"])
+                else:
+                    progress = float(update - 1) / float(runtime["total_updates"] - 1)
+                    lr_now = float(runtime["learning_rate"] + progress * (runtime["learning_rate_final"] - runtime["learning_rate"]))
             for pg in optimizer.param_groups:
                 pg["lr"] = lr_now
+
+            go_explore_prob_now = float(runtime["go_explore_prob"])
+            if runtime["training_mode"] == "single_actor":
+                go_explore_prob_now = float(
+                    runtime["go_explore_prob"] * (STAGE_DECAY_RATIO ** max(0, int(active_stage_index) - 1))
+                )
+            if go_explore_prob_now < 0.0:
+                go_explore_prob_now = 0.0
+            if go_explore_prob_now > 1.0:
+                go_explore_prob_now = 1.0
 
             # 1) Rollout buffers for this update.
             rollout_obs: List[torch.Tensor] = []
@@ -1291,14 +1312,12 @@ def train(
             rollout_values: List[torch.Tensor] = []
             rollout_rewards: List[torch.Tensor] = []
             rollout_dones: List[torch.Tensor] = []
-            rollout_hiddens: List[torch.Tensor] = []
             opponent_episode_counts_update: Dict[str, int] = {}
 
             for _ in range(runtime["rollout_steps"]):
                 rollout_obs.append(next_obs.detach().clone())
                 rollout_masks.append(next_mask.detach().clone())
                 with torch.no_grad():
-                    rollout_hiddens.append(recurrent_hidden.detach().clone())
                     logits, value, hidden_next = model.forward_gru_step(next_obs, recurrent_hidden)
                     dist = masked_categorical(logits, next_mask)
                     sampled_actions = dist.sample()
@@ -1318,7 +1337,7 @@ def train(
                     if action_list[env_idx] == GO_ACTION_INDEX:
                         episode_go_attempts[env_idx] += 1
                         continue
-                    if random.random() < runtime["go_explore_prob"]:
+                    if random.random() < go_explore_prob_now:
                         action_list[env_idx] = GO_ACTION_INDEX
                         episode_go_attempts[env_idx] += 1
                     else:
@@ -1364,18 +1383,30 @@ def train(
                         completed_returns.append(episode_returns[env_idx])
                         completed_lengths.append(episode_lengths[env_idx])
                         final_gold_diff_done = float(reply.info.get("final_gold_diff", 0.0))
-                        completed_gold_diff.append(final_gold_diff_done)
+                        stage_window_gold_diff.append(final_gold_diff_done)
                         go_attempts_ep = int(episode_go_attempts[env_idx])
                         go_opportunities_ep = int(episode_go_opportunities[env_idx])
                         go_not_selected_ep = int(episode_go_not_selected[env_idx])
                         go_game = 1 if go_attempts_ep > 0 else 0
                         go_opportunity_game = 1 if go_opportunities_ep > 0 else 0
                         go_failure = 1 if (go_game == 1 and final_gold_diff_done < 0.0) else 0
-                        completed_go_attempts.append(go_attempts_ep)
-                        completed_go_not_selected.append(go_not_selected_ep)
-                        completed_go_games.append(go_game)
-                        completed_go_opportunity_games.append(go_opportunity_game)
-                        completed_go_failures.append(go_failure)
+                        stage_window_go_attempts.append(go_attempts_ep)
+                        stage_window_go_not_selected.append(go_not_selected_ep)
+                        stage_window_go_games.append(go_game)
+                        stage_window_go_opportunity_games.append(go_opportunity_game)
+                        stage_window_go_failures.append(go_failure)
+                        if len(stage_window_gold_diff) > ROLLING_METRIC_GAMES:
+                            stage_window_gold_diff.pop(0)
+                        if len(stage_window_go_attempts) > ROLLING_METRIC_GAMES:
+                            stage_window_go_attempts.pop(0)
+                        if len(stage_window_go_not_selected) > ROLLING_METRIC_GAMES:
+                            stage_window_go_not_selected.pop(0)
+                        if len(stage_window_go_games) > ROLLING_METRIC_GAMES:
+                            stage_window_go_games.pop(0)
+                        if len(stage_window_go_opportunity_games) > ROLLING_METRIC_GAMES:
+                            stage_window_go_opportunity_games.pop(0)
+                        if len(stage_window_go_failures) > ROLLING_METRIC_GAMES:
+                            stage_window_go_failures.pop(0)
                         if runtime["training_mode"] == "single_actor":
                             opp_policy = str(reply.info.get("opponent_policy", "")).strip()
                             if not opp_policy:
@@ -1434,12 +1465,6 @@ def train(
             values_t = torch.stack(rollout_values, dim=0)
             rewards_t = torch.stack(rollout_rewards, dim=0)
             dones_t = torch.stack(rollout_dones, dim=0)
-            if len(rollout_hiddens) != runtime["rollout_steps"]:
-                fail(
-                    "GRU rollout hidden count mismatch: "
-                    f"got={len(rollout_hiddens)}, expected={runtime['rollout_steps']}"
-                )
-            hidden_t = torch.stack(rollout_hiddens, dim=0)
 
             advantages = torch.zeros_like(rewards_t, device=device)
             last_gae = torch.zeros(num_envs, dtype=torch.float32, device=device)
@@ -1477,8 +1502,18 @@ def train(
             # 3) PPO optimization epochs.
             model.train()
             seq_len = int(runtime["gru_seq_len"])
+            burn_in_steps = int(GRU_BURN_IN_STEPS)
             rollout_steps = int(runtime["rollout_steps"])
+            if burn_in_steps < 0:
+                fail(f"GRU_BURN_IN_STEPS must be >= 0, got={burn_in_steps}")
+            if burn_in_steps >= seq_len:
+                fail(
+                    "GRU burn-in must be smaller than seq_len "
+                    f"(burn_in={burn_in_steps}, seq_len={seq_len})"
+                )
             for _ in range(runtime["ppo_epochs"]):
+                # Recompute recurrent context with current parameters every epoch.
+                hidden_carry = model.init_recurrent_state(batch_size=num_envs, device=device)
                 for start in range(0, rollout_steps, seq_len):
                     end = min(start + seq_len, rollout_steps)
                     obs_seq = obs_t[start:end]
@@ -1488,18 +1523,35 @@ def train(
                     adv_seq = advantages[start:end]
                     ret_seq = returns_t[start:end]
                     old_value_seq = values_t[start:end]
-                    hidden_init = hidden_t[start].detach().clone()
 
                     seq_t = end - start
                     reset_before = torch.zeros(seq_t, num_envs, dtype=torch.float32, device=device)
+                    if start > 0:
+                        reset_before[0] = dones_t[start - 1]
                     if seq_t > 1:
                         reset_before[1:] = dones_t[start : end - 1]
 
-                    logits_seq, value_seq, _ = model.forward_gru_sequence(
+                    logits_seq, value_seq, hidden_out = model.forward_gru_sequence(
                         obs_seq=obs_seq,
-                        hidden_init=hidden_init,
+                        hidden_init=hidden_carry,
                         reset_before_step=reset_before,
                     )
+                    # TBPTT: carry hidden across chunks, but detach graph at chunk boundary.
+                    hidden_carry = hidden_out.detach()
+
+                    # Burn-in: skip early timesteps in each chunk for PPO loss terms.
+                    valid_start = min(burn_in_steps, seq_t)
+                    if valid_start >= seq_t:
+                        continue
+                    logits_seq = logits_seq[valid_start:]
+                    value_seq = value_seq[valid_start:]
+                    mask_seq = mask_seq[valid_start:]
+                    act_seq = act_seq[valid_start:]
+                    old_logprob_seq = old_logprob_seq[valid_start:]
+                    adv_seq = adv_seq[valid_start:]
+                    ret_seq = ret_seq[valid_start:]
+                    old_value_seq = old_value_seq[valid_start:]
+
                     dist = masked_categorical(
                         logits_seq.reshape(-1, action_dim),
                         mask_seq.reshape(-1, action_dim),
@@ -1557,16 +1609,16 @@ def train(
                 last_approx_kl = float(approx_kl_sum / approx_kl_count)
 
             # 4) Rolling metrics over latest N finished games.
-            window_gold_diff = completed_gold_diff[-ROLLING_METRIC_GAMES:]
+            window_gold_diff = stage_window_gold_diff
             mean_gold_diff = float(sum(window_gold_diff) / max(1, len(window_gold_diff)))
             wins_1000 = sum(1 for v in window_gold_diff if float(v) > 0)
             denom_1000 = max(1, len(window_gold_diff))
             catastrophic_rate_1000 = rate_at_or_below(window_gold_diff, runtime["catastrophic_loss_threshold"])
-            window_go_opportunity_games = completed_go_opportunity_games[-ROLLING_METRIC_GAMES:]
-            window_go_games = completed_go_games[-ROLLING_METRIC_GAMES:]
-            window_go_attempts = completed_go_attempts[-ROLLING_METRIC_GAMES:]
-            window_go_not_selected = completed_go_not_selected[-ROLLING_METRIC_GAMES:]
-            window_go_failures = completed_go_failures[-ROLLING_METRIC_GAMES:]
+            window_go_opportunity_games = stage_window_go_opportunity_games
+            window_go_games = stage_window_go_games
+            window_go_attempts = stage_window_go_attempts
+            window_go_not_selected = stage_window_go_not_selected
+            window_go_failures = stage_window_go_failures
             go_opportunity_games = int(sum(window_go_opportunity_games))
             go_games = int(sum(window_go_games))
             go_attempts = int(sum(window_go_attempts))
@@ -1593,13 +1645,13 @@ def train(
                 "updates_since_best": int(stage_updates_since_best),
                 "stage_best_update_so_far": int(stage_best_update),
                 "stage_updates_since_best": int(stage_updates_since_best),
-                "overall_best_update_so_far": int(overall_best_update),
                 "early_stop_patience_triggered": False,
                 "go_opportunity_games": go_opportunity_games,
                 "go_games": go_games,
                 "go_attempts": go_attempts,
                 "go_not_selected": go_not_selected,
                 "go_failures": go_failures,
+                "go_explore_prob": float(go_explore_prob_now),
                 "approx_kl": last_approx_kl,
                 "gru_num_layers": int(runtime["gru_num_layers"]),
                 "gru_seq_len": int(runtime["gru_seq_len"]),
@@ -1617,9 +1669,8 @@ def train(
                 },
             }
 
-            # 5) Stage-best / overall-best tracking + stage-scoped early-stop gate.
+            # 5) Stage-best tracking + stage-scoped early-stop gate.
             is_stage_best_update = False
-            is_overall_best_update = False
             if best_eval_ready:
                 if stage_best_metrics is None or is_better_update(candidate=metrics, best=stage_best_metrics):
                     stage_best_update = int(update)
@@ -1628,20 +1679,13 @@ def train(
                 else:
                     stage_updates_since_best += 1
 
-                if overall_best_metrics is None or is_better_update(candidate=metrics, best=overall_best_metrics):
-                    overall_best_update = int(update)
-                    is_overall_best_update = True
-
             metrics["best_update_so_far"] = int(stage_best_update)
             metrics["updates_since_best"] = int(stage_updates_since_best)
             metrics["stage_best_update_so_far"] = int(stage_best_update)
             metrics["stage_updates_since_best"] = int(stage_updates_since_best)
-            metrics["overall_best_update_so_far"] = int(overall_best_update)
 
             if is_stage_best_update:
                 stage_best_metrics = dict(metrics)
-            if is_overall_best_update:
-                overall_best_metrics = dict(metrics)
 
             stop_by_patience = (
                 best_eval_ready
@@ -1668,17 +1712,6 @@ def train(
             if is_stage_best_update:
                 save_checkpoint(
                     output_dir=output_dir,
-                    filename="best.pt",
-                    model=model,
-                    optimizer=optimizer,
-                    runtime=runtime,
-                    update=update,
-                    obs_dim=obs_dim,
-                    action_dim=action_dim,
-                    metrics=metrics,
-                )
-                save_checkpoint(
-                    output_dir=output_dir,
                     filename=stage_best_checkpoint_name(active_stage_index),
                     model=model,
                     optimizer=optimizer,
@@ -1688,24 +1721,7 @@ def train(
                     action_dim=action_dim,
                     metrics=metrics,
                 )
-                with open(os.path.join(output_dir, "best_metrics.json"), "w", encoding="utf-8") as f:
-                    json.dump(metrics, f, ensure_ascii=False, indent=2)
                 with open(stage_best_metrics_path(active_stage_index), "w", encoding="utf-8") as f:
-                    json.dump(metrics, f, ensure_ascii=False, indent=2)
-
-            if is_overall_best_update:
-                save_checkpoint(
-                    output_dir=output_dir,
-                    filename="best_overall.pt",
-                    model=model,
-                    optimizer=optimizer,
-                    runtime=runtime,
-                    update=update,
-                    obs_dim=obs_dim,
-                    action_dim=action_dim,
-                    metrics=metrics,
-                )
-                with open(overall_best_metrics_path, "w", encoding="utf-8") as f:
                     json.dump(metrics, f, ensure_ascii=False, indent=2)
 
             save_checkpoint(
