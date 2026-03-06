@@ -1,9 +1,9 @@
-{
+﻿{
     "format_version": "ppo_runtime_phase1_v1",
     "phase": "1",
     "training_mode": "single_actor",
     "node_bin": "node",
-    "env_bridge_script": "ppo/scripts/ppo_env_bridge.mjs",
+    "env_bridge_script": "ppo_by_GPT/scripts/ppo_env_bridge.mjs",
     "rule_key": "A",
     "control_actor": "human",
     "first_turn_policy": "alternate",
@@ -25,6 +25,7 @@
     "learning_rate": 0.0003,
     "learning_rate_final": 0.00012,
     "entropy_coef": 0.03,
+    "entropy_coef_final": 0.005,
     "value_coef": 0.5,
     "value_clip_coef": 0.2,
     "target_kl": 0.02,
@@ -32,26 +33,27 @@
     "catastrophic_loss_threshold": -7000,
     "catastrophic_penalty_scale": 0.0002,
     "early_stop_patience_updates": 9999,
-    "early_stop_min_updates": 9999,
+    "early_stop_min_updates": 1,
     "gru_num_layers": 1,
     "gru_seq_len": 16,
     "hidden_size": 256,
     "device": "cpu",
     "log_every_updates": 20,
     "save_every_updates": 500,
-    "seed": "abl_E",
-    "reward_scale": 0.01,
-    "go_explore_prob": 0.05,
+    "seed": "abl_C",
+    "reward_scale": 0.001,
+    "go_explore_prob": 0.25,
+    "go_explore_stage_decay": 0.7,
+    "forced_go_policy_weight": 0.0,
     "opponent_policy": "H-J1:0.50|H-Gemini:0.20|H-AntiCL:0.20|H-J2:0.10",
     "opponent_policy_schedule": [
         {
             "start_update": 1,
-            "opponent_policy": "H-J1:0.50|H-Gemini:0.20|H-AntiCL:0.20|H-J2:0.10"
+            "opponent_policy": "H-J1:0.60|H-Gemini:0.40"
         }
     ],
-    "output_dir": "logs/PPO/ablation_E_claude",
-    "output_dir_template": "logs/PPO/ablation_E_claude_{seed}",
-    "_ablation_desc": "go_explore 0.05 + reward_scale 0.01 + weak fixed",
-    "entropy_coef_final": 0.005,
-    "_desc": "CL best: entropy_annealing + value_mlp + goScoreHold + goMomentum + stopWin"
+    "output_dir": "logs/PPO_GPT/ablation_C_weak_fixed",
+    "output_dir_template": "logs/PPO_GPT/ablation_C_weak_fixed_{seed}",
+    "_ablation_desc": "weak fixed opponents only"
 }
+

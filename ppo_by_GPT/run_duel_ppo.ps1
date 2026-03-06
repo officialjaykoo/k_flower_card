@@ -17,7 +17,7 @@ if (-not (Test-Path $RuntimeConfig)) {
 }
 
 $args = @(
-  "ppo/scripts/duel_ppo_vs_v5.py",
+  "ppo_by_GPT/scripts/duel_ppo_vs_v5.py",
   "--runtime-config", "$RuntimeConfig"
 )
 

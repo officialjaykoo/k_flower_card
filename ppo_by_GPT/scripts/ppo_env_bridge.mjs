@@ -78,8 +78,10 @@ const PHASE1_SHAPING = Object.freeze({
   shaking: 0.05,
   bomb: 0.05,
   goScoreUp: 0.12,
-  goWin: 0.20,
-  goLoss: -0.12,
+  goScoreHold: 0.05,
+  goWin: 0.45,
+  goLoss: -0.22,
+  stopWin: -0.08,
   doublePiGet: 0.03,
   pi10Reached: 0.06,
   piBakRisk: -0.10,
@@ -209,6 +211,10 @@ function parseArgs(argv) {
     terminalWinBonus: null,
     terminalLossPenalty: null,
     goActionBonus: null,
+    phase1GoWin: null,
+    phase1GoLoss: null,
+    phase1StopWin: null,
+    phase1GoScoreHold: null,
     firstTurnPolicy: "",
     fixedFirstTurn: ""
   };
@@ -245,6 +251,14 @@ function parseArgs(argv) {
       out.terminalLossPenalty = toFiniteNumber(value, "--terminal-loss-penalty");
     } else if (key === "--go-action-bonus") {
       out.goActionBonus = toFiniteNumber(value, "--go-action-bonus");
+    } else if (key === "--phase1-go-win") {
+      out.phase1GoWin = toFiniteNumber(value, "--phase1-go-win");
+    } else if (key === "--phase1-go-loss") {
+      out.phase1GoLoss = toFiniteNumber(value, "--phase1-go-loss");
+    } else if (key === "--phase1-stop-win") {
+      out.phase1StopWin = toFiniteNumber(value, "--phase1-stop-win");
+    } else if (key === "--phase1-go-score-hold") {
+      out.phase1GoScoreHold = toFiniteNumber(value, "--phase1-go-score-hold");
     } else if (key === "--first-turn-policy") {
       out.firstTurnPolicy = normalizeFirstTurnPolicy(value);
     } else if (key === "--fixed-first-turn") {
@@ -271,6 +285,10 @@ function parseArgs(argv) {
   if (out.terminalLossPenalty < 0) fail("--terminal-loss-penalty must be >= 0");
   if (out.goActionBonus == null) fail("--go-action-bonus is required");
   if (out.goActionBonus < 0) fail("--go-action-bonus must be >= 0");
+  if (out.phase1GoWin != null && out.phase1GoWin < 0) fail("--phase1-go-win must be >= 0");
+  if (out.phase1GoLoss != null && out.phase1GoLoss > 0) fail("--phase1-go-loss must be <= 0");
+  if (out.phase1StopWin != null && out.phase1StopWin > 0) fail("--phase1-stop-win must be <= 0");
+  if (out.phase1GoScoreHold != null && out.phase1GoScoreHold < 0) fail("--phase1-go-score-hold must be >= 0");
   if (!out.firstTurnPolicy) fail("--first-turn-policy is required");
   if (out.firstTurnPolicy === "fixed" && !out.fixedFirstTurn) {
     fail("--fixed-first-turn is required when --first-turn-policy=fixed");
@@ -367,6 +385,15 @@ function sampleOpponentPolicy(runtime, seedText) {
     }
   }
   return pool[pool.length - 1];
+}
+
+function resolvePhase1Shaping(cli) {
+  const out = { ...PHASE1_SHAPING };
+  if (cli.phase1GoWin != null) out.goWin = Number(cli.phase1GoWin);
+  if (cli.phase1GoLoss != null) out.goLoss = Number(cli.phase1GoLoss);
+  if (cli.phase1StopWin != null) out.stopWin = Number(cli.phase1StopWin);
+  if (cli.phase1GoScoreHold != null) out.goScoreHold = Number(cli.phase1GoScoreHold);
+  return Object.freeze(out);
 }
 
 // =============================================================================
@@ -605,11 +632,13 @@ function goExpectedValueNormPublic(state, controlActor, decisionType, focusMonth
   const matchDensity = matchOpportunityDensity(state, focusMonth);
   const immediate = immediateMatchPossible(state, decisionType, focusMonth);
   const knownRatio = candidateMonthKnownRatio(state, controlActor, focusMonth);
+  const goMomentum = clamp01(Number(state?.players?.[controlActor]?.goCount || 0) / 3.0);
 
   const raw =
-    0.40 * lead +
+    0.34 * lead +
     0.20 * (selfStopReady - oppStopReady) +
-    0.20 * mulNorm +
+    0.16 * mulNorm +
+    0.10 * goMomentum +
     0.10 * matchDensity +
     0.05 * immediate +
     0.05 * knownRatio;
@@ -889,7 +918,7 @@ function phase1RewardShapingDelta({
     return { total: 0.0, breakdown: {} };
   }
 
-  const w = PHASE1_SHAPING;
+  const w = runtime?.phase1Shaping || PHASE1_SHAPING;
   const beforePlayer = beforeState?.players?.[controlActor];
   const afterPlayer = afterState?.players?.[controlActor];
   const opp = otherActor(controlActor);
@@ -951,6 +980,7 @@ function phase1RewardShapingDelta({
     const beforeScoreSelf = Number(calculateScore(beforePlayer, beforeOpp, beforeState?.ruleKey).total || 0);
     const afterScoreSelf = Number(calculateScore(afterPlayer, afterOpp, afterState?.ruleKey).total || 0);
     if (afterScoreSelf > beforeScoreSelf) add("go_score_up", w.goScoreUp);
+    else if (afterScoreSelf === beforeScoreSelf) add("go_score_hold", w.goScoreHold);
   }
 
   const beforePi = Number(scoringPiCount(beforePlayer) || 0);
@@ -970,6 +1000,9 @@ function phase1RewardShapingDelta({
   if (done && !truncated && runtime.controlGoDeclaredInEpisode) {
     if (afterDiff > 0) add("go_win", w.goWin);
     else if (afterDiff < 0) add("go_loss", w.goLoss);
+  }
+  if (done && !truncated && !runtime.controlGoDeclaredInEpisode && afterDiff > 0) {
+    add("stop_win", w.stopWin);
   }
 
   if (done && !truncated && afterDiff < 0) {
@@ -1217,6 +1250,7 @@ function buildRuntime(cli) {
     cli.trainingMode === "single_actor"
       ? parseOpponentPolicyPool(cli.opponentPolicy, "--opponent-policy")
       : [];
+  const phase1Shaping = resolvePhase1Shaping(cli);
   return {
     trainingMode: cli.trainingMode,
     phase: cli.phase,
@@ -1233,6 +1267,7 @@ function buildRuntime(cli) {
     terminalWinBonus: cli.terminalWinBonus,
     terminalLossPenalty: cli.terminalLossPenalty,
     goActionBonus: cli.goActionBonus,
+    phase1Shaping,
     firstTurnPolicy: cli.firstTurnPolicy,
     fixedFirstTurn: cli.fixedFirstTurn || "human",
     state: null,

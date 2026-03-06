@@ -21,7 +21,7 @@ import {
   ruleSets
 } from "../../src/engine/index.js";
 import { getActionPlayerKey } from "../../src/engine/runner.js";
-import { aiPlay } from "../../src/ai/aiPlay_by_GPT.js";
+import { aiPlay } from "../../src/ai/aiPlay.js";
 import { normalizeBotPolicy, resolveBotPolicy } from "../../src/ai/policies.js";
 import {
   selectDecisionPool,
@@ -78,11 +78,9 @@ const PHASE1_SHAPING = Object.freeze({
   shaking: 0.05,
   bomb: 0.05,
   goScoreUp: 0.12,
-  // Claude mod: goWin↑ goLoss↑(절대값) 비대칭 강화 → go 학습 유도
-  // 원본: goWin 0.20 / goLoss -0.12
+  goScoreHold: 0.05,
   goWin: 0.50,
   goLoss: -0.25,
-  // Claude mod: stop으로 이겼을 때 소폭 패널티 → go 없이 이기는 게 더 유리한 구조 해소
   stopWin: -0.10,
   doublePiGet: 0.03,
   pi10Reached: 0.06,
@@ -602,21 +600,21 @@ function multiplierRiskNorm(state, scoreSelf, scoreOpp, goMinScore) {
 function goExpectedValueNormPublic(state, controlActor, decisionType, focusMonth, scoreSelf, scoreOpp, goMinScore) {
   const selfScore = Number(scoreSelf?.total || 0);
   const oppScore = Number(scoreOpp?.total || 0);
-  const lead = tanhNorm(selfScore - oppScore, 8.0); // [-1, +1]
-  const selfStopReady = 1.0 - scoreGapToStopNorm(selfScore, goMinScore); // [0, 1]
-  const oppStopReady = 1.0 - scoreGapToStopNorm(oppScore, goMinScore); // [0, 1]
+  const lead = tanhNorm(selfScore - oppScore, 8.0);
+  const selfStopReady = 1.0 - scoreGapToStopNorm(selfScore, goMinScore);
+  const oppStopReady = 1.0 - scoreGapToStopNorm(oppScore, goMinScore);
   const mulNorm = currentMultiplierNorm(state, scoreSelf);
   const matchDensity = matchOpportunityDensity(state, focusMonth);
   const immediate = immediateMatchPossible(state, decisionType, focusMonth);
   const knownRatio = candidateMonthKnownRatio(state, controlActor, focusMonth);
-  // CL: go count 압박 반영 — 이미 go를 했을수록 계속 go 해야 이득
+  // goCount momentum: 이미 go를 더 많이 했을수록 계속 go가 합리적
   const selfGoCount = Number(state?.players?.[controlActor]?.goCount || 0);
-  const goMomentum = clamp01(selfGoCount / 3.0);
+  const goMomentum = Math.min(1.0, selfGoCount / 3.0);
 
   const raw =
     0.30 * lead +
-    0.20 * (selfStopReady - oppStopReady) +
-    0.15 * mulNorm +
+    0.18 * (selfStopReady - oppStopReady) +
+    0.17 * mulNorm +
     0.15 * goMomentum +
     0.10 * matchDensity +
     0.05 * immediate +
@@ -958,11 +956,10 @@ function phase1RewardShapingDelta({
   if (isGoStopDecision && selectedOption === "go") {
     const beforeScoreSelf = Number(calculateScore(beforePlayer, beforeOpp, beforeState?.ruleKey).total || 0);
     const afterScoreSelf = Number(calculateScore(afterPlayer, afterOpp, afterState?.ruleKey).total || 0);
-    // CL: 점수가 오른 경우 goScoreUp, 유지된 경우도 소형 보상 (go 선언 자체가 가치 있음을 학습)
     if (afterScoreSelf > beforeScoreSelf) {
       add("go_score_up", w.goScoreUp);
     } else if (afterScoreSelf >= beforeScoreSelf - 1) {
-      add("go_score_hold", w.goScoreUp * 0.4);
+      add("go_score_hold", w.goScoreHold);
     }
   }
 
@@ -985,7 +982,6 @@ function phase1RewardShapingDelta({
     else if (afterDiff < 0) add("go_loss", w.goLoss);
   }
 
-  // Claude mod: stop 승리(go 없이 이긴 경우) 소폭 패널티
   if (done && !truncated && !runtime.controlGoDeclaredInEpisode && afterDiff > 0) {
     add("stop_win", w.stopWin);
   }

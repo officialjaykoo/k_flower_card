@@ -65,6 +65,7 @@ REQUIRED_KEYS = [
     "learning_rate_final",
     "entropy_coef",
     "value_coef",
+    # entropy_coef_final은 optional (없으면 고정, 있으면 annealing)
     "value_clip_coef",
     "target_kl",
     "max_grad_norm",
@@ -333,16 +334,15 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     runtime["learning_rate"] = as_nonneg_float(cfg, "learning_rate")
     runtime["learning_rate_final"] = as_nonneg_float(cfg, "learning_rate_final")
     runtime["entropy_coef"] = as_nonneg_float(cfg, "entropy_coef")
-    # CL: entropy_coef_final is optional. If set, entropy anneals linearly over total_updates.
-    # This keeps exploration high early and reduces it late, without needing go_explore_prob.
     raw_ent_final = cfg.get("entropy_coef_final", None)
     if raw_ent_final is not None:
         try:
-            runtime["entropy_coef_final"] = float(raw_ent_final)
+            ent_final = float(raw_ent_final)
         except Exception:
-            fail(f"entropy_coef_final must be a float, got={raw_ent_final}")
-        if runtime["entropy_coef_final"] < 0:
+            fail(f"entropy_coef_final must be float, got={raw_ent_final}")
+        if ent_final < 0.0:
             fail("entropy_coef_final must be >= 0")
+        runtime["entropy_coef_final"] = ent_final
     else:
         runtime["entropy_coef_final"] = None
     runtime["value_coef"] = as_nonneg_float(cfg, "value_coef")
@@ -645,7 +645,6 @@ class PolicyValueNet(nn.Module):
         if self.gru_num_layers <= 0:
             fail(f"gru_num_layers must be > 0, got={self.gru_num_layers}")
         # GRU-only path: lightweight encoder -> 1-step/sequence GRU -> actor/critic heads.
-        # CL: ReLU + LayerNorm after encoder for better representation.
         self.obs_encoder = nn.Sequential(
             nn.Linear(self.obs_dim, self.hidden_size),
             nn.ReLU(),
@@ -657,8 +656,7 @@ class PolicyValueNet(nn.Module):
             num_layers=self.gru_num_layers,
             batch_first=False,
         )
-        # CL: policy/value 별도 FC — GRU 공유 후 분기.
-        # value는 별도 hidden layer를 거쳐 더 정확한 state value 추정.
+
         self.policy_head = nn.Linear(self.hidden_size, self.action_dim)
         self.value_mlp = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size // 2),
@@ -1316,15 +1314,13 @@ def train(
             for pg in optimizer.param_groups:
                 pg["lr"] = lr_now
 
-            # CL: entropy annealing — high exploration early, low late.
-            # Falls back to fixed entropy_coef if entropy_coef_final not set.
             if runtime["entropy_coef_final"] is not None:
                 if runtime["total_updates"] <= 1:
                     entropy_coef_now = float(runtime["entropy_coef_final"])
                 else:
-                    ent_progress = float(update - 1) / float(runtime["total_updates"] - 1)
+                    ent_t = float(update - 1) / float(runtime["total_updates"] - 1)
                     entropy_coef_now = float(
-                        runtime["entropy_coef"] + ent_progress * (runtime["entropy_coef_final"] - runtime["entropy_coef"])
+                        runtime["entropy_coef"] + ent_t * (runtime["entropy_coef_final"] - runtime["entropy_coef"])
                     )
                 entropy_coef_now = max(0.0, entropy_coef_now)
             else:
