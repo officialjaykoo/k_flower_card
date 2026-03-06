@@ -30,7 +30,7 @@
     "learning_rate_final":  0.00005,
     "entropy_coef":  0.01,
     "value_coef":  0.5,
-    "value_clip_coef":  0.0,
+    "value_clip_coef":  0.2,
     "target_kl":  0.02,
     "max_grad_norm":  0.5,
     "catastrophic_loss_threshold":  -12000,

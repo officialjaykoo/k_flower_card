@@ -7,19 +7,19 @@
     "env_bridge_script":  "ppo/scripts/ppo_env_bridge.mjs",
     "rule_key":  "A",
     "control_actor":  "human",
-    "opponent_policy":  "H-CL:0.15|H-J2:0.60|H-AntiCL:0.15|H-NEXg:0.10",
+    "opponent_policy":  "H-J1:0.50|H-Gemini:0.20|H-AntiCL:0.20|H-J2:0.10",
     "opponent_policy_schedule":  [
         {
             "start_update":  1,
-            "opponent_policy":  "H-CL:0.15|H-J2:0.60|H-AntiCL:0.15|H-NEXg:0.10"
+            "opponent_policy":  "H-J1:0.50|H-Gemini:0.20|H-AntiCL:0.20|H-J2:0.10"
         },
         {
             "start_update":  501,
-            "opponent_policy":  "H-CL:0.375|H-J2:0.375|H-AntiCL:0.15|H-NEXg:0.10"
+            "opponent_policy":  "H-J2:0.40|H-NEXg:0.30|H-AntiCL:0.20|H-GPT:0.10"
         },
         {
             "start_update":  1001,
-            "opponent_policy":  "H-CL:0.60|H-J2:0.15|H-AntiCL:0.15|H-NEXg:0.10"
+            "opponent_policy":  "H-CL:0.40|H-J2:0.30|H-NEXg:0.20|H-GPT:0.10"
         }
     ],
     "first_turn_policy":  "alternate",
@@ -44,7 +44,7 @@
     "learning_rate_final":  0.00012,
     "entropy_coef":  0.01,
     "value_coef":  0.5,
-    "value_clip_coef":  0.0,
+    "value_clip_coef":  0.2,
     "target_kl":  0.02,
     "max_grad_norm":  0.5,
     "catastrophic_loss_threshold":  -7000,
