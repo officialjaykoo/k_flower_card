@@ -5,6 +5,11 @@ This folder is the PPO pipeline for Matgo. The priority is:
 2) reduce catastrophic downside
 3) keep win rate stable enough to avoid fragile models
 
+## Quick Reference Docs
+
+- Observation feature spec (exact index map): `docs/ppo/PPO_OBSERVATION_FEATURE_SPEC.md`
+- Phase1 reward + Stage(1/2/3) guide: `docs/ppo/PPO_PHASE1_REWARD_STAGE_GUIDE.md`
+
 ## Source Structure (Execution Order)
 
 ### Training path
