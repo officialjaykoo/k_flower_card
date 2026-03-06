@@ -609,11 +609,15 @@ function goExpectedValueNormPublic(state, controlActor, decisionType, focusMonth
   const matchDensity = matchOpportunityDensity(state, focusMonth);
   const immediate = immediateMatchPossible(state, decisionType, focusMonth);
   const knownRatio = candidateMonthKnownRatio(state, controlActor, focusMonth);
+  // CL: go count 압박 반영 — 이미 go를 했을수록 계속 go 해야 이득
+  const selfGoCount = Number(state?.players?.[controlActor]?.goCount || 0);
+  const goMomentum = clamp01(selfGoCount / 3.0);
 
   const raw =
-    0.40 * lead +
+    0.30 * lead +
     0.20 * (selfStopReady - oppStopReady) +
-    0.20 * mulNorm +
+    0.15 * mulNorm +
+    0.15 * goMomentum +
     0.10 * matchDensity +
     0.05 * immediate +
     0.05 * knownRatio;
@@ -954,7 +958,12 @@ function phase1RewardShapingDelta({
   if (isGoStopDecision && selectedOption === "go") {
     const beforeScoreSelf = Number(calculateScore(beforePlayer, beforeOpp, beforeState?.ruleKey).total || 0);
     const afterScoreSelf = Number(calculateScore(afterPlayer, afterOpp, afterState?.ruleKey).total || 0);
-    if (afterScoreSelf > beforeScoreSelf) add("go_score_up", w.goScoreUp);
+    // CL: 점수가 오른 경우 goScoreUp, 유지된 경우도 소형 보상 (go 선언 자체가 가치 있음을 학습)
+    if (afterScoreSelf > beforeScoreSelf) {
+      add("go_score_up", w.goScoreUp);
+    } else if (afterScoreSelf >= beforeScoreSelf - 1) {
+      add("go_score_hold", w.goScoreUp * 0.4);
+    }
   }
 
   const beforePi = Number(scoringPiCount(beforePlayer) || 0);

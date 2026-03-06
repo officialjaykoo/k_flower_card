@@ -333,6 +333,18 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     runtime["learning_rate"] = as_nonneg_float(cfg, "learning_rate")
     runtime["learning_rate_final"] = as_nonneg_float(cfg, "learning_rate_final")
     runtime["entropy_coef"] = as_nonneg_float(cfg, "entropy_coef")
+    # CL: entropy_coef_final is optional. If set, entropy anneals linearly over total_updates.
+    # This keeps exploration high early and reduces it late, without needing go_explore_prob.
+    raw_ent_final = cfg.get("entropy_coef_final", None)
+    if raw_ent_final is not None:
+        try:
+            runtime["entropy_coef_final"] = float(raw_ent_final)
+        except Exception:
+            fail(f"entropy_coef_final must be a float, got={raw_ent_final}")
+        if runtime["entropy_coef_final"] < 0:
+            fail("entropy_coef_final must be >= 0")
+    else:
+        runtime["entropy_coef_final"] = None
     runtime["value_coef"] = as_nonneg_float(cfg, "value_coef")
     runtime["value_clip_coef"] = as_nonneg_float(cfg, "value_clip_coef")
     runtime["target_kl"] = as_nonneg_float(cfg, "target_kl")
@@ -633,7 +645,7 @@ class PolicyValueNet(nn.Module):
         if self.gru_num_layers <= 0:
             fail(f"gru_num_layers must be > 0, got={self.gru_num_layers}")
         # GRU-only path: lightweight encoder -> 1-step/sequence GRU -> actor/critic heads.
-        # Claude mod: added ReLU + LayerNorm after encoder for better representation.
+        # CL: ReLU + LayerNorm after encoder for better representation.
         self.obs_encoder = nn.Sequential(
             nn.Linear(self.obs_dim, self.hidden_size),
             nn.ReLU(),
@@ -645,9 +657,14 @@ class PolicyValueNet(nn.Module):
             num_layers=self.gru_num_layers,
             batch_first=False,
         )
-
+        # CL: policy/value 별도 FC — GRU 공유 후 분기.
+        # value는 별도 hidden layer를 거쳐 더 정확한 state value 추정.
         self.policy_head = nn.Linear(self.hidden_size, self.action_dim)
-        self.value_head = nn.Linear(self.hidden_size, 1)
+        self.value_mlp = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size // 2),
+            nn.ReLU(),
+        )
+        self.value_head = nn.Linear(self.hidden_size // 2, 1)
 
     def init_recurrent_state(self, batch_size: int, device: torch.device) -> torch.Tensor:
         b = int(batch_size)
@@ -674,11 +691,11 @@ class PolicyValueNet(nn.Module):
                 "GRU hidden shape mismatch: "
                 f"got={tuple(hidden.shape)}, expected=({self.gru_num_layers},{b},{self.hidden_size})"
             )
-        x = torch.tanh(self.obs_encoder(obs))
+        x = self.obs_encoder(obs)
         out, next_hidden = self.gru(x.unsqueeze(0), hidden)
         feat = out.squeeze(0)
         logits = self.policy_head(feat)
-        values = self.value_head(feat)
+        values = self.value_head(self.value_mlp(feat))
         return logits, values, next_hidden
 
     def forward_gru_sequence(
@@ -719,11 +736,11 @@ class PolicyValueNet(nn.Module):
             if torch.any(reset_mask > 0):
                 hidden = hidden * (1.0 - reset_mask)
 
-            x = torch.tanh(self.obs_encoder(obs_seq[step]))
+            x = self.obs_encoder(obs_seq[step])
             out, hidden = self.gru(x.unsqueeze(0), hidden)
             feat = out.squeeze(0)
             logits_steps.append(self.policy_head(feat))
-            value_steps.append(self.value_head(feat).squeeze(-1))
+            value_steps.append(self.value_head(self.value_mlp(feat)).squeeze(-1))
 
         logits_t = torch.stack(logits_steps, dim=0)
         values_t = torch.stack(value_steps, dim=0)
@@ -1299,6 +1316,20 @@ def train(
             for pg in optimizer.param_groups:
                 pg["lr"] = lr_now
 
+            # CL: entropy annealing — high exploration early, low late.
+            # Falls back to fixed entropy_coef if entropy_coef_final not set.
+            if runtime["entropy_coef_final"] is not None:
+                if runtime["total_updates"] <= 1:
+                    entropy_coef_now = float(runtime["entropy_coef_final"])
+                else:
+                    ent_progress = float(update - 1) / float(runtime["total_updates"] - 1)
+                    entropy_coef_now = float(
+                        runtime["entropy_coef"] + ent_progress * (runtime["entropy_coef_final"] - runtime["entropy_coef"])
+                    )
+                entropy_coef_now = max(0.0, entropy_coef_now)
+            else:
+                entropy_coef_now = float(runtime["entropy_coef"])
+
             go_explore_prob_now = float(runtime["go_explore_prob"])
             if runtime["training_mode"] == "single_actor":
                 go_explore_prob_now = float(
@@ -1608,7 +1639,7 @@ def train(
                     loss = (
                         policy_loss
                         + runtime["value_coef"] * value_loss
-                        - runtime["entropy_coef"] * entropy
+                        - entropy_coef_now * entropy
                     )
 
                     optimizer.zero_grad(set_to_none=True)
@@ -1674,6 +1705,7 @@ def train(
                 "go_not_selected": go_not_selected,
                 "go_failures": go_failures,
                 "go_explore_prob": float(go_explore_prob_now),
+                "entropy_coef_now": float(entropy_coef_now),
                 "approx_kl": last_approx_kl,
                 "gru_num_layers": int(runtime["gru_num_layers"]),
                 "gru_seq_len": int(runtime["gru_seq_len"]),

@@ -39,7 +39,7 @@
     "device": "cpu",
     "log_every_updates": 20,
     "save_every_updates": 500,
-    "seed": "abl_D",
+    "seed": "abl_E",
     "reward_scale": 0.01,
     "go_explore_prob": 0.05,
     "opponent_policy": "H-J1:0.50|H-Gemini:0.20|H-AntiCL:0.20|H-J2:0.10",
@@ -49,8 +49,8 @@
             "opponent_policy": "H-J1:0.50|H-Gemini:0.20|H-AntiCL:0.20|H-J2:0.10"
         }
     ],
-    "output_dir": "logs/PPO/ablation_D_all",
-    "output_dir_template": "logs/PPO/ablation_D_all_{seed}",
-    "_ablation_desc": "go_explore 0.05 + reward_scale 0.01 + weak fixed",
+    "output_dir": "logs/PPO/ablation_E_claude",
+    "output_dir_template": "logs/PPO/ablation_E_claude_{seed}",
+    "_ablation_desc": "CL: D + entropy_annealing + value_mlp + goScoreHold + goMomentum",
     "entropy_coef_final": 0.005
 }

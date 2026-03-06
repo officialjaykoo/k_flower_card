@@ -24,7 +24,7 @@
     "clip_coef": 0.2,
     "learning_rate": 0.0003,
     "learning_rate_final": 0.00012,
-    "entropy_coef": 0.01,
+    "entropy_coef": 0.03,
     "value_coef": 0.5,
     "value_clip_coef": 0.2,
     "target_kl": 0.02,
@@ -51,5 +51,6 @@
     ],
     "output_dir": "logs/PPO/ablation_C_weak_fixed",
     "output_dir_template": "logs/PPO/ablation_C_weak_fixed_{seed}",
-    "_ablation_desc": "weak opponent fixed, no schedule change"
+    "_ablation_desc": "weak opponent fixed, no schedule change",
+    "entropy_coef_final": 0.005
 }
