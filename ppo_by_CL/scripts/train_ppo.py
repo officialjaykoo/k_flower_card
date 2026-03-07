@@ -157,6 +157,19 @@ def as_finite_float(cfg: Dict[str, Any], key: str) -> float:
     return n
 
 
+def as_optional_finite_float(cfg: Dict[str, Any], key: str) -> Optional[float]:
+    raw = cfg.get(key, None)
+    if raw is None:
+        return None
+    try:
+        n = float(raw)
+    except Exception:
+        fail(f"runtime key '{key}' must be float when provided, got={raw}")
+    if not math.isfinite(n):
+        fail(f"runtime key '{key}' must be finite, got={n}")
+    return n
+
+
 def parse_opponent_policy_schedule(cfg: Dict[str, Any], training_mode: str, default_policy: str) -> List[Dict[str, Any]]:
     raw = cfg.get("opponent_policy_schedule", None)
 
@@ -317,6 +330,41 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     runtime["terminal_loss_penalty"] = as_nonneg_float(cfg, "terminal_loss_penalty")
     runtime["go_action_bonus"] = as_nonneg_float(cfg, "go_action_bonus")
     runtime["go_explore_prob"] = as_nonneg_float(cfg, "go_explore_prob")
+    forced_go_policy_weight_raw = cfg.get("forced_go_policy_weight", 0.0)
+    try:
+        runtime["forced_go_policy_weight"] = float(forced_go_policy_weight_raw)
+    except Exception:
+        fail(f"runtime key 'forced_go_policy_weight' must be float, got={forced_go_policy_weight_raw}")
+    if not (0.0 <= runtime["forced_go_policy_weight"] <= 1.0):
+        fail(
+            "runtime key 'forced_go_policy_weight' must be in [0,1], "
+            f"got={runtime['forced_go_policy_weight']}"
+        )
+    go_explore_stage_decay_raw = cfg.get("go_explore_stage_decay", STAGE_DECAY_RATIO)
+    try:
+        runtime["go_explore_stage_decay"] = float(go_explore_stage_decay_raw)
+    except Exception:
+        fail(f"runtime key 'go_explore_stage_decay' must be float, got={go_explore_stage_decay_raw}")
+    if not (0.0 <= runtime["go_explore_stage_decay"] <= 1.0):
+        fail(
+            "runtime key 'go_explore_stage_decay' must be in [0,1], "
+            f"got={runtime['go_explore_stage_decay']}"
+        )
+    runtime["phase1_go_win"] = as_optional_finite_float(cfg, "phase1_go_win")
+    runtime["phase1_go_loss"] = as_optional_finite_float(cfg, "phase1_go_loss")
+    runtime["phase1_stop_win"] = as_optional_finite_float(cfg, "phase1_stop_win")
+    runtime["phase1_go_score_hold"] = as_optional_finite_float(cfg, "phase1_go_score_hold")
+    if runtime["phase1_go_win"] is not None and runtime["phase1_go_win"] < 0:
+        fail(f"runtime key 'phase1_go_win' must be >= 0, got={runtime['phase1_go_win']}")
+    if runtime["phase1_go_score_hold"] is not None and runtime["phase1_go_score_hold"] < 0:
+        fail(
+            "runtime key 'phase1_go_score_hold' must be >= 0, "
+            f"got={runtime['phase1_go_score_hold']}"
+        )
+    if runtime["phase1_go_loss"] is not None and runtime["phase1_go_loss"] > 0:
+        fail(f"runtime key 'phase1_go_loss' must be <= 0, got={runtime['phase1_go_loss']}")
+    if runtime["phase1_stop_win"] is not None and runtime["phase1_stop_win"] > 0:
+        fail(f"runtime key 'phase1_stop_win' must be <= 0, got={runtime['phase1_stop_win']}")
     if abs(runtime["reward_scale"]) <= 0:
         fail("reward_scale must be non-zero")
     if runtime["go_explore_prob"] > 1.0:
@@ -334,17 +382,22 @@ def normalize_runtime(cfg: Dict[str, Any], cfg_path: str) -> Dict[str, Any]:
     runtime["learning_rate"] = as_nonneg_float(cfg, "learning_rate")
     runtime["learning_rate_final"] = as_nonneg_float(cfg, "learning_rate_final")
     runtime["entropy_coef"] = as_nonneg_float(cfg, "entropy_coef")
-    raw_ent_final = cfg.get("entropy_coef_final", None)
-    if raw_ent_final is not None:
-        try:
-            ent_final = float(raw_ent_final)
-        except Exception:
-            fail(f"entropy_coef_final must be float, got={raw_ent_final}")
-        if ent_final < 0.0:
-            fail("entropy_coef_final must be >= 0")
-        runtime["entropy_coef_final"] = ent_final
-    else:
+    raw_entropy_final = cfg.get("entropy_coef_final", None)
+    if raw_entropy_final is None:
         runtime["entropy_coef_final"] = None
+    else:
+        try:
+            entropy_final = float(raw_entropy_final)
+        except Exception:
+            fail(f"runtime key 'entropy_coef_final' must be float, got={raw_entropy_final}")
+        if not math.isfinite(entropy_final) or entropy_final < 0:
+            fail(f"runtime key 'entropy_coef_final' must be finite and >= 0, got={entropy_final}")
+        if entropy_final > runtime["entropy_coef"]:
+            fail(
+                "entropy_coef_final must be <= entropy_coef "
+                f"({entropy_final} > {runtime['entropy_coef']})"
+            )
+        runtime["entropy_coef_final"] = entropy_final
     runtime["value_coef"] = as_nonneg_float(cfg, "value_coef")
     runtime["value_clip_coef"] = as_nonneg_float(cfg, "value_clip_coef")
     runtime["target_kl"] = as_nonneg_float(cfg, "target_kl")
@@ -493,6 +546,14 @@ class BridgeEnv:
             "--fixed-first-turn",
             runtime["fixed_first_turn"],
         ]
+        if runtime.get("phase1_go_win") is not None:
+            cmd.extend(["--phase1-go-win", str(runtime["phase1_go_win"])])
+        if runtime.get("phase1_go_loss") is not None:
+            cmd.extend(["--phase1-go-loss", str(runtime["phase1_go_loss"])])
+        if runtime.get("phase1_stop_win") is not None:
+            cmd.extend(["--phase1-stop-win", str(runtime["phase1_stop_win"])])
+        if runtime.get("phase1_go_score_hold") is not None:
+            cmd.extend(["--phase1-go-score-hold", str(runtime["phase1_go_score_hold"])])
         if runtime["training_mode"] == "single_actor":
             cmd.extend(
                 [
@@ -1329,7 +1390,8 @@ def train(
             go_explore_prob_now = float(runtime["go_explore_prob"])
             if runtime["training_mode"] == "single_actor":
                 go_explore_prob_now = float(
-                    runtime["go_explore_prob"] * (STAGE_DECAY_RATIO ** max(0, int(active_stage_index) - 1))
+                    runtime["go_explore_prob"]
+                    * (runtime["go_explore_stage_decay"] ** max(0, int(active_stage_index) - 1))
                 )
             if go_explore_prob_now < 0.0:
                 go_explore_prob_now = 0.0
@@ -1341,6 +1403,7 @@ def train(
             rollout_masks: List[torch.Tensor] = []
             rollout_actions: List[torch.Tensor] = []
             rollout_logprobs: List[torch.Tensor] = []
+            rollout_policy_weights: List[torch.Tensor] = []
             rollout_values: List[torch.Tensor] = []
             rollout_rewards: List[torch.Tensor] = []
             rollout_dones: List[torch.Tensor] = []
@@ -1355,7 +1418,6 @@ def train(
                     sampled_actions = dist.sample()
 
                 action_list = [int(x) for x in sampled_actions.detach().cpu().tolist()]
-                # track which envs had go forcibly injected
                 go_forced = [False] * num_envs
                 for env_idx in range(num_envs):
                     go_mask_raw = float(next_mask[env_idx, GO_ACTION_INDEX].item())
@@ -1380,24 +1442,26 @@ def train(
 
                 actions = torch.tensor(action_list, dtype=torch.int64, device=device)
                 with torch.no_grad():
-                    # For forced-go envs: recompute logprob from the live dist
-                    # so PPO ratio is not polluted by the forced override.
-                    # For normal envs: logprob of the sampled action as usual.
+                    logprob = dist.log_prob(actions)
                     if any(go_forced):
-                        logprob = dist.log_prob(actions)
-                        # detach forced envs from on-policy gradient signal
-                        # by replacing their logprob with the dist's go logprob
-                        # (i.e. treat forced step as if policy chose go itself)
                         go_logprobs = dist.log_prob(
                             torch.full((num_envs,), GO_ACTION_INDEX, dtype=torch.int64, device=device)
                         )
                         forced_mask = torch.tensor(go_forced, dtype=torch.bool, device=device)
                         logprob = torch.where(forced_mask, go_logprobs, logprob)
-                    else:
-                        logprob = dist.log_prob(actions)
+
+                policy_weights = torch.tensor(
+                    [
+                        runtime["forced_go_policy_weight"] if forced else 1.0
+                        for forced in go_forced
+                    ],
+                    dtype=torch.float32,
+                    device=device,
+                )
 
                 rollout_actions.append(actions.detach().clone())
                 rollout_logprobs.append(logprob.detach().clone())
+                rollout_policy_weights.append(policy_weights.detach().clone())
                 rollout_values.append(value.squeeze(-1).detach().clone())
 
                 step_rewards: List[float] = []
@@ -1511,9 +1575,13 @@ def train(
             mask_t = torch.stack(rollout_masks, dim=0)
             actions_t = torch.stack(rollout_actions, dim=0)
             old_logprob_t = torch.stack(rollout_logprobs, dim=0)
+            policy_weight_t = torch.stack(rollout_policy_weights, dim=0)
             values_t = torch.stack(rollout_values, dim=0)
             rewards_t = torch.stack(rollout_rewards, dim=0)
             dones_t = torch.stack(rollout_dones, dim=0)
+            policy_steps_update = int(round(float(policy_weight_t.sum().item())))
+            forced_go_steps_update = int(policy_weight_t.numel() - policy_steps_update)
+            forced_go_ratio_update = float(forced_go_steps_update / max(1, policy_weight_t.numel()))
 
             advantages = torch.zeros_like(rewards_t, device=device)
             last_gae = torch.zeros(num_envs, dtype=torch.float32, device=device)
@@ -1569,6 +1637,7 @@ def train(
                     mask_seq = mask_t[start:end]
                     act_seq = actions_t[start:end]
                     old_logprob_seq = old_logprob_t[start:end]
+                    policy_weight_seq = policy_weight_t[start:end]
                     adv_seq = advantages[start:end]
                     ret_seq = returns_t[start:end]
                     old_value_seq = values_t[start:end]
@@ -1597,6 +1666,7 @@ def train(
                     mask_seq = mask_seq[valid_start:]
                     act_seq = act_seq[valid_start:]
                     old_logprob_seq = old_logprob_seq[valid_start:]
+                    policy_weight_seq = policy_weight_seq[valid_start:]
                     adv_seq = adv_seq[valid_start:]
                     ret_seq = ret_seq[valid_start:]
                     old_value_seq = old_value_seq[valid_start:]
@@ -1606,16 +1676,24 @@ def train(
                         mask_seq.reshape(-1, action_dim),
                     )
                     new_logprob = dist.log_prob(act_seq.reshape(-1))
-                    entropy = dist.entropy().mean()
+                    entropy_flat = dist.entropy()
 
                     old_logprob_flat = old_logprob_seq.reshape(-1)
+                    policy_weight_flat = policy_weight_seq.reshape(-1)
+                    policy_weight_sum = float(policy_weight_flat.sum().item())
                     ratio = torch.exp(new_logprob - old_logprob_flat)
                     adv_flat = adv_seq.reshape(-1)
                     pg_loss_1 = -adv_flat * ratio
                     pg_loss_2 = -adv_flat * torch.clamp(
                         ratio, 1.0 - runtime["clip_coef"], 1.0 + runtime["clip_coef"]
                     )
-                    policy_loss = torch.max(pg_loss_1, pg_loss_2).mean()
+                    pg_loss = torch.max(pg_loss_1, pg_loss_2)
+                    if policy_weight_sum > 1e-8:
+                        policy_loss = (pg_loss * policy_weight_flat).sum() / float(policy_weight_sum)
+                        entropy = (entropy_flat * policy_weight_flat).sum() / float(policy_weight_sum)
+                    else:
+                        policy_loss = torch.zeros((), dtype=torch.float32, device=device)
+                        entropy = torch.zeros((), dtype=torch.float32, device=device)
 
                     v_pred = value_seq.reshape(-1)
                     v_old = old_value_seq.reshape(-1)
@@ -1644,7 +1722,12 @@ def train(
                     optimizer.step()
 
                     with torch.no_grad():
-                        approx_kl_val = float((old_logprob_flat - new_logprob).mean().item())
+                        if policy_weight_sum > 1e-8:
+                            approx_kl_val = float(
+                                (((old_logprob_flat - new_logprob) * policy_weight_flat).sum() / float(policy_weight_sum)).item()
+                            )
+                        else:
+                            approx_kl_val = 0.0
                         last_approx_kl = approx_kl_val
                         approx_kl_sum += approx_kl_val
                         approx_kl_count += 1
@@ -1701,7 +1784,11 @@ def train(
                 "go_not_selected": go_not_selected,
                 "go_failures": go_failures,
                 "go_explore_prob": float(go_explore_prob_now),
+                "go_explore_stage_decay": float(runtime["go_explore_stage_decay"]),
+                "forced_go_policy_weight": float(runtime["forced_go_policy_weight"]),
                 "entropy_coef_now": float(entropy_coef_now),
+                "forced_go_steps_update": int(forced_go_steps_update),
+                "forced_go_ratio_update": float(forced_go_ratio_update),
                 "approx_kl": last_approx_kl,
                 "gru_num_layers": int(runtime["gru_num_layers"]),
                 "gru_seq_len": int(runtime["gru_seq_len"]),

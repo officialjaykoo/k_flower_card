@@ -3,7 +3,7 @@
 // - StdIO JSON bridge between Matgo engine and PPO trainer.
 // - Strict CLI/runtime validation + fail-fast errors with context.
 // Execution order:
-// train_ppo.py/duel_ppo_vs_v5.py -> this bridge(reset/step) -> Matgo engine decision runtime.
+// train_ppo.py/duel_ppo.py -> this bridge(reset/step) -> Matgo engine decision runtime.
 //
 // Execution Flow Map:
 // 1) parseArgs() + buildRuntime(): strict CLI/runtime bootstrap
@@ -211,6 +211,10 @@ function parseArgs(argv) {
     terminalWinBonus: null,
     terminalLossPenalty: null,
     goActionBonus: null,
+    phase1GoWin: null,
+    phase1GoLoss: null,
+    phase1StopWin: null,
+    phase1GoScoreHold: null,
     firstTurnPolicy: "",
     fixedFirstTurn: ""
   };
@@ -247,6 +251,14 @@ function parseArgs(argv) {
       out.terminalLossPenalty = toFiniteNumber(value, "--terminal-loss-penalty");
     } else if (key === "--go-action-bonus") {
       out.goActionBonus = toFiniteNumber(value, "--go-action-bonus");
+    } else if (key === "--phase1-go-win") {
+      out.phase1GoWin = toFiniteNumber(value, "--phase1-go-win");
+    } else if (key === "--phase1-go-loss") {
+      out.phase1GoLoss = toFiniteNumber(value, "--phase1-go-loss");
+    } else if (key === "--phase1-stop-win") {
+      out.phase1StopWin = toFiniteNumber(value, "--phase1-stop-win");
+    } else if (key === "--phase1-go-score-hold") {
+      out.phase1GoScoreHold = toFiniteNumber(value, "--phase1-go-score-hold");
     } else if (key === "--first-turn-policy") {
       out.firstTurnPolicy = normalizeFirstTurnPolicy(value);
     } else if (key === "--fixed-first-turn") {
@@ -273,6 +285,10 @@ function parseArgs(argv) {
   if (out.terminalLossPenalty < 0) fail("--terminal-loss-penalty must be >= 0");
   if (out.goActionBonus == null) fail("--go-action-bonus is required");
   if (out.goActionBonus < 0) fail("--go-action-bonus must be >= 0");
+  if (out.phase1GoWin != null && out.phase1GoWin < 0) fail("--phase1-go-win must be >= 0");
+  if (out.phase1GoLoss != null && out.phase1GoLoss > 0) fail("--phase1-go-loss must be <= 0");
+  if (out.phase1StopWin != null && out.phase1StopWin > 0) fail("--phase1-stop-win must be <= 0");
+  if (out.phase1GoScoreHold != null && out.phase1GoScoreHold < 0) fail("--phase1-go-score-hold must be >= 0");
   if (!out.firstTurnPolicy) fail("--first-turn-policy is required");
   if (out.firstTurnPolicy === "fixed" && !out.fixedFirstTurn) {
     fail("--fixed-first-turn is required when --first-turn-policy=fixed");
@@ -895,7 +911,13 @@ function phase1RewardShapingDelta({
     return { total: 0.0, breakdown: {} };
   }
 
-  const w = PHASE1_SHAPING;
+  const w = {
+    ...PHASE1_SHAPING,
+    ...(runtime.phase1GoWin != null ? { goWin: runtime.phase1GoWin } : {}),
+    ...(runtime.phase1GoLoss != null ? { goLoss: runtime.phase1GoLoss } : {}),
+    ...(runtime.phase1StopWin != null ? { stopWin: runtime.phase1StopWin } : {}),
+    ...(runtime.phase1GoScoreHold != null ? { goScoreHold: runtime.phase1GoScoreHold } : {})
+  };
   const beforePlayer = beforeState?.players?.[controlActor];
   const afterPlayer = afterState?.players?.[controlActor];
   const opp = otherActor(controlActor);
@@ -958,7 +980,7 @@ function phase1RewardShapingDelta({
     const afterScoreSelf = Number(calculateScore(afterPlayer, afterOpp, afterState?.ruleKey).total || 0);
     if (afterScoreSelf > beforeScoreSelf) {
       add("go_score_up", w.goScoreUp);
-    } else if (afterScoreSelf >= beforeScoreSelf - 1) {
+    } else if (w.goScoreHold != null && afterScoreSelf >= beforeScoreSelf - 1) {
       add("go_score_hold", w.goScoreHold);
     }
   }
@@ -982,7 +1004,7 @@ function phase1RewardShapingDelta({
     else if (afterDiff < 0) add("go_loss", w.goLoss);
   }
 
-  if (done && !truncated && !runtime.controlGoDeclaredInEpisode && afterDiff > 0) {
+  if (w.stopWin != null && done && !truncated && !runtime.controlGoDeclaredInEpisode && afterDiff > 0) {
     add("stop_win", w.stopWin);
   }
 
@@ -1247,6 +1269,10 @@ function buildRuntime(cli) {
     terminalWinBonus: cli.terminalWinBonus,
     terminalLossPenalty: cli.terminalLossPenalty,
     goActionBonus: cli.goActionBonus,
+    phase1GoWin: cli.phase1GoWin,
+    phase1GoLoss: cli.phase1GoLoss,
+    phase1StopWin: cli.phase1StopWin,
+    phase1GoScoreHold: cli.phase1GoScoreHold,
     firstTurnPolicy: cli.firstTurnPolicy,
     fixedFirstTurn: cli.fixedFirstTurn || "human",
     state: null,
