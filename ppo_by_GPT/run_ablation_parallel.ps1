@@ -1,8 +1,9 @@
 param(
   [Parameter(Mandatory = $false)][string]$Python = ".\.venv\Scripts\python",
-  [Parameter(Mandatory = $false)][Nullable[int]]$TotalUpdates = 200,
+  [Parameter(Mandatory = $false)][Nullable[int]]$TotalUpdates = $null,
   [Parameter(Mandatory = $false)][Nullable[int]]$SaveEveryUpdates = 50,
-  [Parameter(Mandatory = $false)][Nullable[int]]$LogEveryUpdates = 20
+  [Parameter(Mandatory = $false)][Nullable[int]]$LogEveryUpdates = 20,
+  [Parameter(Mandatory = $false)][bool]$ResumeFromLatest = $true
 )
 
 Set-StrictMode -Version Latest
@@ -22,16 +23,48 @@ $jobs = @()
 foreach ($arm in $arms) {
   $name = $arm.name
   $cfg = $arm.config
+  if (-not (Test-Path $cfg)) {
+    throw "config not found: $cfg"
+  }
+  $cfgObj = Get-Content -Path $cfg -Raw -Encoding UTF8 | ConvertFrom-Json
+  $outDir = [string]$cfgObj.output_dir
+  if ([string]::IsNullOrWhiteSpace($outDir)) {
+    throw "output_dir missing in config: $cfg"
+  }
+  $resumeCkpt = Join-Path $outDir "latest.pt"
   $logFile = "logs/PPO_GPT/ablation_$name.log"
-  Write-Host "Starting ARM-$name -> $cfg"
+  if ($ResumeFromLatest -and (Test-Path $resumeCkpt)) {
+    Write-Host "Starting ARM-$name -> $cfg (resume: $resumeCkpt)"
+  } else {
+    Write-Host "Starting ARM-$name -> $cfg (fresh)"
+  }
 
   $job = Start-Job -ScriptBlock {
-    param($root, $py, $cfg, $log, $totalUpdates, $saveEveryUpdates, $logEveryUpdates)
+    param(
+      $root,
+      $py,
+      $cfg,
+      $outDir,
+      $resumeCkpt,
+      $resumeFromLatest,
+      $log,
+      $totalUpdates,
+      $saveEveryUpdates,
+      $logEveryUpdates
+    )
     Set-Location $root
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
     $env:TORCH_COMPILE_DISABLE = "1"
     $env:TORCHDYNAMO_DISABLE = "1"
-    $args = @("ppo_by_GPT/scripts/train_ppo.py", "--runtime-config", $cfg)
+    $args = @(
+      "ppo_by_GPT/scripts/train_ppo.py",
+      "--runtime-config", $cfg,
+      "--output-dir", $outDir
+    )
+    if ($resumeFromLatest -and (Test-Path $resumeCkpt)) {
+      $args += @("--resume-checkpoint", $resumeCkpt)
+    }
     if ($null -ne $totalUpdates) {
       if ($totalUpdates -le 0) { throw "TotalUpdates must be > 0, got=$totalUpdates" }
       $args += @("--total-updates", "$totalUpdates")
@@ -45,7 +78,7 @@ foreach ($arm in $arms) {
       $args += @("--log-every-updates", "$logEveryUpdates")
     }
     & $py @args 2>&1 | Tee-Object -FilePath $log
-  } -ArgumentList $root, $Python, $cfg, $logFile, $TotalUpdates, $SaveEveryUpdates, $LogEveryUpdates
+  } -ArgumentList $root, $Python, $cfg, $outDir, $resumeCkpt, $ResumeFromLatest, $logFile, $TotalUpdates, $SaveEveryUpdates, $LogEveryUpdates
 
   $jobs += [PSCustomObject]@{ job = $job; name = $name; config = $cfg }
   Start-Sleep -Milliseconds 700

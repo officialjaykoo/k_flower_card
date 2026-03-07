@@ -1,9 +1,9 @@
-{
+﻿{
     "format_version": "ppo_runtime_phase1_v1",
     "phase": "1",
     "training_mode": "single_actor",
     "node_bin": "node",
-    "env_bridge_script": "ppo/scripts/ppo_env_bridge.mjs",
+    "env_bridge_script": "ppo_by_CL/scripts/ppo_env_bridge.mjs",
     "rule_key": "A",
     "control_actor": "human",
     "first_turn_policy": "alternate",

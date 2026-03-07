@@ -1,9 +1,9 @@
-{
+﻿{
     "format_version": "ppo_runtime_phase1_v1",
     "phase": "1",
     "training_mode": "single_actor",
     "node_bin": "node",
-    "env_bridge_script": "ppo/scripts/ppo_env_bridge.mjs",
+    "env_bridge_script": "ppo_by_CL/scripts/ppo_env_bridge.mjs",
     "rule_key": "A",
     "control_actor": "human",
     "first_turn_policy": "alternate",
@@ -39,26 +39,18 @@
     "device": "cpu",
     "log_every_updates": 20,
     "save_every_updates": 500,
-    "seed": "abl_A",
+    "seed": "abl_C",
     "reward_scale": 0.001,
-    "go_explore_prob": 0.05,
+    "go_explore_prob": 0.25,
     "opponent_policy": "H-J1:0.50|H-Gemini:0.20|H-AntiCL:0.20|H-J2:0.10",
     "opponent_policy_schedule": [
         {
             "start_update": 1,
             "opponent_policy": "H-J1:0.50|H-Gemini:0.20|H-AntiCL:0.20|H-J2:0.10"
-        },
-        {
-            "start_update": 501,
-            "opponent_policy": "H-J2:0.40|H-NEXg:0.30|H-AntiCL:0.20|H-GPT:0.10"
-        },
-        {
-            "start_update": 1001,
-            "opponent_policy": "H-CL:0.40|H-J2:0.30|H-NEXg:0.20|H-GPT:0.10"
         }
     ],
-    "output_dir": "logs/PPO/ablation_A_go_explore",
-    "output_dir_template": "logs/PPO/ablation_A_go_explore_{seed}",
-    "_ablation_desc": "go_explore_prob 0.05 only",
+    "output_dir": "logs/PPO/ablation_C_weak_fixed",
+    "output_dir_template": "logs/PPO/ablation_C_weak_fixed_{seed}",
+    "_ablation_desc": "weak opponent fixed, no schedule change",
     "entropy_coef_final": 0.005
 }

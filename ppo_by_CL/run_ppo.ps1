@@ -81,7 +81,7 @@ if (-not [string]::IsNullOrWhiteSpace($Seed)) {
 }
 
 $args = @(
-  "ppo/scripts/train_ppo.py",
+  "ppo_by_CL/scripts/train_ppo.py",
   "--runtime-config", "$RuntimeConfig"
 )
 
