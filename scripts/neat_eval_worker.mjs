@@ -4,6 +4,10 @@ import {
   initSimulationGame,
   startSimulationGame,
   createSeededRng,
+  getDeclarableShakingMonths,
+  getDeclarableBombMonths,
+  declareShaking,
+  declareBomb,
   playTurn,
   chooseMatch,
   chooseGo,
@@ -32,12 +36,27 @@ function normalizePolicyName(policy) {
   return String(policy || "").trim().toLowerCase();
 }
 
+function normalizeControlPolicyMode(mode) {
+  const raw = String(mode || "").trim().toLowerCase();
+  if (!raw || raw === "pure_model") return "pure_model";
+  if (
+    raw === "hybrid_play_match_only" ||
+    raw === "hybrid_playmatch_only" ||
+    raw === "play_match_only"
+  ) {
+    return "hybrid_play_match_only";
+  }
+  throw new Error(
+    `invalid --control-policy-mode: ${mode} (allowed: pure_model, hybrid_play_match_only)`
+  );
+}
+
 const OPPONENT_SPEC_CACHE = new Map();
 
 function parseHybridPlayGoSpec(token) {
   const m = String(token || "")
     .trim()
-    .match(/^hybrid_play_go\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\s*\)$/i);
+    .match(/^hybrid_play_go\(\s*([^,]+)\s*,\s*([^,]+?)(?:\s*,\s*([^)]+)\s*)?\)$/i);
   if (!m) {
     return null;
   }
@@ -117,18 +136,25 @@ function resolveOpponentSpec(policyToken, opponentGenomePath) {
     if (hybridGo) {
       const modelSpec = resolvePhaseModelToken(hybridGo.modelToken, "hybrid opponent model");
       const goStopPolicy = resolveBotPolicy(hybridGo.goStopToken);
-      const heuristicPolicy = resolveBotPolicy(hybridGo.heuristicToken);
-      if (!goStopPolicy || !heuristicPolicy) {
+      const heuristicToken = String(hybridGo.heuristicToken || "").trim();
+      const heuristicPolicy = heuristicToken ? resolveBotPolicy(heuristicToken) : "";
+      if (!goStopPolicy || (heuristicToken && !heuristicPolicy)) {
         throw new Error(`invalid hybrid opponent policy: ${raw}`);
       }
+      const goStopOnly = !heuristicPolicy;
       resolved = {
         kind: "hybrid_play_model",
-        key: `hybrid_play_go(${modelSpec.key},${goStopPolicy},${heuristicPolicy})`,
-        label: `hybrid_play_go(${modelSpec.label},${goStopPolicy},${heuristicPolicy})`,
+        key: goStopOnly
+          ? `hybrid_play_go(${modelSpec.key},${goStopPolicy})`
+          : `hybrid_play_go(${modelSpec.key},${goStopPolicy},${heuristicPolicy})`,
+        label: goStopOnly
+          ? `hybrid_play_go(${modelSpec.label},${goStopPolicy})`
+          : `hybrid_play_go(${modelSpec.label},${goStopPolicy},${heuristicPolicy})`,
         model: modelSpec.model,
         modelPath: modelSpec.modelPath,
         heuristicPolicy,
         goStopPolicy,
+        goStopOnly,
       };
     } else {
       const hybrid = parseHybridPlaySpec(raw);
@@ -191,6 +217,8 @@ function parseArgs(argv) {
     fitnessWinWeight: null,
     fitnessGoldWeight: null,
     fitnessWinNeutralRate: null,
+    controlPolicyMode: "pure_model",
+    controlHeuristicPolicy: "H-CL",
   };
 
   while (args.length > 0) {
@@ -254,6 +282,8 @@ function parseArgs(argv) {
     else if (key === "--fitness-win-weight") out.fitnessWinWeight = Number(value);
     else if (key === "--fitness-gold-weight") out.fitnessGoldWeight = Number(value);
     else if (key === "--fitness-win-neutral-rate") out.fitnessWinNeutralRate = Number(value);
+    else if (key === "--control-policy-mode") out.controlPolicyMode = normalizeControlPolicyMode(value);
+    else if (key === "--control-heuristic-policy") out.controlHeuristicPolicy = String(value || "").trim();
     else throw new Error(`Unknown argument: ${key}`);
   }
 
@@ -296,6 +326,15 @@ function parseArgs(argv) {
   if (!Number.isFinite(out.fitnessWinNeutralRate) || out.fitnessWinNeutralRate <= 0 || out.fitnessWinNeutralRate >= 1) {
     throw new Error("--fitness-win-neutral-rate is required and must be in (0,1)");
   }
+  if (out.controlPolicyMode === "hybrid_play_match_only") {
+    const resolved = resolveBotPolicy(out.controlHeuristicPolicy);
+    if (!resolved) {
+      throw new Error(
+        `invalid --control-heuristic-policy: ${out.controlHeuristicPolicy} (use a policy key from src/ai/policies.js)`
+      );
+    }
+    out.controlHeuristicPolicy = resolved;
+  }
   return out;
 }
 
@@ -331,9 +370,67 @@ function normalizeOptionCandidates(items) {
   return out;
 }
 
+const PLAY_SPECIAL_SHAKE_PREFIX = "shake_start:";
+const PLAY_SPECIAL_BOMB_PREFIX = "bomb:";
+
+function parsePlaySpecialCandidate(candidate) {
+  const raw = String(candidate || "").trim();
+  if (!raw) return null;
+  if (raw.startsWith(PLAY_SPECIAL_SHAKE_PREFIX)) {
+    const cardId = raw.slice(PLAY_SPECIAL_SHAKE_PREFIX.length).trim();
+    if (!cardId) return null;
+    return { kind: "shake_start", cardId };
+  }
+  if (raw.startsWith(PLAY_SPECIAL_BOMB_PREFIX)) {
+    const month = Number(raw.slice(PLAY_SPECIAL_BOMB_PREFIX.length).trim());
+    if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+    return { kind: "bomb", month };
+  }
+  return null;
+}
+
+function buildPlayingSpecialActions(state, actor) {
+  if (state?.phase !== "playing" || state?.currentTurn !== actor) return [];
+  const out = [];
+  const shakingMonths = new Set(getDeclarableShakingMonths(state, actor));
+  if (shakingMonths.size > 0) {
+    for (const card of state?.players?.[actor]?.hand || []) {
+      const cardId = String(card?.id || "").trim();
+      if (!cardId || card?.passCard) continue;
+      const month = Number(card?.month || 0);
+      if (shakingMonths.has(month)) out.push(`${PLAY_SPECIAL_SHAKE_PREFIX}${cardId}`);
+    }
+  }
+  for (const month of getDeclarableBombMonths(state, actor)) {
+    const monthNum = Number(month || 0);
+    if (monthNum >= 1 && monthNum <= 12) out.push(`${PLAY_SPECIAL_BOMB_PREFIX}${monthNum}`);
+  }
+  return out;
+}
+
+function applyPlayCandidate(state, actor, candidate) {
+  const special = parsePlaySpecialCandidate(candidate);
+  if (!special) return playTurn(state, candidate);
+  if (special.kind === "shake_start") {
+    const selected = (state?.players?.[actor]?.hand || []).find(
+      (card) => String(card?.id || "") === String(special.cardId || "")
+    );
+    const month = Number(selected?.month || 0);
+    if (month < 1) return state;
+    const declared = declareShaking(state, actor, month);
+    if (!declared || declared === state) return state;
+    return playTurn(declared, special.cardId) || declared;
+  }
+  if (special.kind === "bomb") return declareBomb(state, actor, special.month);
+  return state;
+}
+
 function selectPool(state, actor) {
   if (state.phase === "playing" && state.currentTurn === actor) {
-    return { cards: (state.players?.[actor]?.hand || []).map((c) => c.id) };
+    return {
+      cards: (state.players?.[actor]?.hand || []).map((c) => c.id),
+      specialActions: buildPlayingSpecialActions(state, actor),
+    };
   }
   if (state.phase === "select-match" && state.pendingMatch?.playerKey === actor) {
     return { boardCardIds: state.pendingMatch.boardCardIds || [] };
@@ -355,7 +452,10 @@ function selectPool(state, actor) {
 
 function legalCandidatesForDecision(sp, decisionType) {
   if (decisionType === "play") {
-    return (sp.cards || []).map((x) => String(x)).filter((x) => x.length > 0);
+    return [
+      ...(sp.cards || []).map((x) => String(x)).filter((x) => x.length > 0),
+      ...(sp.specialActions || []).map((x) => String(x)).filter((x) => x.length > 0),
+    ];
   }
   if (decisionType === "match") {
     return (sp.boardCardIds || []).map((x) => String(x)).filter((x) => x.length > 0);
@@ -369,7 +469,7 @@ function legalCandidatesForDecision(sp, decisionType) {
 function applyAction(state, actor, decisionType, rawAction) {
   let action = String(rawAction || "").trim();
   if (!action) return state;
-  if (decisionType === "play") return playTurn(state, action);
+  if (decisionType === "play") return applyPlayCandidate(state, actor, action);
   if (decisionType === "match") return chooseMatch(state, action);
   if (decisionType !== "option") return state;
 
@@ -396,6 +496,8 @@ function stateProgressKey(state) {
     String(state.pendingMatch?.stage || ""),
     String(state.pendingPresident?.playerKey || ""),
     String(state.pendingShakingConfirm?.playerKey || ""),
+    String(state.pendingShakingConfirm?.cardId || ""),
+    String(state.pendingShakingConfirm?.month || ""),
     String(state.pendingGukjinChoice?.playerKey || ""),
     String(state.turnSeq || 0),
     String(state.kiboSeq || 0),
@@ -644,11 +746,17 @@ function playSingleRound(
   controlActor,
   opponentPolicy,
   maxSteps,
-  opponentGenomePath
+  opponentGenomePath,
+  controlOptions = {}
 ) {
   const rng = createSeededRng(`${seed}|rng`);
   let state = initialState;
   const opponentSpec = resolveOpponentSpec(opponentPolicy, opponentGenomePath);
+  const controlPolicyMode = normalizeControlPolicyMode(controlOptions.controlPolicyMode || "pure_model");
+  const controlHeuristicPolicy =
+    controlPolicyMode === "hybrid_play_match_only"
+      ? String(controlOptions.controlHeuristicPolicy || "H-CL")
+      : "";
   const imitation = {
     totals: { play: 0, match: 0, option: 0 },
     matches: { play: 0, match: 0, option: 0 },
@@ -667,12 +775,29 @@ function playSingleRound(
     const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
     const candidates = decisionType ? legalCandidatesForDecision(sp, decisionType) : [];
     let next = state;
+    let controlDecisionOwnedByModel = false;
 
     if (actor === controlActor) {
-      next = aiPlay(state, actor, {
-        source: "model",
-        model: controlModel,
-      });
+      if (controlPolicyMode === "hybrid_play_match_only") {
+        const traced = hybridPolicyPlayDetailed(state, actor, {
+          model: controlModel,
+          heuristicPolicy: controlHeuristicPolicy,
+          goStopPolicy: controlHeuristicPolicy,
+          phasePolicy: controlHeuristicPolicy,
+          specialPolicy: controlHeuristicPolicy,
+          playFallbackPolicy: controlHeuristicPolicy,
+          modelMatchPhase: true,
+        });
+        next = traced?.next || state;
+        const route = String(traced?.route || "");
+        controlDecisionOwnedByModel = route === "model_play" || route === "model_match";
+      } else {
+        next = aiPlay(state, actor, {
+          source: "model",
+          model: controlModel,
+        });
+        controlDecisionOwnedByModel = true;
+      }
     } else {
       if (opponentSpec.kind === "model") {
         next = aiPlay(state, actor, {
@@ -684,6 +809,7 @@ function playSingleRound(
           model: opponentSpec.model,
           heuristicPolicy: String(opponentSpec.heuristicPolicy || ""),
           goStopPolicy: String(opponentSpec.goStopPolicy || ""),
+          goStopOnly: !!opponentSpec.goStopOnly,
         });
         next = traced?.next || state;
       } else {
@@ -696,6 +822,9 @@ function playSingleRound(
 
     if (!next || stateProgressKey(next) === before) {
       next = randomLegalAction(state, actor, rng);
+      if (actor === controlActor) {
+        controlDecisionOwnedByModel = false;
+      }
     }
     if (!next || stateProgressKey(next) === before) {
       throw new Error(
@@ -703,7 +832,7 @@ function playSingleRound(
       );
     }
 
-    if (actor === controlActor && decisionType && candidates.length > 0) {
+    if (actor === controlActor && controlDecisionOwnedByModel && decisionType && candidates.length > 0) {
       const chosen = inferChosenCandidateFromTransition(
         state,
         actor,
@@ -860,7 +989,11 @@ function main() {
       controlActor,
       opponentPolicyForGame,
       maxSteps,
-      opts.opponentGenomePath
+      opts.opponentGenomePath,
+      {
+        controlPolicyMode: opts.controlPolicyMode,
+        controlHeuristicPolicy: opts.controlHeuristicPolicy,
+      }
     );
     const endState = gameResult?.endState || gameResult;
     const afterGoldDiff = controlGoldDiff(endState, controlActor);
@@ -955,9 +1088,14 @@ function main() {
     opponent_policy: opts.opponentPolicy,
     opponent_policy_mix: opts.opponentPolicyMix,
     opponent_policy_counts: opponentPolicyCounts,
+    control_policy_mode: opts.controlPolicyMode,
+    control_heuristic_policy:
+      opts.controlPolicyMode === "hybrid_play_match_only" ? opts.controlHeuristicPolicy : null,
     opponent_eval_tuning: {
       fast_path: false,
       imitation_reference_enabled: true,
+      imitation_decision_scope:
+        opts.controlPolicyMode === "hybrid_play_match_only" ? "model_owned_play_match_only" : "all_control_decisions",
       opponent_heuristic_params: null,
     },
     opponent_genome: String(opts.opponentGenomePath || "") || null,

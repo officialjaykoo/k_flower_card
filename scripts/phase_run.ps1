@@ -1,6 +1,8 @@
 ﻿param(
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
-  [Parameter(Mandatory = $true)][int]$Seed
+  [Parameter(Mandatory = $true)][int]$Seed,
+  [Parameter(Mandatory = $false)][string]$ControlPolicyMode = "",
+  [Parameter(Mandatory = $false)][string]$ControlHeuristicPolicy = ""
 )
 
 Set-StrictMode -Version Latest
@@ -193,6 +195,18 @@ $cmd = @(
   "--profile-name", "phase${Phase}_seed$Seed"
 )
 
+if (-not [string]::IsNullOrWhiteSpace($ControlPolicyMode)) {
+  $cmd += @(
+    "--control-policy-mode", $ControlPolicyMode
+  )
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ControlHeuristicPolicy)) {
+  $cmd += @(
+    "--control-heuristic-policy", $ControlHeuristicPolicy
+  )
+}
+
 if ($Phase -ne "1") {
   $previousPhase = [int]$Phase - 1
   $previousLabel = "phase$previousPhase"
@@ -203,9 +217,15 @@ if ($Phase -ne "1") {
     throw "$previousLabel run summary not found: $previousSummaryPath"
   }
   $previousSummary = Read-JsonFile -Path $previousSummaryPath
+  $previousAppliedOverrides = $previousSummary.applied_overrides
+  $previousBaseGeneration = 0
+  if ($null -ne $previousAppliedOverrides) {
+    $previousBaseGeneration = To-PositiveIntOrDefault -Value $previousAppliedOverrides.base_generation -DefaultValue 0
+  }
   $previousGenerations = To-PositiveIntOrDefault -Value $previousSummary.generations -DefaultValue (
     To-PositiveIntOrDefault -Value $previousRuntime.generations -DefaultValue 20
   )
+  $cumulativeBaseGeneration = $previousBaseGeneration + $previousGenerations
   $previousWinnerRaw = [string]$previousSummary.winner_pickle
   if ([string]::IsNullOrWhiteSpace($previousWinnerRaw)) {
     $previousWinnerRaw = "logs/NEAT/neat_phase${previousPhase}_seed$Seed/models/winner_genome.pkl"
@@ -217,7 +237,7 @@ if ($Phase -ne "1") {
 
   $cmd += @(
     "--seed-genome", "$previousWinnerPath",
-    "--base-generation", "$previousGenerations"
+    "--base-generation", "$cumulativeBaseGeneration"
   )
 }
 

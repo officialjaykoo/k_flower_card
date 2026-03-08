@@ -6,6 +6,16 @@ export const POLICY_HEURISTIC_J2 = "H-J2";
 export const POLICY_HEURISTIC_CL = "H-CL";
 export const POLICY_HEURISTIC_ANTICL = "H-AntiCL";
 export const POLICY_HEURISTIC_GPT = "H-GPT";
+export const POLICY_HEURISTIC_GPT54 = "H-GPT54";
+export const POLICY_HEURISTIC_GPT_PLAYMATCH_CL = "H-GPT-PlayMatch+CL";
+export const POLICY_HEURISTIC_GPT_PLAYMATCHGO_CL = "H-GPT-PlayMatchGo+CL";
+export const POLICY_HEURISTIC_GPT_PLAYMATCHSHAKE_CL = "H-GPT-PlayMatchShake+CL";
+export const POLICY_HEURISTIC_GPT_PLAYMATCHGUKJIN_CL = "H-GPT-PlayMatchGukjin+CL";
+export const POLICY_HEURISTIC_GPT_PLAYMATCHPRESIDENT_CL = "H-GPT-PlayMatchPresident+CL";
+export const POLICY_HEURISTIC_GPT_PLAYMATCHGUKJINPRESIDENT_CL =
+  "H-GPT-PlayMatchGukjinPresident+CL";
+export const POLICY_HEURISTIC_GPT_ALLBUTGO_CL = "H-GPT-AllButGo+CL";
+export const POLICY_HEURISTIC_GPT_PLAYMATCHBPG_CL = "H-GPT-PlayMatchBPG+CL";
 export const POLICY_HEURISTIC_GEMINI = "H-Gemini";
 export const POLICY_HEURISTIC_NEXG = "H-NEXg";
 export const POLICY_NEAT_PHASE2_SEED9 = "N-P2-Seed9";
@@ -22,6 +32,15 @@ export const BOT_POLICIES = Object.freeze([
   POLICY_HEURISTIC_ANTICL,
   POLICY_HEURISTIC_NEXG,
   POLICY_HEURISTIC_GPT,
+  POLICY_HEURISTIC_GPT54,
+  POLICY_HEURISTIC_GPT_PLAYMATCH_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHGO_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHSHAKE_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHGUKJIN_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHPRESIDENT_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHGUKJINPRESIDENT_CL,
+  POLICY_HEURISTIC_GPT_ALLBUTGO_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHBPG_CL,
   POLICY_HEURISTIC_GEMINI
 ]);
 
@@ -58,6 +77,51 @@ export const MODEL_CATALOG = Object.freeze({
     labelKey: "model.heuristicGPT",
     kind: "bot_policy",
     botPolicy: POLICY_HEURISTIC_GPT
+  },
+  [POLICY_HEURISTIC_GPT54]: {
+    kind: "bot_policy",
+    botPolicy: POLICY_HEURISTIC_GPT54,
+    label: "H-GPT54"
+  },
+  [POLICY_HEURISTIC_GPT_PLAYMATCH_CL]: {
+    kind: "bot_policy",
+    botPolicy: POLICY_HEURISTIC_GPT_PLAYMATCH_CL,
+    label: "H-GPT-PlayMatch+CL"
+  },
+  [POLICY_HEURISTIC_GPT_PLAYMATCHGO_CL]: {
+    kind: "bot_policy",
+    botPolicy: POLICY_HEURISTIC_GPT_PLAYMATCHGO_CL,
+    label: "H-GPT-PlayMatchGo+CL"
+  },
+  [POLICY_HEURISTIC_GPT_PLAYMATCHSHAKE_CL]: {
+    kind: "bot_policy",
+    botPolicy: POLICY_HEURISTIC_GPT_PLAYMATCHSHAKE_CL,
+    label: "H-GPT-PlayMatchShake+CL"
+  },
+  [POLICY_HEURISTIC_GPT_PLAYMATCHGUKJIN_CL]: {
+    kind: "bot_policy",
+    botPolicy: POLICY_HEURISTIC_GPT_PLAYMATCHGUKJIN_CL,
+    label: "H-GPT-PlayMatchGukjin+CL"
+  },
+  [POLICY_HEURISTIC_GPT_PLAYMATCHPRESIDENT_CL]: {
+    kind: "bot_policy",
+    botPolicy: POLICY_HEURISTIC_GPT_PLAYMATCHPRESIDENT_CL,
+    label: "H-GPT-PlayMatchPresident+CL"
+  },
+  [POLICY_HEURISTIC_GPT_PLAYMATCHGUKJINPRESIDENT_CL]: {
+    kind: "bot_policy",
+    botPolicy: POLICY_HEURISTIC_GPT_PLAYMATCHGUKJINPRESIDENT_CL,
+    label: "H-GPT-PlayMatchGukjinPresident+CL"
+  },
+  [POLICY_HEURISTIC_GPT_ALLBUTGO_CL]: {
+    kind: "bot_policy",
+    botPolicy: POLICY_HEURISTIC_GPT_ALLBUTGO_CL,
+    label: "H-GPT-AllButGo+CL"
+  },
+  [POLICY_HEURISTIC_GPT_PLAYMATCHBPG_CL]: {
+    kind: "bot_policy",
+    botPolicy: POLICY_HEURISTIC_GPT_PLAYMATCHBPG_CL,
+    label: "H-GPT-PlayMatchBPG+CL"
   },
   [POLICY_HEURISTIC_GEMINI]: {
     labelKey: "model.heuristicGemini",

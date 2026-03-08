@@ -1,5 +1,6 @@
 param(
   [Parameter(Mandatory = $true)][int]$Seed,
+  [string]$Phase = "",
   [string]$RuntimeConfig = "",
   [string]$OutputDir = ""
 )
@@ -14,15 +15,11 @@ if (-not (Test-Path $CommonScript)) {
 . $CommonScript
 
 $RepoRoot = Get-NeatGptRepoRoot -ScriptRoot $PSScriptRoot
-$DefaultRuntimeConfig = Join-Path $PSScriptRoot "configs\runtime_focus_cl_v1.json"
 $EvalWorker = Join-Path $PSScriptRoot "scripts\neat_eval_worker.mjs"
 
 function Read-JsonFile {
   param([Parameter(Mandatory = $true)][string]$Path)
-  if (-not (Test-Path $Path)) {
-    throw "json file not found: $Path"
-  }
-  return Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+  return Read-NeatGptRuntimeJson -Path $Path
 }
 
 function Get-OptionalDouble {
@@ -76,7 +73,7 @@ function Get-PolicyLabel {
   throw "eval_opponent_policy or eval_opponent_policy_mix is required"
 }
 
-$RuntimeConfig = Resolve-PathFromBase -Path $RuntimeConfig -BasePath $RepoRoot -DefaultPath $DefaultRuntimeConfig
+$RuntimeConfig = Resolve-NeatGptRuntimeConfigPath -ScriptRoot $PSScriptRoot -RepoRoot $RepoRoot -RuntimeConfig $RuntimeConfig -Phase $Phase
 if (-not (Test-Path $RuntimeConfig)) {
   throw "runtime config not found: $RuntimeConfig"
 }
@@ -97,6 +94,10 @@ $policyValue = [string]$runtime.eval_opponent_policy
 $policyMix = $runtime.eval_opponent_policy_mix
 $teacherPolicy = [string]$runtime.teacher_policy
 $fitnessProfile = [string]$runtime.fitness_profile
+$fitnessOverrides = $null
+if ($runtime.PSObject.Properties.Name -contains "fitness_overrides") {
+  $fitnessOverrides = $runtime.fitness_overrides
+}
 if ([string]::IsNullOrWhiteSpace($fitnessProfile)) {
   throw "runtime fitness_profile is empty"
 }
@@ -113,6 +114,12 @@ $cmd = @(
 )
 if (-not [string]::IsNullOrWhiteSpace($teacherPolicy)) {
   $cmd += @("--teacher-policy", $teacherPolicy)
+}
+if ($null -ne $fitnessOverrides) {
+  $fitnessOverridesJson = $fitnessOverrides | ConvertTo-Json -Depth 20 -Compress
+  if (-not [string]::IsNullOrWhiteSpace($fitnessOverridesJson) -and $fitnessOverridesJson -ne "{}") {
+    $cmd += @("--fitness-overrides", $fitnessOverridesJson)
+  }
 }
 if (-not [string]::IsNullOrWhiteSpace($policyValue)) {
   $cmd += @("--opponent-policy", $policyValue)

@@ -290,6 +290,22 @@ def _required_bool(cfg: dict, key: str) -> bool:
     raise RuntimeError(f"runtime key '{key}' must be boolean")
 
 
+def _normalize_control_policy_mode(raw_value: object) -> str:
+    raw = str(raw_value or "").strip().lower()
+    if raw in ("", "pure_model"):
+        return "pure_model"
+    aliases = {
+        "hybrid_play_match_only": "hybrid_play_match_only",
+        "hybrid_playmatch_only": "hybrid_play_match_only",
+        "play_match_only": "hybrid_play_match_only",
+    }
+    if raw in aliases:
+        return aliases[raw]
+    raise RuntimeError(
+        "runtime key 'control_policy_mode' must be one of: pure_model, hybrid_play_match_only"
+    )
+
+
 # =============================================================================
 # Section 2. Runtime Config Normalization
 # =============================================================================
@@ -353,6 +369,8 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     if failure_slope_metric not in ("win_rate", "imitation"):
         raise RuntimeError("runtime key 'failure_slope_metric' must be one of: win_rate, imitation")
     cfg["failure_slope_metric"] = failure_slope_metric
+    cfg["control_policy_mode"] = _normalize_control_policy_mode(cfg.get("control_policy_mode"))
+    cfg["control_heuristic_policy"] = str(cfg.get("control_heuristic_policy") or "H-CL").strip() or "H-CL"
 
     if cfg["fitness_gold_scale"] <= 0:
         raise RuntimeError("runtime key 'fitness_gold_scale' must be > 0")
@@ -419,6 +437,8 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}FAILURE_IMITATION_MAX"] = str(runtime.get("failure_imitation_max"))
     os.environ[f"{ENV_PREFIX}FAILURE_SLOPE_5_MAX"] = str(float(runtime["failure_slope_5_max"]))
     os.environ[f"{ENV_PREFIX}FAILURE_SLOPE_METRIC"] = str(runtime["failure_slope_metric"])
+    os.environ[f"{ENV_PREFIX}CONTROL_POLICY_MODE"] = str(runtime.get("control_policy_mode") or "pure_model")
+    os.environ[f"{ENV_PREFIX}CONTROL_HEURISTIC_POLICY"] = str(runtime.get("control_heuristic_policy") or "H-CL")
 
 
 def _runtime_from_env() -> Dict[str, object]:
@@ -454,6 +474,8 @@ def _runtime_from_env() -> Dict[str, object]:
         "failure_imitation_max": os.environ.get(f"{ENV_PREFIX}FAILURE_IMITATION_MAX"),
         "failure_slope_5_max": os.environ.get(f"{ENV_PREFIX}FAILURE_SLOPE_5_MAX"),
         "failure_slope_metric": os.environ.get(f"{ENV_PREFIX}FAILURE_SLOPE_METRIC"),
+        "control_policy_mode": os.environ.get(f"{ENV_PREFIX}CONTROL_POLICY_MODE"),
+        "control_heuristic_policy": os.environ.get(f"{ENV_PREFIX}CONTROL_HEURISTIC_POLICY"),
     }
     return _normalize_runtime_values(raw)
 
@@ -706,6 +728,10 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             str(float(runtime["fitness_gold_weight"])),
             "--fitness-win-neutral-rate",
             str(float(runtime["fitness_win_neutral_rate"])),
+            "--control-policy-mode",
+            str(runtime.get("control_policy_mode") or "pure_model"),
+            "--control-heuristic-policy",
+            str(runtime.get("control_heuristic_policy") or "H-CL"),
         ]
         if has_opponent_policy:
             cmd.extend(["--opponent-policy", opponent_policy])
@@ -1232,6 +1258,16 @@ def parse_args() -> argparse.Namespace:
         help="Override neutral baseline win rate for win_norm",
     )
     parser.add_argument(
+        "--control-policy-mode",
+        default="",
+        help="Override control policy mode (pure_model or hybrid_play_match_only)",
+    )
+    parser.add_argument(
+        "--control-heuristic-policy",
+        default="",
+        help="Override heuristic fallback policy for hybrid control modes",
+    )
+    parser.add_argument(
         "--profile-name",
         default="",
         help="Optional profile label included in run_summary",
@@ -1524,6 +1560,12 @@ def main() -> None:
     if args.fitness_win_neutral_rate == args.fitness_win_neutral_rate:
         runtime["fitness_win_neutral_rate"] = args.fitness_win_neutral_rate
         override_keys.append("fitness_win_neutral_rate")
+    if str(args.control_policy_mode).strip():
+        runtime["control_policy_mode"] = str(args.control_policy_mode).strip()
+        override_keys.append("control_policy_mode")
+    if str(args.control_heuristic_policy).strip():
+        runtime["control_heuristic_policy"] = str(args.control_heuristic_policy).strip()
+        override_keys.append("control_heuristic_policy")
     runtime = _normalize_runtime_values(runtime)
     for key in override_keys:
         applied_overrides[key] = runtime.get(key)

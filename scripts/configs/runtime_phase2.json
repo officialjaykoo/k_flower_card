@@ -10,15 +10,15 @@
   "seed": 13,
   "opponent_policy": "",
   "opponent_policy_mix": [
-    { "policy": "H-CL", "weight": 50 },
-    { "policy": "hybrid_play(phase1_seed202,H-CL)", "weight": 50 }
+    { "policy": "hybrid_play(phase3_seed203,H-CL)", "weight": 50 },
+    { "policy": "hybrid_play(phase3_seed202,H-CL)", "weight": 50 }
   ],
   "opponent_genome": "",
   "switch_seats": true,
   "fitness_gold_scale": 2500.0,
   "fitness_gold_neutral_delta": 0.0,
-  "fitness_win_weight": 0.7,
-  "fitness_gold_weight": 0.3,
+  "fitness_win_weight": 0.75,
+  "fitness_gold_weight": 0.25,
   "fitness_win_neutral_rate": 0.50,
   "gate_mode": "win_rate_only",
   "gate_ema_window": 5,

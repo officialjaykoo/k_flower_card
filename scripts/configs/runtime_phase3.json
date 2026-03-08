@@ -10,8 +10,8 @@
   "seed": 13,
   "opponent_policy": "",
   "opponent_policy_mix": [
-    { "policy": "hybrid_play(phase1_seed202,H-CL)", "weight": 50 },
-    { "policy": "hybrid_play(phase2_seed202,H-CL)", "weight": 50 }
+    { "policy": "hybrid_play(phase3_seed202,H-CL)", "weight": 50 },
+    { "policy": "hybrid_play(phase2_seed204,H-CL)", "weight": 50 }
   ],
   "opponent_genome": "",
   "switch_seats": true,

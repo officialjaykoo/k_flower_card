@@ -5,6 +5,9 @@
 - Phase 실행·평가는 단일 진입점(`scripts/phase_run.ps1`, `scripts/phase_eval.ps1`)으로 통합되었다.
 - 모든 런타임 설정은 `scripts/configs/runtime_phase*.json`을 단일 기준(Source of Truth)으로 사용한다.
 
+빠른 참고:
+- 반복 확인하는 설정/fitness/정책 메모는 `docs/neat/QUICK_NOTES.md`
+
 ## 1. 문서 범위
 이 문서는 NEAT 기반 학습/평가 운영 기준, 파일 경계, 실행 명령, 산출물 해석 규칙을 정의한다.
 레거시 실행 경로(`run_neat_*`, 루트 `configs/`)는 현재 기준에서 제외한다.

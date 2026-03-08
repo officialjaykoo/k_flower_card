@@ -7,8 +7,15 @@ import {
   chooseShakingNo,
   choosePresidentStop,
   choosePresidentHold,
-  chooseGukjinMode
+  chooseGukjinMode,
+  getDeclarableShakingMonths,
+  getDeclarableBombMonths,
+  declareShaking,
+  declareBomb
 } from "../engine/index.js";
+
+const PLAY_SPECIAL_SHAKE_PREFIX = "shake_start:";
+const PLAY_SPECIAL_BOMB_PREFIX = "bomb:";
 
 const OPTION_ALIASES = {
   choose_go: "go",
@@ -40,10 +47,69 @@ export function normalizeOptionCandidates(items) {
   return out;
 }
 
+export function parsePlaySpecialCandidate(candidate) {
+  const raw = String(candidate || "").trim();
+  if (!raw) return null;
+  if (raw.startsWith(PLAY_SPECIAL_SHAKE_PREFIX)) {
+    const cardId = raw.slice(PLAY_SPECIAL_SHAKE_PREFIX.length).trim();
+    if (!cardId) return null;
+    return { kind: "shake_start", cardId };
+  }
+  if (raw.startsWith(PLAY_SPECIAL_BOMB_PREFIX)) {
+    const month = Number(raw.slice(PLAY_SPECIAL_BOMB_PREFIX.length).trim());
+    if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+    return { kind: "bomb", month };
+  }
+  return null;
+}
+
+function findCardById(cards, cardId) {
+  const id = String(cardId || "");
+  if (!Array.isArray(cards)) return null;
+  return cards.find((c) => String(c?.id || "") === id) || null;
+}
+
+function buildPlayingSpecialActions(state, actor) {
+  if (state?.phase !== "playing" || state?.currentTurn !== actor) return [];
+  const out = [];
+  const shakingMonths = new Set(getDeclarableShakingMonths(state, actor));
+  if (shakingMonths.size > 0) {
+    for (const card of state?.players?.[actor]?.hand || []) {
+      const cardId = String(card?.id || "").trim();
+      if (!cardId || card?.passCard) continue;
+      const month = Number(card?.month || 0);
+      if (shakingMonths.has(month)) out.push(`${PLAY_SPECIAL_SHAKE_PREFIX}${cardId}`);
+    }
+  }
+  for (const month of getDeclarableBombMonths(state, actor)) {
+    const monthNum = Number(month || 0);
+    if (monthNum >= 1 && monthNum <= 12) out.push(`${PLAY_SPECIAL_BOMB_PREFIX}${monthNum}`);
+  }
+  return out;
+}
+
+function applyPlayDecisionCandidate(state, actor, candidate) {
+  const special = parsePlaySpecialCandidate(candidate);
+  if (!special) return playTurn(state, candidate);
+  if (special.kind === "shake_start") {
+    const selected = findCardById(state?.players?.[actor]?.hand || [], special.cardId);
+    const month = Number(selected?.month || 0);
+    if (month < 1) return state;
+    const declared = declareShaking(state, actor, month);
+    if (!declared || declared === state) return state;
+    return playTurn(declared, special.cardId) || declared;
+  }
+  if (special.kind === "bomb") return declareBomb(state, actor, special.month);
+  return state;
+}
+
 export function selectDecisionPool(state, actor, options = {}) {
   const previewPlay = !!options.previewPlay;
   if (state.phase === "playing" && (state.currentTurn === actor || previewPlay)) {
-    return { cards: (state.players?.[actor]?.hand || []).map((c) => c.id) };
+    return {
+      cards: (state.players?.[actor]?.hand || []).map((c) => c.id),
+      specialActions: buildPlayingSpecialActions(state, actor)
+    };
   }
   if (state.phase === "select-match" && state.pendingMatch?.playerKey === actor) {
     return { boardCardIds: state.pendingMatch.boardCardIds || [] };
@@ -75,7 +141,10 @@ export function resolveDecisionType(pool) {
 
 export function legalCandidatesForDecision(pool, decisionType) {
   if (decisionType === "play") {
-    return (pool.cards || []).map((x) => String(x)).filter((x) => x.length > 0);
+    return [
+      ...(pool.cards || []).map((x) => String(x)).filter((x) => x.length > 0),
+      ...(pool.specialActions || []).map((x) => String(x)).filter((x) => x.length > 0)
+    ];
   }
   if (decisionType === "match") {
     return (pool.boardCardIds || []).map((x) => String(x)).filter((x) => x.length > 0);
@@ -90,7 +159,7 @@ export function applyDecisionAction(state, actor, decisionType, rawAction) {
   let action = String(rawAction || "").trim();
   if (!action) return state;
 
-  if (decisionType === "play") return playTurn(state, action);
+  if (decisionType === "play") return applyPlayDecisionCandidate(state, actor, action);
   if (decisionType === "match") return chooseMatch(state, action);
   if (decisionType !== "option") return state;
 
@@ -118,6 +187,8 @@ export function stateProgressKey(state, options = {}) {
     String(state.pendingMatch?.stage || ""),
     String(state.pendingPresident?.playerKey || ""),
     String(state.pendingShakingConfirm?.playerKey || ""),
+    String(state.pendingShakingConfirm?.cardId || ""),
+    String(state.pendingShakingConfirm?.month || ""),
     String(state.pendingGukjinChoice?.playerKey || ""),
     String(state.turnSeq || 0)
   ];

@@ -3,6 +3,8 @@
   scoringPiCount,
   getDeclarableShakingMonths,
   getDeclarableBombMonths,
+  declareShaking,
+  declareBomb,
   playTurn,
   chooseGo,
   chooseStop,
@@ -22,6 +24,8 @@
  * ========================================================================== */
 const NEAT_MODEL_FORMAT = "neat_python_genome_v1";
 const COMPILED_NEAT_CACHE = new WeakMap();
+const PLAY_SPECIAL_SHAKE_PREFIX = "shake_start:";
+const PLAY_SPECIAL_BOMB_PREFIX = "bomb:";
 
 /* 1) Candidate-space normalization */
 function canonicalOptionAction(action) {
@@ -53,10 +57,63 @@ function normalizeOptionCandidates(items) {
   return out;
 }
 
+function parsePlaySpecialCandidate(candidate) {
+  const raw = String(candidate || "").trim();
+  if (!raw) return null;
+  if (raw.startsWith(PLAY_SPECIAL_SHAKE_PREFIX)) {
+    const cardId = raw.slice(PLAY_SPECIAL_SHAKE_PREFIX.length).trim();
+    if (!cardId) return null;
+    return { kind: "shake_start", cardId };
+  }
+  if (raw.startsWith(PLAY_SPECIAL_BOMB_PREFIX)) {
+    const month = Number(raw.slice(PLAY_SPECIAL_BOMB_PREFIX.length).trim());
+    if (!Number.isInteger(month) || month < 1 || month > 12) return null;
+    return { kind: "bomb", month };
+  }
+  return null;
+}
+
+function buildPlayingSpecialActions(state, actor) {
+  if (state?.phase !== "playing" || state?.currentTurn !== actor) return [];
+  const out = [];
+  const shakingMonths = new Set(getDeclarableShakingMonths(state, actor));
+  if (shakingMonths.size > 0) {
+    for (const card of state?.players?.[actor]?.hand || []) {
+      const cardId = String(card?.id || "").trim();
+      if (!cardId || card?.passCard) continue;
+      const month = Number(card?.month || 0);
+      if (shakingMonths.has(month)) out.push(`${PLAY_SPECIAL_SHAKE_PREFIX}${cardId}`);
+    }
+  }
+  for (const month of getDeclarableBombMonths(state, actor)) {
+    const monthNum = Number(month || 0);
+    if (monthNum >= 1 && monthNum <= 12) out.push(`${PLAY_SPECIAL_BOMB_PREFIX}${monthNum}`);
+  }
+  return out;
+}
+
+function applyPlayCandidate(state, actor, candidate) {
+  const special = parsePlaySpecialCandidate(candidate);
+  if (!special) return playTurn(state, candidate);
+  if (special.kind === "shake_start") {
+    const selected = findCardById(state?.players?.[actor]?.hand || [], special.cardId);
+    const month = Number(selected?.month || 0);
+    if (month < 1) return state;
+    const declared = declareShaking(state, actor, month);
+    if (!declared || declared === state) return state;
+    return playTurn(declared, special.cardId) || declared;
+  }
+  if (special.kind === "bomb") return declareBomb(state, actor, special.month);
+  return state;
+}
+
 function selectPool(state, actor, options = {}) {
   const previewPlay = !!options.previewPlay;
   if (state.phase === "playing" && (state.currentTurn === actor || previewPlay)) {
-    return { cards: (state.players?.[actor]?.hand || []).map((c) => c.id) };
+    return {
+      cards: (state.players?.[actor]?.hand || []).map((c) => c.id),
+      specialActions: buildPlayingSpecialActions(state, actor)
+    };
   }
   if (state.phase === "select-match" && state.pendingMatch?.playerKey === actor) {
     return { boardCardIds: state.pendingMatch.boardCardIds || [] };
@@ -88,7 +145,10 @@ function resolveDecisionType(sp) {
 
 function legalCandidatesForDecision(sp, decisionType) {
   if (decisionType === "play") {
-    return (sp.cards || []).map((x) => String(x)).filter((x) => x.length > 0);
+    return [
+      ...(sp.cards || []).map((x) => String(x)).filter((x) => x.length > 0),
+      ...(sp.specialActions || []).map((x) => String(x)).filter((x) => x.length > 0)
+    ];
   }
   if (decisionType === "match") {
     return (sp.boardCardIds || []).map((x) => String(x)).filter((x) => x.length > 0);
@@ -119,6 +179,9 @@ function findCardById(cards, cardId) {
 }
 
 function optionCode(action) {
+  const special = parsePlaySpecialCandidate(action);
+  if (special?.kind === "shake_start") return 0.9;
+  if (special?.kind === "bomb") return 0.95;
   const a = canonicalOptionAction(action);
   const map = {
     go: 1,
@@ -135,6 +198,13 @@ function optionCode(action) {
 
 function candidateCard(state, actor, decisionType, candidate) {
   if (decisionType === "play") {
+    const special = parsePlaySpecialCandidate(candidate);
+    if (special?.kind === "shake_start") {
+      return findCardById(state?.players?.[actor]?.hand || [], special.cardId);
+    }
+    if (special?.kind === "bomb") {
+      return { id: String(candidate || ""), month: special.month, category: "junk", piValue: 0 };
+    }
     return findCardById(state?.players?.[actor]?.hand || [], candidate);
   }
   if (decisionType === "match") {
@@ -605,7 +675,7 @@ export function modelPolicyPlay(state, actor, policyModel) {
   if (decisionType === "option") c = canonicalOptionAction(c);
   if (!legal.includes(String(c))) c = legal[0];
 
-  if (decisionType === "play") return playTurn(state, c);
+  if (decisionType === "play") return applyPlayCandidate(state, actor, c);
   if (decisionType === "match") return chooseMatch(state, c);
   if (decisionType !== "option") return state;
 

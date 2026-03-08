@@ -1,5 +1,6 @@
 param(
   [Parameter(Mandatory = $true)][int]$Seed,
+  [string]$Phase = "",
   [string]$RuntimeConfig = "",
   [string]$OutputDir = ""
 )
@@ -14,17 +15,13 @@ if (-not (Test-Path $CommonScript)) {
 . $CommonScript
 
 $RepoRoot = Get-NeatGptRepoRoot -ScriptRoot $PSScriptRoot
-$DefaultRuntimeConfig = Join-Path $PSScriptRoot "configs\runtime_focus_cl_v1.json"
 $ConfigFeedforward = Join-Path $PSScriptRoot "configs\neat_feedforward.ini"
 $TrainWorker = Join-Path $PSScriptRoot "scripts\neat_train_worker.py"
 $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 
 function Read-JsonFile {
   param([Parameter(Mandatory = $true)][string]$Path)
-  if (-not (Test-Path $Path)) {
-    throw "json file not found: $Path"
-  }
-  return Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+  return Read-NeatGptRuntimeJson -Path $Path
 }
 
 function Get-OptionalDouble {
@@ -41,6 +38,22 @@ function Get-OptionalDouble {
   catch {
     return $DefaultValue
   }
+}
+
+function To-PositiveIntOrDefault {
+  param(
+    [Parameter(Mandatory = $false)]$Value,
+    [Parameter(Mandatory = $true)][int]$DefaultValue
+  )
+  try {
+    $n = [int]$Value
+    if ($n -gt 0) {
+      return $n
+    }
+  }
+  catch {
+  }
+  return $DefaultValue
 }
 
 function Get-PropertyValue {
@@ -142,7 +155,7 @@ function Assert-RuntimeKeys {
   }
 }
 
-$RuntimeConfig = Resolve-PathFromBase -Path $RuntimeConfig -BasePath $RepoRoot -DefaultPath $DefaultRuntimeConfig
+$RuntimeConfig = Resolve-NeatGptRuntimeConfigPath -ScriptRoot $PSScriptRoot -RepoRoot $RepoRoot -RuntimeConfig $RuntimeConfig -Phase $Phase
 $resolvedOutputDir = Resolve-NeatGptOutputDirPath -RepoRoot $RepoRoot -RuntimeConfigPath $RuntimeConfig -SeedValue $Seed -ExplicitOutputDir $OutputDir
 
 if (-not (Test-Path $Python)) {
@@ -161,6 +174,43 @@ if (-not (Test-Path $RuntimeConfig)) {
 $runtime = Read-JsonFile -Path $RuntimeConfig
 Assert-RuntimeKeys -Runtime $runtime
 $profileName = [System.IO.Path]::GetFileNameWithoutExtension($RuntimeConfig)
+$phaseSeedState = Resolve-NeatGptPhaseSeedState -ScriptRoot $PSScriptRoot -RepoRoot $RepoRoot -Phase $Phase -SeedValue $Seed
+if ($null -ne $phaseSeedState) {
+  $summaryPath = [string]$phaseSeedState.summary_path
+  if (-not (Test-Path $summaryPath) -and (Test-Path $phaseSeedState.legacy_summary_path)) {
+    $summaryPath = [string]$phaseSeedState.legacy_summary_path
+  }
+  if (-not (Test-Path $summaryPath)) {
+    throw "$($phaseSeedState.previous_label) run summary not found: $($phaseSeedState.summary_path)"
+  }
+  $previousSummary = Read-JsonFile -Path $summaryPath
+  $previousRuntime = Read-JsonFile -Path $phaseSeedState.runtime_config
+  $previousAppliedOverrides = Get-PropertyValue -Object $previousSummary -Name "applied_overrides"
+  $previousBaseGeneration = 0
+  if ($null -ne $previousAppliedOverrides) {
+    $previousBaseGeneration = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousAppliedOverrides -Name "base_generation") -DefaultValue 0
+  }
+  $previousGenerations = To-PositiveIntOrDefault -Value $previousSummary.generations -DefaultValue (
+    To-PositiveIntOrDefault -Value $previousRuntime.generations -DefaultValue 20
+  )
+  $cumulativeBaseGeneration = $previousBaseGeneration + $previousGenerations
+  $previousWinnerRaw = [string](Get-PropertyValue -Object $previousSummary -Name "winner_pickle")
+  if ([string]::IsNullOrWhiteSpace($previousWinnerRaw)) {
+    if ($summaryPath -eq [string]$phaseSeedState.legacy_summary_path) {
+      $previousWinnerRaw = [string]$phaseSeedState.legacy_fallback_winner_path
+    }
+    else {
+      $previousWinnerRaw = [string]$phaseSeedState.fallback_winner_path
+    }
+  }
+  $previousWinnerPath = Resolve-PathFromBase -Path $previousWinnerRaw -BasePath $RepoRoot
+  if (-not (Test-Path $previousWinnerPath)) {
+    throw "$($phaseSeedState.previous_label) winner genome not found: $previousWinnerPath"
+  }
+  $phaseSeedState | Add-Member -NotePropertyName summary_path_resolved -NotePropertyValue $summaryPath -Force
+  $phaseSeedState | Add-Member -NotePropertyName winner_path -NotePropertyValue $previousWinnerPath -Force
+  $phaseSeedState | Add-Member -NotePropertyName base_generation -NotePropertyValue $cumulativeBaseGeneration -Force
+}
 $cmd = @(
   $TrainWorker,
   "--config-feedforward", $ConfigFeedforward,
@@ -169,6 +219,12 @@ $cmd = @(
   "--seed", "$Seed",
   "--profile-name", "${profileName}_seed$Seed"
 )
+if ($null -ne $phaseSeedState) {
+  $cmd += @(
+    "--seed-genome", "$($phaseSeedState.winner_path)",
+    "--base-generation", "$($phaseSeedState.base_generation)"
+  )
+}
 
 $resultText = & $Python @cmd | Out-String
 $exitCode = $LASTEXITCODE
@@ -197,6 +253,11 @@ $bestTarget = Get-PropertyValue -Object $summary -Name "best_target"
 Write-Host "=== NEAT GPT Run Summary ==="
 Write-Host "Runtime:          $RuntimeConfig"
 Write-Host "Output:           $resolvedOutputDir"
+if ($null -ne $phaseSeedState) {
+  Write-Host "Seed genome:      $($phaseSeedState.winner_path)"
+  Write-Host "Base generation:  $($phaseSeedState.base_generation)"
+  Write-Host "Seed summary:     $($phaseSeedState.summary_path_resolved)"
+}
 Write-Host "Winner basis:     $($summary.winner_model_basis)"
 Write-Host "Best fitness:     $($summary.best_fitness)"
 Write-Host "Train fitness:    $($summary.train_best_fitness)"

@@ -1,0 +1,28 @@
+{
+  "extends": "./runtime_base_v1.json",
+  "format_version": "neat_gpt_runtime_phase2_v1",
+  "fitness_profile": "phase2",
+  "opponent_policy_mix": [
+    { "policy": "H-CL", "weight": 50 },
+    { "policy": "H-GPT-PlayMatch+CL", "weight": 30 },
+    { "policy": "H-J2", "weight": 20 }
+  ],
+  "selection_opponent_policy_mix": [
+    { "policy": "H-CL", "weight": 45 },
+    { "policy": "H-GPT-PlayMatch+CL", "weight": 35 },
+    { "policy": "H-J2", "weight": 20 }
+  ],
+  "transition_ema_win_rate": 0.46,
+  "transition_mean_gold_delta_min": 0.0,
+  "transition_cvar10_gold_delta_min": -3900.0,
+  "transition_catastrophic_loss_rate_max": 0.11,
+  "transition_streak": 3,
+  "failure_ema_win_rate_max": 0.42,
+  "failure_mean_gold_delta_max": -140.0,
+  "failure_cvar10_gold_delta_max": -5200.0,
+  "failure_catastrophic_loss_rate_min": 0.14,
+  "eval_pass_win_rate_min": 0.45,
+  "eval_pass_mean_gold_delta_min": 0.0,
+  "eval_pass_cvar10_gold_delta_min": -4200.0,
+  "eval_pass_catastrophic_loss_rate_max": 0.12
+}

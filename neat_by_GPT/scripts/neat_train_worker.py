@@ -282,6 +282,27 @@ def _parse_opponent_policy_mix(raw_value: object) -> list:
     return out
 
 
+def _parse_json_object_strict(name: str, raw_value: object) -> Dict[str, Any]:
+    if raw_value is None:
+        return {}
+
+    if isinstance(raw_value, dict):
+        return dict(raw_value)
+
+    text = str(raw_value).strip()
+    if not text:
+        return {}
+
+    try:
+        parsed = json.loads(text)
+    except Exception as exc:
+        raise RuntimeError(f"{name} must be a JSON object: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"{name} must be a JSON object")
+    return dict(parsed)
+
+
 def _load_runtime_config_recursive(path: str, cfg: dict, seen: set[str]) -> None:
     abs_path = os.path.abspath(path)
     if abs_path in seen:
@@ -360,6 +381,7 @@ def _normalize_runtime_values(cfg: dict) -> dict:
         allowed = ", ".join(sorted(ALLOWED_FITNESS_PROFILES))
         raise RuntimeError(f"runtime fitness_profile must be one of: {allowed}")
     cfg["fitness_profile"] = fitness_profile
+    cfg["fitness_overrides"] = _parse_json_object_strict("runtime fitness_overrides", cfg.get("fitness_overrides"))
     cfg["seed"] = _to_seed(_require_runtime_key(cfg, "seed"), "")
     if not cfg["seed"]:
         raise RuntimeError("runtime seed is required")
@@ -464,6 +486,7 @@ def _normalize_eval_runtime_values(cfg: dict) -> dict:
     cfg["opponent_policy_mix"] = _parse_opponent_policy_mix(_require_runtime_key(cfg, "opponent_policy_mix"))
     cfg["opponent_genome"] = str(_require_runtime_key(cfg, "opponent_genome") or "").strip()
     cfg["teacher_policy"] = str(cfg.get("teacher_policy") or "").strip()
+    cfg["fitness_overrides"] = _parse_json_object_strict("env fitness_overrides", cfg.get("fitness_overrides"))
     cfg["switch_seats"] = _parse_bool_strict("env switch_seats", _require_runtime_key(cfg, "switch_seats"))
     fitness_profile = str(_require_runtime_key(cfg, "fitness_profile") or "").strip().lower()
     if fitness_profile not in ALLOWED_FITNESS_PROFILES:
@@ -496,6 +519,11 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}OPPONENT_GENOME"] = str(runtime.get("opponent_genome") or "")
     os.environ[f"{ENV_PREFIX}TEACHER_POLICY"] = str(runtime.get("teacher_policy") or "")
     os.environ[f"{ENV_PREFIX}FITNESS_PROFILE"] = str(runtime["fitness_profile"])
+    os.environ[f"{ENV_PREFIX}FITNESS_OVERRIDES"] = json.dumps(
+        runtime.get("fitness_overrides") or {},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     os.environ[f"{ENV_PREFIX}SWITCH_SEATS"] = "1" if bool(runtime["switch_seats"]) else "0"
     os.environ[f"{ENV_PREFIX}SEED"] = str(runtime["seed"])
     os.environ[f"{ENV_PREFIX}OUTPUT_DIR"] = os.path.abspath(output_dir)
@@ -512,6 +540,7 @@ def _runtime_from_env() -> Dict[str, object]:
         "opponent_genome": os.environ.get(f"{ENV_PREFIX}OPPONENT_GENOME"),
         "teacher_policy": os.environ.get(f"{ENV_PREFIX}TEACHER_POLICY"),
         "fitness_profile": os.environ.get(f"{ENV_PREFIX}FITNESS_PROFILE"),
+        "fitness_overrides": os.environ.get(f"{ENV_PREFIX}FITNESS_OVERRIDES"),
         "switch_seats": os.environ.get(f"{ENV_PREFIX}SWITCH_SEATS"),
         "seed": os.environ.get(f"{ENV_PREFIX}SEED"),
         "output_dir": os.environ.get(f"{ENV_PREFIX}OUTPUT_DIR") or os.getcwd(),
@@ -558,6 +587,7 @@ def _evaluate_genome_payload(
     opponent_policy_mix = eval_runtime.get("opponent_policy_mix") or []
     opponent_genome = str(eval_runtime.get("opponent_genome") or "").strip()
     teacher_policy = str(eval_runtime.get("teacher_policy") or "").strip()
+    fitness_overrides = eval_runtime.get("fitness_overrides") or {}
     has_policy = bool(opponent_policy)
     has_policy_mix = isinstance(opponent_policy_mix, list) and len(opponent_policy_mix) > 0
     failure_meta = {
@@ -569,6 +599,7 @@ def _evaluate_genome_payload(
         "opponent_policy": opponent_policy,
         "opponent_policy_mix": opponent_policy_mix,
         "teacher_policy": teacher_policy,
+        "fitness_overrides": fitness_overrides,
     }
 
     if not eval_script or not os.path.exists(eval_script):
@@ -645,6 +676,8 @@ def _evaluate_genome_payload(
             cmd.extend(["--opponent-genome", opponent_genome])
         if teacher_policy:
             cmd.extend(["--teacher-policy", teacher_policy])
+        if isinstance(fitness_overrides, dict) and len(fitness_overrides) > 0:
+            cmd.extend(["--fitness-overrides", json.dumps(fitness_overrides, ensure_ascii=False, separators=(",", ":"))])
 
         proc = subprocess.run(
             cmd,
@@ -1606,6 +1639,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="", help="Output directory")
     parser.add_argument("--resume", default="", help="Checkpoint file path to resume")
     parser.add_argument(
+        "--seed-genome",
+        default="",
+        help="Path to winner_genome.pkl used to reseed a fresh population for the next phase",
+    )
+    parser.add_argument(
         "--base-generation",
         type=int,
         default=0,
@@ -1692,6 +1730,65 @@ def _build_config(config_path: str):
 def _run_dry_eval(population, _config):
     for _, genome in population:
         genome.fitness = float(len(genome.connections)) * 0.001 + float(len(genome.nodes)) * 0.0001
+
+
+def _build_seeded_population(cfg, seed_genome_path: str):
+    if neat is None:
+        raise RuntimeError("neat-python is not installed. Install with: pip install neat-python")
+
+    seed_path = os.path.abspath(str(seed_genome_path or "").strip())
+    if not seed_path:
+        raise RuntimeError("seed genome path is empty")
+    if not os.path.exists(seed_path):
+        raise RuntimeError(f"seed genome not found: {seed_genome_path}")
+
+    with open(seed_path, "rb") as f:
+        seed_genome = pickle.load(f)
+
+    if seed_genome is None or not hasattr(seed_genome, "nodes") or not hasattr(seed_genome, "connections"):
+        raise RuntimeError(f"invalid seed genome pickle: {seed_genome_path}")
+
+    population = neat.Population(cfg)
+    population_size = max(1, int(cfg.pop_size))
+    existing_keys = sorted(population.population.keys())
+    if len(existing_keys) < population_size:
+        raise RuntimeError("failed to initialize base population for seed expansion")
+
+    tracker = population.reproduction.innovation_tracker
+    cfg.genome_config.innovation_tracker = tracker
+    max_innovation = int(getattr(tracker, "global_counter", 0) or 0)
+    for conn_gene in (getattr(seed_genome, "connections", {}) or {}).values():
+        innovation = getattr(conn_gene, "innovation", None)
+        if innovation is None:
+            continue
+        try:
+            max_innovation = max(max_innovation, int(innovation))
+        except Exception:
+            continue
+    tracker.global_counter = int(max_innovation)
+    tracker.reset_generation()
+
+    seeded_population = {}
+    population.reproduction.ancestors = {}
+    seed_key = int(getattr(seed_genome, "key", 0) or 0)
+
+    for idx, genome_key in enumerate(existing_keys[:population_size]):
+        genome = _copy_genome(seed_genome)
+        genome.key = int(genome_key)
+        genome.fitness = None
+        if idx > 0:
+            genome.mutate(cfg.genome_config)
+            if (idx % 4) == 0:
+                genome.mutate(cfg.genome_config)
+        seeded_population[int(genome_key)] = genome
+        population.reproduction.ancestors[int(genome_key)] = (seed_key,)
+
+    population.population = seeded_population
+    population.generation = 0
+    population.best_genome = None
+    population.species = cfg.species_set_type(cfg.species_set_config, population.reporters)
+    population.species.speciate(cfg, population.population, population.generation)
+    return population
 
 
 if neat is not None:
@@ -1807,6 +1904,11 @@ def main() -> None:
 
     runtime = _load_runtime_config(args.runtime_config)
     applied_overrides = {}
+    seed_genome_path = str(args.seed_genome or "").strip()
+    if seed_genome_path:
+        applied_overrides["seed_genome"] = seed_genome_path
+    if args.resume and seed_genome_path:
+        raise RuntimeError("--resume and --seed-genome are mutually exclusive")
     base_generation = max(0, int(args.base_generation))
     if base_generation != 0:
         applied_overrides["base_generation"] = int(base_generation)
@@ -1895,6 +1997,8 @@ def main() -> None:
 
     if args.resume:
         p = neat.Checkpointer.restore_checkpoint(args.resume)
+    elif seed_genome_path:
+        p = _build_seeded_population(cfg, seed_genome_path)
     else:
         p = neat.Population(cfg)
     start_generation = int(getattr(p, "generation", 0))
@@ -2013,6 +2117,7 @@ def main() -> None:
         "winner_latest_train_json": latest_train_json_path,
         "winner_best_target_pickle": best_target_pkl,
         "winner_best_target_json": best_target_json_path,
+        "seed_genome": seed_genome_path or None,
         "config_feedforward": os.path.abspath(args.config_feedforward),
         "runtime_config": os.path.abspath(args.runtime_config),
     }

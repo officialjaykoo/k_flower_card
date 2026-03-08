@@ -36,6 +36,10 @@ function isGoStopTurn(state, actor) {
   return state?.phase === "go-stop" && state?.pendingGoStop === actor;
 }
 
+function isMatchTurn(state, actor) {
+  return state?.phase === "select-match" && state?.pendingMatch?.playerKey === actor;
+}
+
 function resolvesToDirectHandPlay(state, actor, targetState) {
   if (!isMoved(state, targetState)) return false;
   const hand = state?.players?.[actor]?.hand || [];
@@ -74,14 +78,14 @@ function runHeuristicPolicy(state, actor, policy, heuristicParams) {
 }
 
 export function hybridPolicyPlayDetailed(state, actor, options = {}) {
-  const {
-    heuristicPolicy,
-    goStopPolicy,
-    phasePolicy,
-    specialPolicy,
-    playFallbackPolicy,
-    heuristicParams,
-  } = resolveHeuristicInputs(options);
+  const model = options.model || null;
+  const heuristicParams =
+    options.heuristicParams && typeof options.heuristicParams === "object"
+      ? options.heuristicParams
+      : null;
+  const goStopOnly = !!options.goStopOnly;
+  const modelMatchPhase = !!options.modelMatchPhase;
+  const goStopPolicy = normalizeBotPolicy(options.goStopPolicy || options.heuristicPolicy || DEFAULT_BOT_POLICY);
 
   if (isGoStopTurn(state, actor)) {
     const goStopNext = runHeuristicPolicy(state, actor, goStopPolicy, heuristicParams);
@@ -92,6 +96,40 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
         route: "heuristic_go_stop",
       };
     }
+    if (goStopOnly) {
+      return {
+        next: state,
+        actionSource: "hybrid_go_stop_unresolved",
+        route: "heuristic_go_stop_unresolved",
+      };
+    }
+  }
+
+  if (goStopOnly) {
+    if (model) {
+      const modelNext = runModelPolicyPlay(state, actor, model);
+      if (isMoved(state, modelNext)) {
+        return {
+          next: modelNext,
+          actionSource: "hybrid_model_non_go_stop",
+          route: "model_non_go_stop",
+        };
+      }
+    }
+    return {
+      next: state,
+      actionSource: "hybrid_unresolved",
+      route: "unresolved",
+    };
+  }
+
+  const {
+    heuristicPolicy,
+    phasePolicy,
+    specialPolicy,
+    playFallbackPolicy,
+  } = resolveHeuristicInputs(options);
+  if (isGoStopTurn(state, actor)) {
     const fallbackNext =
       goStopPolicy === heuristicPolicy
         ? state
@@ -103,6 +141,34 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
         route: "heuristic_go_stop_fallback",
       };
     }
+  }
+
+  if (modelMatchPhase && isMatchTurn(state, actor)) {
+    if (model) {
+      const modelNext = runModelPolicyPlay(state, actor, model);
+      if (isMoved(state, modelNext)) {
+        return {
+          next: modelNext,
+          actionSource: "hybrid_model_match",
+          route: "model_match",
+        };
+      }
+    }
+
+    const matchFallbackNext = runHeuristicPolicy(state, actor, phasePolicy, heuristicParams);
+    if (isMoved(state, matchFallbackNext)) {
+      return {
+        next: matchFallbackNext,
+        actionSource: "hybrid_heuristic_match_fallback",
+        route: "heuristic_match_fallback",
+      };
+    }
+
+    return {
+      next: state,
+      actionSource: "hybrid_match_unresolved",
+      route: "match_unresolved",
+    };
   }
 
   if (!isPlayingTurn(state, actor)) {
@@ -123,7 +189,6 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
     };
   }
 
-  const model = options.model || null;
   if (model) {
     const modelNext = runModelPolicyPlay(state, actor, model);
     if (isMoved(state, modelNext)) {

@@ -15,6 +15,7 @@ import {
 import { getActionPlayerKey } from "../../src/engine/runner.js";
 import { aiPlay } from "../../src/ai/aiPlay_by_GPT.js";
 import { resolveBotPolicy } from "../../src/ai/policies.js";
+import { hybridPolicyPlayDetailed } from "../../src/ai/hybridPolicyEngine.js";
 import {
   canonicalOptionAction,
   selectDecisionPool,
@@ -27,6 +28,7 @@ import {
   getModelDecisionAnalysis,
   applyModelDecisionAnalysis
 } from "../../src/ai/modelPolicyEngine_by_GPT.js";
+import { resolveHybridPlayModelSpec } from "./hybridOpponentSpec.mjs";
 
 // Quick Read Map (top-down):
 // 1) parseArgs(): strict CLI parsing + validation
@@ -47,6 +49,180 @@ function parseContinuousSeriesValue(value) {
   throw new Error(`invalid --continuous-series: ${raw} (allowed: 1=true, 2=false)`);
 }
 
+const FITNESS_OVERRIDE_NUMBER_KEYS = new Set([
+  "goldMeanNeutral",
+  "goldMeanScale",
+  "goldP50Neutral",
+  "goldP50Scale",
+  "goldP10Neutral",
+  "goldP10Scale",
+  "goldCvar10Neutral",
+  "goldCvar10Scale",
+  "goldMeanWeight",
+  "goldP50Weight",
+  "goldP10Weight",
+  "goldCvar10Weight",
+  "tieBreakWeight",
+  "tieBreakExpectedNeutral",
+  "bankruptPenaltyWeight",
+  "catastrophicLossThreshold",
+  "catastrophicLossWeight",
+  "downsideSemiScale",
+  "downsideSemiWeight",
+  "goFailRateCap",
+  "goFailExcessWeight",
+  "seatGapWeight",
+  "seatGoldGapScale",
+  "inflictedBankruptBonusWeight",
+  "imitationAgreementWeight",
+  "imitationProbWeight",
+  "scenarioGoldWeight",
+  "scenarioResultWeight",
+  "scenarioLocalWeight",
+  "scenarioReliabilityGames",
+  "scenarioReliabilityDecisions",
+]);
+const FITNESS_OVERRIDE_NULLABLE_NUMBER_KEYS = new Set(["goZeroForceScore"]);
+const FITNESS_OVERRIDE_STRING_KEYS = new Set(["modelName", "teacherPolicy"]);
+const FITNESS_OVERRIDE_OBJECT_KEYS = new Set(["imitationWeights", "scenarioShardWeights"]);
+const IMITATION_WEIGHT_KEYS = ["play", "match", "option"];
+const SCENARIO_WEIGHT_KEYS = ["leading", "trailing", "pressure", "late", "option"];
+
+function parseJsonObjectArg(rawValue, name) {
+  const raw = String(rawValue || "").trim();
+  if (!raw) return {};
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`invalid ${name} JSON: ${String(err && err.message ? err.message : err)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${name} must be a JSON object`);
+  }
+  return parsed;
+}
+
+function cloneFitnessProfile(profile) {
+  return {
+    ...profile,
+    imitationWeights: { ...(profile?.imitationWeights || {}) },
+    scenarioShardWeights: { ...(profile?.scenarioShardWeights || {}) },
+  };
+}
+
+function sanitizeFitnessOverrides(rawOverrides) {
+  const out = {};
+  const overrides = rawOverrides && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)
+    ? rawOverrides
+    : {};
+
+  for (const [key, value] of Object.entries(overrides)) {
+    if (FITNESS_OVERRIDE_NUMBER_KEYS.has(key)) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) {
+        throw new Error(`invalid fitness override number for ${key}`);
+      }
+      if ((key === "scenarioReliabilityGames" || key === "scenarioReliabilityDecisions") && n < 1) {
+        throw new Error(`fitness override ${key} must be >= 1`);
+      }
+      out[key] = n;
+      continue;
+    }
+    if (FITNESS_OVERRIDE_NULLABLE_NUMBER_KEYS.has(key)) {
+      if (value == null || String(value).trim().toLowerCase() === "null") {
+        out[key] = null;
+        continue;
+      }
+      const n = Number(value);
+      if (!Number.isFinite(n)) {
+        throw new Error(`invalid fitness override number for ${key}`);
+      }
+      out[key] = n;
+      continue;
+    }
+    if (FITNESS_OVERRIDE_STRING_KEYS.has(key)) {
+      if (key === "teacherPolicy") {
+        if (value == null || !String(value).trim()) {
+          out[key] = null;
+          continue;
+        }
+        const resolved = resolveBotPolicy(value);
+        if (!resolved) {
+          throw new Error(`invalid fitness override teacherPolicy: ${String(value)}`);
+        }
+        out[key] = resolved;
+        continue;
+      }
+      const text = String(value || "").trim();
+      if (!text) {
+        throw new Error(`fitness override ${key} must be a non-empty string`);
+      }
+      out[key] = text;
+      continue;
+    }
+    if (FITNESS_OVERRIDE_OBJECT_KEYS.has(key)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error(`fitness override ${key} must be an object`);
+      }
+      if (key === "imitationWeights") {
+        const weights = {};
+        for (const weightKey of Object.keys(value)) {
+          if (!IMITATION_WEIGHT_KEYS.includes(weightKey)) {
+            throw new Error(`unknown imitationWeights key: ${weightKey}`);
+          }
+          const n = Number(value[weightKey]);
+          if (!Number.isFinite(n) || n < 0) {
+            throw new Error(`invalid imitationWeights.${weightKey}`);
+          }
+          weights[weightKey] = n;
+        }
+        out.imitationWeights = weights;
+        continue;
+      }
+      const weights = {};
+      for (const weightKey of Object.keys(value)) {
+        if (!SCENARIO_WEIGHT_KEYS.includes(weightKey)) {
+          throw new Error(`unknown scenarioShardWeights key: ${weightKey}`);
+        }
+        const n = Number(value[weightKey]);
+        if (!Number.isFinite(n) || n < 0) {
+          throw new Error(`invalid scenarioShardWeights.${weightKey}`);
+        }
+        weights[weightKey] = n;
+      }
+      out.scenarioShardWeights = weights;
+      continue;
+    }
+    throw new Error(`unknown fitness override key: ${key}`);
+  }
+
+  return out;
+}
+
+function applyFitnessOverrides(profile, rawOverrides) {
+  const next = cloneFitnessProfile(profile);
+  const overrides = sanitizeFitnessOverrides(rawOverrides);
+  for (const [key, value] of Object.entries(overrides)) {
+    if (key === "imitationWeights") {
+      next.imitationWeights = {
+        ...(next.imitationWeights || {}),
+        ...(value || {}),
+      };
+      continue;
+    }
+    if (key === "scenarioShardWeights") {
+      next.scenarioShardWeights = {
+        ...(next.scenarioShardWeights || {}),
+        ...(value || {}),
+      };
+      continue;
+    }
+    next[key] = value;
+  }
+  return next;
+}
+
 function parseArgs(argv) {
   const args = [...argv];
   const out = {
@@ -56,6 +232,7 @@ function parseArgs(argv) {
     seed: "neat-python",
     maxSteps: 600,
     fitnessProfile: "phase1",
+    fitnessOverrides: {},
     teacherPolicy: "",
     opponentPolicy: "",
     opponentPolicyMix: [],
@@ -83,6 +260,7 @@ function parseArgs(argv) {
     else if (key === "--seed") out.seed = String(value || "neat-python");
     else if (key === "--max-steps") out.maxSteps = Math.max(20, Number(value || 600));
     else if (key === "--fitness-profile") out.fitnessProfile = String(value || "phase1").trim().toLowerCase();
+    else if (key === "--fitness-overrides") out.fitnessOverrides = parseJsonObjectArg(value, "--fitness-overrides");
     else if (key === "--teacher-policy") out.teacherPolicy = String(value || "").trim();
     else if (key === "--opponent-policy") out.opponentPolicy = String(value || "").trim();
     else if (key === "--opponent-policy-mix") {
@@ -143,6 +321,7 @@ function parseArgs(argv) {
     }
     out.teacherPolicy = resolvedTeacherPolicy;
   }
+  out.fitnessOverrides = sanitizeFitnessOverrides(out.fitnessOverrides);
   const hasPolicy = String(out.opponentPolicy || "").trim().length > 0;
   const hasPolicyMix = Array.isArray(out.opponentPolicyMix) && out.opponentPolicyMix.length > 0;
   if (!hasPolicy && !hasPolicyMix) {
@@ -430,6 +609,53 @@ function selectOpponentPolicyForGame(opts, gameIndex) {
   }
   return String(opts.opponentPolicyMix[opts.opponentPolicyMix.length - 1].policy || "").trim();
 }
+
+function resolveOpponentSpec(policyToken, opponentModel, cache = null) {
+  const token = String(policyToken || "").trim();
+  if (!token) {
+    throw new Error("resolved empty opponent policy");
+  }
+  if (cache && cache.has(token)) {
+    return cache.get(token);
+  }
+
+  let spec = null;
+  const hybridSpec = resolveHybridPlayModelSpec(token, "opponent");
+  if (hybridSpec) {
+    spec = hybridSpec;
+  } else if (normalizePolicyName(token) === "genome") {
+    if (!opponentModel) {
+      throw new Error("--opponent-genome is required when opponent policy resolves to genome");
+    }
+    spec = {
+      input: token,
+      kind: "model",
+      key: "genome",
+      label: "genome",
+      model: opponentModel,
+      modelPath: null,
+    };
+  } else {
+    const resolved = resolveBotPolicy(token);
+    if (!resolved) {
+      throw new Error(
+        `invalid opponent policy: ${token} (use heuristic key, genome, hybrid_play(phase2_seed203,H-CL), hybrid_play_go(phase2_seed203,H-CL), or hybrid_play_go(phase2_seed203,H-NEXg,H-CL))`
+      );
+    }
+    spec = {
+      input: token,
+      kind: "heuristic",
+      key: resolved,
+      label: resolved,
+      model: null,
+      modelPath: null,
+    };
+  }
+
+  if (cache) cache.set(token, spec);
+  return spec;
+}
+
 function resolveFirstTurnKey(opts, gameIndex) {
   if (opts.firstTurnPolicy === "fixed") return opts.fixedFirstTurn;
   return gameIndex % 2 === 0 ? "ai" : "human";
@@ -463,9 +689,8 @@ function playSingleRound(
   controlModel,
   seed,
   controlActor,
-  opponentPolicy,
+  opponentSpec,
   maxSteps,
-  opponentModel,
   teacherPolicy = null
 ) {
   let state = initialState;
@@ -526,22 +751,31 @@ function playSingleRound(
           scenarioGameStats.shards[tag].localProxySum += proxy;
         }
       }
-    } else if (normalizePolicyName(opponentPolicy) === "genome") {
+    } else if (opponentSpec?.kind === "hybrid_play_model") {
+      const traced = hybridPolicyPlayDetailed(state, actor, {
+        model: opponentSpec.model,
+        heuristicPolicy: String(opponentSpec.heuristicPolicy || ""),
+        goStopPolicy: String(opponentSpec.goStopPolicy || opponentSpec.heuristicPolicy || ""),
+        goStopOnly: !!opponentSpec.goStopOnly,
+      });
+      actionSource = String(traced?.actionSource || "hybrid_play_model");
+      next = traced?.next || state;
+    } else if (opponentSpec?.kind === "model") {
       actionSource = "model_opponent";
       next = aiPlay(state, actor, {
         source: "model",
-        model: opponentModel,
+        model: opponentSpec.model,
       });
     } else {
       next = aiPlay(state, actor, {
         source: "heuristic",
-        heuristicPolicy: opponentPolicy,
+        heuristicPolicy: String(opponentSpec?.key || ""),
       });
     }
 
     if (!next || transitionKey(next) === before) {
       throw new Error(
-        `action resolution failed: seed=${seed}, step=${steps}, actor=${actor}, phase=${String(state?.phase || "")}, policy=${String(opponentPolicy || "")}, source=${actionSource}`
+        `action resolution failed: seed=${seed}, step=${steps}, actor=${actor}, phase=${String(state?.phase || "")}, policy=${String(opponentSpec?.label || opponentSpec?.input || "")}, source=${actionSource}`
       );
     }
 
@@ -793,10 +1027,11 @@ function main() {
       scenarioReliabilityDecisions: 24,
     },
   };
-  const profile = FITNESS_PROFILES[opts.fitnessProfile];
-  if (!profile) {
+  const baseProfile = FITNESS_PROFILES[opts.fitnessProfile];
+  if (!baseProfile) {
     throw new Error(`unsupported fitness profile: ${String(opts.fitnessProfile || "")}`);
   }
+  const profile = applyFitnessOverrides(baseProfile, opts.fitnessOverrides);
   const effectiveTeacherPolicy = String(opts.teacherPolicy || profile.teacherPolicy || "").trim() || null;
 
   const games = Math.max(1, Math.floor(opts.games));
@@ -829,6 +1064,7 @@ function main() {
   };
   const simImitationStats = createImitationStats();
   const simScenarioTotals = createScenarioAccumulator();
+  const opponentSpecCache = new Map();
 
   // 4-2) Run per-game simulations and accumulate metrics.
   for (let gi = 0; gi < games; gi += 1) {
@@ -837,6 +1073,7 @@ function main() {
     if (!opponentPolicyForGame) {
       throw new Error("resolved empty opponent policy");
     }
+    const opponentSpecForGame = resolveOpponentSpec(opponentPolicyForGame, opponentModel, opponentSpecCache);
     opponentPolicyCounts[opponentPolicyForGame] = Number(opponentPolicyCounts[opponentPolicyForGame] || 0) + 1;
     firstTurnCounts[firstTurnKey] += 1;
     const controlSeat = firstTurnKey === controlActor ? "first" : "second";
@@ -853,9 +1090,8 @@ function main() {
       controlModel,
       seed,
       controlActor,
-      opponentPolicyForGame,
+      opponentSpecForGame,
       maxSteps,
-      opponentModel,
       effectiveTeacherPolicy
     );
     const endState = gameResult.endState;
@@ -1056,6 +1292,8 @@ function main() {
     seat_mean_gold_gap: seatMeanGoldGap,
     fitness_model: profile.modelName,
     fitness_profile: opts.fitnessProfile,
+    fitness_profile_base: opts.fitnessProfile,
+    fitness_overrides: opts.fitnessOverrides,
     fitness_gold_scale: FITNESS_GOLD_MEAN_SCALE,
     fitness_gold_neutral_delta: FITNESS_GOLD_MEAN_NEUTRAL,
     fitness_gold_p50_scale: FITNESS_GOLD_P50_SCALE,
@@ -1067,6 +1305,12 @@ function main() {
     fitness_tie_break_expected_neutral: FITNESS_TIE_BREAK_EXPECTED_NEUTRAL,
     fitness_win_weight: FITNESS_TIE_BREAK_WEIGHT,
     fitness_gold_weight: 1.0,
+    fitness_tie_break_weight: FITNESS_TIE_BREAK_WEIGHT,
+    fitness_gold_core_total_weight:
+      FITNESS_GOLD_MEAN_WEIGHT +
+      FITNESS_GOLD_P50_WEIGHT +
+      FITNESS_GOLD_P10_WEIGHT +
+      FITNESS_GOLD_CVAR10_WEIGHT,
     fitness_bankrupt_penalty_weight: FITNESS_BANKRUPT_PENALTY_WEIGHT,
     fitness_catastrophic_loss_threshold: FITNESS_CATASTROPHIC_LOSS_THRESHOLD,
     fitness_catastrophic_loss_weight: FITNESS_CATASTROPHIC_LOSS_WEIGHT,

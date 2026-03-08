@@ -6,6 +6,7 @@ import {
 } from "../engine/index.js";
 import {
   canonicalOptionAction,
+  parsePlaySpecialCandidate,
   selectDecisionPool,
   resolveDecisionType,
   legalCandidatesForDecision,
@@ -61,6 +62,9 @@ function findCardById(cards, cardId) {
 }
 
 function optionCode(action) {
+  const special = parsePlaySpecialCandidate(action);
+  if (special?.kind === "shake_start") return 0.9;
+  if (special?.kind === "bomb") return 0.95;
   const a = canonicalOptionAction(action);
   const map = {
     go: 1,
@@ -77,6 +81,13 @@ function optionCode(action) {
 
 function candidateCard(state, actor, decisionType, candidate) {
   if (decisionType === "play") {
+    const special = parsePlaySpecialCandidate(candidate);
+    if (special?.kind === "shake_start") {
+      return findCardById(state?.players?.[actor]?.hand || [], special.cardId);
+    }
+    if (special?.kind === "bomb") {
+      return { id: String(candidate || ""), month: special.month, category: "junk", piValue: 0 };
+    }
     return findCardById(state?.players?.[actor]?.hand || [], candidate);
   }
   if (decisionType === "match") {

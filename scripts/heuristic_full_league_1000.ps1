@@ -11,7 +11,8 @@ param(
   [int]$MaxSteps = 600,
   [string]$OutputTag = "",
   [string]$ResumeFrom = "",
-  [string]$Policies = "H-J2,H-CL,H-NEXg,H-GPT,H-Gemini"
+  [string]$Policies = "H-J2,H-CL,H-NEXg,H-GPT,H-Gemini",
+  [string[]]$PolicyList = @()
 )
 
 if ($GamesPerMatch -ne 1000) {
@@ -198,9 +199,14 @@ function Set-LatestMatchSummary {
   }
 }
 
-$policyInputs = ConvertFrom-PoliciesCsv -CsvText $Policies
+$policyInputs =
+  if ($null -ne $PolicyList -and $PolicyList.Count -gt 0) {
+    @($PolicyList | ForEach-Object { [string]$_ })
+  } else {
+    ConvertFrom-PoliciesCsv -CsvText $Policies
+  }
 if ($policyInputs.Count -lt 2) {
-  throw "Policies must be one comma-separated string with at least two policies. Example: -Policies ""H-J2,H-CL,H-NEXg,H-GPT"""
+  throw "Provide at least two policies via -Policies ""H-J2,H-CL"" or -PolicyList @(""H-J2"", ""H-CL"")"
 }
 
 $policyList = ConvertTo-UniqueLowerPolicies -InputPolicies $policyInputs

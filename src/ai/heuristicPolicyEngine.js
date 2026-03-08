@@ -24,6 +24,15 @@ import {
   POLICY_HEURISTIC_ANTICL,
   POLICY_HEURISTIC_NEXG,
   POLICY_HEURISTIC_GPT,
+  POLICY_HEURISTIC_GPT54,
+  POLICY_HEURISTIC_GPT_PLAYMATCH_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHGO_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHSHAKE_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHGUKJIN_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHPRESIDENT_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHGUKJINPRESIDENT_CL,
+  POLICY_HEURISTIC_GPT_ALLBUTGO_CL,
+  POLICY_HEURISTIC_GPT_PLAYMATCHBPG_CL,
   POLICY_HEURISTIC_GEMINI,
   normalizeBotPolicy
 } from "./policies.js";
@@ -254,8 +263,9 @@ function chooseShakingCardIdForMonth(state, playerKey, month, policy = DEFAULT_B
   const monthCards = player.hand.filter((c) => c && !c.passCard && Number(c.month) === targetMonth);
   if (!monthCards.length) return null;
 
-  const ranked = rankHandCardsByPolicy(state, playerKey, policy, heuristicParams);
-  if (policy === POLICY_HEURISTIC_GPT) {
+  const effectivePolicy = resolveDecisionPolicy(policy, "shake_discard");
+  const ranked = rankHandCardsByPolicy(state, playerKey, effectivePolicy, heuristicParams);
+  if (effectivePolicy === POLICY_HEURISTIC_GPT) {
     const v6Picked = chooseShakingDiscardCardIdGPT(state, playerKey, monthCards, ranked);
     if (v6Picked) return v6Picked;
   }
@@ -270,6 +280,79 @@ function chooseShakingCardIdForMonth(state, playerKey, month, policy = DEFAULT_B
 
   monthCards.sort((a, b) => cardCaptureValue(b) - cardCaptureValue(a));
   return monthCards[0]?.id || null;
+}
+
+function resolveDecisionPolicy(policy, decisionKind = "generic") {
+  const resolved = normalizeBotPolicy(policy);
+  if (resolved === POLICY_HEURISTIC_GPT_PLAYMATCH_CL) {
+    if (decisionKind === "play_rank" || decisionKind === "match") return POLICY_HEURISTIC_GPT;
+    return POLICY_HEURISTIC_CL;
+  }
+  if (resolved === POLICY_HEURISTIC_GPT_PLAYMATCHGO_CL) {
+    if (decisionKind === "play_rank" || decisionKind === "match" || decisionKind === "go") {
+      return POLICY_HEURISTIC_GPT;
+    }
+    return POLICY_HEURISTIC_CL;
+  }
+  if (resolved === POLICY_HEURISTIC_GPT_PLAYMATCHSHAKE_CL) {
+    if (
+      decisionKind === "play_rank" ||
+      decisionKind === "match" ||
+      decisionKind === "shaking" ||
+      decisionKind === "shake_discard"
+    ) {
+      return POLICY_HEURISTIC_GPT;
+    }
+    return POLICY_HEURISTIC_CL;
+  }
+  if (resolved === POLICY_HEURISTIC_GPT_PLAYMATCHGUKJIN_CL) {
+    if (decisionKind === "play_rank" || decisionKind === "match" || decisionKind === "gukjin") {
+      return POLICY_HEURISTIC_GPT;
+    }
+    return POLICY_HEURISTIC_CL;
+  }
+  if (resolved === POLICY_HEURISTIC_GPT_PLAYMATCHPRESIDENT_CL) {
+    if (decisionKind === "play_rank" || decisionKind === "match" || decisionKind === "president") {
+      return POLICY_HEURISTIC_GPT;
+    }
+    return POLICY_HEURISTIC_CL;
+  }
+  if (resolved === POLICY_HEURISTIC_GPT_PLAYMATCHGUKJINPRESIDENT_CL) {
+    if (
+      decisionKind === "play_rank" ||
+      decisionKind === "match" ||
+      decisionKind === "gukjin" ||
+      decisionKind === "president"
+    ) {
+      return POLICY_HEURISTIC_GPT;
+    }
+    return POLICY_HEURISTIC_CL;
+  }
+  if (resolved === POLICY_HEURISTIC_GPT54) {
+    if (decisionKind === "go") {
+      return POLICY_HEURISTIC_CL;
+    }
+    return POLICY_HEURISTIC_GPT;
+  }
+  if (resolved === POLICY_HEURISTIC_GPT_ALLBUTGO_CL) {
+    if (decisionKind === "go") {
+      return POLICY_HEURISTIC_CL;
+    }
+    return POLICY_HEURISTIC_GPT;
+  }
+  if (resolved === POLICY_HEURISTIC_GPT_PLAYMATCHBPG_CL) {
+    if (
+      decisionKind === "play_rank" ||
+      decisionKind === "match" ||
+      decisionKind === "bomb" ||
+      decisionKind === "president" ||
+      decisionKind === "gukjin"
+    ) {
+      return POLICY_HEURISTIC_GPT;
+    }
+    return POLICY_HEURISTIC_CL;
+  }
+  return resolved;
 }
 
 function toFiniteNumber(v, fallback = 0) {
@@ -1891,7 +1974,12 @@ function dispatchHeuristicPolicyCall(ctx, handlers) {
 }
 
 function chooseGukjinByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
+  const ctx = resolveHeuristicDecisionContext(
+    state,
+    playerKey,
+    resolveDecisionPolicy(policy, "gukjin"),
+    heuristicParams
+  );
   return dispatchHeuristicPolicyCall(ctx, {
     gemini: ({ decisionState, deps, params }) => chooseGukjinHeuristicGemini(decisionState, playerKey, deps, params),
     gpt: ({ decisionState, deps, params }) => chooseGukjinHeuristicGPT(decisionState, playerKey, deps, params),
@@ -1904,7 +1992,12 @@ function chooseGukjinByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heu
 }
 
 function shouldPresidentStopByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
+  const ctx = resolveHeuristicDecisionContext(
+    state,
+    playerKey,
+    resolveDecisionPolicy(policy, "president"),
+    heuristicParams
+  );
   return dispatchHeuristicPolicyCall(ctx, {
     gemini: ({ decisionState, deps, params }) => shouldPresidentStopGemini(decisionState, playerKey, deps, params),
     gpt: ({ decisionState, deps, params }) => shouldPresidentStopGPT(decisionState, playerKey, deps, params),
@@ -1917,7 +2010,12 @@ function shouldPresidentStopByPolicy(state, playerKey, policy = DEFAULT_BOT_POLI
 }
 
 function chooseMatchByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
+  const ctx = resolveHeuristicDecisionContext(
+    state,
+    playerKey,
+    resolveDecisionPolicy(policy, "match"),
+    heuristicParams
+  );
   return dispatchHeuristicPolicyCall(ctx, {
     gemini: ({ decisionState, deps, params }) => chooseMatchHeuristicGemini(decisionState, playerKey, deps, params),
     gpt: ({ decisionState, deps, params }) => chooseMatchHeuristicGPT(decisionState, playerKey, deps, params),
@@ -1930,7 +2028,12 @@ function chooseMatchByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heur
 }
 
 function shouldGoByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
+  const ctx = resolveHeuristicDecisionContext(
+    state,
+    playerKey,
+    resolveDecisionPolicy(policy, "go"),
+    heuristicParams
+  );
   return dispatchHeuristicPolicyCall(ctx, {
     gemini: ({ decisionState, deps, params }) => shouldGoGemini(decisionState, playerKey, deps, params),
     gpt: ({ decisionState, deps, params }) => shouldGoGPT(decisionState, playerKey, deps, params),
@@ -1949,7 +2052,12 @@ function selectBombMonthByPolicy(
   policy = DEFAULT_BOT_POLICY,
   heuristicParams = null
 ) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
+  const ctx = resolveHeuristicDecisionContext(
+    state,
+    playerKey,
+    resolveDecisionPolicy(policy, "bomb"),
+    heuristicParams
+  );
   return dispatchHeuristicPolicyCall(ctx, {
     gemini: ({ decisionState, deps }) => selectBombMonthGemini(decisionState, playerKey, bombMonths, deps),
     gpt: ({ decisionState, deps }) => selectBombMonthGPT(decisionState, playerKey, bombMonths, deps),
@@ -1968,7 +2076,12 @@ function shouldBombByPolicy(
   policy = DEFAULT_BOT_POLICY,
   heuristicParams = null
 ) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
+  const ctx = resolveHeuristicDecisionContext(
+    state,
+    playerKey,
+    resolveDecisionPolicy(policy, "bomb"),
+    heuristicParams
+  );
   return dispatchHeuristicPolicyCall(ctx, {
     gemini: ({ decisionState, deps, params }) => shouldBombGemini(decisionState, playerKey, bombMonths, deps, params),
     gpt: ({ decisionState, deps, params }) => shouldBombGPT(decisionState, playerKey, bombMonths, deps, params),
@@ -1987,7 +2100,12 @@ function decideShakingByPolicy(
   policy = DEFAULT_BOT_POLICY,
   heuristicParams = null
 ) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
+  const ctx = resolveHeuristicDecisionContext(
+    state,
+    playerKey,
+    resolveDecisionPolicy(policy, "shaking"),
+    heuristicParams
+  );
   return dispatchHeuristicPolicyCall(ctx, {
     gemini: ({ decisionState, deps, params }) => decideShakingGemini(decisionState, playerKey, shakingMonths, deps, params),
     gpt: ({ decisionState, deps, params }) => decideShakingGPT(decisionState, playerKey, shakingMonths, deps, params),
@@ -2000,7 +2118,12 @@ function decideShakingByPolicy(
 }
 
 function rankHandCardsByPolicy(state, playerKey, policy = DEFAULT_BOT_POLICY, heuristicParams = null) {
-  const ctx = resolveHeuristicDecisionContext(state, playerKey, policy, heuristicParams);
+  const ctx = resolveHeuristicDecisionContext(
+    state,
+    playerKey,
+    resolveDecisionPolicy(policy, "play_rank"),
+    heuristicParams
+  );
   return dispatchHeuristicPolicyCall(ctx, {
     gemini: ({ decisionState, deps, params }) => rankHandCardsGemini(decisionState, playerKey, deps, params),
     gpt: ({ decisionState, deps, params }) => rankHandCardsGPT(decisionState, playerKey, deps, params),
