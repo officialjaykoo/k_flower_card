@@ -2,13 +2,13 @@
   initSimulationGame,
   startSimulationGame,
   createSeededRng
-} from "../src/engine/index.js";
+} from "../../src/engine/index.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { getActionPlayerKey } from "../src/engine/runner.js";
-import { aiPlay } from "../src/ai/aiPlay_by_GPT.js";
-import { resolveBotPolicy } from "../src/ai/policies.js";
-import { stateProgressKey } from "../src/ai/decisionRuntime_by_GPT.js";
+import { getActionPlayerKey } from "../../src/engine/runner.js";
+import { aiPlay } from "../../src/ai/aiPlay_by_GPT.js";
+import { resolveBotPolicy } from "../../src/ai/policies.js";
+import { stateProgressKey } from "../../src/ai/decisionRuntime_by_GPT.js";
 
 // GPT-only duel runner (minimal duel/report flow).
 
@@ -86,7 +86,7 @@ function parseArgs(argv) {
 function usageText() {
   return [
     "Usage:",
-    "  node scripts/model_duel_worker_by_GPT.mjs --human <spec> --ai <spec> [options]",
+    "  node neat_by_GPT/scripts/model_duel_worker.mjs --human <spec> --ai <spec> [options]",
     "",
     "Required:",
     "  --human <policy|phaseX_seedY>",
@@ -103,7 +103,7 @@ function usageText() {
     "  --result-out <path>         optional, auto-generated if omitted",
     "",
     "Example:",
-    "  node scripts/model_duel_worker_by_GPT.mjs --human H-CL --ai phase1_seed60 --games 1000 --seed gpt_duel_1 --first-turn-policy alternate --continuous-series 1",
+    "  node neat_by_GPT/scripts/model_duel_worker.mjs --human H-CL --ai phase1_seed60 --games 1000 --seed gpt_duel_1 --first-turn-policy alternate --continuous-series 1",
   ].join("\n");
 }
 

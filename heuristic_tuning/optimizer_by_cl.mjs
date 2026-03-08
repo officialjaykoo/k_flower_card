@@ -27,7 +27,7 @@
 //      Dataset-only analysis is possible even without full kibo.
 //
 // Usage:
-//   node scripts/optimizer_by_cl.mjs \
+//   node heuristic_tuning/optimizer_by_cl.mjs \
 //     --kibo        <kibo.jsonl> \
 //     --dataset     <dataset.jsonl> \
 //     --actor       ai \
@@ -636,7 +636,7 @@ const argv = parseArgs(process.argv.slice(2));
 
 if (argv.help) {
   console.log(`
-  node scripts/optimizer_by_cl.mjs \\
+  node heuristic_tuning/optimizer_by_cl.mjs \\
     --kibo <kibo.jsonl> --dataset <dataset.jsonl> \\
     --actor ai --actor-policy H-NEXg \\
     --params-file src/heuristics/heuristicNEXg.js \\

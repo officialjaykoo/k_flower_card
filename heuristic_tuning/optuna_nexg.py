@@ -8,12 +8,12 @@
 # 4) main(): study run + artifact export
 
 """
-scripts/optuna_nexg.py - NEXg Optuna tuning
+heuristic_tuning/optuna_nexg.py - NEXg Optuna tuning
 target: H-NEXg vs H-J2 (1000 games per trial)
 tuning set: CL core 31 + NEXg-specific 11 params
 
 usage:
-  python scripts/optuna_nexg.py --trials 200 --workers 4
+  python heuristic_tuning/optuna_nexg.py --trials 200 --workers 4
 """
 
 import argparse

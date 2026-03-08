@@ -10,12 +10,12 @@
   },
 
   "seed": 13,
-  "eval_script": "scripts/neat_eval_worker_by_GPT.mjs",
+  "eval_script": "neat_by_GPT/scripts/neat_eval_worker.mjs",
   "fitness_profile": "phase1",
 
-  "generations": 50,
+  "generations": 12,
   "eval_workers": 6,
-  "games_per_genome": 240,
+  "games_per_genome": 150,
   "eval_timeout_sec": 540,
   "max_eval_steps": 600,
   "checkpoint_every": 4,

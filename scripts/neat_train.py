@@ -11,8 +11,7 @@ Execution Flow Map:
 
 File Layout Map (top-down):
 1) runtime defaults + normalization + env bridge helpers
-2) teacher dataset normalization/cache helpers
-3) eval function + parallel evaluator + CLI entrypoint
+2) eval function + parallel evaluator + CLI entrypoint
 """
 
 import argparse
@@ -40,74 +39,41 @@ except Exception:
 
 
 # =============================================================================
-# Section 1. Runtime Defaults + Primitive Coercion Helpers
+# Section 1. Runtime Schema + Primitive Coercion Helpers
 # =============================================================================
 ENV_PREFIX = "KFC_NEAT_"
-DEFAULT_RUNTIME = {
-    "format_version": "neat_runtime_v1",
-    "generations": 50,
-    "eval_workers": 6,
-    "games_per_genome": 40,
-    "eval_timeout_sec": 360,
-    "max_eval_steps": 600,
-    "opponent_policy": "",
-    "opponent_policy_mix": [],
-    "opponent_genome": "",
-    "switch_seats": True,
-    "checkpoint_every": 50,
-    "eval_script": "scripts/neat_eval_worker.mjs",
-    "seed": 13,
-    # Evaluator maps these to win/gold/go component weights.
-    "fitness_gold_scale": 2500.0,
-    "fitness_gold_neutral_delta": 0.0,
-    "fitness_win_weight": 0.35,
-    "fitness_gold_weight": 0.50,
-    "fitness_win_neutral_rate": 0.40,
-    "fitness_go_weight": 0.15,
-    "fitness_go_target_rate": 0.20,
-    "fitness_go_max_games": 70,
-    "fitness_go_max_games_penalty": 0.80,
-    "fitness_go_presence_weight": 0.2,
-    "fitness_go_quality_weight": 0.8,
-    "fitness_go_zero_games_penalty": 0.07,
-    "fitness_go_fail_penalty_enabled": True,
-    "fitness_go_fail_penalty_margin": 0.05,
-    "fitness_go_fail_penalty_trigger": 0.45,
-    "fitness_go_fail_penalty_amount": 0.10,
-    "fitness_go_fail_bonus_trigger": 0.20,
-    "fitness_go_fail_bonus_amount": 0.20,
-    # Gate / transition controls (can be phase-specific via runtime config)
-    "gate_mode": "win_rate_only",  # win_rate_only | hybrid
-    "gate_ema_window": 5,
-    "transition_ema_imitation": 0.60,
-    "transition_ema_win_rate": 0.45,
-    "transition_mean_gold_delta_min": None,
-    "transition_best_fitness_min": None,
-    "transition_streak": 3,
-    "failure_generation_min": 30,
-    "failure_ema_win_rate_max": 0.30,
-    "failure_imitation_max": None,
-    "failure_slope_5_max": 0.005,
-    "failure_slope_metric": "win_rate",  # win_rate | imitation
-    # Optional offline teacher dataset (phase1 imitation).
-    "teacher_dataset_path": "",
-    "teacher_kibo_path": "",
-    "teacher_kibo_count_records": False,
-    "teacher_dataset_actor": "all",  # all | human | ai
-    "teacher_dataset_decisions": 0,  # 0 disables offline teacher scoring
-    "teacher_dataset_cache_path": "",
-}
-
-OPTION_CANDIDATE_ALIASES = {
-    "choose_go": "go",
-    "choose_stop": "stop",
-    "choose_shaking_yes": "shaking_yes",
-    "choose_shaking_no": "shaking_no",
-    "choose_president_stop": "president_stop",
-    "choose_president_hold": "president_hold",
-    "choose_five": "five",
-    "choose_junk": "junk",
-}
+REQUIRED_RUNTIME_KEYS = [
+    "format_version",
+    "generations",
+    "eval_workers",
+    "games_per_genome",
+    "eval_timeout_sec",
+    "max_eval_steps",
+    "opponent_policy",
+    "opponent_policy_mix",
+    "opponent_genome",
+    "switch_seats",
+    "checkpoint_every",
+    "eval_script",
+    "seed",
+    "fitness_gold_scale",
+    "fitness_gold_neutral_delta",
+    "fitness_win_weight",
+    "fitness_gold_weight",
+    "fitness_win_neutral_rate",
+    "gate_mode",
+    "gate_ema_window",
+    "transition_ema_imitation",
+    "transition_ema_win_rate",
+    "transition_mean_gold_delta_min",
+    "transition_best_fitness_min",
+    "transition_streak",
+    "failure_generation_min",
+    "failure_ema_win_rate_max",
+    "failure_imitation_max",
+    "failure_slope_5_max",
+    "failure_slope_metric",
+]
 
 
 def _to_int(value, default):
@@ -267,11 +233,67 @@ def _load_runtime_config_recursive(path: str, cfg: dict, seen: set[str]) -> None
     cfg.update(local)
 
 
+def _required_value(cfg: dict, key: str):
+    if key not in cfg:
+        raise RuntimeError(f"runtime missing required key: {key}")
+    return cfg.get(key)
+
+
+def _required_int(cfg: dict, key: str, min_value: Optional[int] = None) -> int:
+    raw = _required_value(cfg, key)
+    try:
+        value = int(raw)
+    except Exception:
+        raise RuntimeError(f"runtime key '{key}' must be integer")
+    if min_value is not None and value < min_value:
+        raise RuntimeError(f"runtime key '{key}' must be >= {int(min_value)}")
+    return int(value)
+
+
+def _required_float(cfg: dict, key: str) -> float:
+    raw = _required_value(cfg, key)
+    try:
+        value = float(raw)
+    except Exception:
+        raise RuntimeError(f"runtime key '{key}' must be number")
+    if not math.isfinite(value):
+        raise RuntimeError(f"runtime key '{key}' must be finite")
+    return float(value)
+
+
+def _required_optional_float(cfg: dict, key: str) -> Optional[float]:
+    raw = _required_value(cfg, key)
+    if raw is None:
+        return None
+    s = str(raw).strip().lower()
+    if s in ("", "none", "null"):
+        return None
+    try:
+        value = float(raw)
+    except Exception:
+        raise RuntimeError(f"runtime key '{key}' must be number or null")
+    if not math.isfinite(value):
+        raise RuntimeError(f"runtime key '{key}' must be finite when provided")
+    return float(value)
+
+
+def _required_bool(cfg: dict, key: str) -> bool:
+    raw = _required_value(cfg, key)
+    if isinstance(raw, bool):
+        return raw
+    s = str(raw).strip().lower()
+    if s in ("1", "true", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "no", "n", "off"):
+        return False
+    raise RuntimeError(f"runtime key '{key}' must be boolean")
+
+
 # =============================================================================
 # Section 2. Runtime Config Normalization
 # =============================================================================
 def _load_runtime_config(path: str) -> dict:
-    cfg = dict(DEFAULT_RUNTIME)
+    cfg = {}
     if path:
         _load_runtime_config_recursive(path, cfg, set())
     return _normalize_runtime_values(cfg)
@@ -279,188 +301,73 @@ def _load_runtime_config(path: str) -> dict:
 
 def _normalize_runtime_values(cfg: dict) -> dict:
     cfg = dict(cfg or {})
-    cfg["generations"] = max(1, _to_int(cfg.get("generations"), DEFAULT_RUNTIME["generations"]))
-    cfg["eval_workers"] = max(2, _to_int(cfg.get("eval_workers"), DEFAULT_RUNTIME["eval_workers"]))
-    cfg["games_per_genome"] = max(
-        1, _to_int(cfg.get("games_per_genome"), DEFAULT_RUNTIME["games_per_genome"])
-    )
-    cfg["eval_timeout_sec"] = max(
-        10, _to_int(cfg.get("eval_timeout_sec"), DEFAULT_RUNTIME["eval_timeout_sec"])
-    )
-    cfg["max_eval_steps"] = max(
-        50, _to_int(cfg.get("max_eval_steps"), DEFAULT_RUNTIME["max_eval_steps"])
-    )
-    cfg["opponent_policy"] = str(cfg.get("opponent_policy") or DEFAULT_RUNTIME["opponent_policy"]).strip()
-    cfg["opponent_policy_mix"] = _parse_opponent_policy_mix(cfg.get("opponent_policy_mix"))
-    cfg["opponent_genome"] = str(cfg.get("opponent_genome") or "").strip()
-    cfg["switch_seats"] = _to_bool(cfg.get("switch_seats"), DEFAULT_RUNTIME["switch_seats"])
-    cfg["checkpoint_every"] = max(
-        1, _to_int(cfg.get("checkpoint_every"), DEFAULT_RUNTIME["checkpoint_every"])
-    )
-    cfg["eval_script"] = str(cfg.get("eval_script") or DEFAULT_RUNTIME["eval_script"]).strip()
-    cfg["seed"] = _to_seed(cfg.get("seed"), DEFAULT_RUNTIME["seed"])
-    cfg["fitness_gold_scale"] = max(
-        1.0, _to_float(cfg.get("fitness_gold_scale"), DEFAULT_RUNTIME["fitness_gold_scale"])
-    )
-    cfg["fitness_gold_neutral_delta"] = _to_float(
-        cfg.get("fitness_gold_neutral_delta"),
-        DEFAULT_RUNTIME["fitness_gold_neutral_delta"],
-    )
-    cfg["fitness_win_weight"] = _to_float(
-        cfg.get("fitness_win_weight"), DEFAULT_RUNTIME["fitness_win_weight"]
-    )
-    cfg["fitness_gold_weight"] = _to_float(
-        cfg.get("fitness_gold_weight"), DEFAULT_RUNTIME["fitness_gold_weight"]
-    )
-    cfg["fitness_win_neutral_rate"] = min(
-        0.99,
-        max(
-            0.01,
-            _to_float(
-                cfg.get("fitness_win_neutral_rate"),
-                DEFAULT_RUNTIME["fitness_win_neutral_rate"],
-            ),
-        ),
-    )
-    cfg["fitness_go_weight"] = _to_float(
-        cfg.get("fitness_go_weight"), DEFAULT_RUNTIME["fitness_go_weight"]
-    )
-    cfg["fitness_go_target_rate"] = max(
-        0.01, _to_float(cfg.get("fitness_go_target_rate"), DEFAULT_RUNTIME["fitness_go_target_rate"])
-    )
-    cfg["fitness_go_max_games"] = max(
-        1,
-        _to_int(
-            cfg.get("fitness_go_max_games"),
-            DEFAULT_RUNTIME["fitness_go_max_games"],
-        ),
-    )
-    cfg["fitness_go_max_games_penalty"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_max_games_penalty"),
-            DEFAULT_RUNTIME["fitness_go_max_games_penalty"],
-        ),
-    )
-    cfg["fitness_go_presence_weight"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_presence_weight"),
-            DEFAULT_RUNTIME["fitness_go_presence_weight"],
-        ),
-    )
-    cfg["fitness_go_quality_weight"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_quality_weight"),
-            DEFAULT_RUNTIME["fitness_go_quality_weight"],
-        ),
-    )
-    cfg["fitness_go_zero_games_penalty"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_zero_games_penalty"),
-            DEFAULT_RUNTIME["fitness_go_zero_games_penalty"],
-        ),
-    )
-    cfg["fitness_go_fail_penalty_enabled"] = _to_bool(
-        cfg.get("fitness_go_fail_penalty_enabled"),
-        DEFAULT_RUNTIME["fitness_go_fail_penalty_enabled"],
-    )
-    cfg["fitness_go_fail_penalty_margin"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_fail_penalty_margin"),
-            DEFAULT_RUNTIME["fitness_go_fail_penalty_margin"],
-        ),
-    )
-    cfg["fitness_go_fail_penalty_trigger"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_fail_penalty_trigger"),
-            DEFAULT_RUNTIME["fitness_go_fail_penalty_trigger"],
-        ),
-    )
-    cfg["fitness_go_fail_penalty_amount"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_fail_penalty_amount"),
-            DEFAULT_RUNTIME["fitness_go_fail_penalty_amount"],
-        ),
-    )
-    cfg["fitness_go_fail_bonus_trigger"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_fail_bonus_trigger"),
-            DEFAULT_RUNTIME["fitness_go_fail_bonus_trigger"],
-        ),
-    )
-    cfg["fitness_go_fail_bonus_amount"] = max(
-        0.0,
-        _to_float(
-            cfg.get("fitness_go_fail_bonus_amount"),
-            DEFAULT_RUNTIME["fitness_go_fail_bonus_amount"],
-        ),
-    )
-    gate_mode = str(cfg.get("gate_mode") or DEFAULT_RUNTIME["gate_mode"]).strip().lower()
+    missing = [k for k in REQUIRED_RUNTIME_KEYS if k not in cfg]
+    if missing:
+        raise RuntimeError(f"runtime missing required keys: {', '.join(missing)}")
+
+    cfg["format_version"] = str(_required_value(cfg, "format_version") or "").strip()
+    if not cfg["format_version"]:
+        raise RuntimeError("runtime key 'format_version' must be non-empty")
+
+    cfg["generations"] = _required_int(cfg, "generations", 1)
+    cfg["eval_workers"] = _required_int(cfg, "eval_workers", 2)
+    cfg["games_per_genome"] = _required_int(cfg, "games_per_genome", 1)
+    cfg["eval_timeout_sec"] = _required_int(cfg, "eval_timeout_sec", 10)
+    cfg["max_eval_steps"] = _required_int(cfg, "max_eval_steps", 50)
+
+    cfg["opponent_policy"] = str(_required_value(cfg, "opponent_policy") or "").strip()
+    cfg["opponent_policy_mix"] = _parse_opponent_policy_mix(_required_value(cfg, "opponent_policy_mix"))
+    cfg["opponent_genome"] = str(_required_value(cfg, "opponent_genome") or "").strip()
+    cfg["switch_seats"] = _required_bool(cfg, "switch_seats")
+
+    cfg["checkpoint_every"] = _required_int(cfg, "checkpoint_every", 1)
+    cfg["eval_script"] = str(_required_value(cfg, "eval_script") or "").strip()
+    if not cfg["eval_script"]:
+        raise RuntimeError("runtime key 'eval_script' must be non-empty")
+    cfg["seed"] = str(_required_value(cfg, "seed") or "").strip()
+    if not cfg["seed"]:
+        raise RuntimeError("runtime key 'seed' must be non-empty")
+
+    cfg["fitness_gold_scale"] = _required_float(cfg, "fitness_gold_scale")
+    cfg["fitness_gold_neutral_delta"] = _required_float(cfg, "fitness_gold_neutral_delta")
+    cfg["fitness_win_weight"] = _required_float(cfg, "fitness_win_weight")
+    cfg["fitness_gold_weight"] = _required_float(cfg, "fitness_gold_weight")
+    cfg["fitness_win_neutral_rate"] = _required_float(cfg, "fitness_win_neutral_rate")
+
+    gate_mode = str(_required_value(cfg, "gate_mode") or "").strip().lower()
     if gate_mode not in ("win_rate_only", "hybrid"):
-        gate_mode = str(DEFAULT_RUNTIME["gate_mode"])
+        raise RuntimeError("runtime key 'gate_mode' must be one of: win_rate_only, hybrid")
     cfg["gate_mode"] = gate_mode
-    cfg["gate_ema_window"] = max(2, _to_int(cfg.get("gate_ema_window"), DEFAULT_RUNTIME["gate_ema_window"]))
-    cfg["transition_ema_imitation"] = _to_optional_float(
-        cfg.get("transition_ema_imitation"), DEFAULT_RUNTIME["transition_ema_imitation"]
-    )
-    cfg["transition_ema_win_rate"] = _to_optional_float(
-        cfg.get("transition_ema_win_rate"), DEFAULT_RUNTIME["transition_ema_win_rate"]
-    )
-    cfg["transition_mean_gold_delta_min"] = _to_optional_float(
-        cfg.get("transition_mean_gold_delta_min"), DEFAULT_RUNTIME["transition_mean_gold_delta_min"]
-    )
-    cfg["transition_best_fitness_min"] = _to_optional_float(
-        cfg.get("transition_best_fitness_min"), DEFAULT_RUNTIME["transition_best_fitness_min"]
-    )
-    cfg["transition_streak"] = max(
-        1, _to_int(cfg.get("transition_streak"), DEFAULT_RUNTIME["transition_streak"])
-    )
-    cfg["failure_generation_min"] = max(
-        1, _to_int(cfg.get("failure_generation_min"), DEFAULT_RUNTIME["failure_generation_min"])
-    )
-    cfg["failure_ema_win_rate_max"] = _to_optional_float(
-        cfg.get("failure_ema_win_rate_max"), DEFAULT_RUNTIME["failure_ema_win_rate_max"]
-    )
-    cfg["failure_imitation_max"] = _to_optional_float(
-        cfg.get("failure_imitation_max"), DEFAULT_RUNTIME["failure_imitation_max"]
-    )
-    cfg["failure_slope_5_max"] = _to_float(
-        cfg.get("failure_slope_5_max"), DEFAULT_RUNTIME["failure_slope_5_max"]
-    )
-    failure_slope_metric = str(
-        cfg.get("failure_slope_metric") or DEFAULT_RUNTIME["failure_slope_metric"]
-    ).strip().lower()
+    cfg["gate_ema_window"] = _required_int(cfg, "gate_ema_window", 2)
+    cfg["transition_ema_imitation"] = _required_optional_float(cfg, "transition_ema_imitation")
+    cfg["transition_ema_win_rate"] = _required_optional_float(cfg, "transition_ema_win_rate")
+    cfg["transition_mean_gold_delta_min"] = _required_optional_float(cfg, "transition_mean_gold_delta_min")
+    cfg["transition_best_fitness_min"] = _required_optional_float(cfg, "transition_best_fitness_min")
+    cfg["transition_streak"] = _required_int(cfg, "transition_streak", 1)
+    cfg["failure_generation_min"] = _required_int(cfg, "failure_generation_min", 1)
+    cfg["failure_ema_win_rate_max"] = _required_optional_float(cfg, "failure_ema_win_rate_max")
+    cfg["failure_imitation_max"] = _required_optional_float(cfg, "failure_imitation_max")
+    cfg["failure_slope_5_max"] = _required_float(cfg, "failure_slope_5_max")
+    failure_slope_metric = str(_required_value(cfg, "failure_slope_metric") or "").strip().lower()
     if failure_slope_metric not in ("win_rate", "imitation"):
-        failure_slope_metric = str(DEFAULT_RUNTIME["failure_slope_metric"])
+        raise RuntimeError("runtime key 'failure_slope_metric' must be one of: win_rate, imitation")
     cfg["failure_slope_metric"] = failure_slope_metric
 
-    cfg["teacher_dataset_path"] = str(cfg.get("teacher_dataset_path") or "").strip()
-    cfg["teacher_kibo_path"] = str(cfg.get("teacher_kibo_path") or "").strip()
-    cfg["teacher_kibo_count_records"] = _to_bool(
-        cfg.get("teacher_kibo_count_records"),
-        DEFAULT_RUNTIME["teacher_kibo_count_records"],
-    )
-
-    teacher_actor = str(
-        cfg.get("teacher_dataset_actor") or DEFAULT_RUNTIME["teacher_dataset_actor"]
-    ).strip().lower()
-    if teacher_actor not in ("all", "human", "ai"):
-        teacher_actor = str(DEFAULT_RUNTIME["teacher_dataset_actor"])
-    cfg["teacher_dataset_actor"] = teacher_actor
-    cfg["teacher_dataset_decisions"] = max(
-        0, _to_int(cfg.get("teacher_dataset_decisions"), DEFAULT_RUNTIME["teacher_dataset_decisions"])
-    )
-    cfg["teacher_dataset_cache_path"] = str(cfg.get("teacher_dataset_cache_path") or "").strip()
+    if cfg["fitness_gold_scale"] <= 0:
+        raise RuntimeError("runtime key 'fitness_gold_scale' must be > 0")
+    if cfg["fitness_win_weight"] < 0:
+        raise RuntimeError("runtime key 'fitness_win_weight' must be >= 0")
+    if cfg["fitness_gold_weight"] < 0:
+        raise RuntimeError("runtime key 'fitness_gold_weight' must be >= 0")
+    if (cfg["fitness_win_weight"] + cfg["fitness_gold_weight"]) <= 0:
+        raise RuntimeError("runtime keys 'fitness_win_weight' + 'fitness_gold_weight' must be > 0")
+    if cfg["fitness_win_neutral_rate"] <= 0 or cfg["fitness_win_neutral_rate"] >= 1:
+        raise RuntimeError("runtime key 'fitness_win_neutral_rate' must be in (0,1)")
 
     if "output_dir" in cfg:
         cfg["output_dir"] = str(cfg.get("output_dir") or "").strip()
+        if not cfg["output_dir"]:
+            raise RuntimeError("runtime key 'output_dir' must be non-empty")
     return cfg
 
 
@@ -468,6 +375,10 @@ def _normalize_runtime_values(cfg: dict) -> dict:
 # Section 3. Runtime <-> Environment Bridge
 # =============================================================================
 def _set_eval_env(runtime: dict, output_dir: str) -> None:
+    os.environ[f"{ENV_PREFIX}FORMAT_VERSION"] = str(runtime["format_version"])
+    os.environ[f"{ENV_PREFIX}GENERATIONS"] = str(int(runtime["generations"]))
+    os.environ[f"{ENV_PREFIX}EVAL_WORKERS"] = str(int(runtime["eval_workers"]))
+    os.environ[f"{ENV_PREFIX}CHECKPOINT_EVERY"] = str(int(runtime["checkpoint_every"]))
     os.environ[f"{ENV_PREFIX}EVAL_SCRIPT"] = os.path.abspath(str(runtime["eval_script"]))
     os.environ[f"{ENV_PREFIX}GAMES_PER_GENOME"] = str(int(runtime["games_per_genome"]))
     os.environ[f"{ENV_PREFIX}EVAL_TIMEOUT_SEC"] = str(int(runtime["eval_timeout_sec"]))
@@ -491,55 +402,29 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}FITNESS_WIN_NEUTRAL_RATE"] = str(
         float(runtime["fitness_win_neutral_rate"])
     )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_WEIGHT"] = str(float(runtime["fitness_go_weight"]))
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_TARGET_RATE"] = str(float(runtime["fitness_go_target_rate"]))
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES"] = str(int(runtime["fitness_go_max_games"]))
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES_PENALTY"] = str(
-        float(runtime["fitness_go_max_games_penalty"])
+    os.environ[f"{ENV_PREFIX}GATE_MODE"] = str(runtime["gate_mode"])
+    os.environ[f"{ENV_PREFIX}GATE_EMA_WINDOW"] = str(int(runtime["gate_ema_window"]))
+    os.environ[f"{ENV_PREFIX}TRANSITION_EMA_IMITATION"] = str(runtime.get("transition_ema_imitation"))
+    os.environ[f"{ENV_PREFIX}TRANSITION_EMA_WIN_RATE"] = str(runtime.get("transition_ema_win_rate"))
+    os.environ[f"{ENV_PREFIX}TRANSITION_MEAN_GOLD_DELTA_MIN"] = str(
+        runtime.get("transition_mean_gold_delta_min")
     )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_PRESENCE_WEIGHT"] = str(
-        float(runtime["fitness_go_presence_weight"])
+    os.environ[f"{ENV_PREFIX}TRANSITION_BEST_FITNESS_MIN"] = str(
+        runtime.get("transition_best_fitness_min")
     )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_QUALITY_WEIGHT"] = str(
-        float(runtime["fitness_go_quality_weight"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_ZERO_GAMES_PENALTY"] = str(
-        float(runtime["fitness_go_zero_games_penalty"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_ENABLED"] = (
-        "1" if bool(runtime.get("fitness_go_fail_penalty_enabled")) else "0"
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_MARGIN"] = str(
-        float(runtime["fitness_go_fail_penalty_margin"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_TRIGGER"] = str(
-        float(runtime["fitness_go_fail_penalty_trigger"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_AMOUNT"] = str(
-        float(runtime["fitness_go_fail_penalty_amount"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_BONUS_TRIGGER"] = str(
-        float(runtime["fitness_go_fail_bonus_trigger"])
-    )
-    os.environ[f"{ENV_PREFIX}FITNESS_GO_FAIL_BONUS_AMOUNT"] = str(
-        float(runtime["fitness_go_fail_bonus_amount"])
-    )
-    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_PATH"] = str(runtime.get("teacher_dataset_path") or "")
-    os.environ[f"{ENV_PREFIX}TEACHER_KIBO_PATH"] = str(runtime.get("teacher_kibo_path") or "")
-    os.environ[f"{ENV_PREFIX}TEACHER_KIBO_COUNT_RECORDS"] = (
-        "1" if bool(runtime.get("teacher_kibo_count_records")) else "0"
-    )
-    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_ACTOR"] = str(runtime.get("teacher_dataset_actor") or "all")
-    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_DECISIONS"] = str(
-        int(runtime.get("teacher_dataset_decisions") or 0)
-    )
-    os.environ[f"{ENV_PREFIX}TEACHER_DATASET_CACHE_PATH"] = str(
-        runtime.get("teacher_dataset_cache_path") or ""
-    )
+    os.environ[f"{ENV_PREFIX}TRANSITION_STREAK"] = str(int(runtime["transition_streak"]))
+    os.environ[f"{ENV_PREFIX}FAILURE_GENERATION_MIN"] = str(int(runtime["failure_generation_min"]))
+    os.environ[f"{ENV_PREFIX}FAILURE_EMA_WIN_RATE_MAX"] = str(runtime.get("failure_ema_win_rate_max"))
+    os.environ[f"{ENV_PREFIX}FAILURE_IMITATION_MAX"] = str(runtime.get("failure_imitation_max"))
+    os.environ[f"{ENV_PREFIX}FAILURE_SLOPE_5_MAX"] = str(float(runtime["failure_slope_5_max"]))
+    os.environ[f"{ENV_PREFIX}FAILURE_SLOPE_METRIC"] = str(runtime["failure_slope_metric"])
 
 
 def _runtime_from_env() -> Dict[str, object]:
     raw: Dict[str, object] = {
+        "format_version": os.environ.get(f"{ENV_PREFIX}FORMAT_VERSION"),
+        "generations": os.environ.get(f"{ENV_PREFIX}GENERATIONS"),
+        "eval_workers": os.environ.get(f"{ENV_PREFIX}EVAL_WORKERS"),
         "eval_script": os.environ.get(f"{ENV_PREFIX}EVAL_SCRIPT") or "",
         "games_per_genome": os.environ.get(f"{ENV_PREFIX}GAMES_PER_GENOME"),
         "eval_timeout_sec": os.environ.get(f"{ENV_PREFIX}EVAL_TIMEOUT_SEC"),
@@ -548,46 +433,26 @@ def _runtime_from_env() -> Dict[str, object]:
         "opponent_policy_mix": os.environ.get(f"{ENV_PREFIX}OPPONENT_POLICY_MIX"),
         "opponent_genome": os.environ.get(f"{ENV_PREFIX}OPPONENT_GENOME"),
         "switch_seats": os.environ.get(f"{ENV_PREFIX}SWITCH_SEATS"),
+        "checkpoint_every": os.environ.get(f"{ENV_PREFIX}CHECKPOINT_EVERY"),
         "seed": os.environ.get(f"{ENV_PREFIX}SEED"),
-        "output_dir": os.environ.get(f"{ENV_PREFIX}OUTPUT_DIR") or os.getcwd(),
+        "output_dir": os.environ.get(f"{ENV_PREFIX}OUTPUT_DIR"),
         "fitness_gold_scale": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_SCALE"),
         "fitness_gold_neutral_delta": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_NEUTRAL_DELTA"),
         "fitness_win_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"),
         "fitness_gold_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_WEIGHT"),
         "fitness_win_neutral_rate": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_NEUTRAL_RATE"),
-        "fitness_go_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_WEIGHT"),
-        "fitness_go_target_rate": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_TARGET_RATE"),
-        "fitness_go_max_games": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES"),
-        "fitness_go_max_games_penalty": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_MAX_GAMES_PENALTY"),
-        "fitness_go_presence_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_PRESENCE_WEIGHT"),
-        "fitness_go_quality_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GO_QUALITY_WEIGHT"),
-        "fitness_go_zero_games_penalty": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_ZERO_GAMES_PENALTY"
-        ),
-        "fitness_go_fail_penalty_enabled": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_ENABLED"
-        ),
-        "fitness_go_fail_penalty_margin": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_MARGIN"
-        ),
-        "fitness_go_fail_penalty_trigger": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_TRIGGER"
-        ),
-        "fitness_go_fail_penalty_amount": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_PENALTY_AMOUNT"
-        ),
-        "fitness_go_fail_bonus_trigger": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_BONUS_TRIGGER"
-        ),
-        "fitness_go_fail_bonus_amount": os.environ.get(
-            f"{ENV_PREFIX}FITNESS_GO_FAIL_BONUS_AMOUNT"
-        ),
-        "teacher_dataset_path": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_PATH") or "",
-        "teacher_kibo_path": os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_PATH") or "",
-        "teacher_kibo_count_records": os.environ.get(f"{ENV_PREFIX}TEACHER_KIBO_COUNT_RECORDS") or "0",
-        "teacher_dataset_actor": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_ACTOR"),
-        "teacher_dataset_decisions": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_DECISIONS"),
-        "teacher_dataset_cache_path": os.environ.get(f"{ENV_PREFIX}TEACHER_DATASET_CACHE_PATH") or "",
+        "gate_mode": os.environ.get(f"{ENV_PREFIX}GATE_MODE"),
+        "gate_ema_window": os.environ.get(f"{ENV_PREFIX}GATE_EMA_WINDOW"),
+        "transition_ema_imitation": os.environ.get(f"{ENV_PREFIX}TRANSITION_EMA_IMITATION"),
+        "transition_ema_win_rate": os.environ.get(f"{ENV_PREFIX}TRANSITION_EMA_WIN_RATE"),
+        "transition_mean_gold_delta_min": os.environ.get(f"{ENV_PREFIX}TRANSITION_MEAN_GOLD_DELTA_MIN"),
+        "transition_best_fitness_min": os.environ.get(f"{ENV_PREFIX}TRANSITION_BEST_FITNESS_MIN"),
+        "transition_streak": os.environ.get(f"{ENV_PREFIX}TRANSITION_STREAK"),
+        "failure_generation_min": os.environ.get(f"{ENV_PREFIX}FAILURE_GENERATION_MIN"),
+        "failure_ema_win_rate_max": os.environ.get(f"{ENV_PREFIX}FAILURE_EMA_WIN_RATE_MAX"),
+        "failure_imitation_max": os.environ.get(f"{ENV_PREFIX}FAILURE_IMITATION_MAX"),
+        "failure_slope_5_max": os.environ.get(f"{ENV_PREFIX}FAILURE_SLOPE_5_MAX"),
+        "failure_slope_metric": os.environ.get(f"{ENV_PREFIX}FAILURE_SLOPE_METRIC"),
     }
     return _normalize_runtime_values(raw)
 
@@ -600,194 +465,6 @@ def _runtime_from_env_cached(force_reload: bool = False) -> Dict[str, object]:
     if force_reload or _RUNTIME_FROM_ENV_CACHE is None:
         _RUNTIME_FROM_ENV_CACHE = _runtime_from_env()
     return _RUNTIME_FROM_ENV_CACHE
-
-
-# =============================================================================
-# Section 4. Teacher Dataset Token Normalization
-# =============================================================================
-def _normalize_decision_type(value: object) -> str:
-    dt = str(value or "").strip().lower()
-    if dt in ("play", "match", "option"):
-        return dt
-    return ""
-
-
-def _normalize_candidate_token(decision_type: str, value: object) -> str:
-    token = str(value or "").strip()
-    if not token:
-        return ""
-    if decision_type == "option":
-        key = token.lower()
-        return OPTION_CANDIDATE_ALIASES.get(key, key)
-    return token
-
-
-def _count_jsonl_records(path: str) -> int:
-    count = 0
-    with open(path, "r", encoding="utf-8-sig") as f:
-        for line in f:
-            if str(line).strip():
-                count += 1
-    return int(count)
-
-
-# =============================================================================
-# Section 5. Teacher Dataset Cache Build
-# =============================================================================
-def _build_teacher_dataset_cache(runtime: dict, output_dir: str) -> None:
-    dataset_path = str(runtime.get("teacher_dataset_path") or "").strip()
-    kibo_path = str(runtime.get("teacher_kibo_path") or "").strip()
-    actor_filter = str(runtime.get("teacher_dataset_actor") or "all").strip().lower()
-    if actor_filter not in ("all", "human", "ai"):
-        actor_filter = "all"
-    runtime["teacher_dataset_actor"] = actor_filter
-    max_decisions = max(0, _to_int(runtime.get("teacher_dataset_decisions"), 0))
-    runtime["teacher_dataset_decisions"] = int(max_decisions)
-
-    runtime["teacher_dataset_cache_path"] = ""
-    runtime["teacher_dataset_decisions_loaded"] = 0
-    runtime["teacher_dataset_rows_scanned"] = 0
-    runtime["teacher_dataset_rows_used"] = 0
-    runtime["teacher_kibo_records"] = 0
-
-    if kibo_path:
-        kibo_abs = os.path.abspath(kibo_path)
-        if not os.path.exists(kibo_abs):
-            raise RuntimeError(f"teacher kibo not found: {kibo_abs}")
-        runtime["teacher_kibo_path"] = kibo_abs
-        if bool(runtime.get("teacher_kibo_count_records")):
-            runtime["teacher_kibo_records"] = _count_jsonl_records(kibo_abs)
-    else:
-        runtime["teacher_kibo_path"] = ""
-
-    if not dataset_path or max_decisions <= 0:
-        runtime["teacher_dataset_path"] = os.path.abspath(dataset_path) if dataset_path else ""
-        return
-
-    dataset_abs = os.path.abspath(dataset_path)
-    if not os.path.exists(dataset_abs):
-        raise RuntimeError(f"teacher dataset not found: {dataset_abs}")
-    runtime["teacher_dataset_path"] = dataset_abs
-
-    groups: Dict[str, Dict[str, Any]] = {}
-    rows_scanned = 0
-    rows_used = 0
-
-    with open(dataset_abs, "r", encoding="utf-8-sig") as f:
-        for raw_line in f:
-            line = str(raw_line).strip()
-            if not line:
-                continue
-            rows_scanned += 1
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(row, dict):
-                continue
-
-            actor = str(row.get("actor") or "").strip().lower()
-            if actor_filter != "all" and actor != actor_filter:
-                continue
-
-            decision_type = _normalize_decision_type(row.get("decision_type"))
-            if not decision_type:
-                continue
-
-            candidate = _normalize_candidate_token(decision_type, row.get("candidate"))
-            if not candidate:
-                continue
-
-            features_raw = row.get("features")
-            if not isinstance(features_raw, list) or len(features_raw) <= 0:
-                continue
-            features = []
-            feature_ok = True
-            for v in features_raw:
-                fv = _safe_optional_float(v)
-                if fv is None:
-                    feature_ok = False
-                    break
-                features.append(float(fv))
-            if not feature_ok:
-                continue
-
-            seed = str(row.get("seed") or "").strip()
-            game_index = _to_int(row.get("game_index"), -1)
-            step = _to_int(row.get("step"), -1)
-            legal_count = max(1, _to_int(row.get("legal_count"), 1))
-            group_key = (
-                f"{seed}|g={int(game_index)}|s={int(step)}|a={actor}|d={decision_type}|l={int(legal_count)}"
-            )
-
-            group = groups.get(group_key)
-            if group is None:
-                if len(groups) >= max_decisions:
-                    break
-                group = {
-                    "decision_type": decision_type,
-                    "chosen_candidate": "",
-                    "candidates": [],
-                    "candidate_set": set(),
-                }
-                groups[group_key] = group
-
-            if candidate not in group["candidate_set"]:
-                group["candidate_set"].add(candidate)
-                group["candidates"].append({"candidate": candidate, "features": features})
-                rows_used += 1
-
-            chosen_flag = _to_int(row.get("chosen"), 0) == 1
-            if chosen_flag:
-                group["chosen_candidate"] = candidate
-            elif not group["chosen_candidate"]:
-                chosen_candidate = _normalize_candidate_token(decision_type, row.get("chosen_candidate"))
-                if chosen_candidate:
-                    group["chosen_candidate"] = chosen_candidate
-
-    decisions = []
-    for group in groups.values():
-        decision_type = str(group.get("decision_type") or "")
-        chosen_candidate = _normalize_candidate_token(decision_type, group.get("chosen_candidate"))
-        candidates = list(group.get("candidates") or [])
-        if not chosen_candidate or not candidates:
-            continue
-        candidate_set = {str(c.get("candidate") or "") for c in candidates}
-        if chosen_candidate not in candidate_set:
-            continue
-        decisions.append(
-            {
-                "decision_type": decision_type,
-                "chosen_candidate": chosen_candidate,
-                "candidates": candidates,
-            }
-        )
-
-    if not decisions:
-        raise RuntimeError(
-            "teacher dataset cache build failed: no valid teacher decisions were extracted"
-        )
-
-    cache_path = os.path.join(output_dir, "teacher_dataset_cache.json")
-    cache_payload = {
-        "format_version": "teacher_dataset_cache_v1",
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-        "source_dataset_path": dataset_abs,
-        "source_kibo_path": str(runtime.get("teacher_kibo_path") or ""),
-        "actor_filter": actor_filter,
-        "requested_max_decisions": int(max_decisions),
-        "decisions_loaded": len(decisions),
-        "rows_scanned": int(rows_scanned),
-        "rows_used": int(rows_used),
-        "decisions": decisions,
-    }
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(cache_payload, f, ensure_ascii=False, separators=(",", ":"))
-
-    runtime["teacher_dataset_cache_path"] = cache_path
-    runtime["teacher_dataset_decisions_loaded"] = len(decisions)
-    runtime["teacher_dataset_rows_scanned"] = int(rows_scanned)
-    runtime["teacher_dataset_rows_used"] = int(rows_used)
 
 
 # =============================================================================
@@ -944,9 +621,6 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
         genome_key=int(genome_key),
     )
     opponent_genome = str(runtime.get("opponent_genome") or "").strip()
-    teacher_dataset_path = str(runtime.get("teacher_dataset_path") or "").strip()
-    teacher_kibo_path = str(runtime.get("teacher_kibo_path") or "").strip()
-    teacher_dataset_cache = str(runtime.get("teacher_dataset_cache_path") or "").strip()
     failure_meta = {
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "generation": int(generation),
@@ -956,13 +630,13 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
     }
     if not eval_script or not os.path.exists(eval_script):
         _append_eval_failure_log(
-            str(runtime.get("output_dir") or os.getcwd()),
+            str(runtime["output_dir"]),
             dict(failure_meta, reason="eval_script_missing", eval_script=eval_script),
         )
         return {"fitness": -1e9, "seed_used": seed_text, "eval_ok": False}
 
     payload = _export_neat_python_genome(genome, config)
-    output_dir = str(runtime.get("output_dir") or os.getcwd())
+    output_dir = str(runtime["output_dir"])
 
     if opponent_policy == "genome":
         if not opponent_genome:
@@ -983,24 +657,6 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
                 ),
             )
             return {"fitness": -1e9, "seed_used": seed_text, "eval_ok": False}
-
-    if teacher_dataset_cache:
-        teacher_dataset_cache = os.path.abspath(teacher_dataset_cache)
-        if not os.path.exists(teacher_dataset_cache):
-            _append_eval_failure_log(
-                output_dir,
-                dict(
-                    failure_meta,
-                    reason="teacher_dataset_cache_not_found",
-                    teacher_dataset_cache=teacher_dataset_cache,
-                ),
-            )
-            return {"fitness": -1e9, "seed_used": seed_text, "eval_ok": False}
-
-    if teacher_dataset_path:
-        teacher_dataset_path = os.path.abspath(teacher_dataset_path)
-    if teacher_kibo_path:
-        teacher_kibo_path = os.path.abspath(teacher_kibo_path)
 
     try:
         with tempfile.NamedTemporaryFile(
@@ -1037,29 +693,9 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             str(float(runtime["fitness_gold_weight"])),
             "--fitness-win-neutral-rate",
             str(float(runtime["fitness_win_neutral_rate"])),
-            "--fitness-go-zero-games-penalty",
-            str(float(runtime["fitness_go_zero_games_penalty"])),
-            "--fitness-go-max-games",
-            str(int(runtime["fitness_go_max_games"])),
-            "--fitness-go-max-games-penalty",
-            str(float(runtime["fitness_go_max_games_penalty"])),
-            "--fitness-go-fail-penalty-trigger",
-            str(float(runtime["fitness_go_fail_penalty_trigger"])),
-            "--fitness-go-fail-penalty-amount",
-            str(float(runtime["fitness_go_fail_penalty_amount"])),
-            "--fitness-go-fail-bonus-trigger",
-            str(float(runtime["fitness_go_fail_bonus_trigger"])),
-            "--fitness-go-fail-bonus-amount",
-            str(float(runtime["fitness_go_fail_bonus_amount"])),
         ]
         if opponent_policy == "genome":
             cmd.extend(["--opponent-genome", opponent_genome])
-        if teacher_dataset_cache:
-            cmd.extend(["--teacher-dataset-cache", teacher_dataset_cache])
-        if teacher_dataset_path:
-            cmd.extend(["--teacher-dataset-path", teacher_dataset_path])
-        if teacher_kibo_path:
-            cmd.extend(["--teacher-kibo-path", teacher_kibo_path])
 
         proc = subprocess.run(
             cmd,
@@ -1109,7 +745,7 @@ class LoggedParallelEvaluator:
         self.num_workers = max(1, int(num_workers))
         self.output_dir = os.path.abspath(output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
-        self.runtime_seed = str(runtime.get("seed") or DEFAULT_RUNTIME["seed"])
+        self.runtime_seed = str(runtime["seed"])
         self.pool = mp.Pool(processes=self.num_workers)
 
         self.eval_metrics_log = os.path.join(self.output_dir, "eval_metrics.ndjson")
@@ -1569,85 +1205,6 @@ def parse_args() -> argparse.Namespace:
         help="Override neutral baseline win rate for win_norm",
     )
     parser.add_argument(
-        "--fitness-go-weight",
-        type=float,
-        default=float("nan"),
-        help="Override draw-rate fitness weight",
-    )
-    parser.add_argument(
-        "--fitness-go-target-rate",
-        type=float,
-        default=0.0,
-        help="Override GO target rate for fitness GO presence term",
-    )
-    parser.add_argument(
-        "--fitness-go-max-games",
-        type=int,
-        default=0,
-        help="Override maximum GO games allowed before penalty",
-    )
-    parser.add_argument(
-        "--fitness-go-max-games-penalty",
-        type=float,
-        default=float("nan"),
-        help="Override GO max-games penalty amount",
-    )
-    parser.add_argument(
-        "--fitness-go-presence-weight",
-        type=float,
-        default=float("nan"),
-        help="Override GO presence ratio weight in GO term",
-    )
-    parser.add_argument(
-        "--fitness-go-quality-weight",
-        type=float,
-        default=float("nan"),
-        help="Override GO quality ratio weight in GO term",
-    )
-    parser.add_argument(
-        "--fitness-go-zero-games-penalty",
-        type=float,
-        default=float("nan"),
-        help="Override fitness penalty when go_games is zero",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-penalty-enabled",
-        type=int,
-        choices=[0, 1],
-        default=-1,
-        help="Override GO fail-over-cap penalty enable (1=on, 0=off)",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-penalty-margin",
-        type=float,
-        default=float("nan"),
-        help="Override GO fail-over-cap penalty margin",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-penalty-trigger",
-        type=float,
-        default=float("nan"),
-        help="Override GO fail penalty trigger rate",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-penalty-amount",
-        type=float,
-        default=float("nan"),
-        help="Override GO fail penalty amount",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-bonus-trigger",
-        type=float,
-        default=float("nan"),
-        help="Override GO fail bonus trigger rate",
-    )
-    parser.add_argument(
-        "--fitness-go-fail-bonus-amount",
-        type=float,
-        default=float("nan"),
-        help="Override GO fail bonus amount",
-    )
-    parser.add_argument(
         "--profile-name",
         default="",
         help="Optional profile label included in run_summary",
@@ -1876,45 +1433,6 @@ def main() -> None:
     if args.fitness_win_neutral_rate == args.fitness_win_neutral_rate:
         runtime["fitness_win_neutral_rate"] = args.fitness_win_neutral_rate
         override_keys.append("fitness_win_neutral_rate")
-    if args.fitness_go_weight == args.fitness_go_weight:
-        runtime["fitness_go_weight"] = args.fitness_go_weight
-        override_keys.append("fitness_go_weight")
-    if args.fitness_go_target_rate > 0:
-        runtime["fitness_go_target_rate"] = args.fitness_go_target_rate
-        override_keys.append("fitness_go_target_rate")
-    if args.fitness_go_max_games > 0:
-        runtime["fitness_go_max_games"] = args.fitness_go_max_games
-        override_keys.append("fitness_go_max_games")
-    if args.fitness_go_max_games_penalty == args.fitness_go_max_games_penalty:
-        runtime["fitness_go_max_games_penalty"] = args.fitness_go_max_games_penalty
-        override_keys.append("fitness_go_max_games_penalty")
-    if args.fitness_go_presence_weight == args.fitness_go_presence_weight:
-        runtime["fitness_go_presence_weight"] = args.fitness_go_presence_weight
-        override_keys.append("fitness_go_presence_weight")
-    if args.fitness_go_quality_weight == args.fitness_go_quality_weight:
-        runtime["fitness_go_quality_weight"] = args.fitness_go_quality_weight
-        override_keys.append("fitness_go_quality_weight")
-    if args.fitness_go_zero_games_penalty == args.fitness_go_zero_games_penalty:
-        runtime["fitness_go_zero_games_penalty"] = args.fitness_go_zero_games_penalty
-        override_keys.append("fitness_go_zero_games_penalty")
-    if args.fitness_go_fail_penalty_enabled in (0, 1):
-        runtime["fitness_go_fail_penalty_enabled"] = bool(args.fitness_go_fail_penalty_enabled)
-        override_keys.append("fitness_go_fail_penalty_enabled")
-    if args.fitness_go_fail_penalty_margin == args.fitness_go_fail_penalty_margin:
-        runtime["fitness_go_fail_penalty_margin"] = args.fitness_go_fail_penalty_margin
-        override_keys.append("fitness_go_fail_penalty_margin")
-    if args.fitness_go_fail_penalty_trigger == args.fitness_go_fail_penalty_trigger:
-        runtime["fitness_go_fail_penalty_trigger"] = args.fitness_go_fail_penalty_trigger
-        override_keys.append("fitness_go_fail_penalty_trigger")
-    if args.fitness_go_fail_penalty_amount == args.fitness_go_fail_penalty_amount:
-        runtime["fitness_go_fail_penalty_amount"] = args.fitness_go_fail_penalty_amount
-        override_keys.append("fitness_go_fail_penalty_amount")
-    if args.fitness_go_fail_bonus_trigger == args.fitness_go_fail_bonus_trigger:
-        runtime["fitness_go_fail_bonus_trigger"] = args.fitness_go_fail_bonus_trigger
-        override_keys.append("fitness_go_fail_bonus_trigger")
-    if args.fitness_go_fail_bonus_amount == args.fitness_go_fail_bonus_amount:
-        runtime["fitness_go_fail_bonus_amount"] = args.fitness_go_fail_bonus_amount
-        override_keys.append("fitness_go_fail_bonus_amount")
     runtime = _normalize_runtime_values(runtime)
     for key in override_keys:
         applied_overrides[key] = runtime.get(key)
@@ -1944,8 +1462,6 @@ def main() -> None:
     models_dir = os.path.join(args.output_dir, "models")
     os.makedirs(checkpoints_dir, exist_ok=True)
     os.makedirs(models_dir, exist_ok=True)
-
-    _build_teacher_dataset_cache(runtime, args.output_dir)
 
     cfg = _build_config(args.config_feedforward)
     if len(cfg.genome_config.output_keys) != 1:

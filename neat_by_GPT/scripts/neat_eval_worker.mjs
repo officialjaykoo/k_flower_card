@@ -1,4 +1,4 @@
-﻿// neat_eval_worker_by_GPT.mjs
+﻿// neat_eval_worker.mjs
 // - Evaluates one genome against heuristic/mix opponents.
 // - Emits one JSON summary line (stdout last line).
 // - Fail-fast on missing/invalid required inputs.
@@ -9,10 +9,10 @@ import {
   initSimulationGame,
   startSimulationGame,
   createSeededRng
-} from "../src/engine/index.js";
-import { getActionPlayerKey } from "../src/engine/runner.js";
-import { aiPlay } from "../src/ai/aiPlay_by_GPT.js";
-import { stateProgressKey } from "../src/ai/decisionRuntime_by_GPT.js";
+} from "../../src/engine/index.js";
+import { getActionPlayerKey } from "../../src/engine/runner.js";
+import { aiPlay } from "../../src/ai/aiPlay_by_GPT.js";
+import { stateProgressKey } from "../../src/ai/decisionRuntime_by_GPT.js";
 
 // Quick Read Map (top-down):
 // 1) parseArgs(): strict CLI parsing + validation
@@ -739,6 +739,7 @@ try {
   process.stderr.write(`${msg}\n`);
   process.exit(1);
 }
+
 
 
 

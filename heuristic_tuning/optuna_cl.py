@@ -8,12 +8,12 @@
 # 4) main(): study run + artifact export
 
 """
-scripts/optuna_cl.py  –  CL Optuna tuning
+heuristic_tuning/optuna_cl.py  –  CL Optuna tuning
 target: H-CL vs H-J2 (1000 games per trial)
 튜닝 대상: 승률에 영향 큰 핵심 31개 파라미터만 (나머지는 DEFAULT_PARAMS trial0 값 고정)
 
 사용법:
-  python scripts/optuna_cl.py --trials 200 --workers 4
+  python heuristic_tuning/optuna_cl.py --trials 200 --workers 4
 """
 import argparse, json, math, os, subprocess, sys, time
 from pathlib import Path

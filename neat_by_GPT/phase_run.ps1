@@ -1,5 +1,5 @@
 ﻿#
-# phase_run_by_GPT.ps1
+# phase_run.ps1
 # - Train NEAT by phase using GPT runtime configs.
 # - Keep runtime logic unchanged; this file is comment/structure organized.
 #
@@ -148,7 +148,7 @@ function Invoke-TrainingRun {
     if (-not [string]::IsNullOrWhiteSpace($result)) {
       Write-Host $result.Trim()
     }
-    throw "failed to parse neat_train_worker_by_GPT output as JSON"
+    throw "failed to parse neat_train_worker output as JSON"
   }
 }
 
@@ -298,8 +298,8 @@ if (-not (Test-Path $python)) {
   throw "python not found: $python"
 }
 
-$configFeedforward = "scripts/configs/neat_feedforward_by_GPT.ini"
-$runtimeConfig = "scripts/configs/runtime_phase${Phase}_by_GPT.json"
+$configFeedforward = "neat_by_GPT/configs/neat_feedforward.ini"
+$runtimeConfig = "neat_by_GPT/configs/runtime_phase${Phase}.json"
 $outputDir = "logs/NEAT_GPT/neat_phase${Phase}_seed$Seed"
 
 if (-not (Test-Path $configFeedforward)) {
@@ -313,7 +313,7 @@ if (-not (Test-Path $runtimeConfig)) {
 # Section 3) Build training command
 # ---------------------------------------------------------------------------
 $baseCmd = @(
-  "scripts/neat_train_worker_by_GPT.py",
+  "neat_by_GPT/scripts/neat_train_worker.py",
   "--config-feedforward", $configFeedforward,
   "--runtime-config", $runtimeConfig,
   "--output-dir", $outputDir,
@@ -369,7 +369,7 @@ if ($Phase -eq "1") {
 else {
   $previousPhase = [int]$Phase - 1
   $previousLabel = "phase$previousPhase"
-  $previousRuntimePath = "scripts/configs/runtime_phase${previousPhase}_by_GPT.json"
+  $previousRuntimePath = "neat_by_GPT/configs/runtime_phase${previousPhase}.json"
   $previousRuntime = Read-JsonFile -Path $previousRuntimePath
   $previousGenerations = To-PositiveIntOrDefault -Value $previousRuntime.generations -DefaultValue 20
   $previousCheckpointDir = "logs/NEAT_GPT/neat_phase${previousPhase}_seed$Seed/checkpoints"

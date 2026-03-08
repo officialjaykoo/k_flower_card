@@ -30,27 +30,40 @@ function Get-OptionalDouble {
   }
 }
 
+function Get-RequiredDouble {
+  param(
+    [Parameter(Mandatory = $true)]$Object,
+    [Parameter(Mandatory = $true)][string]$Key
+  )
+  if (-not ($Object.PSObject.Properties.Name -contains $Key)) {
+    throw "runtime missing required key: $Key"
+  }
+  $v = Get-OptionalDouble -Value $Object.$Key -DefaultValue ([double]::NaN)
+  if ([double]::IsNaN($v)) {
+    throw "runtime key '$Key' must be finite number"
+  }
+  return [double]$v
+}
+
+function Assert-RequiredRuntimeKeys {
+  param(
+    [Parameter(Mandatory = $true)]$Runtime,
+    [Parameter(Mandatory = $true)][string[]]$Keys
+  )
+  foreach ($k in $Keys) {
+    if (-not ($Runtime.PSObject.Properties.Name -contains $k)) {
+      throw "runtime missing required key: $k"
+    }
+    if ($null -eq $Runtime.$k) {
+      throw "runtime key '$k' must not be null"
+    }
+  }
+}
+
 function Resolve-EvalGateRule {
   param([Parameter(Mandatory = $true)]$Runtime)
-
-  $defaultMeanGold = 100.0
-  $defaultWinRate = 0.48
-
-  $meanGold = Get-OptionalDouble -Value $Runtime.eval_pass_mean_gold_delta_min
-  if ([double]::IsNaN($meanGold)) {
-    $meanGold = Get-OptionalDouble -Value $Runtime.transition_mean_gold_delta_min
-  }
-  if ([double]::IsNaN($meanGold)) {
-    $meanGold = $defaultMeanGold
-  }
-
-  $winRate = Get-OptionalDouble -Value $Runtime.eval_pass_win_rate_min
-  if ([double]::IsNaN($winRate)) {
-    $winRate = Get-OptionalDouble -Value $Runtime.transition_ema_win_rate
-  }
-  if ([double]::IsNaN($winRate)) {
-    $winRate = $defaultWinRate
-  }
+  $meanGold = Get-RequiredDouble -Object $Runtime -Key "eval_pass_mean_gold_delta_min"
+  $winRate = Get-RequiredDouble -Object $Runtime -Key "eval_pass_win_rate_min"
 
   return [ordered]@{
     mean_gold_delta_min = [double]$meanGold
@@ -83,6 +96,14 @@ if (-not (Test-Path $genomePath)) {
 $runtime = Read-JsonFile -Path $runtimeConfigPath
 $gate = Read-JsonFile -Path $gateStatePath
 $passRule = Resolve-EvalGateRule -Runtime $runtime
+Assert-RequiredRuntimeKeys -Runtime $runtime -Keys @(
+  "max_eval_steps",
+  "fitness_gold_scale",
+  "fitness_gold_neutral_delta",
+  "fitness_win_weight",
+  "fitness_gold_weight",
+  "fitness_win_neutral_rate"
+)
 
 $games = 1000
 $seedTag = "phase${Phase}_eval_$Seed"
@@ -109,9 +130,10 @@ $cmd = @(
   "--max-steps", "$($runtime.max_eval_steps)",
   "--first-turn-policy", "alternate",
   "--fitness-gold-scale", "$($runtime.fitness_gold_scale)",
+  "--fitness-gold-neutral-delta", "$($runtime.fitness_gold_neutral_delta)",
   "--fitness-win-weight", "$($runtime.fitness_win_weight)",
   "--fitness-gold-weight", "$($runtime.fitness_gold_weight)",
-  "--fitness-go-zero-games-penalty", "$($runtime.fitness_go_zero_games_penalty)"
+  "--fitness-win-neutral-rate", "$($runtime.fitness_win_neutral_rate)"
 )
 if (-not $hasPolicy -and $hasPolicyMix) {
   $mixJson = $mixValue | ConvertTo-Json -Depth 8 -Compress
@@ -124,31 +146,6 @@ if ($hasPolicy) {
   $cmd += @("--opponent-policy", "$policyValue")
 }
 
-if ($null -ne $runtime.fitness_win_neutral_rate) {
-  $cmd += @("--fitness-win-neutral-rate", "$($runtime.fitness_win_neutral_rate)")
-}
-if ($null -ne $runtime.fitness_gold_neutral_delta) {
-  $cmd += @("--fitness-gold-neutral-delta", "$($runtime.fitness_gold_neutral_delta)")
-}
-
-if ($null -ne $runtime.fitness_go_max_games) {
-  $cmd += @("--fitness-go-max-games", "$($runtime.fitness_go_max_games)")
-}
-if ($null -ne $runtime.fitness_go_max_games_penalty) {
-  $cmd += @("--fitness-go-max-games-penalty", "$($runtime.fitness_go_max_games_penalty)")
-}
-if ($null -ne $runtime.fitness_go_fail_penalty_trigger) {
-  $cmd += @("--fitness-go-fail-penalty-trigger", "$($runtime.fitness_go_fail_penalty_trigger)")
-}
-if ($null -ne $runtime.fitness_go_fail_penalty_amount) {
-  $cmd += @("--fitness-go-fail-penalty-amount", "$($runtime.fitness_go_fail_penalty_amount)")
-}
-if ($null -ne $runtime.fitness_go_fail_bonus_trigger) {
-  $cmd += @("--fitness-go-fail-bonus-trigger", "$($runtime.fitness_go_fail_bonus_trigger)")
-}
-if ($null -ne $runtime.fitness_go_fail_bonus_amount) {
-  $cmd += @("--fitness-go-fail-bonus-amount", "$($runtime.fitness_go_fail_bonus_amount)")
-}
 $resultLines = & node @cmd
 $exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
@@ -170,9 +167,6 @@ $goGames = [int](Get-OptionalDouble -Value $r.go_games -DefaultValue 0.0)
 $goFailCount = [int](Get-OptionalDouble -Value $r.go_fail_count -DefaultValue 0.0)
 $goFailRate = [double](Get-OptionalDouble -Value $r.go_fail_rate -DefaultValue 0.0)
 $goRate = [double](Get-OptionalDouble -Value $r.go_rate -DefaultValue 0.0)
-$luckProxy = [double](Get-OptionalDouble -Value $r.luck_proxy -DefaultValue 0.0)
-$luckSeatWinRateGap = [double](Get-OptionalDouble -Value $r.luck_components.seat_win_rate_gap -DefaultValue 0.0)
-$luckGoldVolatilityNorm = [double](Get-OptionalDouble -Value $r.luck_components.gold_volatility_norm -DefaultValue 0.0)
 
 Write-Host ""
 Write-Host "=== Phase$Phase Evaluation (Seed=$Seed) ==="
@@ -184,9 +178,6 @@ Write-Host "GO games:        $goGames"
 Write-Host "GO fail count:   $goFailCount"
 Write-Host "GO fail rate:    $goFailRate"
 Write-Host "GO rate:         $goRate"
-Write-Host "Luck proxy:      $luckProxy"
-Write-Host "Luck seat gap:   $luckSeatWinRateGap"
-Write-Host "Luck volatility: $luckGoldVolatilityNorm"
 Write-Host "Imit play ratio: $($r.imitation_play_ratio)"
 Write-Host "Imit match ratio:$($r.imitation_match_ratio)"
 Write-Host "Imit opt ratio:  $($r.imitation_option_ratio)"
@@ -218,9 +209,6 @@ $passState = [ordered]@{
   go_fail_count = $goFailCount
   go_fail_rate = $goFailRate
   go_rate = $goRate
-  luck_proxy = $luckProxy
-  luck_seat_win_rate_gap = $luckSeatWinRateGap
-  luck_gold_volatility_norm = $luckGoldVolatilityNorm
   eval_result_path = $savePath
   gate_state_path = $gateStatePath
   transition_ready = [bool]$gate.transition_ready

@@ -48,18 +48,11 @@ function parseArgs(argv) {
     // - fitnessGoldNeutralDelta shifts gold neutral baseline (0-score point).
     // - fitnessWinWeight / fitnessGoldWeight are mapped to:
     //   win / gold component weights (normalized internally).
-    fitnessGoldScale: 2500.0,
-    fitnessGoldNeutralDelta: 0.0,
-    fitnessWinWeight: 0.35,
-    fitnessGoldWeight: 0.50,
-    fitnessWinNeutralRate: 0.40,
-    fitnessGoZeroGamesPenalty: 0.07,
-    fitnessGoMaxGames: 70,
-    fitnessGoMaxGamesPenalty: 0.80,
-    fitnessGoFailPenaltyTrigger: 0.45,
-    fitnessGoFailPenaltyAmount: 0.10,
-    fitnessGoFailBonusTrigger: 0.20,
-    fitnessGoFailBonusAmount: 0.20,
+    fitnessGoldScale: null,
+    fitnessGoldNeutralDelta: null,
+    fitnessWinWeight: null,
+    fitnessGoldWeight: null,
+    fitnessWinNeutralRate: null,
   };
 
   while (args.length > 0) {
@@ -118,18 +111,11 @@ function parseArgs(argv) {
       out.firstTurnPolicy = String(value || "1").trim() === "0" ? "fixed" : "alternate";
     }
     else if (key === "--continuous-series") out.continuousSeries = !(String(value || "1").trim() === "0");
-    else if (key === "--fitness-gold-scale") out.fitnessGoldScale = Math.max(1.0, Number(value || 2500.0));
-    else if (key === "--fitness-gold-neutral-delta") out.fitnessGoldNeutralDelta = Number(value || 0.0);
-    else if (key === "--fitness-win-weight") out.fitnessWinWeight = Number(value || 0.35);
-    else if (key === "--fitness-gold-weight") out.fitnessGoldWeight = Number(value || 0.50);
-    else if (key === "--fitness-win-neutral-rate") out.fitnessWinNeutralRate = Math.min(0.99, Math.max(0.01, Number(value || 0.40)));
-    else if (key === "--fitness-go-zero-games-penalty") out.fitnessGoZeroGamesPenalty = Math.max(0.0, Number(value || 0.07));
-    else if (key === "--fitness-go-max-games") out.fitnessGoMaxGames = Math.max(1, Math.floor(Number(value || 70)));
-    else if (key === "--fitness-go-max-games-penalty") out.fitnessGoMaxGamesPenalty = Math.max(0.0, Number(value || 0.80));
-    else if (key === "--fitness-go-fail-penalty-trigger") out.fitnessGoFailPenaltyTrigger = Math.max(0.0, Number(value || 0.45));
-    else if (key === "--fitness-go-fail-penalty-amount") out.fitnessGoFailPenaltyAmount = Math.max(0.0, Number(value || 0.10));
-    else if (key === "--fitness-go-fail-bonus-trigger") out.fitnessGoFailBonusTrigger = Math.max(0.0, Number(value || 0.20));
-    else if (key === "--fitness-go-fail-bonus-amount") out.fitnessGoFailBonusAmount = Math.max(0.0, Number(value || 0.20));
+    else if (key === "--fitness-gold-scale") out.fitnessGoldScale = Number(value);
+    else if (key === "--fitness-gold-neutral-delta") out.fitnessGoldNeutralDelta = Number(value);
+    else if (key === "--fitness-win-weight") out.fitnessWinWeight = Number(value);
+    else if (key === "--fitness-gold-weight") out.fitnessGoldWeight = Number(value);
+    else if (key === "--fitness-win-neutral-rate") out.fitnessWinNeutralRate = Number(value);
     else throw new Error(`Unknown argument: ${key}`);
   }
 
@@ -153,6 +139,24 @@ function parseArgs(argv) {
     if (hasGenomeInMix && !out.opponentGenomePath) {
       throw new Error("--opponent-genome is required when --opponent-policy-mix includes genome");
     }
+  }
+  if (!Number.isFinite(out.fitnessGoldScale) || out.fitnessGoldScale <= 0) {
+    throw new Error("--fitness-gold-scale is required and must be > 0");
+  }
+  if (!Number.isFinite(out.fitnessGoldNeutralDelta)) {
+    throw new Error("--fitness-gold-neutral-delta is required and must be finite");
+  }
+  if (!Number.isFinite(out.fitnessWinWeight) || out.fitnessWinWeight < 0) {
+    throw new Error("--fitness-win-weight is required and must be >= 0");
+  }
+  if (!Number.isFinite(out.fitnessGoldWeight) || out.fitnessGoldWeight < 0) {
+    throw new Error("--fitness-gold-weight is required and must be >= 0");
+  }
+  if ((out.fitnessWinWeight + out.fitnessGoldWeight) <= 0) {
+    throw new Error("--fitness-win-weight + --fitness-gold-weight must be > 0");
+  }
+  if (!Number.isFinite(out.fitnessWinNeutralRate) || out.fitnessWinNeutralRate <= 0 || out.fitnessWinNeutralRate >= 1) {
+    throw new Error("--fitness-win-neutral-rate is required and must be in (0,1)");
   }
   return out;
 }
@@ -479,21 +483,6 @@ function quantile(values, q) {
   return sorted[idx];
 }
 
-function mean(values) {
-  if (!Array.isArray(values) || values.length <= 0) return 0;
-  return values.reduce((acc, v) => acc + Number(v || 0), 0) / values.length;
-}
-
-function standardDeviation(values) {
-  if (!Array.isArray(values) || values.length <= 1) return 0;
-  const mu = mean(values);
-  const variance = values.reduce((acc, v) => {
-    const d = Number(v || 0) - mu;
-    return acc + (d * d);
-  }, 0) / values.length;
-  return Math.sqrt(Math.max(0, variance));
-}
-
 function clamp01(v) {
   const x = Number(v || 0);
   if (x <= 0) return 0;
@@ -584,10 +573,6 @@ function main() {
     ai: 0,
   };
   const opponentPolicyCounts = {};
-  const controlSeatStats = {
-    first: { games: 0, wins: 0, goldDeltas: [] },
-    second: { games: 0, wins: 0, goldDeltas: [] },
-  };
   const seriesSession = {
     roundsPlayed: 0,
     previousEndState: null,
@@ -600,8 +585,6 @@ function main() {
       throw new Error("resolved empty opponent policy");
     }
     opponentPolicyCounts[opponentPolicyForGame] = Number(opponentPolicyCounts[opponentPolicyForGame] || 0) + 1;
-    const controlSeat = firstTurnKey === controlActor ? "first" : "second";
-    controlSeatStats[controlSeat].games += 1;
     firstTurnCounts[firstTurnKey] += 1;
     const seed = `${opts.seed}|g=${gi}|first=${firstTurnKey}|sr=${seriesSession.roundsPlayed}`;
     const roundStart = opts.continuousSeries
@@ -623,7 +606,6 @@ function main() {
     const afterGoldDiff = controlGoldDiff(endState, controlActor);
     const goldDelta = afterGoldDiff - beforeGoldDiff;
     goldDeltas.push(goldDelta);
-    controlSeatStats[controlSeat].goldDeltas.push(goldDelta);
     const controlGold = Number(endState?.players?.[controlActor]?.gold || 0);
     const opponentGold = Number(endState?.players?.[opponentActor]?.gold || 0);
     const controlBankrupt = controlGold <= 0;
@@ -648,7 +630,6 @@ function main() {
     const winner = endState?.result?.winner || "unknown";
     if (winner === controlActor) {
       wins += 1;
-      controlSeatStats[controlSeat].wins += 1;
     }
     else if (winner === opponentActor) losses += 1;
     else draws += 1;
@@ -670,61 +651,16 @@ function main() {
   const drawRate = draws / games;
   const goRate = goGames / games;
   const goFailRate = goGames > 0 ? goFailCount / goGames : 0;
-  const fitnessGoldScaleRaw = Number(opts.fitnessGoldScale);
-  const fitnessGoldNeutralDeltaRaw = Number(opts.fitnessGoldNeutralDelta);
-  const fitnessWinWeightRaw = Number(opts.fitnessWinWeight);
-  const fitnessGoldWeightRaw = Number(opts.fitnessGoldWeight);
-  const fitnessWinNeutralRateRaw = Number(opts.fitnessWinNeutralRate);
-  const fitnessGoZeroGamesPenaltyRaw = Number(opts.fitnessGoZeroGamesPenalty);
-  const fitnessGoMaxGamesRaw = Number(opts.fitnessGoMaxGames);
-  const fitnessGoMaxGamesPenaltyRaw = Number(opts.fitnessGoMaxGamesPenalty);
-  const fitnessGoFailPenaltyTriggerRaw = Number(opts.fitnessGoFailPenaltyTrigger);
-  const fitnessGoFailPenaltyAmountRaw = Number(opts.fitnessGoFailPenaltyAmount);
-  const fitnessGoFailBonusTriggerRaw = Number(opts.fitnessGoFailBonusTrigger);
-  const fitnessGoFailBonusAmountRaw = Number(opts.fitnessGoFailBonusAmount);
-  const fitnessGoldScale = Number.isFinite(fitnessGoldScaleRaw) && fitnessGoldScaleRaw > 0
-    ? fitnessGoldScaleRaw
-    : 2500.0;
-  const fitnessGoldNeutralDelta = Number.isFinite(fitnessGoldNeutralDeltaRaw) ? fitnessGoldNeutralDeltaRaw : 0.0;
-  const weightWinRaw = Number.isFinite(fitnessWinWeightRaw) ? Math.max(0, fitnessWinWeightRaw) : 0.35;
-  const weightGoldRaw = Number.isFinite(fitnessGoldWeightRaw) ? Math.max(0, fitnessGoldWeightRaw) : 0.50;
+  const fitnessGoldScale = Number(opts.fitnessGoldScale);
+  const fitnessGoldNeutralDelta = Number(opts.fitnessGoldNeutralDelta);
+  const weightWinRaw = Number(opts.fitnessWinWeight);
+  const weightGoldRaw = Number(opts.fitnessGoldWeight);
   const weightRawSum = weightWinRaw + weightGoldRaw;
-  const fitnessWinWeight = weightRawSum > 0 ? weightWinRaw / weightRawSum : 0.35;
-  const fitnessGoldWeight = weightRawSum > 0 ? weightGoldRaw / weightRawSum : 0.50;
-  const fitnessGoZeroGamesPenalty =
-    Number.isFinite(fitnessGoZeroGamesPenaltyRaw) && fitnessGoZeroGamesPenaltyRaw >= 0
-      ? fitnessGoZeroGamesPenaltyRaw
-      : 0.07;
-  const fitnessGoMaxGames =
-    Number.isFinite(fitnessGoMaxGamesRaw) && fitnessGoMaxGamesRaw > 0 ? Math.floor(fitnessGoMaxGamesRaw) : 70;
-  const fitnessGoMaxGamesPenalty =
-    Number.isFinite(fitnessGoMaxGamesPenaltyRaw) && fitnessGoMaxGamesPenaltyRaw >= 0
-      ? fitnessGoMaxGamesPenaltyRaw
-      : 0.80;
-  const fitnessWinNeutralRate =
-    Number.isFinite(fitnessWinNeutralRateRaw) && fitnessWinNeutralRateRaw > 0 && fitnessWinNeutralRateRaw < 1
-      ? fitnessWinNeutralRateRaw
-      : 0.40;
-  const goFailPenaltyTrigger =
-    Number.isFinite(fitnessGoFailPenaltyTriggerRaw) && fitnessGoFailPenaltyTriggerRaw >= 0
-      ? fitnessGoFailPenaltyTriggerRaw
-      : 0.45;
-  const goFailPenaltyAmount =
-    Number.isFinite(fitnessGoFailPenaltyAmountRaw) && fitnessGoFailPenaltyAmountRaw >= 0
-      ? fitnessGoFailPenaltyAmountRaw
-      : 0.10;
-  const goFailBonusTrigger =
-    Number.isFinite(fitnessGoFailBonusTriggerRaw) && fitnessGoFailBonusTriggerRaw >= 0
-      ? fitnessGoFailBonusTriggerRaw
-      : 0.20;
-  const goFailBonusAmount =
-    Number.isFinite(fitnessGoFailBonusAmountRaw) && fitnessGoFailBonusAmountRaw >= 0
-      ? fitnessGoFailBonusAmountRaw
-      : 0.20;
+  const fitnessWinWeight = weightWinRaw / weightRawSum;
+  const fitnessGoldWeight = weightGoldRaw / weightRawSum;
+  const fitnessWinNeutralRate = Number(opts.fitnessWinNeutralRate);
 
-  // Simplified fitness:
-  // - base term: gold + result(win/loss/draw)
-  // - GO controls: zero-go penalty + fail-rate penalty/bonus + max-go penalty
+  // Simplified fitness: base term only (gold + result win/loss/draw)
   const goldNorm = Math.tanh((meanGoldDelta - fitnessGoldNeutralDelta) / fitnessGoldScale);
   const expectedResultRaw =
     clamp01(winRate) + (0.5 * clamp01(drawRate)) - clamp01(lossRate);
@@ -742,43 +678,6 @@ function main() {
   let fitness =
     (fitnessGoldWeight * goldNorm) +
     (fitnessWinWeight * resultNorm);
-  let goZeroGamesPenalty = 0.0;
-  let goMaxGamesPenalty = 0.0;
-  let goFailPenalty = 0.0;
-  let goFailBonus = 0.0;
-  let goFailBonusTier = "none";
-  if (goGames === 0) {
-    goZeroGamesPenalty = fitnessGoZeroGamesPenalty;
-    fitness -= goZeroGamesPenalty;
-  } else if (goFailRate <= goFailBonusTrigger) {
-    goFailBonus = goFailBonusAmount;
-    goFailBonusTier = "strict";
-    fitness += goFailBonus;
-  } else if (goFailRate >= goFailPenaltyTrigger) {
-    goFailPenalty = goFailPenaltyAmount;
-    fitness -= goFailPenalty;
-  }
-  if (goGames > fitnessGoMaxGames) {
-    goMaxGamesPenalty = fitnessGoMaxGamesPenalty;
-    fitness -= goMaxGamesPenalty;
-  }
-
-  // Luck proxy (logging-only):
-  // - seat_win_rate_gap: sensitivity to turn-order randomness
-  // - gold_volatility_norm: outcome volatility normalized by fitness gold scale
-  const seatFirstWinRate = controlSeatStats.first.games > 0
-    ? controlSeatStats.first.wins / controlSeatStats.first.games
-    : 0;
-  const seatSecondWinRate = controlSeatStats.second.games > 0
-    ? controlSeatStats.second.wins / controlSeatStats.second.games
-    : 0;
-  const seatWinRateGap = Math.abs(seatFirstWinRate - seatSecondWinRate);
-  const seatFirstMeanGoldDelta = mean(controlSeatStats.first.goldDeltas);
-  const seatSecondMeanGoldDelta = mean(controlSeatStats.second.goldDeltas);
-  const goldDeltaStdDev = standardDeviation(goldDeltas);
-  const goldVolatility = fitnessGoldScale > 0 ? goldDeltaStdDev / fitnessGoldScale : 0;
-  const goldVolatilityNorm = clamp01(goldVolatility / 2.0);
-  const luckProxy = (0.6 * seatWinRateGap) + (0.4 * goldVolatilityNorm);
 
   const simImitation = buildImitationMetrics(simImitationTotals, simImitationMatches);
   const imitationTotals = cloneDecisionCounters(simImitation.totals);
@@ -825,17 +724,6 @@ function main() {
     p10_gold_delta: quantile(goldDeltas, 0.1),
     p50_gold_delta: quantile(goldDeltas, 0.5),
     p90_gold_delta: quantile(goldDeltas, 0.9),
-    luck_proxy: luckProxy,
-    luck_components: {
-      seat_first_win_rate: seatFirstWinRate,
-      seat_second_win_rate: seatSecondWinRate,
-      seat_win_rate_gap: seatWinRateGap,
-      seat_first_mean_gold_delta: seatFirstMeanGoldDelta,
-      seat_second_mean_gold_delta: seatSecondMeanGoldDelta,
-      gold_delta_stddev: goldDeltaStdDev,
-      gold_volatility: goldVolatility,
-      gold_volatility_norm: goldVolatilityNorm,
-    },
     fitness_gold_scale: fitnessGoldScale,
     fitness_gold_neutral_delta: fitnessGoldNeutralDelta,
     fitness_win_neutral_rate: fitnessWinNeutralRate,
@@ -864,22 +752,10 @@ function main() {
       result_expected: expectedResult,
       result_neutral: neutralExpectedResult,
       win_neutral_rate: fitnessWinNeutralRate,
-      go_zero_games_penalty: goZeroGamesPenalty,
-      go_zero_games_penalty_amount: fitnessGoZeroGamesPenalty,
-      go_max_games_penalty: goMaxGamesPenalty,
-      go_fail_penalty: goFailPenalty,
-      go_fail_penalty_trigger: goFailPenaltyTrigger,
-      go_fail_penalty_amount: goFailPenaltyAmount,
-      go_fail_bonus: goFailBonus,
-      go_fail_bonus_tier: goFailBonusTier,
-      go_fail_bonus_trigger: goFailBonusTrigger,
-      go_fail_bonus_amount: goFailBonusAmount,
       weights: {
         win: fitnessWinWeight,
         gold: fitnessGoldWeight,
       },
-      go_max_games: fitnessGoMaxGames,
-      go_max_games_penalty_amount: fitnessGoMaxGamesPenalty,
     },
     eval_time_ms: Math.max(0, Date.now() - evalStartMs),
     seed_used: opts.seed,

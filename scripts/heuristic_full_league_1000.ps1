@@ -153,6 +153,10 @@ function Convert-DuelResultToMatchSummary {
     go_games_b        = [int]$ResultObject.go_games_b
     go_fail_count_a   = [int]$ResultObject.go_fail_count_a
     go_fail_count_b   = [int]$ResultObject.go_fail_count_b
+    go_opp_count_a    = [int]$ResultObject.go_opportunity_count_a
+    go_opp_count_b    = [int]$ResultObject.go_opportunity_count_b
+    go_opp_games_a    = [int]$ResultObject.go_opportunity_games_a
+    go_opp_games_b    = [int]$ResultObject.go_opportunity_games_b
     mean_gold_delta_a = [double]$ResultObject.mean_gold_delta_a
     file              = $resolvedFile
   }
@@ -330,6 +334,8 @@ foreach ($p in $policyList) {
     go_count = 0
     go_games = 0
     go_fail_count = 0
+    go_opp_count = 0
+    go_opp_games = 0
     bankrupt_inflicted = 0
     bankrupt_suffered = 0
     gold_delta_total = 0.0
@@ -348,6 +354,8 @@ foreach ($m in $matchSummaries) {
   $a.go_count += $m.go_count_a
   $a.go_games += $m.go_games_a
   $a.go_fail_count += $m.go_fail_count_a
+  $a.go_opp_count += $m.go_opp_count_a
+  $a.go_opp_games += $m.go_opp_games_a
   $a.bankrupt_suffered += $m.bankrupt_a
   $a.bankrupt_inflicted += $m.bankrupt_b
   $a.gold_delta_total += ($m.mean_gold_delta_a * $m.games)
@@ -359,6 +367,8 @@ foreach ($m in $matchSummaries) {
   $b.go_count += $m.go_count_b
   $b.go_games += $m.go_games_b
   $b.go_fail_count += $m.go_fail_count_b
+  $b.go_opp_count += $m.go_opp_count_b
+  $b.go_opp_games += $m.go_opp_games_b
   $b.bankrupt_suffered += $m.bankrupt_b
   $b.bankrupt_inflicted += $m.bankrupt_a
   $b.gold_delta_total += ((-$m.mean_gold_delta_a) * $m.games)
@@ -376,12 +386,21 @@ foreach ($p in $policyList) {
     win_rate = if ($x.games -gt 0) { $x.wins / $x.games } else { 0 }
     mean_gold_delta = if ($x.games -gt 0) { [Math]::Round(($x.gold_delta_total / $x.games), 0) } else { 0 }
     go_count = $x.go_count
+    go_games = $x.go_games
     go_fail_count = $x.go_fail_count
+    go_opp_count = $x.go_opp_count
+    go_opp_games = $x.go_opp_games
     bankrupt_inflicted = $x.bankrupt_inflicted
     bankrupt_suffered = $x.bankrupt_suffered
+    go_per_win_rate = if ($x.wins -gt 0) { $x.go_games / $x.wins } else { 0 }
     go_fail_rate = if ($x.go_games -gt 0) { $x.go_fail_count / $x.go_games } else { 0 }
+    go_take_rate = if ($x.go_opp_count -gt 0) { $x.go_count / $x.go_opp_count } else { 0 }
+    go_opp_game_rate = if ($x.games -gt 0) { $x.go_opp_games / $x.games } else { 0 }
     win_rate_pct = [Math]::Round($(if ($x.games -gt 0) { ($x.wins * 100.0) / $x.games } else { 0 }), 1)
+    go_per_win_rate_pct = [Math]::Round($(if ($x.wins -gt 0) { ($x.go_games * 100.0) / $x.wins } else { 0 }), 1)
     go_fail_rate_pct = [Math]::Round($(if ($x.go_games -gt 0) { ($x.go_fail_count * 100.0) / $x.go_games } else { 0 }), 1)
+    go_take_rate_pct = [Math]::Round($(if ($x.go_opp_count -gt 0) { ($x.go_count * 100.0) / $x.go_opp_count } else { 0 }), 1)
+    go_opp_game_rate_pct = [Math]::Round($(if ($x.games -gt 0) { ($x.go_opp_games * 100.0) / $x.games } else { 0 }), 1)
   }
 }
 
@@ -418,7 +437,7 @@ Write-Host "=== Full League Completed ==="
 Write-Host "Output:  $([System.IO.Path]::GetFullPath($outputDir))"
 Write-Host "Summary: $([System.IO.Path]::GetFullPath($summaryPath))"
 Write-Host ""
-$displayStandings = $standings | Select-Object `
+$displayOverall = $standings | Select-Object `
   policy,
   @{ Name = "G"; Expression = { $_.games } },
   @{ Name = "W"; Expression = { $_.wins } },
@@ -427,8 +446,20 @@ $displayStandings = $standings | Select-Object `
   @{ Name = "W%"; Expression = { "{0:N1}%" -f $_.win_rate_pct } },
   @{ Name = "BI"; Expression = { $_.bankrupt_inflicted } },
   @{ Name = "BS"; Expression = { $_.bankrupt_suffered } },
-  @{ Name = "G_DT"; Expression = { "{0:N0}" -f ([Math]::Round($_.mean_gold_delta, 0)) } },
+  @{ Name = "G_DT"; Expression = { "{0:N0}" -f ([Math]::Round($_.mean_gold_delta, 0)) } }
+
+$displayGoMetrics = $standings | Select-Object `
+  policy,
+  @{ Name = "W"; Expression = { $_.wins } },
+  @{ Name = "GO_G"; Expression = { $_.go_games } },
+  @{ Name = "GO_G%"; Expression = { "{0:N1}%" -f $_.go_per_win_rate_pct } },
+  @{ Name = "GO_OPP"; Expression = { $_.go_opp_count } },
   @{ Name = "GO"; Expression = { $_.go_count } },
+  @{ Name = "GO_T%"; Expression = { "{0:N1}%" -f $_.go_take_rate_pct } },
   @{ Name = "GO_F"; Expression = { $_.go_fail_count } },
   @{ Name = "GO_F%"; Expression = { "{0:N1}%" -f $_.go_fail_rate_pct } }
-Write-Host ($displayStandings | Format-Table -AutoSize | Out-String -Width 4096)
+
+Write-Host "=== Overall Standings ==="
+Write-Host ($displayOverall | Format-Table -AutoSize | Out-String -Width 4096)
+Write-Host "=== GO Metrics ==="
+Write-Host ($displayGoMetrics | Format-Table -AutoSize | Out-String -Width 4096)

@@ -50,8 +50,9 @@ pip install torch neat-python optuna
 
 ## Repository Map
 - `src/`: game engine, AI policies, web UI
-- `scripts/`: NEAT orchestration and evaluation
-- `scripts/configs/`: NEAT runtime/config files
+- `scripts/`: base NEAT orchestration/evaluation scripts
+- `scripts/configs/`: base NEAT runtime/config files
+- `neat_by_GPT/`: GPT-specific NEAT pipeline (`phase_*`, `scripts/`, `configs/`)
 - `ppo_by_GPT/`: PPO (GPT) pipeline
 - `ppo_by_CL/`: PPO (CL) pipeline
 - `logs/`: training and evaluation outputs

@@ -1,5 +1,5 @@
 ﻿#
-# phase_eval_by_GPT.ps1
+# phase_eval.ps1
 # - Evaluate winner genome for selected phase/seed.
 # - Keep runtime logic unchanged; this file is comment/structure organized.
 #
@@ -81,7 +81,7 @@ function Resolve-EvalGateRule {
 # ---------------------------------------------------------------------------
 # Section 2) Paths and runtime loading
 # ---------------------------------------------------------------------------
-$runtimeConfigPath = "scripts/configs/runtime_phase${Phase}_by_GPT.json"
+$runtimeConfigPath = "neat_by_GPT/configs/runtime_phase${Phase}.json"
 $outputDir = "logs/NEAT_GPT/neat_phase${Phase}_seed$Seed"
 $gateStatePath = Join-Path $outputDir "gate_state.json"
 $genomePath = Join-Path $outputDir "models/winner_genome.json"
@@ -128,7 +128,7 @@ if ([string]::IsNullOrWhiteSpace($fitnessProfile)) {
 }
 
 $cmd = @(
-  "scripts/neat_eval_worker_by_GPT.mjs",
+  "neat_by_GPT/scripts/neat_eval_worker.mjs",
   "--genome", $genomePath,
   "--games", "$games",
   "--seed", $seedTag,

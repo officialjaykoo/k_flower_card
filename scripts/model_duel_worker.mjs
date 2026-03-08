@@ -325,6 +325,13 @@ function normalizeOptionCandidates(items) {
   return out;
 }
 
+function isGoStopOpportunityDecision(decision) {
+  if (!decision || decision.decisionType !== "option") return false;
+  if (String(decision?.stateBefore?.phase || "") !== "go-stop") return false;
+  const options = normalizeOptionCandidates(decision.candidates || []);
+  return options.includes("go") && options.includes("stop");
+}
+
 function selectPool(state, actor) {
   if (state.phase === "playing" && state.currentTurn === actor) {
     return { cards: (state.players?.[actor]?.hand || []).map((c) => c.id) };
@@ -867,17 +874,32 @@ function createSeatRecord() {
     go_count_total: 0,
     go_game_count: 0,
     go_fail_count: 0,
+    go_opportunity_count_total: 0,
+    go_opportunity_game_count: 0,
     gold_deltas: [],
   };
 }
 
-function updateSeatRecord(record, winner, selfActor, oppActor, goldDelta, selfGoCount) {
+function updateSeatRecord(
+  record,
+  winner,
+  selfActor,
+  oppActor,
+  goldDelta,
+  selfGoCount,
+  selfGoOpportunityCount
+) {
   record.games += 1;
   if (winner === selfActor) record.wins += 1;
   else if (winner === oppActor) record.losses += 1;
   else record.draws += 1;
   const goCount = Math.max(0, Number(selfGoCount || 0));
+  const goOpportunityCount = Math.max(0, Number(selfGoOpportunityCount || 0));
   record.go_count_total += goCount;
+  record.go_opportunity_count_total += goOpportunityCount;
+  if (goOpportunityCount > 0) {
+    record.go_opportunity_game_count += 1;
+  }
   if (goCount > 0) {
     record.go_game_count += 1;
     if (winner !== selfActor) {
@@ -895,6 +917,8 @@ function finalizeSeatRecord(record) {
   const goCountTotal = Number(record?.go_count_total || 0);
   const goGameCount = Number(record?.go_game_count || 0);
   const goFailCount = Number(record?.go_fail_count || 0);
+  const goOpportunityCountTotal = Number(record?.go_opportunity_count_total || 0);
+  const goOpportunityGameCount = Number(record?.go_opportunity_game_count || 0);
   const deltas = Array.isArray(record?.gold_deltas) ? record.gold_deltas : [];
   const meanGoldDelta = deltas.length > 0 ? deltas.reduce((a, b) => a + b, 0) / deltas.length : 0;
   return {
@@ -911,6 +935,10 @@ function finalizeSeatRecord(record) {
     go_fail_count: goFailCount,
     go_success_count: Math.max(0, goGameCount - goFailCount),
     go_fail_rate: goGameCount > 0 ? goFailCount / goGameCount : 0,
+    go_opportunity_count_total: goOpportunityCountTotal,
+    go_opportunity_game_count: goOpportunityGameCount,
+    go_opportunity_rate: games > 0 ? goOpportunityGameCount / games : 0,
+    go_take_rate: goOpportunityCountTotal > 0 ? goCountTotal / goOpportunityCountTotal : 0,
     mean_gold_delta: meanGoldDelta,
     p10_gold_delta: quantile(deltas, 0.1),
     p50_gold_delta: quantile(deltas, 0.5),
@@ -930,6 +958,12 @@ function buildSeatSplitSummary(firstRecord, secondRecord) {
     Number(firstRecord.go_game_count || 0) + Number(secondRecord.go_game_count || 0);
   combined.go_fail_count =
     Number(firstRecord.go_fail_count || 0) + Number(secondRecord.go_fail_count || 0);
+  combined.go_opportunity_count_total =
+    Number(firstRecord.go_opportunity_count_total || 0) +
+    Number(secondRecord.go_opportunity_count_total || 0);
+  combined.go_opportunity_game_count =
+    Number(firstRecord.go_opportunity_game_count || 0) +
+    Number(secondRecord.go_opportunity_game_count || 0);
   combined.gold_deltas = [
     ...(Array.isArray(firstRecord.gold_deltas) ? firstRecord.gold_deltas : []),
     ...(Array.isArray(secondRecord.gold_deltas) ? secondRecord.gold_deltas : []),
@@ -994,6 +1028,14 @@ function buildConsoleSummary(report) {
     go_fail_count_b: Number(report?.go_fail_count_b || 0),
     go_fail_rate_a: Number(report?.go_fail_rate_a || 0),
     go_fail_rate_b: Number(report?.go_fail_rate_b || 0),
+    go_opportunity_count_a: Number(report?.go_opportunity_count_a || 0),
+    go_opportunity_count_b: Number(report?.go_opportunity_count_b || 0),
+    go_opportunity_games_a: Number(report?.go_opportunity_games_a || 0),
+    go_opportunity_games_b: Number(report?.go_opportunity_games_b || 0),
+    go_opportunity_rate_a: Number(report?.go_opportunity_rate_a || 0),
+    go_opportunity_rate_b: Number(report?.go_opportunity_rate_b || 0),
+    go_take_rate_a: Number(report?.go_take_rate_a || 0),
+    go_take_rate_b: Number(report?.go_take_rate_b || 0),
     bankrupt: report?.bankrupt || { a_bankrupt_count: 0, b_bankrupt_count: 0 },
   };
 }
@@ -1016,6 +1058,8 @@ function formatConsoleSummaryText(summary) {
     `Gold delta(A):     mean=${summary.mean_gold_delta_a}, p10=${summary.p10_gold_delta_a}, p50=${summary.p50_gold_delta_a}, p90=${summary.p90_gold_delta_a}`,
     `GO A:              count=${summary.go_count_a}, games=${summary.go_games_a}, fail=${summary.go_fail_count_a}, fail_rate=${summary.go_fail_rate_a}`,
     `GO B:              count=${summary.go_count_b}, games=${summary.go_games_b}, fail=${summary.go_fail_count_b}, fail_rate=${summary.go_fail_rate_b}`,
+    `GO Opp A:          total=${summary.go_opportunity_count_a}, games=${summary.go_opportunity_games_a}, opp_rate=${summary.go_opportunity_rate_a}, take_rate=${summary.go_take_rate_a}`,
+    `GO Opp B:          total=${summary.go_opportunity_count_b}, games=${summary.go_opportunity_games_b}, opp_rate=${summary.go_opportunity_rate_b}, take_rate=${summary.go_take_rate_b}`,
     `Bankrupt:          A=${bankrupt.a_bankrupt_count}, B=${bankrupt.b_bankrupt_count}`,
     `Result file:       ${summary.result_out || ""}`,
     "===========================================================",
@@ -1122,6 +1166,7 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
         ? continueRound(seriesSession.previousEndState, seed, firstTurnKey, effectiveKiboDetail)
         : startRound(seed, firstTurnKey, effectiveKiboDetail)
       : startRound(seed, firstTurnKey, effectiveKiboDetail);
+    const roundGoOpportunity = { human: 0, ai: 0 };
 
     const beforeDiffA = goldDiffByActor(roundStart, actorA);
     const endState = playSingleRound(
@@ -1130,6 +1175,11 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
       playerByActor,
       Math.max(20, Math.floor(opts.maxSteps)),
       (decision) => {
+        if (isGoStopOpportunityDecision(decision)) {
+          if (decision.actor === "human" || decision.actor === "ai") {
+            roundGoOpportunity[decision.actor] += 1;
+          }
+        }
         if (!datasetWriter) return;
         if (opts.datasetActor !== "all" && decision.actor !== opts.datasetActor) return;
         if (opts.datasetDecisionTypes && !opts.datasetDecisionTypes.has(decision.decisionType)) return;
@@ -1197,6 +1247,8 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
     const goldB = Number(endState?.players?.[actorB]?.gold || 0);
     const goCountA = Math.max(0, Number(endState?.players?.[actorA]?.goCount || 0));
     const goCountB = Math.max(0, Number(endState?.players?.[actorB]?.goCount || 0));
+    const goOpportunityCountA = Math.max(0, Number(roundGoOpportunity[actorA] || 0));
+    const goOpportunityCountB = Math.max(0, Number(roundGoOpportunity[actorB] || 0));
     if (goldA <= 0) bankrupt.a_bankrupt_count += 1;
     if (goldB <= 0) bankrupt.b_bankrupt_count += 1;
 
@@ -1228,8 +1280,24 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
     const seatAKey = firstTurnKey === actorA ? "first" : "second";
     const seatBKey = firstTurnKey === actorB ? "first" : "second";
     const goldDeltaA = afterDiffA - beforeDiffA;
-    updateSeatRecord(seatSplitA[seatAKey], winner, actorA, actorB, goldDeltaA, goCountA);
-    updateSeatRecord(seatSplitB[seatBKey], winner, actorB, actorA, -goldDeltaA, goCountB);
+    updateSeatRecord(
+      seatSplitA[seatAKey],
+      winner,
+      actorA,
+      actorB,
+      goldDeltaA,
+      goCountA,
+      goOpportunityCountA
+    );
+    updateSeatRecord(
+      seatSplitB[seatBKey],
+      winner,
+      actorB,
+      actorA,
+      -goldDeltaA,
+      goCountB,
+      goOpportunityCountB
+    );
   }
 
   const games = opts.games;
@@ -1306,6 +1374,14 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
     go_fail_count_b: splitSummaryB.combined.go_fail_count,
     go_fail_rate_a: splitSummaryA.combined.go_fail_rate,
     go_fail_rate_b: splitSummaryB.combined.go_fail_rate,
+    go_opportunity_count_a: splitSummaryA.combined.go_opportunity_count_total,
+    go_opportunity_count_b: splitSummaryB.combined.go_opportunity_count_total,
+    go_opportunity_games_a: splitSummaryA.combined.go_opportunity_game_count,
+    go_opportunity_games_b: splitSummaryB.combined.go_opportunity_game_count,
+    go_opportunity_rate_a: splitSummaryA.combined.go_opportunity_rate,
+    go_opportunity_rate_b: splitSummaryB.combined.go_opportunity_rate,
+    go_take_rate_a: splitSummaryA.combined.go_take_rate,
+    go_take_rate_b: splitSummaryB.combined.go_take_rate,
     mean_gold_delta_a: meanGoldDeltaA,
     p10_gold_delta_a: quantile(goldDeltasA, 0.1),
     p50_gold_delta_a: quantile(goldDeltasA, 0.5),

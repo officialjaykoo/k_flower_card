@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 """
-Pipeline Stage: 1/3 (neat_train_worker_by_GPT.py -> neat_eval_worker_by_GPT.mjs -> phase_eval_by_GPT.ps1)
+Pipeline Stage: 1/3 (neat_by_GPT/scripts/neat_train_worker.py -> neat_by_GPT/scripts/neat_eval_worker.mjs -> neat_by_GPT/phase_eval.ps1)
 
 Execution Flow Map:
 1) parse_args()/main(): runtime bootstrap and training orchestration
@@ -55,7 +55,7 @@ DEFAULT_RUNTIME = {
     "opponent_genome": "",
     "switch_seats": True,
     "checkpoint_every": 50,
-    "eval_script": "scripts/neat_eval_worker_by_GPT.mjs",
+    "eval_script": "neat_by_GPT/scripts/neat_eval_worker.mjs",
     "fitness_profile": "phase1",
     "seed": 13,
     # Gate / transition controls
@@ -1163,12 +1163,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="neat-python training runner for k_flower_card")
     parser.add_argument(
         "--config-feedforward",
-        default="scripts/configs/neat_feedforward_by_GPT.ini",
+        default="neat_by_GPT/configs/neat_feedforward.ini",
         help="Path to neat-python config file",
     )
     parser.add_argument(
         "--runtime-config",
-        default="scripts/configs/runtime_phase1_by_GPT.json",
+        default="neat_by_GPT/configs/runtime_phase1.json",
         help="Path to runtime JSON (workers/games/checkpoint interval)",
     )
     parser.add_argument("--output-dir", default="logs/NEAT_GPT/neat_phase1_seed13", help="Output directory")

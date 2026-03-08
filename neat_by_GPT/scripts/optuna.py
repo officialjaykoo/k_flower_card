@@ -8,11 +8,11 @@
 # 4) main(): study run + artifact export
 
 """
-scripts/optuna_gpt.py - GPT Optuna tuner
+neat_by_GPT/scripts/optuna.py - GPT Optuna tuner
 target: H-GPT vs H-CL (1000 games per trial)
 
 Integration:
-  - Can consume optimizer_by_gpt output plan JSON.
+  - Can consume optimizer output plan JSON.
   - Converts defense/attack recommendations into Optuna seed trials.
 """
 
@@ -39,7 +39,7 @@ OPPONENT_POLICY = "H-CL"
 SEED = "optuna-gpt"
 MAX_STEPS = 600
 TRIAL_TIMEOUT_SEC = 600
-DUEL_SCRIPT = "scripts/model_duel_worker_by_GPT.mjs"
+DUEL_SCRIPT = "neat_by_GPT/scripts/model_duel_worker.mjs"
 WIN_RATE_WEIGHT = 0.35
 GOLD_DELTA_WEIGHT = 0.65
 GOLD_DELTA_SCALE = 500.0
@@ -399,7 +399,7 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--db", type=str, default="")
     parser.add_argument("--study", type=str, default="gpt_tuning")
-    parser.add_argument("--output", type=str, default="logs/optuna/optuna_gpt_best.json")
+    parser.add_argument("--output", type=str, default="logs/optuna/optuna_best.json")
     parser.add_argument("--result-dir", type=str, default="")
     parser.add_argument("--timeout", type=int, default=0)
     parser.add_argument("--seed", type=str, default=SEED)

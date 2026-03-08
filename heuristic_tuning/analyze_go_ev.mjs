@@ -1060,7 +1060,7 @@ function buildSummaryText(payload) {
 const argv = parseArgs(process.argv.slice(2));
 if (argv.help) {
   console.log(`Usage:
-  node scripts/analyze_go_ev.mjs --kibo <kibo.jsonl> --dataset <dataset.jsonl> --actor-policy <POLICY> [--actor ai]
+  node heuristic_tuning/analyze_go_ev.mjs --kibo <kibo.jsonl> --dataset <dataset.jsonl> --actor-policy <POLICY> [--actor ai]
 
 Outputs (fixed):
   <match_dir>/analyze/go_stop_summary.txt

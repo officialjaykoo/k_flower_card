@@ -75,9 +75,6 @@ function Get-BestGenomeGoMetrics {
     go_fail_count = $null
     go_fail_rate = $null
     go_rate = $null
-    luck_proxy = $null
-    luck_seat_win_rate_gap = $null
-    luck_gold_volatility_norm = $null
   }
 
   $generationMetricsPathRaw = [string]$Summary.generation_metrics_log
@@ -118,9 +115,6 @@ function Get-BestGenomeGoMetrics {
     go_fail_count = [int]$bestEvalRecord.go_fail_count
     go_fail_rate = [double]$bestEvalRecord.go_fail_rate
     go_rate = [double]$bestEvalRecord.go_rate
-    luck_proxy = [double]$bestEvalRecord.luck_proxy
-    luck_seat_win_rate_gap = [double]$bestEvalRecord.luck_components.seat_win_rate_gap
-    luck_gold_volatility_norm = [double]$bestEvalRecord.luck_components.gold_volatility_norm
   }
 }
 
@@ -264,12 +258,9 @@ if ([bool]$goMetrics.available) {
   Write-Host "GO fail count:    $($goMetrics.go_fail_count)"
   Write-Host "GO fail rate:     $($goMetrics.go_fail_rate)"
   Write-Host "GO rate:          $($goMetrics.go_rate)"
-  Write-Host "Luck proxy:       $($goMetrics.luck_proxy)"
-  Write-Host "Luck seat gap:    $($goMetrics.luck_seat_win_rate_gap)"
-  Write-Host "Luck volatility:  $($goMetrics.luck_gold_volatility_norm)"
 }
 else {
-  Write-Host "GO/Luck metrics:  unavailable"
+  Write-Host "GO metrics:       unavailable"
 }
 Write-Host "================================"
 

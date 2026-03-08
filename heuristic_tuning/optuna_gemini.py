@@ -8,7 +8,7 @@
 # 4) main(): study run + artifact export
 
 """
-scripts/optuna_gemini.py - Gemini Optuna tuner
+heuristic_tuning/optuna_gemini.py - Gemini Optuna tuner
 
 Target:
   H-Gemini (A) vs H-CL (B)
