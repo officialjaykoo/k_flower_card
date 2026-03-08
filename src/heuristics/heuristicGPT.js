@@ -597,7 +597,10 @@ function buildRankingCache(state, playerKey, deps, profile) {
     capturedByMonth,
     blockMonths,
     blockUrgency,
-    firstTurnPlan
+    firstTurnPlan,
+    comboOpportunityByMonth: new Map(),
+    oppImmediateGainByMonth: new Map(),
+    dangerMonthRiskByMonth: new Map()
   };
 }
 
@@ -861,7 +864,11 @@ function evaluateCard(state, playerKey, card, deps, P, profile, cache) {
   if (oppPi <= 5) immediate += piGain * P.oppPiWindowMul;
   if (captured.some((c) => isDoublePi(c, deps))) immediate += P.doublePiBonus;
 
-  const comboOpportunity = safeNum(deps?.ownComboOpportunityScore?.(state, playerKey, month));
+  let comboOpportunity = cache.comboOpportunityByMonth.get(month);
+  if (comboOpportunity == null) {
+    comboOpportunity = safeNum(deps?.ownComboOpportunityScore?.(state, playerKey, month));
+    cache.comboOpportunityByMonth.set(month, comboOpportunity);
+  }
   immediate += comboOpportunity * P.comboOpportunityMul;
 
   let deny = 0;
@@ -896,16 +903,26 @@ function evaluateCard(state, playerKey, card, deps, P, profile, cache) {
   tempo += monthPriority * 0.2;
 
   let risk = 0;
-  risk += safeNum(deps?.estimateOpponentImmediateGainIfDiscard?.(state, playerKey, month))
-    * (matches.length === 0 ? P.feedRiskNoMatchMul : P.feedRiskMatchMul);
-  risk += safeNum(deps?.estimateDangerMonthRisk?.(
-    state,
-    playerKey,
-    month,
-    cache.boardCountByMonth,
-    cache.handCountByMonth,
-    cache.capturedByMonth
-  )) * (matches.length === 0 ? P.dangerNoMatchMul : P.dangerMatchMul);
+  let feedRisk = cache.oppImmediateGainByMonth.get(month);
+  if (feedRisk == null) {
+    feedRisk = safeNum(deps?.estimateOpponentImmediateGainIfDiscard?.(state, playerKey, month));
+    cache.oppImmediateGainByMonth.set(month, feedRisk);
+  }
+  risk += feedRisk * (matches.length === 0 ? P.feedRiskNoMatchMul : P.feedRiskMatchMul);
+
+  let dangerMonthRisk = cache.dangerMonthRiskByMonth.get(month);
+  if (dangerMonthRisk == null) {
+    dangerMonthRisk = safeNum(deps?.estimateDangerMonthRisk?.(
+      state,
+      playerKey,
+      month,
+      cache.boardCountByMonth,
+      cache.handCountByMonth,
+      cache.capturedByMonth
+    ));
+    cache.dangerMonthRiskByMonth.set(month, dangerMonthRisk);
+  }
+  risk += dangerMonthRisk * (matches.length === 0 ? P.dangerNoMatchMul : P.dangerMatchMul);
 
   const releaseRisk = safeNum(deps?.estimateReleasePunishProb?.(state, playerKey, month, profile.signals.jokboThreat, profile.ctx));
   if (matches.length === 0 && releaseRisk >= P.releaseRiskFloor) {

@@ -1,4 +1,4 @@
-﻿import readmeRaw from "../../../README.md?raw";
+﻿import readmeRaw from "../../../docs/rules/GAME_RULES.md?raw";
 import { DEFAULT_LANGUAGE, makeTranslator } from "../i18n/i18n.js";
 
 /* ============================================================================
@@ -299,3 +299,5 @@ export function openGameLogPopup({ log = [], language = DEFAULT_LANGUAGE }) {
   popup.document.close();
   popup.focus();
 }
+
+

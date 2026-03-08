@@ -1,184 +1,66 @@
-﻿# 맞고 데모 룰북 (현재 구현 기준)
+﻿# k_flower_card
 
-브라우저에서 실행되는 2인 맞고(플레이어/AI) 데모입니다.
-기준 코드: `src/state.js`, `src/engine/*`, `src/cards.js`.
+Matgo engine + AI research workspace (NEAT/PPO).
+Primary objective: maximize gold gain while minimizing gold loss.
 
-## 한게임 기본룰 별도 문서
-- 비교/원문 정리는 `docs/HANGAME_BASIC_RULE.md`
+## Quick Start
+```powershell
+npm install
+npm run dev
+```
 
-## 1. 빠른 실행
-- 개발 서버: `npm run dev`
-- 배포 빌드: `npm run build`
-- 빌드 미리보기: `npm run preview`
+## Run by Goal
+- NEAT train: `npm run neat:run -- -Phase 1 -Seed 9`
+- NEAT eval: `npm run neat:eval -- -Phase 1 -Seed 9`
+- NEAT train (GPT variant): `npm run neat:run:gpt -- -Phase 1 -Seed 9`
+- NEAT eval (GPT variant): `npm run neat:eval:gpt -- -Phase 1 -Seed 9`
+- PPO train (GPT): `npm run ppo:gpt:train -- -RuntimeConfig .\ppo_by_GPT\configs\runtime_phase1_ppo.json -Seed 90`
+- PPO duel (GPT): `npm run ppo:gpt:duel -- -RuntimeConfig .\ppo_by_GPT\configs\duel_ppo_vs_v5_1000.json`
+- PPO ablation (GPT): `npm run ppo:gpt:ablation -- -TotalUpdates 700`
+- PPO train (CL): `npm run ppo:cl:train -- -RuntimeConfig .\ppo_by_CL\configs\runtime_phase1_ppo.json -Seed 101`
+- PPO duel (CL): `npm run ppo:cl:duel -- -RuntimeConfig .\ppo_by_CL\configs\duel_ppo_vs_v5_1000.json`
+- PPO ablation (CL): `npm run ppo:cl:ablation -- -TotalUpdates 700`
 
-## 2. 게임 개요
-- 기본 화투 48장 + 보너스 카드 2장(`Bonus Double`, `Bonus Triple`)
-- 시작 배분: 플레이어 10장, AI 10장, 바닥 8장, 나머지 덱
-- AI 기본 봇 정책: `H-CL` (모델 정책 선택 가능)
+## Environment
+- OS: Windows (PowerShell scripts are first-class entry points)
+- Node.js: 20+ recommended
+- Python: 3.10+ recommended
+- PowerShell: 5.1+ or PowerShell 7+
 
-### 2-1. 선턴 결정 (밤일낮장)
-- 첫 판: 각자 시작 손패 첫 카드 월 비교
-- 밤(18:00~05:59): 낮은 월 선
-- 낮(06:00~17:59): 높은 월 선
-- 동월이면 랜덤
-- 다음 판: 직전 승자 선, 나가리면 직전 승자 유지
+## Python Dependencies
+This repository currently has no pinned Python dependency file (`requirements.txt` or `pyproject.toml`).
+Install required runtime packages in your active venv:
 
-### 2-2. 시작 보정
-- 손패 보너스는 즉시 획득 후 손패 10장 보충
-- 바닥 보너스는 선턴이 즉시 획득
-- 가져간 수만큼 덱에서 보충해 바닥 8장 유지
+```powershell
+python -m pip install --upgrade pip
+pip install torch neat-python optuna
+```
 
-## 3. 대통령/나가리
-### 3-1. 손패 대통령
-- 조건: 자기 첫 턴 시작 시 같은 월 4장
-- 단계: `president-choice`
-- 선택: `10점 종료` 또는 `들고치기`
+## Outputs
+- NEAT outputs: `logs/NEAT/neat_phase{1|2|3}_seed{N}/` (`checkpoints/`, `run_summary.json`, `gate_state.json`, `phase*_eval_1000.json`)
+- PPO GPT outputs: `logs/PPO_GPT/*` (`latest.pt`, `checkpoint_update_*.pt`, `best_stage*.pt`, `metrics_update_*.json`)
+- PPO CL outputs: `logs/PPO_CL/*` and some legacy arms under `logs/PPO/*`
+- Duel outputs: `logs/model_duel/*`
 
-들고치기 승리 보너스:
-- 해당 라운드에서 흔들기/폭탄 1회 이상 발생 후 승리 시 최종 배수 x4 추가
+## Troubleshooting
+- `python not found` or `python executable not found`: verify venv path, or pass `-Python .\.venv\Scripts\python` to scripts.
+- `phase1 checkpoint not found` in phase2/phase3: run previous phase first with same seed, or provide resume checkpoint.
+- `opponent-policy=genome requires opponent_genome path`: set runtime `opponent_genome` or pass CLI override.
+- `feature vector size mismatch`: sync NEAT input config with worker feature size (`scripts/configs/neat_feedforward*.ini`).
 
-### 3-2. 바닥 대통령
-- 조건: 시작 바닥패에 같은 월 4장
-- 처리: 선공 즉시 승리, 10점 종료
+## Repository Map
+- `src/`: game engine, AI policies, web UI
+- `scripts/`: NEAT orchestration and evaluation
+- `scripts/configs/`: NEAT runtime/config files
+- `ppo_by_GPT/`: PPO (GPT) pipeline
+- `ppo_by_CL/`: PPO (CL) pipeline
+- `logs/`: training and evaluation outputs
 
-### 3-3. 나가리
-- 무승부, 양측 무득점, Go 후 점수 상승 실패 시 나가리
-- 다음 판 배수 x2, 연속 나가리면 누적(`x2 -> x4 -> x8 ...`)
+## Document SoT
+- Agent behavior and guardrails: `AGENT_RULES.md`
+- Game rules source: `docs/rules/GAME_RULES.md`
+- NEAT source-of-truth runbook: `docs/neat/README.md`
+- PPO GPT source-of-truth runbook: `ppo_by_GPT/README.md`
+- PPO feature/reward specs: `docs/ppo/OBSERVATION_FEATURE_SPEC.md`, `docs/ppo/PHASE1_REWARD_STAGE_GUIDE.md`
 
-## 4. 턴/매치 처리
-### 4-1. 기본 턴
-1. 손패 1장 낸다
-2. 월이 맞으면 캡처, 아니면 바닥에 둔다
-3. 덱 1장 뒤집는다
-4. 뒤집은 카드도 동일 규칙 처리
 
-### 4-2. 매치 규칙
-- 0매치: 바닥 배치
-- 1매치: 2장 캡처
-- 2매치: 타입(광/열/띠/피) 다르면 선택 UI, 같으면 자동 선택
-- 3매치 이상: 싹쓸이 캡처
-- 뒤집기 2매치도 동일 규칙
-
-## 5. 이벤트/특수 규칙
-- 쪽(`jjob`): 상대 피 1장 강탈
-- 뻑(`ppuk`): 뻑 상태 발생 이벤트
-- 따닥/판쓸: 상대 피 1장 강탈(턴 종료 시 반영)
-
-### 5-1. 흔들기/폭탄
-- 흔들기: 손패 같은 월 3장 + 바닥 0매치 월
-- 폭탄: 손패 같은 월 3장 + 바닥 1장
-- 흔들기/폭탄 모두 1회당 최종 배수 x2 누적
-
-### 5-2. 뻑 먹기/연뻑
-- 자뻑/상대뻑 먹기 동일 처리: 강탈 +1
-- 뻑 보류 보너스도 자뻑/일반뻑 동일 회수/강탈
-- 첫뻑/연뻑 골드 보상:
-- 첫 턴 뻑: 7점
-- 1~2턴 연속 뻑: 14점
-- 1~3턴 연속 뻑: 21점
-- 누적 3뻑: 즉시 승리(7점 처리)
-
-### 5-3. 국진(9월 열) 선택
-- 처음 획득 시 기본은 `열`
-- 피 계산/점수 판정에서 `열`/`쌍피` 결과가 갈리는 시점에 1회 선택(낙장불입)
-- `열`: 열끗 장수/멍박 계산 포함
-- `쌍피`: 피 2로 계산
-- 쌍피 구성: `11월 쌍피`, `12월 쌍피`, `국진(쌍피 선택 시)`, `Bonus Double(2피)`, `Bonus Triple(3피)`
-- 피 강탈 우선순위: `1피 > 2피 > 국진 2피 > 3피`
-
-### 5-4. 기타
-- 마지막 손 1장 턴에서는 `뻑/판쓸/쪽/따닥` 미발동
-- 손패 소진 진행 필요 시 `Pass` 카드 자동 생성
-
-## 6. 점수 계산
-최종점수 = `(기본점수 + Go보너스) x 배수`
-
-### 6-1. 기본점수
-- 광: 3광 3점 / 비광포함3광 2점 / 4광 4점 / 5광 15점
-- 열끗: 5장 이상 `(장수 - 4)`
-- 띠: 5장 이상 `(장수 - 4)`
-- 피: 피 합 10 이상 `(피합 - 9)`
-- 단/족보:
-- 홍단(1/2/3월) +3
-- 청단(6/9/10월) +3
-- 초단(4/5/7월) +3
-- 고도리(2/4/8월 열끗) +5
-
-### 6-2. Go 보너스
-- Go 1회당 기본점수 +1 누적
-
-### 6-3. 배수
-- 고 배수: `3고 x2, 4고 x4, 5고 x8, 6고 x16 ...` (`goCount>=3`에서 `2^(goCount-2)`)
-- 흔들기/폭탄: 각각 1회당 x2 누적
-- 독박: STOP 승리 시 패자 `goCount > 0`이면 x2
-- 광박: 상대 광 0 + 내 광 3장 이상
-- 피박: 상대 피 합 1~7 + 내가 피로 득점 (`0`이면 면박으로 피박 면제)
-- 멍박: 상대 열끗 0 + 내 열끗 7장 이상
-
-## 7. Go/Stop 및 라운드 종료
-- 7점 이상 + 직전 Go 기준점(`lastGoBase`) 상승 시 Go/Stop
-- Go: `goCount +1`, `lastGoBase` 갱신
-- Stop: 즉시 종료
-- 종료 조건: Stop 또는 양측 손패 0
-- 들고치기 x4 조건 충족 시 추가 적용
-- 나가리는 승패 없이 종료, 다음 판 누적 배수만 증가
-
-## 8. 골드 정산
-- 시작 자금: 각 1,000,000골드
-- 점당 단위: `POINT_GOLD_UNIT`(기본 100)
-- 승자 정산: `최종점수 x POINT_GOLD_UNIT`
-- 패자는 보유 골드 한도 내 지급(음수 불가)
-- 지급 후 0골드면 해당 판은 0 유지, 다음 게임 시작 시 1,000,000골드 재시작
-
-## 9. 더미/강탈/피 규칙(최신)
-- 더미 패스 카드는 손패에서만 존재 가능(실카드 ID 중복 금지)
-- 더미 생성 기준:
-- `expectedHand = 10 - turnCount`
-- `dummyNeeded = expectedHand - realHandCount` (양수일 때만)
-- 더미 사용: 1장만 소모, 뒤집기/매치 판정은 일반 턴과 동일
-- 피 강탈 우선순위: `1피 -> 2피 -> 국진쌍피 -> 3피`
-- 같은 우선순위면 나중에 획득한 피부터 강탈
-
-## 10. 용어 이중표기(동의어)
-- 대통령/`phase: "president-choice"`, `pendingPresident` = 총통
-상황: 손패에 같은 월 4장이 성립하면 `president-choice`로 진입하고, 즉시 종료(`choosePresidentStop`) 또는 들고치기(`choosePresidentHold`)를 선택한다.
-- 폭탄/`events.bomb`, `declareBomb`, `type: "declare_bomb"` = 쿵
-상황: 손패 같은 월 3장 + 바닥 같은 월 1장일 때 선언 가능하며, 해당 월 카드를 먼저 획득한 뒤 뒤집기 단계를 진행한다. 턴 종료 시 상대 피 1장 강탈이 예약된다.
-- 쪽/`events.jjob` = 키스 = 귀신
-상황: 손패를 냈을 때 0매치(낸 카드가 바닥에 놓임)였고, 뒤집기 최종 카드가 같은 월로 1매치가 되며 매칭 대상이 방금 낸 손패 카드일 때 발생한다. 턴 종료 시 상대 피 1장 강탈이 예약된다. 마지막 손 1장 턴에서는 미발동.
-보너스 카드가 뒤집기 중간에 끼면 보너스는 최종 매칭 시 함께 획득되며, `bonus.stealPi`만큼 강탈 수가 추가된다. (보너스 1장당 +1, 2장이면 +2)
-- 따닥/`events.ddadak` = 쌍쓸
-상황: 바닥 같은 월 2장 상태에서 손패 같은 월 1장을 내고, 뒤집기에서 같은 월이 또 나와 최종 4장을 나눠 획득하는 케이스(뒤집기 1매치)에서 발생한다. 구현 판정은 "뒤집기 1매치 + 같은 월 + 매칭 대상이 방금 낸 카드가 아님"이다. 턴 종료 시 상대 피 1장 강탈이 예약된다. 마지막 손 1장 턴에서는 미발동.
-보너스 카드가 뒤집기 중간에 끼면 보너스는 최종 매칭 시 함께 획득되며, `bonus.stealPi`만큼 강탈 수가 추가된다. (보너스 1장당 +1, 2장이면 +2)
-- 뻑/`events.ppuk`, `ppukState` = 설사 = 뻐꾸기 = 싼다
-상황: 손패 1장을 내서 바닥 같은 월 1장과 먼저 1매치가 된 뒤, 뒤집기 최종 카드가 같은 월로 나오고(중간 보너스 카드는 홀딩), 뒤집기 결과가 보드 0매치(`flip NONE`)이면 발생한다. 최종적으로 묶인 카드(손매칭 카드 + 뒤집기 카드 + 중간 보너스)는 획득하지 않고 바닥에 남는다. 마지막 손 1장 턴에서는 미발동.
-- 뻑 먹기/`events.jabbeok`
-상황: 누군가 뻑 상태(`ppukState.active`)일 때 상대/본인이 일반 캡처를 성공하면 뻑 상태를 소모하며 추가 강탈(+1) 및 보류 보너스 회수 처리를 한다. 또는 바닥 같은 월 3장 캡처 성공(`hand THREE_PLUS`) 시에도 뻑 먹기로 처리되어 추가 강탈(+1)이 적용된다.
-- 판쓸/`events.pansseul` = 싹쓸이 (판쓰리와 동일 표현, 문서/엔진은 판쓸로 통일)
-상황: 손패 처리 + 뒤집기 처리가 모두 끝난 뒤 최종적으로 획득이 반영되고, 바닥패가 0장인 경우 발생한다. 턴 종료 시 상대 피 1장 강탈이 예약된다. 마지막 손 1장 턴에서는 미발동.
-- 국진 쌍피/`gukjinMode: "junk"`, `gukjinLocked`, `gukjinTransformed`
-상황: 국진 선택에서 `junk` 모드를 고르면 국진(열) 카드를 쌍피(피2)로 취급해 피 계산 및 피 강탈 후보에 포함한다.
-- 수류탄(2장 폭탄): 현재 엔진 미구현
-상황: 발동 조건/처리 로직이 없어 실제 게임 중 발생하지 않는다.
-
-## 11. 모드/기보/시뮬레이션
-### 11-1. 플레이 모드
-- 사람 vs AI
-- 사람 vs 사람
-- AI vs AI
-
-### 11-2. 기보 로그
-- UI `기보 내보내기`로 JSON 다운로드
-- 주요 기록:
-- `kibo.turn_end.action.matchEvents` (`source(hand/flip)` + `eventTag`)
-- `kibo.turn_end.action.captureBySource` (`hand[]/flip[]`)
-- `kibo.turn_end.ppukState`
-- 턴 리플레이 지원: 이전/다음/자동재생/슬라이더/속도
-
-## 13. React 구조
-- UI 프레임워크: React + Vite
-- 엔진: `src/gameEngine.js`, `src/state.js`, `src/engine/*`
-- UI 컴포넌트:
-- `src/ui/components/GameBoard.jsx`
-- `src/ui/components/GameOverlays.jsx`
-- `src/ui/components/CardView.jsx`

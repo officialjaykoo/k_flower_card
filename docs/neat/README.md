@@ -1,4 +1,4 @@
-﻿# K-Flower Card Developer Guide (NEAT)
+﻿# K-Flower Card NEAT Runbook
 
 ## 결론
 - 현재 학습/평가 기준 파이프라인은 `scripts/neat_train.py -> scripts/neat_eval_worker.mjs -> scripts/model_duel_worker.mjs`다.
@@ -98,7 +98,7 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 
 ## 7. Worker 동작 메모
 상세 포맷 문서:
-- `docs/KIBO_DATASET_GUIDE.md` (kibo/dataset 구조, 필드 의미, unresolved 해석)
+- `docs/data/KIBO_DATASET_GUIDE.md` (kibo/dataset 구조, 필드 의미, unresolved 해석)
 
 ### 7-1. `neat_eval_worker.mjs`
 - feature vector는 47차원 고정.
@@ -166,3 +166,5 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 4. 결과 검증은 `run_summary.json`, `gate_state.json`, `phase*_eval_1000.json` 순으로 확인한다.
 5. 풀리그 산출물은 `logs/full_league/` 경로에 저장한다.
 6. 저장 인코딩은 UTF-8 BOM을 유지한다.
+
+

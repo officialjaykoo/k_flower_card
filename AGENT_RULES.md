@@ -1,7 +1,14 @@
-﻿# Project Agent Rules
+﻿# Project Agent Rules (Canonical)
 
 These rules are mandatory for this repository.
 If rules conflict, the smaller section number takes precedence.
+
+Recommended quick reading order for collaborators:
+- `1` -> objective and optimization target
+- `3` -> simulation execution boundary
+- `5` -> path/structure constraints
+- `2` -> deletion safety policy
+- `4~10` -> implementation and communication details
 
 1. Primary objective
 - The top priority is to find the strongest Matgo AI model.
@@ -13,9 +20,11 @@ If rules conflict, the smaller section number takes precedence.
 - Do not delete until the user explicitly approves.
 - Exception: empty folders and temporary files can be deleted immediately without prior approval.
 - Temporary files scope (allowed for immediate deletion): `*.tmp`, `*.temp`, `*.bak`, `*.old`, `*.orig`, `*.swp`, `*.swo`, `~*`, `__pycache__/`, `.pytest_cache/`, `.mypy_cache/`, `.cache/`, `tmp/`, `temp/`, `logs/`.
+- Read-only inspection commands and non-simulation build checks are auto-allowed without prior request (examples: file search/read, `git status`, `git diff`, `npm run build`).
 
 3. Simulation execution control
 - Run simulation only when the user explicitly requests it in the current conversation.
+- Exception: quick smoke simulation is allowed for validation without explicit request when scope is small (`<=100` games or `<=10` updates) and reported to the user.
 - When simulation is requested, prefer parallel/multi-worker execution to utilize available CPU resources.
 - Avoid single-worker simulation unless the user explicitly asks for single-worker mode.
 - Full-league runs must save outputs under `logs/full_league/`.
@@ -27,7 +36,8 @@ If rules conflict, the smaller section number takes precedence.
 - If the new direction is clearly better, refactor now. If too large, split into up to 5 explicit steps.
 
 5. Path and structure lock
-- Keep all runtime/config files under `scripts/configs/`.
+- Keep NEAT runtime/config files under `scripts/configs/`.
+- Keep PPO runtime/config files under `ppo_by_GPT/configs/` or `ppo_by_CL/configs/`.
 - Keep orchestration/entry scripts under `scripts/` (e.g., `phase_run.ps1`, `phase_eval.ps1`).
 - Prefer a single entry script with explicit required arguments over per-phase wrapper scripts when logic is shared.
 - Do not create or reference root-level `configs/` paths.
@@ -58,3 +68,4 @@ If rules conflict, the smaller section number takes precedence.
 - For routine low-risk tasks, provide the recommendation and execute directly.
 - For high-risk tasks, warn clearly, provide 1-2 safer alternatives, and wait for explicit user override.
 - Do not hide behind neutral/middle-ground wording when evidence supports a strong recommendation.
+

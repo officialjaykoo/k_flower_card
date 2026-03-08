@@ -302,6 +302,24 @@ function rankHandCardsNEXg(state, playerKey, deps, params = null) {
   const player = state.players?.[playerKey];
   if (!player?.hand?.length) return [];
 
+  const boardCards = state.board || [];
+  const boardByMonth = new Map();
+  const boardCountByMonth = new Map();
+  for (const c of boardCards) {
+    if (!c || c.month == null) continue;
+    const m = c.month;
+    const arr = boardByMonth.get(m) || [];
+    arr.push(c);
+    boardByMonth.set(m, arr);
+    boardCountByMonth.set(m, (boardCountByMonth.get(m) || 0) + 1);
+  }
+  const handCountByMonth = new Map();
+  for (const c of player.hand) {
+    if (!c || c.month == null) continue;
+    const m = c.month;
+    handCountByMonth.set(m, (handCountByMonth.get(m) || 0) + 1);
+  }
+
   const opp = otherPlayerKeyFromDeps(playerKey, deps);
   const oppPlayer = state.players?.[opp];
   const ctx = deps.analyzeGameContext(state, playerKey);
@@ -319,13 +337,27 @@ function rankHandCardsNEXg(state, playerKey, deps, params = null) {
   const mongBak = safeNum(ctx.selfFive) <= 0 && safeNum(ctx.oppFive) >= 7;
   const deckCount = safeNum(state.deck?.length);
   const deck = deckCount;
-  const bCnt = (state.board || []).length;
-  const hCnt = (player?.hand || []).length;
   const lp = getLiveDoublePiMonths(state);
   const plan = deps.getFirstTurnDoublePiPlan(state, playerKey);
   const sec = isSecondMover(state, playerKey);
   const late = deck <= P.lateDeckMax;
   const phase = resolvePhase(deckCount, P);
+  const comboHoldMonths = getComboHoldMonths(state, playerKey, deps);
+  const nextThreatHigh = nextT >= 0.5;
+  const feedRiskByMonth = new Map();
+  const knownCountByMonth = new Map();
+  const getFeedRisk = (month) => {
+    if (feedRiskByMonth.has(month)) return feedRiskByMonth.get(month);
+    const value = safeNum(deps.estimateOpponentImmediateGainIfDiscard(state, playerKey, month));
+    feedRiskByMonth.set(month, value);
+    return value;
+  };
+  const getKnownCount = (month) => {
+    if (knownCountByMonth.has(month)) return knownCountByMonth.get(month);
+    const value = safeNum(deps.countKnownMonthCards?.(state, month));
+    knownCountByMonth.set(month, value);
+    return value;
+  };
 
   // Resolve phase multipliers.
   const comboMul = phase === "early" ? safeNum(P.phaseEarlyComboMul, 1.20)
@@ -338,7 +370,7 @@ function rankHandCardsNEXg(state, playerKey, deps, params = null) {
 
   const ranked = player.hand.map((card) => {
     const month = card.month;
-    const matches = (state.board || []).filter((b) => b.month === month);
+    const matches = boardByMonth.get(month) || [];
     const matchCnt = matches.length;
     const pi = piLikeValue(card, deps);
     const isDpi = isDoublePiLike(card, deps);
@@ -409,11 +441,10 @@ function rankHandCardsNEXg(state, playerKey, deps, params = null) {
         score += P.discardDoublePiDeadBonus;
       }
 
-      const ch = getComboHoldMonths(state, playerKey, deps);
-      if (ch.has(month)) {
+      if (comboHoldMonths.has(month)) {
         score -= (late ? P.discardComboHoldPenaltyLate : P.discardComboHoldPenalty);
       }
-      if (safeNum(deps.nextTurnThreatScore?.(state, playerKey)) >= 0.5) {
+      if (nextThreatHigh) {
         score -= (late ? P.discardOneAwayPenaltyLate : P.discardOneAwayPenalty);
       }
       if (blkM?.has(month)) {
@@ -425,11 +456,11 @@ function rankHandCardsNEXg(state, playerKey, deps, params = null) {
     }
 
     // Feed risk (phase-scaled)
-    const feed = safeNum(deps.estimateOpponentImmediateGainIfDiscard(state, playerKey, month));
+    const feed = getFeedRisk(month);
     score -= feed * (matchCnt === 0 ? P.feedRiskNoMatchMul : P.feedRiskMatchMul) * feedMul;
 
     // Puk risk
-    const puk = safeNum(deps.isRiskOfPuk(state, playerKey, card, bCnt, hCnt));
+    const puk = safeNum(deps.isRiskOfPuk(state, playerKey, card, boardCountByMonth, handCountByMonth));
     if (puk > 0) score -= puk * (deck <= 10 ? P.pukRiskHighMul : P.pukRiskNormalMul);
     else if (puk < 0) score += -puk * 1.4;
 
@@ -440,7 +471,7 @@ function rankHandCardsNEXg(state, playerKey, deps, params = null) {
     if (sec && myScore < oppScore && pi > 0) score += pi * P.secondMoverPiBonus;
 
     // Known-month bonus
-    const knownCnt = safeNum(deps.countKnownMonthCards?.(state, month));
+    const knownCnt = getKnownCount(month);
     if (knownCnt >= 3) score += P.discardKnownMonthBonus;
     else if (knownCnt === 0) score -= P.discardUnknownMonthPenalty;
 

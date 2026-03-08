@@ -115,7 +115,7 @@ export const DEFAULT_PARAMS = {
   goDecisionComboSigmoidK: 1.2,
   goDecisionComboSigmoidX0: 1.0,
   goDecisionMargin: 0.18,
-  goDecisionAmbiguousLogEnabled: 1,
+  goDecisionAmbiguousLogEnabled: 0,
   goDecisionAmbiguousLogSampleRate: 0.2,
   goDecisionRule2ThreatCut: 0.55,
   goDecisionRule2LeadMax: 3,
@@ -404,6 +404,16 @@ function gatherVisibleCards(state, playerKey) {
   ].filter(Boolean);
 }
 
+function buildVisibleMonthCount(cards) {
+  const out = {};
+  for (const c of asList(cards)) {
+    const month = safeNum(c?.month);
+    if (month <= 0) continue;
+    out[month] = safeNum(out[month], 0) + 1;
+  }
+  return out;
+}
+
 // Total card count may include bonus cards in some modes.
 function getDynamicTotalCards(state, P = DEFAULT_PARAMS) {
   const base = 48;
@@ -426,6 +436,7 @@ function buildInference(state, playerKey, P = DEFAULT_PARAMS) {
   const oppKey = otherPlayerKey(playerKey);
   const opp = state?.players?.[oppKey];
   const visible = gatherVisibleCards(state, playerKey);
+  const visibleMonthCount = buildVisibleMonthCount(visible);
   const totalCards = getDynamicTotalCards(state, P);
   const unknownTotal = Math.max(1, totalCards - visible.length);
   const history = asList(state?.actionHistory);
@@ -437,7 +448,7 @@ function buildInference(state, playerKey, P = DEFAULT_PARAMS) {
   const dangerCards = new Set();
 
   for (let month = 1; month <= 12; month += 1) {
-    const knownInMonth = visible.filter((c) => safeNum(c?.month) === month).length;
+    const knownInMonth = safeNum(visibleMonthCount[month], 0);
     const hiddenInMonth = clamp(4 - knownInMonth, 0, 4);
     probs[month] = clamp(hiddenInMonth / unknownTotal, 0, 1);
   }
@@ -513,6 +524,7 @@ function buildInference(state, playerKey, P = DEFAULT_PARAMS) {
     safeMonths,
     dangerLevel,
     dangerCards,
+    visibleMonthCount,
     maxDanger,
     trackedOppThreat: trackedThreat,
     jokboUrgencyByMonth,
@@ -527,10 +539,6 @@ function buildInference(state, playerKey, P = DEFAULT_PARAMS) {
 // ============================================================================
 // Section 5) Card-level scoring components
 // ============================================================================
-function countVisibleInMonth(state, playerKey, month) {
-  return gatherVisibleCards(state, playerKey).filter((c) => safeNum(c?.month) === safeNum(month)).length;
-}
-
 // One-step tactical look-ahead:
 // - trap opportunity
 // - feed risk
@@ -540,7 +548,8 @@ function evaluateLookAheadScore(state, playerKey, card, matches, inference, P) {
 
   // Trap opportunity when opponent likely holds this month.
   if (matches.length === 0 && inference?.holdings?.[month]) {
-    const hiddenInMonth = Math.max(0, 4 - countVisibleInMonth(state, playerKey, month));
+    const knownInMonth = safeNum(inference?.visibleMonthCount?.[month], 0);
+    const hiddenInMonth = Math.max(0, 4 - knownInMonth);
     if (hiddenInMonth >= 2) score += safeNum(P.lookAheadTrapBonus, 1.6);
   }
 
@@ -685,7 +694,8 @@ function evaluateCard(state, playerKey, card, deps, P, inference, ctx) {
   score -= calculatePreemptiveRisk(inference, month, P);
 
   if (matches.length === 0 && inference?.holdings?.[month]) {
-    const hiddenInMonth = Math.max(0, 4 - countVisibleInMonth(state, playerKey, month));
+    const knownInMonth = safeNum(inference?.visibleMonthCount?.[month], 0);
+    const hiddenInMonth = Math.max(0, 4 - knownInMonth);
     if (hiddenInMonth >= 2) score += safeNum(P.trapBonus, 1.9);
   }
   if (matches.length === 2 && inference?.holdings?.[month]) {

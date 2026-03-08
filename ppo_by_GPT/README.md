@@ -7,8 +7,8 @@ This folder is the PPO pipeline for Matgo. The priority is:
 
 ## Quick Reference Docs
 
-- Observation feature spec (exact index map): `docs/ppo/PPO_OBSERVATION_FEATURE_SPEC.md`
-- Phase1 reward + Stage(1/2/3) guide: `docs/ppo/PPO_PHASE1_REWARD_STAGE_GUIDE.md`
+- Observation feature spec (exact index map): `docs/ppo/OBSERVATION_FEATURE_SPEC.md`
+- Phase1 reward + Stage(1/2/3) guide: `docs/ppo/PHASE1_REWARD_STAGE_GUIDE.md`
 
 ## Source Structure (Execution Order)
 
@@ -30,9 +30,9 @@ This folder is the PPO pipeline for Matgo. The priority is:
 - `ppo_by_GPT/configs/`
 - `runtime_phase1_ppo.json`: phase1 single-actor training runtime
 - `runtime_phase2_ppo.json`: phase2 self-play runtime (resume required)
-- `runtime_phase1_resume_u2000.json`: phase1 resume runtime
-- `runtime_phase1_from_p2_u2000.json`: phase1 retrain runtime from phase2 context
+- `ablation_A_go_explore.json` ~ `ablation_E_gpt.json`: 5-arm ablation configs
 - `duel_ppo_vs_v5_1000.json`: PPO vs H-CL duel runtime
+- `duel_ppo_vs_hcl_phase1_seed93_best_1000.json`: fixed-checkpoint duel runtime sample
 
 - `ppo_by_GPT/scripts/`
 - `train_ppo.py`: masked PPO trainer with strict validation and checkpointing
@@ -84,8 +84,11 @@ Notes:
 
 ```powershell
 .\ppo_by_GPT\run_ppo.ps1 `
-  -RuntimeConfig .\ppo_by_GPT\configs\runtime_phase1_resume_u2000.json `
+  -RuntimeConfig .\ppo_by_GPT\configs\runtime_phase1_ppo.json `
   -Seed 90 `
   -ResumeCheckpoint .\logs\PPO_GPT\vs_hcl_phase1_seed90\checkpoint_update_1325.pt `
-  -OutputDir .\logs\PPO_GPT\vs_hcl_phase1_seed90_recover1325
+  -OutputDir .\logs\PPO_GPT\vs_hcl_phase1_seed90_recover1325 `
+  -TotalUpdates 2000
 ```
+
+
