@@ -738,7 +738,7 @@ function buildSummaryText(payload) {
 const argv = parseArgs(process.argv.slice(2));
 if (argv.help) {
   console.log(`Usage:
-node neat_by_GPT/scripts/optimizer.mjs --kibo <kibo.jsonl> --dataset <dataset.jsonl> --actor-policy <POLICY> --params-file <heuristic.js> [--actor human|ai]
+node heuristic_tuning/optimizer_gpt.mjs --kibo <kibo.jsonl> --dataset <dataset.jsonl> --actor-policy <POLICY> --params-file <heuristic.js> [--actor human|ai]
 
 Option-count scaling (default on):
   --min-net-decision-ev <v>          base threshold (default: 1.0)
@@ -935,7 +935,7 @@ const summaryPath = join(cfg.outRoot, "optimizer_gpt_summary.txt");
 const jsonPath = join(cfg.outRoot, "optimizer_gpt_plan.json");
 payload.optuna_hint = {
   optimizer_plan: jsonPath,
-  command: `python neat_by_GPT/scripts/optuna.py --optimizer-plan \"${jsonPath}\" --optimizer-top-k 4`
+  command: `python heuristic_tuning/optuna_gpt.py --optimizer-plan \"${jsonPath}\" --optimizer-top-k 4`
 };
 writeFileSync(summaryPath, buildSummaryText(payload), "utf8");
 writeFileSync(jsonPath, JSON.stringify(payload, null, 2), "utf8");

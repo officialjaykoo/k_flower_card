@@ -15,6 +15,7 @@ File Layout Map (top-down):
 """
 
 import argparse
+import copy
 import contextlib
 import gzip
 import hashlib
@@ -614,11 +615,17 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
     runtime = _runtime_from_env_cached()
     eval_script = str(runtime["eval_script"] or "")
     seed_text = str(seed_override or runtime["seed"])
-    opponent_policy = _select_opponent_policy(
-        runtime=runtime,
-        seed_text=seed_text,
-        generation=int(generation),
-        genome_key=int(genome_key),
+    opponent_policy = str(runtime.get("opponent_policy") or "").strip()
+    opponent_policy_mix = runtime.get("opponent_policy_mix") or []
+    has_opponent_policy = bool(opponent_policy)
+    has_opponent_policy_mix = isinstance(opponent_policy_mix, list) and len(opponent_policy_mix) > 0
+    requires_genome_opponent = (
+        str(opponent_policy).strip().lower() == "genome"
+        or any(
+            str((item or {}).get("policy") or "").strip().lower() == "genome"
+            for item in (opponent_policy_mix if isinstance(opponent_policy_mix, list) else [])
+            if isinstance(item, dict)
+        )
     )
     opponent_genome = str(runtime.get("opponent_genome") or "").strip()
     failure_meta = {
@@ -627,6 +634,7 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
         "genome_key": int(genome_key),
         "seed_used": seed_text,
         "opponent_policy": opponent_policy,
+        "opponent_policy_mix": opponent_policy_mix,
     }
     if not eval_script or not os.path.exists(eval_script):
         _append_eval_failure_log(
@@ -638,7 +646,14 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
     payload = _export_neat_python_genome(genome, config)
     output_dir = str(runtime["output_dir"])
 
-    if opponent_policy == "genome":
+    if (not has_opponent_policy) and (not has_opponent_policy_mix):
+        _append_eval_failure_log(
+            output_dir,
+            dict(failure_meta, reason="opponent_policy_missing"),
+        )
+        return {"fitness": -1e9, "seed_used": seed_text, "eval_ok": False}
+
+    if requires_genome_opponent:
         if not opponent_genome:
             _append_eval_failure_log(
                 output_dir,
@@ -679,8 +694,6 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             seed_text,
             "--max-steps",
             str(int(runtime["max_eval_steps"])),
-            "--opponent-policy",
-            opponent_policy,
             "--switch-seats",
             "1" if bool(runtime["switch_seats"]) else "0",
             "--fitness-gold-scale",
@@ -694,7 +707,16 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             "--fitness-win-neutral-rate",
             str(float(runtime["fitness_win_neutral_rate"])),
         ]
-        if opponent_policy == "genome":
+        if has_opponent_policy:
+            cmd.extend(["--opponent-policy", opponent_policy])
+        elif has_opponent_policy_mix:
+            cmd.extend(
+                [
+                    "--opponent-policy-mix",
+                    json.dumps(opponent_policy_mix, ensure_ascii=False, separators=(",", ":")),
+                ]
+            )
+        if requires_genome_opponent:
             cmd.extend(["--opponent-genome", opponent_genome])
 
         proc = subprocess.run(
@@ -1156,6 +1178,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="logs/NEAT/neat_python", help="Output directory")
     parser.add_argument("--resume", default="", help="Checkpoint file path to resume")
     parser.add_argument(
+        "--seed-genome",
+        default="",
+        help="Path to winner_genome.pkl used to reseed a fresh population for the next phase",
+    )
+    parser.add_argument(
         "--base-generation",
         type=int,
         default=0,
@@ -1274,6 +1301,65 @@ def _run_dry_eval(population, _config):
         genome.fitness = float(len(genome.connections)) * 0.001 + float(len(genome.nodes)) * 0.0001
 
 
+def _build_seeded_population(cfg, seed_genome_path: str):
+    if neat is None:
+        raise RuntimeError("neat-python is not installed. Install with: pip install neat-python")
+
+    seed_path = os.path.abspath(str(seed_genome_path or "").strip())
+    if not seed_path:
+        raise RuntimeError("seed genome path is empty")
+    if not os.path.exists(seed_path):
+        raise RuntimeError(f"seed genome not found: {seed_genome_path}")
+
+    with open(seed_path, "rb") as f:
+        seed_genome = pickle.load(f)
+
+    if seed_genome is None or not hasattr(seed_genome, "nodes") or not hasattr(seed_genome, "connections"):
+        raise RuntimeError(f"invalid seed genome pickle: {seed_genome_path}")
+
+    population = neat.Population(cfg)
+    population_size = max(1, int(cfg.pop_size))
+    existing_keys = sorted(population.population.keys())
+    if len(existing_keys) < population_size:
+        raise RuntimeError("failed to initialize base population for seed expansion")
+
+    tracker = population.reproduction.innovation_tracker
+    cfg.genome_config.innovation_tracker = tracker
+    max_innovation = int(getattr(tracker, "global_counter", 0) or 0)
+    for conn_gene in (getattr(seed_genome, "connections", {}) or {}).values():
+        innovation = getattr(conn_gene, "innovation", None)
+        if innovation is None:
+            continue
+        try:
+            max_innovation = max(max_innovation, int(innovation))
+        except Exception:
+            continue
+    tracker.global_counter = int(max_innovation)
+    tracker.reset_generation()
+
+    seeded_population = {}
+    population.reproduction.ancestors = {}
+    seed_key = int(getattr(seed_genome, "key", 0) or 0)
+
+    for idx, genome_key in enumerate(existing_keys[:population_size]):
+        genome = copy.deepcopy(seed_genome)
+        genome.key = int(genome_key)
+        genome.fitness = None
+        if idx > 0:
+            genome.mutate(cfg.genome_config)
+            if (idx % 4) == 0:
+                genome.mutate(cfg.genome_config)
+        seeded_population[int(genome_key)] = genome
+        population.reproduction.ancestors[int(genome_key)] = (seed_key,)
+
+    population.population = seeded_population
+    population.generation = 0
+    population.best_genome = None
+    population.species = cfg.species_set_type(cfg.species_set_config, population.reporters)
+    population.species.speciate(cfg, population.population, population.generation)
+    return population
+
+
 if neat is not None:
 
     class OffsetCheckpointer(neat.Checkpointer):
@@ -1384,6 +1470,11 @@ def main() -> None:
 
     runtime = _load_runtime_config(args.runtime_config)
     applied_overrides = {}
+    seed_genome_path = str(args.seed_genome or "").strip()
+    if seed_genome_path:
+        applied_overrides["seed_genome"] = seed_genome_path
+    if args.resume and seed_genome_path:
+        raise RuntimeError("--resume and --seed-genome are mutually exclusive")
     base_generation = max(0, int(args.base_generation))
     if base_generation != 0:
         applied_overrides["base_generation"] = int(base_generation)
@@ -1471,6 +1562,8 @@ def main() -> None:
 
     if args.resume:
         p = neat.Checkpointer.restore_checkpoint(args.resume)
+    elif seed_genome_path:
+        p = _build_seeded_population(cfg, seed_genome_path)
     else:
         p = neat.Population(cfg)
     start_generation = int(getattr(p, "generation", 0))
@@ -1548,6 +1641,7 @@ def main() -> None:
         "gate_state": evaluator.snapshot() if evaluator is not None else {},
         "winner_pickle": winner_pkl,
         "winner_json": winner_json_path,
+        "seed_genome": seed_genome_path or None,
         "config_feedforward": os.path.abspath(args.config_feedforward),
         "runtime_config": os.path.abspath(args.runtime_config),
     }

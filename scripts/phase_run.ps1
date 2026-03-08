@@ -198,13 +198,26 @@ if ($Phase -ne "1") {
   $previousLabel = "phase$previousPhase"
   $previousRuntimePath = "scripts/configs/runtime_phase$previousPhase.json"
   $previousRuntime = Read-JsonFile -Path $previousRuntimePath
-  $previousGenerations = To-PositiveIntOrDefault -Value $previousRuntime.generations -DefaultValue 20
-  $previousCheckpointDir = "logs/NEAT/neat_phase${previousPhase}_seed$Seed/checkpoints"
-  $resume = Resolve-PreviousCheckpoint -CheckpointDir $previousCheckpointDir -PreferredGeneration $previousGenerations -Label $previousLabel
+  $previousSummaryPath = "logs/NEAT/neat_phase${previousPhase}_seed$Seed/run_summary.json"
+  if (-not (Test-Path $previousSummaryPath)) {
+    throw "$previousLabel run summary not found: $previousSummaryPath"
+  }
+  $previousSummary = Read-JsonFile -Path $previousSummaryPath
+  $previousGenerations = To-PositiveIntOrDefault -Value $previousSummary.generations -DefaultValue (
+    To-PositiveIntOrDefault -Value $previousRuntime.generations -DefaultValue 20
+  )
+  $previousWinnerRaw = [string]$previousSummary.winner_pickle
+  if ([string]::IsNullOrWhiteSpace($previousWinnerRaw)) {
+    $previousWinnerRaw = "logs/NEAT/neat_phase${previousPhase}_seed$Seed/models/winner_genome.pkl"
+  }
+  $previousWinnerPath = [System.IO.Path]::GetFullPath($previousWinnerRaw)
+  if (-not (Test-Path $previousWinnerPath)) {
+    throw "$previousLabel winner genome not found: $previousWinnerPath"
+  }
 
   $cmd += @(
-    "--resume", "$($resume.path)",
-    "--base-generation", "$($resume.generation)"
+    "--seed-genome", "$previousWinnerPath",
+    "--base-generation", "$previousGenerations"
   )
 }
 

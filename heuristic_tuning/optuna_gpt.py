@@ -8,7 +8,7 @@
 # 4) main(): study run + artifact export
 
 """
-neat_by_GPT/scripts/optuna.py - GPT Optuna tuner
+heuristic_tuning/optuna_gpt.py - GPT Optuna tuner
 target: H-GPT vs H-CL (1000 games per trial)
 
 Integration:
@@ -394,7 +394,7 @@ def objective(trial, runtime):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="GPT Optuna tuner")
+    parser = argparse.ArgumentParser(description="GPT heuristic Optuna tuner")
     parser.add_argument("--trials", type=int, default=200)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--db", type=str, default="")

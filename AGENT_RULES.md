@@ -36,9 +36,10 @@ Recommended quick reading order for collaborators:
 - If the new direction is clearly better, refactor now. If too large, split into up to 5 explicit steps.
 
 5. Path and structure lock
-- Keep NEAT runtime/config files under `scripts/configs/`.
+- Keep base/shared NEAT runtime/config files under `scripts/configs/`.
+- Keep GPT-specific NEAT runtime/config/entry files under `neat_by_GPT/`.
 - Keep PPO runtime/config files under `ppo_by_GPT/configs/` or `ppo_by_CL/configs/`.
-- Keep orchestration/entry scripts under `scripts/` (e.g., `phase_run.ps1`, `phase_eval.ps1`).
+- Base/shared orchestration may live under `scripts/`, but GPT-specific entry scripts must live under `neat_by_GPT/`.
 - Prefer a single entry script with explicit required arguments over per-phase wrapper scripts when logic is shared.
 - Do not create or reference root-level `configs/` paths.
 - Use repository-relative paths consistently in scripts.

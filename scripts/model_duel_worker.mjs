@@ -21,6 +21,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { getActionPlayerKey } from "../src/engine/runner.js";
 import { aiPlay } from "../src/ai/aiPlay.js";
 import { resolveBotPolicy } from "../src/ai/policies.js";
+import { hybridPolicyPlayDetailed } from "../src/ai/hybridPolicyEngine.js";
 
 // Pipeline Stage: 3/3 (neat_train.py -> neat_eval_worker.mjs -> model_duel_worker.mjs)
 // Execution Flow Map:
@@ -220,6 +221,57 @@ function resolvePlayerSpec(rawSpec, sideLabel) {
   const token = String(rawSpec || "").trim();
   if (!token) throw new Error(`empty player spec: ${sideLabel}`);
 
+  const hybridGo = parseHybridPlayGoSpec(token);
+  if (hybridGo) {
+    const modelSpec = resolvePhaseModelSpec(hybridGo.modelToken, `${sideLabel}:model`);
+    const goStopPolicy = resolveBotPolicy(hybridGo.goStopToken);
+    if (!goStopPolicy) {
+      throw new Error(
+        `invalid ${sideLabel} hybrid go-stop policy: ${hybridGo.goStopToken} (use a policy key from src/ai/policies.js)`
+      );
+    }
+    const heuristicPolicy = resolveBotPolicy(hybridGo.heuristicToken);
+    if (!heuristicPolicy) {
+      throw new Error(
+        `invalid ${sideLabel} hybrid heuristic policy: ${hybridGo.heuristicToken} (use a policy key from src/ai/policies.js)`
+      );
+    }
+    return {
+      input: token,
+      kind: "hybrid_play_model",
+      key: `hybrid_play_go(${modelSpec.key},${goStopPolicy},${heuristicPolicy})`,
+      label: `hybrid_play_go(${modelSpec.label},${goStopPolicy},${heuristicPolicy})`,
+      model: modelSpec.model,
+      modelPath: modelSpec.modelPath,
+      phase: modelSpec.phase,
+      seed: modelSpec.seed,
+      heuristicPolicy,
+      goStopPolicy,
+    };
+  }
+
+  const hybrid = parseHybridPlaySpec(token);
+  if (hybrid) {
+    const modelSpec = resolvePhaseModelSpec(hybrid.modelToken, `${sideLabel}:model`);
+    const heuristicPolicy = resolveBotPolicy(hybrid.heuristicToken);
+    if (!heuristicPolicy) {
+      throw new Error(
+        `invalid ${sideLabel} hybrid heuristic policy: ${hybrid.heuristicToken} (use a policy key from src/ai/policies.js)`
+      );
+    }
+    return {
+      input: token,
+      kind: "hybrid_play_model",
+      key: `hybrid_play(${modelSpec.key},${heuristicPolicy})`,
+      label: `hybrid_play(${modelSpec.label},${heuristicPolicy})`,
+      model: modelSpec.model,
+      modelPath: modelSpec.modelPath,
+      phase: modelSpec.phase,
+      seed: modelSpec.seed,
+      heuristicPolicy,
+    };
+  }
+
   const resolvedPolicy = resolveBotPolicy(token);
   if (resolvedPolicy) {
     return {
@@ -234,9 +286,42 @@ function resolvePlayerSpec(rawSpec, sideLabel) {
     };
   }
 
-  const m = token.match(/^phase([0-3])_seed(\d+)$/i);
+  return resolvePhaseModelSpec(token, sideLabel);
+}
+
+function parseHybridPlayGoSpec(token) {
+  const m = String(token || "")
+    .trim()
+    .match(/^hybrid_play_go\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\s*\)$/i);
   if (!m) {
-    throw new Error(`invalid ${sideLabel} spec: ${token} (use policy key or phase0_seed9)`);
+    return null;
+  }
+  return {
+    modelToken: String(m[1] || "").trim(),
+    goStopToken: String(m[2] || "").trim(),
+    heuristicToken: String(m[3] || "").trim(),
+  };
+}
+
+function parseHybridPlaySpec(token) {
+  const m = String(token || "")
+    .trim()
+    .match(/^hybrid_play\(\s*([^,]+)\s*,\s*([^)]+)\s*\)$/i);
+  if (!m) {
+    return null;
+  }
+  return {
+    modelToken: String(m[1] || "").trim(),
+    heuristicToken: String(m[2] || "").trim(),
+  };
+}
+
+function resolvePhaseModelSpec(token, sideLabel) {
+  const m = String(token || "").trim().match(/^phase([0-3])_seed(\d+)$/i);
+  if (!m) {
+    throw new Error(
+      `invalid ${sideLabel} spec: ${token} (use policy key, phase0_seed9, hybrid_play(phase1_seed202,H-CL), or hybrid_play_go(phase1_seed202,H-NEXg,H-CL))`
+    );
   }
   const phase = Number(m[1]);
   const seed = Number(m[2]);
@@ -798,6 +883,30 @@ function buildAiPlayOptions(playerSpec) {
   return { source: "heuristic", heuristicPolicy: String(playerSpec?.key || "") };
 }
 
+function resolvePlayerAction(state, actor, playerSpec) {
+  if (playerSpec?.kind === "hybrid_play_model") {
+    const traced = hybridPolicyPlayDetailed(state, actor, {
+      model: playerSpec.model,
+      heuristicPolicy: String(playerSpec.heuristicPolicy || ""),
+      goStopPolicy: String(playerSpec.goStopPolicy || ""),
+    });
+    return {
+      next: traced?.next || state,
+      actionSource: String(traced?.actionSource || "hybrid_play_model"),
+    };
+  }
+  if (playerSpec?.kind === "model" && playerSpec?.model) {
+    return {
+      next: aiPlay(state, actor, buildAiPlayOptions(playerSpec)),
+      actionSource: "model",
+    };
+  }
+  return {
+    next: aiPlay(state, actor, buildAiPlayOptions(playerSpec)),
+    actionSource: "heuristic",
+  };
+}
+
 function playSingleRound(initialState, seed, playerByActor, maxSteps, onDecision = null) {
   const rng = createSeededRng(`${seed}|rng`);
   let state = initialState;
@@ -816,9 +925,9 @@ function playSingleRound(initialState, seed, playerByActor, maxSteps, onDecision
     const candidates = decisionType ? legalCandidatesForDecision(sp, decisionType) : [];
     const playerSpec = playerByActor[actor];
     const policy = String(playerSpec?.label || "");
-    let actionSource = "heuristic";
-    let next = aiPlay(state, actor, buildAiPlayOptions(playerSpec));
-    if (playerSpec?.kind === "model") actionSource = "model";
+    const action = resolvePlayerAction(state, actor, playerSpec);
+    let actionSource = String(action?.actionSource || "heuristic");
+    let next = action?.next || state;
 
     if (!next || stateProgressKey(next) === before) {
       actionSource = "fallback_random";

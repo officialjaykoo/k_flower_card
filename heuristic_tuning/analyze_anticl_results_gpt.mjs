@@ -1,3 +1,4 @@
+// AntiCL duel result analyzer for GPT-authored heuristic tuning runs.
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 

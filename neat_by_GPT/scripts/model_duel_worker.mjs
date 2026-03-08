@@ -3,14 +3,18 @@
   startSimulationGame,
   createSeededRng
 } from "../../src/engine/index.js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { getActionPlayerKey } from "../../src/engine/runner.js";
 import { aiPlay } from "../../src/ai/aiPlay_by_GPT.js";
 import { resolveBotPolicy } from "../../src/ai/policies.js";
 import { stateProgressKey } from "../../src/ai/decisionRuntime_by_GPT.js";
 
 // GPT-only duel runner (minimal duel/report flow).
+const SCRIPT_FILE = fileURLToPath(import.meta.url);
+const SCRIPT_DIR = dirname(SCRIPT_FILE);
+const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
 
 function parseArgs(argv) {
   const args = [...argv];
@@ -89,8 +93,8 @@ function usageText() {
     "  node neat_by_GPT/scripts/model_duel_worker.mjs --human <spec> --ai <spec> [options]",
     "",
     "Required:",
-    "  --human <policy|phaseX_seedY>",
-    "  --ai <policy|phaseX_seedY>",
+    "  --human <policy|gpt_run|model:path/to/winner_genome.json>",
+    "  --ai <policy|gpt_run|model:path/to/winner_genome.json>",
     "",
     "Options:",
     "  --games <N>                 default=1000, minimum=1000",
@@ -103,7 +107,7 @@ function usageText() {
     "  --result-out <path>         optional, auto-generated if omitted",
     "",
     "Example:",
-    "  node neat_by_GPT/scripts/model_duel_worker.mjs --human H-CL --ai phase1_seed60 --games 1000 --seed gpt_duel_1 --first-turn-policy alternate --continuous-series 1",
+    "  node neat_by_GPT/scripts/model_duel_worker.mjs --human H-CL --ai runtime_focus_cl_v1_seed9 --games 1000 --seed gpt_duel_1 --first-turn-policy alternate --continuous-series 1",
   ].join("\n");
 }
 
@@ -130,6 +134,79 @@ function dateTag() {
   return `${yyyy}${mm}${dd}`;
 }
 
+function toAbsoluteRepoPath(rawPath) {
+  const token = String(rawPath || "").trim();
+  if (!token) return "";
+  return resolve(REPO_ROOT, token);
+}
+
+function tryResolveModelArtifactPath(rawSpec) {
+  const token = String(rawSpec || "").trim();
+  if (!token) return null;
+
+  const explicitPath = token.startsWith("model:") ? token.slice("model:".length).trim() : token;
+  const looksLikePath =
+    token.startsWith("model:") ||
+    explicitPath.includes("/") ||
+    explicitPath.includes("\\") ||
+    explicitPath.toLowerCase().endsWith(".json");
+  if (looksLikePath) {
+    const absolute = toAbsoluteRepoPath(explicitPath);
+    if (!existsSync(absolute)) {
+      return {
+        path: absolute,
+        source: "explicit_path",
+        exists: false,
+      };
+    }
+    const stat = statSync(absolute);
+    if (stat.isDirectory()) {
+      const dirCandidate = join(absolute, "models", "winner_genome.json");
+      const fileCandidate = join(absolute, "winner_genome.json");
+      if (existsSync(dirCandidate)) {
+        return { path: dirCandidate, source: "explicit_run_dir", exists: true };
+      }
+      if (existsSync(fileCandidate)) {
+        return { path: fileCandidate, source: "explicit_dir_file", exists: true };
+      }
+      return {
+        path: dirCandidate,
+        source: "explicit_run_dir",
+        exists: false,
+      };
+    }
+    return { path: absolute, source: "explicit_file", exists: true };
+  }
+
+  const runDirCandidate = join(REPO_ROOT, "logs", "NEAT_GPT", token, "models", "winner_genome.json");
+  if (existsSync(runDirCandidate)) {
+    return { path: runDirCandidate, source: "named_gpt_run", exists: true };
+  }
+  return null;
+}
+
+function loadModelSpec(input, label, modelPath) {
+  let model = null;
+  try {
+    const raw = String(readFileSync(modelPath, "utf8") || "").replace(/^\uFEFF/, "");
+    model = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`failed to parse model JSON (${input}): ${modelPath} (${String(err)})`);
+  }
+  if (String(model?.format_version || "").trim() !== "neat_python_genome_v1") {
+    throw new Error(`invalid model format for ${input}: expected neat_python_genome_v1`);
+  }
+
+  return {
+    input,
+    kind: "model",
+    key: label,
+    label,
+    model,
+    modelPath,
+  };
+}
+
 function resolvePlayerSpec(rawSpec, sideLabel) {
   const token = String(rawSpec || "").trim();
   if (!token) throw new Error(`empty player spec: ${sideLabel}`);
@@ -148,43 +225,30 @@ function resolvePlayerSpec(rawSpec, sideLabel) {
     };
   }
 
-  const m = token.match(/^phase([0-3])_seed(\d+)$/i);
-  if (!m) {
-    throw new Error(`invalid ${sideLabel} spec: ${token} (use policy key or phase0_seed9)`);
+  const modelArtifact = tryResolveModelArtifactPath(token);
+  if (modelArtifact?.exists) {
+    const label =
+      modelArtifact.source === "named_gpt_run"
+        ? token
+        : sanitizeFilePart(token).replace(/^model_/, "") || "gpt_model";
+    const loaded = loadModelSpec(token, label, modelArtifact.path);
+    return {
+      ...loaded,
+      phase: null,
+      seed: null,
+    };
   }
-  const phase = Number(m[1]);
-  const seed = Number(m[2]);
-  const modelPath = resolve(`logs/NEAT/neat_phase${phase}_seed${seed}/models/winner_genome.json`);
-  if (!existsSync(modelPath)) {
-    throw new Error(`model not found for ${token}: ${modelPath}`);
+  if (modelArtifact && modelArtifact.exists === false) {
+    throw new Error(`model not found for ${token}: ${modelArtifact.path}`);
   }
-
-  let model = null;
-  try {
-    const raw = String(readFileSync(modelPath, "utf8") || "").replace(/^\uFEFF/, "");
-    model = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`failed to parse model JSON (${token}): ${modelPath} (${String(err)})`);
-  }
-  if (String(model?.format_version || "").trim() !== "neat_python_genome_v1") {
-    throw new Error(`invalid model format for ${token}: expected neat_python_genome_v1`);
-  }
-
-  return {
-    input: token,
-    kind: "model",
-    key: `phase${phase}_seed${seed}`,
-    label: `phase${phase}_seed${seed}`,
-    model,
-    modelPath,
-    phase,
-    seed,
-  };
+  throw new Error(
+    `invalid ${sideLabel} spec: ${token} (use policy key, GPT run name like runtime_focus_cl_v1_seed9, or model:path/to/winner_genome.json)`
+  );
 }
 
 function buildAutoOutputDir(humanLabel, aiLabel) {
   const duelKey = `${sanitizeFilePart(humanLabel)}_vs_${sanitizeFilePart(aiLabel)}_${dateTag()}`;
-  const outDir = join("logs", "model_duel", duelKey);
+  const outDir = join(REPO_ROOT, "logs", "NEAT_GPT", "duels", duelKey);
   mkdirSync(outDir, { recursive: true });
   return outDir;
 }
@@ -197,7 +261,7 @@ function buildAutoArtifactPath(outDir, seed, suffix) {
 function toReportPath(pathValue) {
   const raw = String(pathValue || "").trim();
   if (!raw) return null;
-  const rel = relative(process.cwd(), resolve(raw));
+  const rel = relative(REPO_ROOT, resolve(raw));
   const normalized = String(rel || raw).replace(/\\/g, "/");
   return normalized || null;
 }
@@ -453,6 +517,9 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
     const outDir = buildAutoOutputDir(humanPlayer.label, aiPlayer.label);
     opts.resultOut = buildAutoArtifactPath(outDir, opts.seed, "result.json");
   }
+  else {
+    opts.resultOut = toAbsoluteRepoPath(opts.resultOut);
+  }
 
   const actorA = "human";
   const actorB = "ai";
@@ -533,13 +600,13 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
       input: humanPlayer.input,
       kind: humanPlayer.kind,
       key: humanPlayer.key,
-      model_path: humanPlayer.modelPath,
+      model_path: toReportPath(humanPlayer.modelPath),
     },
     player_ai: {
       input: aiPlayer.input,
       kind: aiPlayer.kind,
       key: aiPlayer.key,
-      model_path: aiPlayer.modelPath,
+      model_path: toReportPath(aiPlayer.modelPath),
     },
     first_turn_policy: opts.firstTurnPolicy,
     fixed_first_turn: opts.firstTurnPolicy === "fixed" ? opts.fixedFirstTurn : null,

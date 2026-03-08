@@ -1,8 +1,8 @@
 ﻿{
-  "format_version": "neat_runtime_v3",
-  "generations": 25,
+  "format_version": "neat_runtime_phase3_v3",
+  "generations": 20,
   "eval_workers": 6,
-  "games_per_genome": 60,
+  "games_per_genome": 200,
   "eval_timeout_sec": 360,
   "max_eval_steps": 600,
   "checkpoint_every": 5,
@@ -10,9 +10,8 @@
   "seed": 13,
   "opponent_policy": "",
   "opponent_policy_mix": [
-    { "policy": "H-CL", "weight": 40 },
-    { "policy": "H-NEXg", "weight": 30 },
-    { "policy": "H-J2", "weight": 30 }
+    { "policy": "hybrid_play(phase1_seed202,H-CL)", "weight": 50 },
+    { "policy": "hybrid_play(phase2_seed202,H-CL)", "weight": 50 }
   ],
   "opponent_genome": "",
   "switch_seats": true,

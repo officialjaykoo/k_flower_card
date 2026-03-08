@@ -1,4 +1,9 @@
-﻿import { calculateScore, scoringPiCount } from "../engine/index.js";
+import {
+  calculateScore,
+  scoringPiCount,
+  getDeclarableShakingMonths,
+  getDeclarableBombMonths
+} from "../engine/index.js";
 import {
   canonicalOptionAction,
   selectDecisionPool,
@@ -26,9 +31,27 @@ function clamp01(x) {
   return v;
 }
 
+function clampSigned(x, limit = 1) {
+  const v = Number(x || 0);
+  const cap = Math.max(1e-6, Number(limit || 1));
+  if (v <= -cap) return -cap;
+  if (v >= cap) return cap;
+  return v;
+}
+
 function tanhNorm(x, scale) {
   const s = Math.max(1e-6, Number(scale || 1));
   return Math.tanh(Number(x || 0) / s);
+}
+
+function mean(values) {
+  if (!Array.isArray(values) || values.length <= 0) return 0;
+  return values.reduce((acc, v) => acc + Number(v || 0), 0) / values.length;
+}
+
+function normalizeDecisionCandidate(decisionType, candidate) {
+  if (decisionType === "option") return canonicalOptionAction(candidate);
+  return String(candidate || "").trim();
 }
 
 function findCardById(cards, cardId) {
@@ -82,6 +105,24 @@ function countCapturedZoneUnique(player, zone) {
     seen.add(id);
   }
   return seen.size;
+}
+
+function hasComboTag(card, tag) {
+  return Array.isArray(card?.comboTags) && card.comboTags.includes(tag);
+}
+
+function countCapturedComboTag(player, zone, tag) {
+  const cards = player?.captured?.[zone] || [];
+  if (!Array.isArray(cards)) return 0;
+  const seen = new Set();
+  let count = 0;
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (hasComboTag(card, tag)) count += 1;
+  }
+  return count;
 }
 
 function isDoublePiCard(card) {
@@ -153,89 +194,283 @@ function candidateMonthKnownRatio(state, actor, month) {
   let known = 0;
   for (const card of cards) {
     if (!card) continue;
-    const id = String(card.id || "");
+    const id = String(card?.id || "");
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    if (Number(card.month || 0) === Number(month)) known += 1;
+    if (Number(card?.month || 0) === Number(month)) known += 1;
   }
   return clamp01(known / total);
 }
 
-function featureVector(state, actor, decisionType, candidate, legalCount, inputDim) {
+function decisionAvailabilityFlags(state, actor) {
+  if (state?.phase === "shaking-confirm" && state?.pendingShakingConfirm?.playerKey === actor) {
+    return { hasShake: 1, hasBomb: 0 };
+  }
+  if (state?.phase !== "playing" || state?.currentTurn !== actor) {
+    return { hasShake: 0, hasBomb: 0 };
+  }
+  const shakingMonths = getDeclarableShakingMonths(state, actor);
+  const bombMonths = getDeclarableBombMonths(state, actor);
+  return {
+    hasShake: Array.isArray(shakingMonths) && shakingMonths.length > 0 ? 1 : 0,
+    hasBomb: Array.isArray(bombMonths) && bombMonths.length > 0 ? 1 : 0
+  };
+}
+
+function currentMultiplierNorm(state, scoreSelf) {
+  const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
+  const mul = Math.max(1.0, Number(scoreSelf?.multiplier || 1.0));
+  return clamp01(((mul * carry) - 1.0) / 15.0);
+}
+
+function buildDecisionBaseContext(state, actor, decisionType, legalCount) {
   const opp = actor === "human" ? "ai" : "human";
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
   const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const { hasShake, hasBomb } = decisionAvailabilityFlags(state, actor);
 
-  const phase = String(state.phase || "");
-  const card = candidateCard(state, actor, decisionType, candidate);
+  return {
+    state,
+    actor,
+    opp,
+    decisionType,
+    legalCount: Number(legalCount || 0),
+    phase: String(state?.phase || ""),
+    scoreSelf,
+    scoreOpp,
+    boardCount: Array.isArray(state?.board) ? state.board.length : 0,
+    selfGwangCount: countCapturedZoneUnique(state?.players?.[actor], "kwang"),
+    oppGwangCount: countCapturedZoneUnique(state?.players?.[opp], "kwang"),
+    selfRibbonCount: countCapturedZoneUnique(state?.players?.[actor], "ribbon"),
+    oppRibbonCount: countCapturedZoneUnique(state?.players?.[opp], "ribbon"),
+    selfFiveCount: countCapturedZoneUnique(state?.players?.[actor], "five"),
+    oppFiveCount: countCapturedZoneUnique(state?.players?.[opp], "five"),
+    selfPiCount: Number(scoringPiCount(state.players[actor]) || 0),
+    oppPiCount: Number(scoringPiCount(state.players[opp]) || 0),
+    selfGodori: countCapturedComboTag(state.players?.[actor], "five", "fiveBirds"),
+    oppGodori: countCapturedComboTag(state.players?.[opp], "five", "fiveBirds"),
+    selfCheongdan: countCapturedComboTag(state.players?.[actor], "ribbon", "blueRibbons"),
+    oppCheongdan: countCapturedComboTag(state.players?.[opp], "ribbon", "blueRibbons"),
+    selfHongdan: countCapturedComboTag(state.players?.[actor], "ribbon", "redRibbons"),
+    oppHongdan: countCapturedComboTag(state.players?.[opp], "ribbon", "redRibbons"),
+    selfChodan: countCapturedComboTag(state.players?.[actor], "ribbon", "plainRibbons"),
+    oppChodan: countCapturedComboTag(state.players?.[opp], "ribbon", "plainRibbons"),
+    selfCanStop: Number(scoreSelf?.total || 0) >= 7 ? 1 : 0,
+    oppCanStop: Number(scoreOpp?.total || 0) >= 7 ? 1 : 0,
+    hasShake,
+    hasBomb,
+    multiplierNorm: currentMultiplierNorm(state, scoreSelf),
+    bakPi: scoreSelf?.bak?.pi ? 1 : 0,
+    bakGwang: scoreSelf?.bak?.gwang ? 1 : 0,
+    bakMongBak: scoreSelf?.bak?.mongBak ? 1 : 0
+  };
+}
+
+function buildCandidateDescriptor(base, candidate) {
+  const state = base.state;
+  const actor = base.actor;
+  const decisionType = base.decisionType;
+  const normalizedCandidate = normalizeDecisionCandidate(decisionType, candidate);
+  const card = candidateCard(state, actor, decisionType, normalizedCandidate);
   const month = resolveCandidateMonth(state, actor, decisionType, card);
   const piValue = Number(card?.piValue || 0);
   const category = String(card?.category || "");
-  const selfGwangCount = countCapturedZoneUnique(state?.players?.[actor], "kwang");
-  const oppGwangCount = countCapturedZoneUnique(state?.players?.[opp], "kwang");
-  const selfRibbonCount = countCapturedZoneUnique(state?.players?.[actor], "ribbon");
-  const oppRibbonCount = countCapturedZoneUnique(state?.players?.[opp], "ribbon");
-  const selfFiveCount = countCapturedZoneUnique(state?.players?.[actor], "five");
-  const oppFiveCount = countCapturedZoneUnique(state?.players?.[opp], "five");
-  const selfPiCount = Number(scoringPiCount(state.players[actor]) || 0);
-  const oppPiCount = Number(scoringPiCount(state.players[opp]) || 0);
-  const boardCount = Array.isArray(state?.board) ? state.board.length : 0;
-  const selfCanStop = Number(scoreSelf?.total || 0) >= 7 ? 1 : 0;
-  const oppCanStop = Number(scoreOpp?.total || 0) >= 7 ? 1 : 0;
-  const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
-  const mul = Math.max(1.0, Number(scoreSelf?.multiplier || 1.0));
-  const currentMultiplier = mul * carry;
 
-  // GPT compact feature set (40 dims): phase, decision, score pressure, capture profile, candidate profile.
-  const features = [
-    phase === "playing" ? 1 : 0,
-    phase === "select-match" ? 1 : 0,
-    phase === "go-stop" ? 1 : 0,
-    phase === "president-choice" ? 1 : 0,
-    phase === "gukjin-choice" ? 1 : 0,
-    phase === "shaking-confirm" ? 1 : 0,
+  return {
+    candidate: normalizedCandidate,
+    month,
+    piNorm: clamp01(piValue / 5.0),
+    category,
+    isKwang: category === "kwang" ? 1 : 0,
+    isRibbon: category === "ribbon" ? 1 : 0,
+    isFive: category === "five" ? 1 : 0,
+    isJunk: category === "junk" ? 1 : 0,
+    isDoublePi: isDoublePiCard(card) ? 1 : 0,
+    matchDensity: matchOpportunityDensity(state, month),
+    immediateMatch: immediateMatchPossible(state, decisionType, month),
+    knownRatio: candidateMonthKnownRatio(state, actor, month),
+    optionCode: optionCode(normalizedCandidate),
+    sameMonthHandCountNorm: clamp01(countCardsByMonth(state?.players?.[actor]?.hand || [], month) / 4.0),
+    sameMonthBoardCountNorm: clamp01(countCardsByMonth(state?.board || [], month) / 3.0),
+    sameMonthLegalShare: 0,
+    categoryShare: 0,
+    piAdv: 0,
+    matchDensityAdv: 0,
+    knownRatioAdv: 0
+  };
+}
 
-    decisionType === "play" ? 1 : 0,
-    decisionType === "match" ? 1 : 0,
-    decisionType === "option" ? 1 : 0,
+function summarizeCandidateDescriptors(descriptors) {
+  const monthCounts = new Map();
+  const categoryCounts = new Map();
+  for (const desc of descriptors) {
+    const monthKey = Number(desc?.month || 0);
+    if (monthKey > 0) {
+      monthCounts.set(monthKey, Number(monthCounts.get(monthKey) || 0) + 1);
+    }
+    const categoryKey = String(desc?.category || "");
+    if (categoryKey) {
+      categoryCounts.set(categoryKey, Number(categoryCounts.get(categoryKey) || 0) + 1);
+    }
+  }
+  return {
+    maxPiNorm: descriptors.reduce((best, d) => Math.max(best, Number(d?.piNorm || 0)), 0),
+    meanPiNorm: mean(descriptors.map((d) => Number(d?.piNorm || 0))),
+    maxMatchDensity: descriptors.reduce((best, d) => Math.max(best, Number(d?.matchDensity || 0)), 0),
+    meanMatchDensity: mean(descriptors.map((d) => Number(d?.matchDensity || 0))),
+    meanKnownRatio: mean(descriptors.map((d) => Number(d?.knownRatio || 0))),
+    monthCounts,
+    categoryCounts
+  };
+}
 
-    clamp01((state.deck?.length || 0) / 30.0),
-    clamp01((state.players?.[actor]?.hand?.length || 0) / 10.0),
-    clamp01((state.players?.[opp]?.hand?.length || 0) / 10.0),
-    clamp01(boardCount / 24.0),
-    clamp01(Number(legalCount || 0) / 10.0),
-    clamp01((state.players?.[actor]?.goCount || 0) / 5.0),
-    clamp01((state.players?.[opp]?.goCount || 0) / 5.0),
-    tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0),
-    tanhNorm(scoreSelf?.total || 0, 10.0),
-    tanhNorm(scoreOpp?.total || 0, 10.0),
-    selfCanStop,
-    oppCanStop,
-    clamp01((currentMultiplier - 1.0) / 12.0),
+function enrichCandidateDescriptors(descriptors, stats) {
+  const total = Math.max(1, descriptors.length);
+  return descriptors.map((desc) => {
+    const monthCount = Number(stats.monthCounts.get(Number(desc.month || 0)) || 0);
+    const categoryCount = Number(stats.categoryCounts.get(String(desc.category || "")) || 0);
+    return {
+      ...desc,
+      sameMonthLegalShare: clamp01(monthCount / total),
+      categoryShare: clamp01(categoryCount / total),
+      piAdv: clampSigned(Number(desc.piNorm || 0) - Number(stats.meanPiNorm || 0), 1),
+      matchDensityAdv: clampSigned(Number(desc.matchDensity || 0) - Number(stats.meanMatchDensity || 0), 1),
+      knownRatioAdv: clampSigned(Number(desc.knownRatio || 0) - Number(stats.meanKnownRatio || 0), 1)
+    };
+  });
+}
 
-    clamp01(selfPiCount / 20.0),
-    clamp01(oppPiCount / 20.0),
-    clamp01(selfGwangCount / 5.0),
-    clamp01(oppGwangCount / 5.0),
-    clamp01(selfRibbonCount / 10.0),
-    clamp01(oppRibbonCount / 10.0),
-    clamp01(selfFiveCount / 5.0),
-    clamp01(oppFiveCount / 5.0),
+function buildLegacyFeatureVector(base, desc) {
+  return [
+    base.phase === "playing" ? 1 : 0,
+    base.phase === "select-match" ? 1 : 0,
+    base.phase === "go-stop" ? 1 : 0,
+    base.phase === "president-choice" ? 1 : 0,
+    base.phase === "gukjin-choice" ? 1 : 0,
+    base.phase === "shaking-confirm" ? 1 : 0,
 
-    clamp01(piValue / 5.0),
-    category === "kwang" ? 1 : 0,
-    category === "ribbon" ? 1 : 0,
-    category === "five" ? 1 : 0,
-    category === "junk" ? 1 : 0,
-    isDoublePiCard(card) ? 1 : 0,
-    matchOpportunityDensity(state, month),
-    immediateMatchPossible(state, decisionType, month),
-    candidateMonthKnownRatio(state, actor, month),
-    optionCode(candidate)
+    base.decisionType === "play" ? 1 : 0,
+    base.decisionType === "match" ? 1 : 0,
+    base.decisionType === "option" ? 1 : 0,
+
+    clamp01((base.state?.deck?.length || 0) / 30.0),
+    clamp01((base.state?.players?.[base.actor]?.hand?.length || 0) / 10.0),
+    clamp01((base.state?.players?.[base.opp]?.hand?.length || 0) / 10.0),
+    clamp01(base.boardCount / 24.0),
+    clamp01(base.legalCount / 10.0),
+    clamp01((base.state?.players?.[base.actor]?.goCount || 0) / 5.0),
+    clamp01((base.state?.players?.[base.opp]?.goCount || 0) / 5.0),
+    tanhNorm((base.scoreSelf?.total || 0) - (base.scoreOpp?.total || 0), 10.0),
+    tanhNorm(base.scoreSelf?.total || 0, 10.0),
+    tanhNorm(base.scoreOpp?.total || 0, 10.0),
+    base.selfCanStop,
+    base.oppCanStop,
+    clamp01(base.multiplierNorm * 1.25),
+
+    clamp01(base.selfPiCount / 20.0),
+    clamp01(base.oppPiCount / 20.0),
+    clamp01(base.selfGwangCount / 5.0),
+    clamp01(base.oppGwangCount / 5.0),
+    clamp01(base.selfRibbonCount / 10.0),
+    clamp01(base.oppRibbonCount / 10.0),
+    clamp01(base.selfFiveCount / 5.0),
+    clamp01(base.oppFiveCount / 5.0),
+
+    desc.piNorm,
+    desc.isKwang,
+    desc.isRibbon,
+    desc.isFive,
+    desc.isJunk,
+    desc.isDoublePi,
+    desc.matchDensity,
+    desc.immediateMatch,
+    desc.knownRatio,
+    desc.optionCode
   ];
+}
 
-  if (inputDim === features.length) return features;
-  throw new Error(`feature vector size mismatch: expected ${inputDim}, supported=${features.length}`);
+function buildCoreRichFeatureVector(base, desc) {
+  return [
+    base.phase === "playing" ? 1 : 0,
+    base.phase === "select-match" ? 1 : 0,
+    base.phase === "go-stop" ? 1 : 0,
+    base.phase === "president-choice" ? 1 : 0,
+    base.phase === "gukjin-choice" ? 1 : 0,
+    base.phase === "shaking-confirm" ? 1 : 0,
+
+    base.decisionType === "play" ? 1 : 0,
+    base.decisionType === "match" ? 1 : 0,
+    base.decisionType === "option" ? 1 : 0,
+
+    clamp01((base.state?.deck?.length || 0) / 30.0),
+    clamp01((base.state?.players?.[base.actor]?.hand?.length || 0) / 10.0),
+    clamp01((base.state?.players?.[base.opp]?.hand?.length || 0) / 10.0),
+    clamp01((base.state?.players?.[base.actor]?.goCount || 0) / 5.0),
+    clamp01((base.state?.players?.[base.opp]?.goCount || 0) / 5.0),
+    tanhNorm((base.scoreSelf?.total || 0) - (base.scoreOpp?.total || 0), 10.0),
+    tanhNorm(base.scoreSelf?.total || 0, 10.0),
+    clamp01(base.legalCount / 10.0),
+
+    desc.piNorm,
+    desc.isKwang,
+    desc.isRibbon,
+    desc.isFive,
+    desc.isJunk,
+    desc.isDoublePi,
+
+    desc.matchDensity,
+    desc.immediateMatch,
+    desc.optionCode,
+
+    clamp01(base.selfGwangCount / 5.0),
+    clamp01(base.oppGwangCount / 5.0),
+    clamp01(base.selfPiCount / 20.0),
+    clamp01(base.oppPiCount / 20.0),
+
+    clamp01(base.selfGodori / 3.0),
+    clamp01(base.oppGodori / 3.0),
+    clamp01(base.selfCheongdan / 3.0),
+    clamp01(base.oppCheongdan / 3.0),
+    clamp01(base.selfHongdan / 3.0),
+    clamp01(base.oppHongdan / 3.0),
+    clamp01(base.selfChodan / 3.0),
+    clamp01(base.oppChodan / 3.0),
+
+    base.selfCanStop,
+    base.oppCanStop,
+
+    base.hasShake,
+    base.multiplierNorm,
+    base.hasBomb,
+
+    base.bakPi,
+    base.bakGwang,
+    base.bakMongBak,
+
+    desc.knownRatio
+  ];
+}
+
+function buildExtendedFeatureVector(base, desc, stats) {
+  return [
+    ...buildCoreRichFeatureVector(base, desc),
+    clamp01(stats.maxPiNorm),
+    desc.piAdv,
+    clamp01(stats.maxMatchDensity),
+    desc.matchDensityAdv,
+    desc.knownRatioAdv,
+    desc.sameMonthLegalShare,
+    desc.sameMonthHandCountNorm,
+    desc.sameMonthBoardCountNorm,
+    desc.categoryShare
+  ];
+}
+
+function buildFeatureVector(base, desc, stats, inputDim) {
+  if (inputDim === 40) return buildLegacyFeatureVector(base, desc);
+  if (inputDim === 47) return buildCoreRichFeatureVector(base, desc);
+  if (inputDim === 56) return buildExtendedFeatureVector(base, desc, stats);
+  throw new Error(`feature vector size mismatch: expected ${inputDim}, supported=40,47,56`);
 }
 
 /* 3) Forward-pass helpers */
@@ -423,8 +658,7 @@ function pickBestByScore(candidates, scoreMap) {
   return best;
 }
 
-/* 6) Public APIs */
-export function getModelCandidateProbabilities(state, actor, policyModel, options = {}) {
+function scoreDecisionCandidates(state, actor, policyModel, options = {}) {
   const compiled = getCompiledNeatModel(policyModel);
   if (!compiled) return null;
 
@@ -432,40 +666,97 @@ export function getModelCandidateProbabilities(state, actor, policyModel, option
   const decisionType = resolveDecisionType(sp);
   if (!decisionType) return null;
 
-  const candidates = legalCandidatesForDecision(sp, decisionType);
+  const candidates = legalCandidatesForDecision(sp, decisionType).map((c) => normalizeDecisionCandidate(decisionType, c));
   if (!candidates.length) return null;
 
+  const base = buildDecisionBaseContext(state, actor, decisionType, candidates.length);
+  const rawDescriptors = candidates.map((candidate) => buildCandidateDescriptor(base, candidate));
+  const stats = summarizeCandidateDescriptors(rawDescriptors);
+  const descriptors = enrichCandidateDescriptors(rawDescriptors, stats);
   const inputDim = Number(compiled.inputKeys.length || 0);
   const scoreMap = new Map();
   const scores = {};
-  try {
-    for (const candidate of candidates) {
-      const x = featureVector(state, actor, decisionType, candidate, candidates.length, inputDim);
-      const score = forward(compiled, x);
-      scoreMap.set(candidate, score);
-      scores[String(candidate)] = score;
-    }
-  } catch (err) {
-    const detail = err && err.message ? err.message : String(err);
-    throw new Error(
-      `[modelPolicyEngine_by_GPT] score computation failed (actor=${actor}, phase=${String(state?.phase || "")}, decisionType=${decisionType}, candidates=${candidates.length}): ${detail}`
-    );
+  const diagnostics = {};
+  const featureMode = inputDim === 56 ? "rich56" : inputDim === 47 ? "rich47" : inputDim === 40 ? "legacy40" : "unknown";
+
+  for (const desc of descriptors) {
+    const x = buildFeatureVector(base, desc, stats, inputDim);
+    const score = forward(compiled, x);
+    scoreMap.set(desc.candidate, score);
+    scores[String(desc.candidate)] = score;
+    diagnostics[String(desc.candidate)] = {
+      feature_mode: featureMode,
+      pi_norm: desc.piNorm,
+      match_density: desc.matchDensity,
+      known_ratio: desc.knownRatio,
+      same_month_legal_share: desc.sameMonthLegalShare,
+      same_month_hand_count_norm: desc.sameMonthHandCountNorm,
+      same_month_board_count_norm: desc.sameMonthBoardCountNorm,
+      category_share: desc.categoryShare,
+      pi_adv: desc.piAdv,
+      match_density_adv: desc.matchDensityAdv,
+      known_ratio_adv: desc.knownRatioAdv,
+      raw_score: score
+    };
   }
 
   const probs = scoreToProbabilityMap(candidates, scoreMap, Number(policyModel?.softmax_temp || 1.0));
-  return { decisionType, candidates, probabilities: probs, scores };
+  const chosenCandidate = pickBestByScore(candidates, scoreMap);
+  return {
+    analysis_version: "gpt_rich_candidate_context_v1",
+    decisionType,
+    candidates,
+    chosenCandidate,
+    probabilities: probs,
+    scores,
+    diagnostics,
+    feature_mode: featureMode
+  };
 }
 
-function modelPickCandidate(state, actor, policyModel) {
-  const scored = getModelCandidateProbabilities(state, actor, policyModel);
-  if (!scored) return null;
-  const scoreMap = new Map();
-  for (const c of scored.candidates) {
-    scoreMap.set(c, Number(scored.scores?.[String(c)] || -Infinity));
+/* 6) Public APIs */
+export function getModelCandidateProbabilities(state, actor, policyModel, options = {}) {
+  return scoreDecisionCandidates(state, actor, policyModel, options);
+}
+
+export function getModelDecisionAnalysis(state, actor, policyModel, options = {}) {
+  return scoreDecisionCandidates(state, actor, policyModel, options);
+}
+
+export function applyModelDecisionAnalysis(state, actor, analysis) {
+  if (!analysis || !analysis.decisionType) {
+    throw new Error(`[modelPolicyEngine_by_GPT] missing analysis payload (actor=${actor}, phase=${String(state?.phase || "")})`);
   }
-  const best = pickBestByScore(scored.candidates, scoreMap);
-  if (!best) return null;
-  return { decisionType: scored.decisionType, candidate: best };
+
+  const sp = selectDecisionPool(state, actor);
+  const decisionType = resolveDecisionType(sp);
+  if (!decisionType || decisionType !== analysis.decisionType) {
+    throw new Error(
+      `[modelPolicyEngine_by_GPT] analysis decision type mismatch (actor=${actor}, phase=${String(state?.phase || "")}, expected=${decisionType}, actual=${String(analysis.decisionType || "")})`
+    );
+  }
+
+  const legal = legalCandidatesForDecision(sp, decisionType).map((c) => normalizeDecisionCandidate(decisionType, c));
+  if (!legal.length) {
+    throw new Error(
+      `[modelPolicyEngine_by_GPT] legal candidates empty (actor=${actor}, phase=${String(state?.phase || "")}, decisionType=${decisionType})`
+    );
+  }
+
+  const picked = normalizeDecisionCandidate(decisionType, analysis.chosenCandidate);
+  if (!picked || !legal.includes(picked)) {
+    throw new Error(
+      `[modelPolicyEngine_by_GPT] illegal analysis candidate (actor=${actor}, phase=${String(state?.phase || "")}, decisionType=${decisionType}, candidate=${String(picked)})`
+    );
+  }
+
+  const next = applyDecisionAction(state, actor, decisionType, picked);
+  if (!next || next === state) {
+    throw new Error(
+      `[modelPolicyEngine_by_GPT] action apply failed (actor=${actor}, phase=${String(state?.phase || "")}, decisionType=${decisionType}, candidate=${String(picked)})`
+    );
+  }
+  return next;
 }
 
 export function modelPolicyPlay(state, actor, policyModel) {
@@ -475,43 +766,12 @@ export function modelPolicyPlay(state, actor, policyModel) {
     );
   }
 
-  const picked = modelPickCandidate(state, actor, policyModel);
-  if (!picked) {
+  const analysis = getModelDecisionAnalysis(state, actor, policyModel);
+  if (!analysis) {
     throw new Error(
       `[modelPolicyEngine_by_GPT] model candidate unresolved (actor=${actor}, phase=${String(state?.phase || "")})`
     );
   }
 
-  const sp = selectDecisionPool(state, actor);
-  const decisionType = resolveDecisionType(sp);
-  if (!decisionType) {
-    throw new Error(
-      `[modelPolicyEngine_by_GPT] decision type unresolved (actor=${actor}, phase=${String(state?.phase || "")})`
-    );
-  }
-
-  const legal = legalCandidatesForDecision(sp, decisionType);
-  if (!legal.length) {
-    throw new Error(
-      `[modelPolicyEngine_by_GPT] legal candidates empty (actor=${actor}, phase=${String(state?.phase || "")}, decisionType=${decisionType})`
-    );
-  }
-
-  let c = picked.candidate;
-  if (decisionType === "option") c = canonicalOptionAction(c);
-  if (!legal.includes(String(c))) {
-    throw new Error(
-      `[modelPolicyEngine_by_GPT] illegal model candidate (actor=${actor}, phase=${String(state?.phase || "")}, decisionType=${decisionType}, candidate=${String(c)})`
-    );
-  }
-
-  const next = applyDecisionAction(state, actor, decisionType, c);
-  if (!next || next === state) {
-    throw new Error(
-      `[modelPolicyEngine_by_GPT] action apply failed (actor=${actor}, phase=${String(state?.phase || "")}, decisionType=${decisionType}, candidate=${String(c)})`
-    );
-  }
-  return next;
+  return applyModelDecisionAnalysis(state, actor, analysis);
 }
-
-

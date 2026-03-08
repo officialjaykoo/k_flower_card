@@ -16,6 +16,8 @@ import {
 } from "../src/engine/index.js";
 import { getActionPlayerKey } from "../src/engine/runner.js";
 import { aiPlay } from "../src/ai/aiPlay.js";
+import { hybridPolicyPlayDetailed } from "../src/ai/hybridPolicyEngine.js";
+import { resolveBotPolicy } from "../src/ai/policies.js";
 
 // Quick Read Map (top-down):
 // 1) main()
@@ -28,6 +30,142 @@ import { aiPlay } from "../src/ai/aiPlay.js";
 // =============================================================================
 function normalizePolicyName(policy) {
   return String(policy || "").trim().toLowerCase();
+}
+
+const OPPONENT_SPEC_CACHE = new Map();
+
+function parseHybridPlayGoSpec(token) {
+  const m = String(token || "")
+    .trim()
+    .match(/^hybrid_play_go\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\s*\)$/i);
+  if (!m) {
+    return null;
+  }
+  return {
+    modelToken: String(m[1] || "").trim(),
+    goStopToken: String(m[2] || "").trim(),
+    heuristicToken: String(m[3] || "").trim(),
+  };
+}
+
+function parseHybridPlaySpec(token) {
+  const m = String(token || "")
+    .trim()
+    .match(/^hybrid_play\(\s*([^,]+)\s*,\s*([^)]+)\s*\)$/i);
+  if (!m) {
+    return null;
+  }
+  return {
+    modelToken: String(m[1] || "").trim(),
+    heuristicToken: String(m[2] || "").trim(),
+  };
+}
+
+function loadGenomeModel(genomePath, label) {
+  const full = path.resolve(String(genomePath || "").trim());
+  if (!fs.existsSync(full)) {
+    throw new Error(`${label} not found: ${genomePath}`);
+  }
+  const parsed = JSON.parse(fs.readFileSync(full, "utf8"));
+  if (String(parsed?.format_version || "").trim() !== "neat_python_genome_v1") {
+    throw new Error(`invalid ${label} format: expected neat_python_genome_v1`);
+  }
+  return {
+    model: parsed,
+    modelPath: full,
+  };
+}
+
+function resolvePhaseModelToken(token, label) {
+  const m = String(token || "").trim().match(/^phase([0-3])_seed(\d+)$/i);
+  if (!m) {
+    throw new Error(`invalid ${label}: ${token}`);
+  }
+  const phase = Number(m[1]);
+  const seed = Number(m[2]);
+  const modelPath = path.resolve(`logs/NEAT/neat_phase${phase}_seed${seed}/models/winner_genome.json`);
+  const loaded = loadGenomeModel(modelPath, label);
+  return {
+    key: `phase${phase}_seed${seed}`,
+    label: `phase${phase}_seed${seed}`,
+    phase,
+    seed,
+    model: loaded.model,
+    modelPath: loaded.modelPath,
+  };
+}
+
+function resolveOpponentSpec(policyToken, opponentGenomePath) {
+  const raw = String(policyToken || "").trim();
+  const cacheKey = `${raw}|oppGenome=${String(opponentGenomePath || "").trim()}`;
+  if (OPPONENT_SPEC_CACHE.has(cacheKey)) {
+    return OPPONENT_SPEC_CACHE.get(cacheKey);
+  }
+
+  let resolved = null;
+  if (normalizePolicyName(raw) === "genome") {
+    const loaded = loadGenomeModel(opponentGenomePath, "opponent genome");
+    resolved = {
+      kind: "model",
+      key: "genome",
+      label: "genome",
+      model: loaded.model,
+      modelPath: loaded.modelPath,
+    };
+  } else {
+    const hybridGo = parseHybridPlayGoSpec(raw);
+    if (hybridGo) {
+      const modelSpec = resolvePhaseModelToken(hybridGo.modelToken, "hybrid opponent model");
+      const goStopPolicy = resolveBotPolicy(hybridGo.goStopToken);
+      const heuristicPolicy = resolveBotPolicy(hybridGo.heuristicToken);
+      if (!goStopPolicy || !heuristicPolicy) {
+        throw new Error(`invalid hybrid opponent policy: ${raw}`);
+      }
+      resolved = {
+        kind: "hybrid_play_model",
+        key: `hybrid_play_go(${modelSpec.key},${goStopPolicy},${heuristicPolicy})`,
+        label: `hybrid_play_go(${modelSpec.label},${goStopPolicy},${heuristicPolicy})`,
+        model: modelSpec.model,
+        modelPath: modelSpec.modelPath,
+        heuristicPolicy,
+        goStopPolicy,
+      };
+    } else {
+      const hybrid = parseHybridPlaySpec(raw);
+      if (hybrid) {
+        const modelSpec = resolvePhaseModelToken(hybrid.modelToken, "hybrid opponent model");
+        const heuristicPolicy = resolveBotPolicy(hybrid.heuristicToken);
+        if (!heuristicPolicy) {
+          throw new Error(`invalid hybrid opponent policy: ${raw}`);
+        }
+        resolved = {
+          kind: "hybrid_play_model",
+          key: `hybrid_play(${modelSpec.key},${heuristicPolicy})`,
+          label: `hybrid_play(${modelSpec.label},${heuristicPolicy})`,
+          model: modelSpec.model,
+          modelPath: modelSpec.modelPath,
+          heuristicPolicy,
+          goStopPolicy: "",
+        };
+      } else {
+        const heuristicPolicy = resolveBotPolicy(raw);
+        if (!heuristicPolicy) {
+          throw new Error(`invalid opponent policy: ${raw}`);
+        }
+        resolved = {
+          kind: "heuristic",
+          key: heuristicPolicy,
+          label: heuristicPolicy,
+          model: null,
+          modelPath: null,
+          heuristicPolicy,
+        };
+      }
+    }
+  }
+
+  OPPONENT_SPEC_CACHE.set(cacheKey, resolved);
+  return resolved;
 }
 
 function parseArgs(argv) {
@@ -315,32 +453,152 @@ function randomChoice(arr, rng) {
   return arr[idx];
 }
 
-function selectOpponentPolicyForGame(opts, gameIndex) {
+function buildWeightedOpponentPlan(opts, totalGames) {
   const fixedPolicy = String(opts.opponentPolicy || "").trim();
   if (fixedPolicy) {
-    return fixedPolicy;
+    return [{ policy: fixedPolicy, count: totalGames, order: 0 }];
   }
   if (!Array.isArray(opts.opponentPolicyMix) || opts.opponentPolicyMix.length <= 0) {
-    return "";
+    return [];
   }
-  const tokenRng = createSeededRng(`${opts.seed}|opponent_mix|g=${gameIndex}`);
-  const needle = Number(tokenRng() || 0);
-  let total = 0;
-  for (const item of opts.opponentPolicyMix) {
-    total += Number(item.weight || 0);
+  const weighted = [];
+  let totalWeight = 0;
+  for (let i = 0; i < opts.opponentPolicyMix.length; i += 1) {
+    const item = opts.opponentPolicyMix[i];
+    const policy = String(item?.policy || "").trim();
+    const weight = Number(item?.weight || 0);
+    if (!policy) continue;
+    if (!Number.isFinite(weight) || weight <= 0) continue;
+    weighted.push({ policy, weight, order: i });
+    totalWeight += weight;
   }
-  if (!Number.isFinite(total) || total <= 0) {
+  if (!Number.isFinite(totalWeight) || totalWeight <= 0 || weighted.length <= 0) {
     throw new Error("invalid opponent_policy_mix total weight");
   }
-  const target = needle * total;
-  let acc = 0;
-  for (const item of opts.opponentPolicyMix) {
-    acc += Number(item.weight || 0);
-    if (target <= acc) {
-      return String(item.policy || "").trim();
+
+  const plan = weighted.map((entry) => {
+    const exact = (totalGames * entry.weight) / totalWeight;
+    const count = Math.floor(exact);
+    return {
+      policy: entry.policy,
+      count,
+      remainder: exact - count,
+      order: entry.order,
+    };
+  });
+  let assigned = 0;
+  for (const item of plan) {
+    assigned += item.count;
+  }
+  let remaining = totalGames - assigned;
+  if (remaining > 0) {
+    const priority = [...plan].sort((a, b) => {
+      if (b.remainder !== a.remainder) return b.remainder - a.remainder;
+      return a.order - b.order;
+    });
+    for (let i = 0; i < remaining; i += 1) {
+      priority[i % priority.length].count += 1;
     }
   }
-  return String(opts.opponentPolicyMix[opts.opponentPolicyMix.length - 1].policy || "").trim();
+
+  return plan.filter((item) => item.count > 0);
+}
+
+function shuffleInPlace(items, rng) {
+  for (let i = items.length - 1; i > 0; i -= 1) {
+    const j = Math.max(0, Math.min(i, Math.floor(Number(rng() || 0) * (i + 1))));
+    if (i === j) continue;
+    const tmp = items[i];
+    items[i] = items[j];
+    items[j] = tmp;
+  }
+}
+
+function buildEvaluationSchedule(opts, totalGames) {
+  const plan = buildWeightedOpponentPlan(opts, totalGames);
+  if (plan.length <= 0) {
+    throw new Error("resolved empty opponent policy schedule");
+  }
+
+  if (opts.firstTurnPolicy === "fixed") {
+    const fixedSchedule = [];
+    for (const item of plan) {
+      for (let i = 0; i < item.count; i += 1) {
+        fixedSchedule.push({
+          opponentPolicy: item.policy,
+          firstTurnKey: opts.fixedFirstTurn,
+        });
+      }
+    }
+    shuffleInPlace(fixedSchedule, createSeededRng(`${opts.seed}|schedule|fixed`));
+    return fixedSchedule;
+  }
+
+  const aiTarget = Math.ceil(totalGames / 2);
+  const humanTarget = totalGames - aiTarget;
+  const seatPlan = plan.map((item) => {
+    const base = Math.floor(item.count / 2);
+    return {
+      policy: item.policy,
+      count: item.count,
+      aiFirstCount: base,
+      humanFirstCount: base,
+      odd: item.count % 2,
+      order: item.order,
+    };
+  });
+
+  let aiAssigned = 0;
+  let humanAssigned = 0;
+  const oddEntries = [];
+  for (const item of seatPlan) {
+    aiAssigned += item.aiFirstCount;
+    humanAssigned += item.humanFirstCount;
+    if (item.odd) {
+      oddEntries.push(item);
+    }
+  }
+
+  let aiRemaining = aiTarget - aiAssigned;
+  let humanRemaining = humanTarget - humanAssigned;
+  const oddOrder = oddEntries.map((item, idx) => ({
+    item,
+    idx,
+    ticket: Number(createSeededRng(`${opts.seed}|schedule|odd|${item.policy}|${idx}`)() || 0),
+  }));
+  oddOrder.sort((a, b) => {
+    if (a.ticket !== b.ticket) return a.ticket - b.ticket;
+    return a.idx - b.idx;
+  });
+
+  for (const entry of oddOrder) {
+    if (aiRemaining > humanRemaining) {
+      entry.item.aiFirstCount += 1;
+      aiRemaining -= 1;
+    } else if (humanRemaining > 0) {
+      entry.item.humanFirstCount += 1;
+      humanRemaining -= 1;
+    } else {
+      entry.item.aiFirstCount += 1;
+      aiRemaining -= 1;
+    }
+  }
+
+  const schedule = [];
+  for (const item of seatPlan) {
+    for (let i = 0; i < item.aiFirstCount; i += 1) {
+      schedule.push({ opponentPolicy: item.policy, firstTurnKey: "ai" });
+    }
+    for (let i = 0; i < item.humanFirstCount; i += 1) {
+      schedule.push({ opponentPolicy: item.policy, firstTurnKey: "human" });
+    }
+  }
+
+  if (schedule.length !== totalGames) {
+    throw new Error(`invalid evaluation schedule length: expected=${totalGames}, actual=${schedule.length}`);
+  }
+  shuffleInPlace(schedule, createSeededRng(`${opts.seed}|schedule|shuffle`));
+  return schedule;
 }
 
 function randomLegalAction(state, actor, rng) {
@@ -354,11 +612,6 @@ function randomLegalAction(state, actor, rng) {
   if (!candidates.length) return state;
   const picked = randomChoice(candidates, rng);
   return applyAction(state, actor, decisionType, picked);
-}
-
-function resolveFirstTurnKey(opts, gameIndex) {
-  if (opts.firstTurnPolicy === "fixed") return opts.fixedFirstTurn;
-  return gameIndex % 2 === 0 ? "ai" : "human";
 }
 
 function startRound(seed, firstTurnKey) {
@@ -391,10 +644,11 @@ function playSingleRound(
   controlActor,
   opponentPolicy,
   maxSteps,
-  opponentModel
+  opponentGenomePath
 ) {
   const rng = createSeededRng(`${seed}|rng`);
   let state = initialState;
+  const opponentSpec = resolveOpponentSpec(opponentPolicy, opponentGenomePath);
   const imitation = {
     totals: { play: 0, match: 0, option: 0 },
     matches: { play: 0, match: 0, option: 0 },
@@ -419,16 +673,25 @@ function playSingleRound(
         source: "model",
         model: controlModel,
       });
-    } else if (normalizePolicyName(opponentPolicy) === "genome") {
-      next = aiPlay(state, actor, {
-        source: "model",
-        model: opponentModel,
-      });
     } else {
-      next = aiPlay(state, actor, {
-        source: "heuristic",
-        heuristicPolicy: opponentPolicy,
-      });
+      if (opponentSpec.kind === "model") {
+        next = aiPlay(state, actor, {
+          source: "model",
+          model: opponentSpec.model,
+        });
+      } else if (opponentSpec.kind === "hybrid_play_model") {
+        const traced = hybridPolicyPlayDetailed(state, actor, {
+          model: opponentSpec.model,
+          heuristicPolicy: String(opponentSpec.heuristicPolicy || ""),
+          goStopPolicy: String(opponentSpec.goStopPolicy || ""),
+        });
+        next = traced?.next || state;
+      } else {
+        next = aiPlay(state, actor, {
+          source: "heuristic",
+          heuristicPolicy: opponentSpec.heuristicPolicy,
+        });
+      }
     }
 
     if (!next || stateProgressKey(next) === before) {
@@ -450,9 +713,9 @@ function playSingleRound(
       );
       if (chosen) {
         const imitationRefPolicy =
-          normalizePolicyName(opponentPolicy) === "genome"
+          opponentSpec.kind === "model"
             ? "H-J2"
-            : opponentPolicy;
+            : String(opponentSpec.heuristicPolicy || opponentPolicy || "");
         const refCandidate = heuristicCandidateForDecision(
           state,
           actor,
@@ -539,20 +802,16 @@ function main() {
   if (String(controlModel?.format_version || "").trim() !== "neat_python_genome_v1") {
     throw new Error("invalid --genome format: expected neat_python_genome_v1");
   }
-  let opponentModel = null;
-  if (String(opts.opponentPolicy || "").trim().toLowerCase() === "genome") {
-    const oppFull = path.resolve(opts.opponentGenomePath);
-    if (!fs.existsSync(oppFull)) {
-      throw new Error(`opponent genome not found: ${opts.opponentGenomePath}`);
-    }
-    opponentModel = JSON.parse(fs.readFileSync(oppFull, "utf8"));
-    if (String(opponentModel?.format_version || "").trim() !== "neat_python_genome_v1") {
-      throw new Error("invalid --opponent-genome format: expected neat_python_genome_v1");
-    }
+  if (String(opts.opponentPolicy || "").trim()) {
+    resolveOpponentSpec(opts.opponentPolicy, opts.opponentGenomePath);
+  }
+  for (const item of opts.opponentPolicyMix || []) {
+    resolveOpponentSpec(item?.policy, opts.opponentGenomePath);
   }
 
   const games = Math.max(1, Math.floor(opts.games));
   const maxSteps = Math.max(20, Math.floor(opts.maxSteps));
+  const evaluationSchedule = buildEvaluationSchedule(opts, games);
   const controlActor = "ai";
   const opponentActor = "human";
   let wins = 0;
@@ -579,8 +838,9 @@ function main() {
   };
 
   for (let gi = 0; gi < games; gi += 1) {
-    const firstTurnKey = resolveFirstTurnKey(opts, gi);
-    const opponentPolicyForGame = selectOpponentPolicyForGame(opts, gi);
+    const scheduleItem = evaluationSchedule[gi];
+    const firstTurnKey = String(scheduleItem?.firstTurnKey || "");
+    const opponentPolicyForGame = String(scheduleItem?.opponentPolicy || "");
     if (!opponentPolicyForGame) {
       throw new Error("resolved empty opponent policy");
     }
@@ -600,7 +860,7 @@ function main() {
       controlActor,
       opponentPolicyForGame,
       maxSteps,
-      opponentModel
+      opts.opponentGenomePath
     );
     const endState = gameResult?.endState || gameResult;
     const afterGoldDiff = controlGoldDiff(endState, controlActor);

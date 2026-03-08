@@ -1,3 +1,4 @@
+// AntiCL GO sweep tuner for GPT-authored heuristic runs.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { spawn } from "node:child_process";
@@ -19,8 +20,8 @@ function parseArgs(argv) {
   const out = {
     opponent: "H-CL",
     games: 1000,
-    seedBase: "anticl_tune",
-    outDir: `logs/duel/anticl_tune/tune_${stamp}`,
+    seedBase: "anticl_tune_gpt",
+    outDir: `logs/duel/anticl_tune_gpt/tune_${stamp}`,
     ratioCutStart: 2.2,
     ratioCutEnd: 2.8,
     ratioCutStep: 0.2,
