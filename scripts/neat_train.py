@@ -299,11 +299,15 @@ def _normalize_control_policy_mode(raw_value: object) -> str:
         "hybrid_play_match_only": "hybrid_play_match_only",
         "hybrid_playmatch_only": "hybrid_play_match_only",
         "play_match_only": "hybrid_play_match_only",
+        "hybrid_go_stop_only": "hybrid_go_stop_only",
+        "hybrid_gostop_only": "hybrid_go_stop_only",
+        "go_stop_only": "hybrid_go_stop_only",
+        "gostop_only": "hybrid_go_stop_only",
     }
     if raw in aliases:
         return aliases[raw]
     raise RuntimeError(
-        "runtime key 'control_policy_mode' must be one of: pure_model, hybrid_play_match_only"
+        "runtime key 'control_policy_mode' must be one of: pure_model, hybrid_play_match_only, hybrid_go_stop_only"
     )
 
 
@@ -1239,6 +1243,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to winner_genome.pkl used to reseed a fresh population for the next phase",
     )
     parser.add_argument(
+        "--seed-genome-count",
+        type=int,
+        default=0,
+        help="How many genomes in the new population should be seeded from --seed-genome; 0 fills the whole population",
+    )
+    parser.add_argument(
         "--base-generation",
         type=int,
         default=0,
@@ -1290,7 +1300,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--control-policy-mode",
         default="",
-        help="Override control policy mode (pure_model or hybrid_play_match_only)",
+        help="Override control policy mode (pure_model, hybrid_play_match_only, or hybrid_go_stop_only)",
     )
     parser.add_argument(
         "--control-heuristic-policy",
@@ -1367,7 +1377,7 @@ def _run_dry_eval(population, _config):
         genome.fitness = float(len(genome.connections)) * 0.001 + float(len(genome.nodes)) * 0.0001
 
 
-def _build_seeded_population(cfg, seed_genome_path: str):
+def _build_seeded_population(cfg, seed_genome_path: str, seed_genome_count: int = 0):
     if neat is None:
         raise RuntimeError("neat-python is not installed. Install with: pip install neat-python")
 
@@ -1385,6 +1395,10 @@ def _build_seeded_population(cfg, seed_genome_path: str):
 
     population = neat.Population(cfg)
     population_size = max(1, int(cfg.pop_size))
+    seed_count = int(seed_genome_count or 0)
+    if seed_count <= 0:
+        seed_count = population_size
+    seed_count = max(1, min(population_size, int(seed_count)))
     existing_keys = sorted(population.population.keys())
     if len(existing_keys) < population_size:
         raise RuntimeError("failed to initialize base population for seed expansion")
@@ -1403,11 +1417,11 @@ def _build_seeded_population(cfg, seed_genome_path: str):
     tracker.global_counter = int(max_innovation)
     tracker.reset_generation()
 
-    seeded_population = {}
+    seeded_population = dict(population.population)
     population.reproduction.ancestors = {}
     seed_key = int(getattr(seed_genome, "key", 0) or 0)
 
-    for idx, genome_key in enumerate(existing_keys[:population_size]):
+    for idx, genome_key in enumerate(existing_keys[:seed_count]):
         genome = copy.deepcopy(seed_genome)
         genome.key = int(genome_key)
         genome.fitness = None
@@ -1417,6 +1431,13 @@ def _build_seeded_population(cfg, seed_genome_path: str):
                 genome.mutate(cfg.genome_config)
         seeded_population[int(genome_key)] = genome
         population.reproduction.ancestors[int(genome_key)] = (seed_key,)
+
+    for genome_key in existing_keys[seed_count:population_size]:
+        genome = seeded_population.get(int(genome_key))
+        if genome is None:
+            continue
+        genome.fitness = None
+        population.reproduction.ancestors[int(genome_key)] = tuple()
 
     population.population = seeded_population
     population.generation = 0
@@ -1620,8 +1641,11 @@ def main() -> None:
     runtime = _load_runtime_config(args.runtime_config)
     applied_overrides = {}
     seed_genome_path = str(args.seed_genome or "").strip()
+    seed_genome_count = max(0, int(args.seed_genome_count or 0))
     if seed_genome_path:
         applied_overrides["seed_genome"] = seed_genome_path
+        if seed_genome_count > 0:
+            applied_overrides["seed_genome_count"] = int(seed_genome_count)
     if args.resume and seed_genome_path:
         raise RuntimeError("--resume and --seed-genome are mutually exclusive")
     explicit_base_generation = max(0, int(args.base_generation))
@@ -1716,7 +1740,7 @@ def main() -> None:
     if args.resume:
         p = _restore_population_from_checkpoint(args.resume)
     elif seed_genome_path:
-        p = _build_seeded_population(cfg, seed_genome_path)
+        p = _build_seeded_population(cfg, seed_genome_path, seed_genome_count=seed_genome_count)
     else:
         p = neat.Population(cfg)
     start_generation = int(getattr(p, "generation", 0))

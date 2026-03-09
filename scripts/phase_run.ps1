@@ -2,7 +2,8 @@
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed,
   [Parameter(Mandatory = $false)][string]$ControlPolicyMode = "",
-  [Parameter(Mandatory = $false)][string]$ControlHeuristicPolicy = ""
+  [Parameter(Mandatory = $false)][string]$ControlHeuristicPolicy = "",
+  [Parameter(Mandatory = $false)][string]$BootstrapSeedSpec = ""
 )
 
 Set-StrictMode -Version Latest
@@ -184,6 +185,37 @@ function Get-PropertyValue {
   return $null
 }
 
+function Resolve-BootstrapWinnerPath {
+  param([Parameter(Mandatory = $true)][string]$Spec)
+
+  $raw = [string]$Spec
+  if ([string]::IsNullOrWhiteSpace($raw)) {
+    throw "bootstrap seed spec is empty"
+  }
+
+  $m = [regex]::Match($raw.Trim(), "^phase([123])_seed(\d+)$", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  if (-not $m.Success) {
+    throw "invalid bootstrap seed spec: $Spec (use phase1_seed203)"
+  }
+
+  $bootstrapPhase = [int]$m.Groups[1].Value
+  $bootstrapSeed = [int]$m.Groups[2].Value
+  $summaryPath = "logs/NEAT/neat_phase${bootstrapPhase}_seed$bootstrapSeed/run_summary.json"
+  $winnerPath = ""
+  if (Test-Path $summaryPath) {
+    $summary = Read-JsonFile -Path $summaryPath
+    $winnerPath = [string](Get-PropertyValue -Object $summary -Name "winner_pickle")
+  }
+  if ([string]::IsNullOrWhiteSpace($winnerPath)) {
+    $winnerPath = "logs/NEAT/neat_phase${bootstrapPhase}_seed$bootstrapSeed/models/winner_genome.pkl"
+  }
+  $fullPath = [System.IO.Path]::GetFullPath($winnerPath)
+  if (-not (Test-Path $fullPath)) {
+    throw "bootstrap winner genome not found: $fullPath"
+  }
+  return $fullPath
+}
+
 $python = ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
   throw "python not found: $python"
@@ -221,7 +253,14 @@ if (-not [string]::IsNullOrWhiteSpace($ControlHeuristicPolicy)) {
   )
 }
 
-if ($Phase -ne "1") {
+if (-not [string]::IsNullOrWhiteSpace($BootstrapSeedSpec)) {
+  $bootstrapWinnerPath = Resolve-BootstrapWinnerPath -Spec $BootstrapSeedSpec
+  $cmd += @(
+    "--seed-genome", "$bootstrapWinnerPath",
+    "--seed-genome-count", "16"
+  )
+}
+elseif ($Phase -ne "1") {
   $previousPhase = [int]$Phase - 1
   $previousLabel = "phase$previousPhase"
   $previousRuntimePath = "scripts/configs/runtime_phase$previousPhase.json"

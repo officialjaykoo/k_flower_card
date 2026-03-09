@@ -10,6 +10,7 @@
 - `scripts/configs/runtime_phase3.json`
 
 현재 값:
+- Phase 1: `generations = 50`, `games_per_genome = 200`
 - Phase 1: `opponent_policy_mix = [hybrid_play(phase1_seed203,H-CL) 50, hybrid_play(phase2_seed204,H-CL) 50]`
 - Phase 1: `fitness_win_weight = 0.99`, `fitness_gold_weight = 0.01`, `fitness_win_neutral_rate = 0.50`
 - Phase 2: `opponent_policy_mix = [H-CL 50, H-GPT-AllButGo+CL 50]`
@@ -132,12 +133,18 @@ fitness_8:2 - fitness_6:4 = 0.2 * (resultNorm - goldNorm)
 
 runtime 키:
 - `control_policy_mode = "hybrid_play_match_only"`
+- `control_policy_mode = "hybrid_go_stop_only"`
 - `control_heuristic_policy = "H-CL"`
 
 의미:
 - 모델이 직접 맡는 것: `play`, `select-match`
 - `H-CL`이 맡는 것: `go/stop`, 흔들기/폭탄, 총통, 국진, 기타 phase
 - imitation 집계도 모델이 실제로 움직인 `play/match`만 센다.
+
+`hybrid_go_stop_only` 의미:
+- 모델이 직접 맡는 것: `play`, `select-match`, 흔들기/폭탄, 총통, 국진 등 `go/stop`을 제외한 나머지
+- `H-CL`이 맡는 것: `go/stop`만
+- imitation 집계도 모델이 실제로 움직인 `non-go-stop` 결정만 센다.
 
 주의:
 - 기존 `hybrid_play(model,H-CL)` 토큰은 실전/듀얼용 hybrid이고, 이 학습 모드는 eval worker의 control actor 평가 경로를 바꾸는 별도 스위치다.

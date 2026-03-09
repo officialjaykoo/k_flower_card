@@ -46,8 +46,16 @@ function normalizeControlPolicyMode(mode) {
   ) {
     return "hybrid_play_match_only";
   }
+  if (
+    raw === "hybrid_go_stop_only" ||
+    raw === "hybrid_gostop_only" ||
+    raw === "go_stop_only" ||
+    raw === "gostop_only"
+  ) {
+    return "hybrid_go_stop_only";
+  }
   throw new Error(
-    `invalid --control-policy-mode: ${mode} (allowed: pure_model, hybrid_play_match_only)`
+    `invalid --control-policy-mode: ${mode} (allowed: pure_model, hybrid_play_match_only, hybrid_go_stop_only)`
   );
 }
 
@@ -326,7 +334,10 @@ function parseArgs(argv) {
   if (!Number.isFinite(out.fitnessWinNeutralRate) || out.fitnessWinNeutralRate <= 0 || out.fitnessWinNeutralRate >= 1) {
     throw new Error("--fitness-win-neutral-rate is required and must be in (0,1)");
   }
-  if (out.controlPolicyMode === "hybrid_play_match_only") {
+  if (
+    out.controlPolicyMode === "hybrid_play_match_only" ||
+    out.controlPolicyMode === "hybrid_go_stop_only"
+  ) {
     const resolved = resolveBotPolicy(out.controlHeuristicPolicy);
     if (!resolved) {
       throw new Error(
@@ -754,7 +765,7 @@ function playSingleRound(
   const opponentSpec = resolveOpponentSpec(opponentPolicy, opponentGenomePath);
   const controlPolicyMode = normalizeControlPolicyMode(controlOptions.controlPolicyMode || "pure_model");
   const controlHeuristicPolicy =
-    controlPolicyMode === "hybrid_play_match_only"
+    controlPolicyMode === "hybrid_play_match_only" || controlPolicyMode === "hybrid_go_stop_only"
       ? String(controlOptions.controlHeuristicPolicy || "H-CL")
       : "";
   const imitation = {
@@ -791,6 +802,16 @@ function playSingleRound(
         next = traced?.next || state;
         const route = String(traced?.route || "");
         controlDecisionOwnedByModel = route === "model_play" || route === "model_match";
+      } else if (controlPolicyMode === "hybrid_go_stop_only") {
+        const traced = hybridPolicyPlayDetailed(state, actor, {
+          model: controlModel,
+          heuristicPolicy: controlHeuristicPolicy,
+          goStopPolicy: controlHeuristicPolicy,
+          goStopOnly: true,
+        });
+        next = traced?.next || state;
+        const route = String(traced?.route || "");
+        controlDecisionOwnedByModel = route === "model_non_go_stop";
       } else {
         next = aiPlay(state, actor, {
           source: "model",
@@ -1090,12 +1111,18 @@ function main() {
     opponent_policy_counts: opponentPolicyCounts,
     control_policy_mode: opts.controlPolicyMode,
     control_heuristic_policy:
-      opts.controlPolicyMode === "hybrid_play_match_only" ? opts.controlHeuristicPolicy : null,
+      opts.controlPolicyMode === "hybrid_play_match_only" || opts.controlPolicyMode === "hybrid_go_stop_only"
+        ? opts.controlHeuristicPolicy
+        : null,
     opponent_eval_tuning: {
       fast_path: false,
       imitation_reference_enabled: true,
       imitation_decision_scope:
-        opts.controlPolicyMode === "hybrid_play_match_only" ? "model_owned_play_match_only" : "all_control_decisions",
+        opts.controlPolicyMode === "hybrid_play_match_only"
+          ? "model_owned_play_match_only"
+          : opts.controlPolicyMode === "hybrid_go_stop_only"
+            ? "model_owned_non_go_stop_only"
+            : "all_control_decisions",
       opponent_heuristic_params: null,
     },
     opponent_genome: String(opts.opponentGenomePath || "") || null,
