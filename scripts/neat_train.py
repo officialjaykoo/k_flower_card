@@ -25,6 +25,7 @@ import multiprocessing as mp
 import os
 import pickle
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -789,7 +790,14 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
 # Section 8. Parallel Evaluator + Gate Tracking
 # =============================================================================
 class LoggedParallelEvaluator:
-    def __init__(self, num_workers: int, output_dir: str, runtime: dict):
+    def __init__(
+        self,
+        num_workers: int,
+        output_dir: str,
+        runtime: dict,
+        start_generation: int = 0,
+        generation_display_offset: int = 0,
+    ):
         self.num_workers = max(1, int(num_workers))
         self.output_dir = os.path.abspath(output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
@@ -800,7 +808,8 @@ class LoggedParallelEvaluator:
         self.generation_metrics_log = os.path.join(self.output_dir, "generation_metrics.ndjson")
         self.gate_state_path = os.path.join(self.output_dir, "gate_state.json")
 
-        self.generation = -1
+        self.generation = int(start_generation) - 1
+        self.generation_display_offset = int(generation_display_offset)
         self.gate_mode = str(runtime["gate_mode"])
         self.ema_window = int(runtime["gate_ema_window"])
         self.ema_alpha = 2.0 / (float(self.ema_window) + 1.0)
@@ -822,6 +831,10 @@ class LoggedParallelEvaluator:
         self.best_imitation_history = []
         self.best_win_rate_history = []
         self.gate_state = {}
+
+    def _display_generation(self, generation: Optional[int] = None) -> int:
+        current = self.generation if generation is None else int(generation)
+        return int(self.generation_display_offset + current)
 
     def _append_lines(self, path: str, records):
         if not records:
@@ -900,7 +913,7 @@ class LoggedParallelEvaluator:
             self.gate_streak = 0
             self.gate_state = {
                 "saved_at": datetime.now(timezone.utc).isoformat(),
-                "generation": int(self.generation),
+                "generation": self._display_generation(),
                 "data_quality": "invalid_generation",
                 "valid_record_count": int(valid_count),
                 "total_record_count": int(total_count),
@@ -910,9 +923,17 @@ class LoggedParallelEvaluator:
                 "ema_win_rate": float(self.ema_win_rate) if self.ema_win_rate is not None else None,
                 "gate_streak": int(self.gate_streak),
                 "transition_ready": bool(self.transition_generation is not None),
-                "transition_generation": self.transition_generation,
+                "transition_generation": (
+                    self._display_generation(self.transition_generation)
+                    if self.transition_generation is not None
+                    else None
+                ),
                 "failure_triggered": bool(self.failure_generation is not None),
-                "failure_generation": self.failure_generation,
+                "failure_generation": (
+                    self._display_generation(self.failure_generation)
+                    if self.failure_generation is not None
+                    else None
+                ),
                 "latest_imitation": None,
                 "latest_win_rate": None,
                 "latest_mean_gold_delta": None,
@@ -975,7 +996,7 @@ class LoggedParallelEvaluator:
 
         self.gate_state = {
             "saved_at": datetime.now(timezone.utc).isoformat(),
-            "generation": int(self.generation),
+            "generation": self._display_generation(),
             "data_quality": "valid_generation",
             "valid_record_count": int(valid_count),
             "total_record_count": int(total_count),
@@ -985,9 +1006,17 @@ class LoggedParallelEvaluator:
             "ema_win_rate": float(self.ema_win_rate),
             "gate_streak": int(self.gate_streak),
             "transition_ready": bool(self.transition_generation is not None),
-            "transition_generation": self.transition_generation,
+            "transition_generation": (
+                self._display_generation(self.transition_generation)
+                if self.transition_generation is not None
+                else None
+            ),
             "failure_triggered": bool(self.failure_generation is not None),
-            "failure_generation": self.failure_generation,
+            "failure_generation": (
+                self._display_generation(self.failure_generation)
+                if self.failure_generation is not None
+                else None
+            ),
             "latest_imitation": float(imitation),
             "latest_win_rate": float(win_rate),
             "latest_mean_gold_delta": float(mean_gold_delta) if mean_gold_delta == mean_gold_delta else None,
@@ -999,12 +1028,13 @@ class LoggedParallelEvaluator:
 
     def evaluate(self, genomes, config):
         self.generation += 1
-        seed_for_generation = f"{self.runtime_seed}|gen={self.generation}"
+        display_generation = self._display_generation()
+        seed_for_generation = f"{self.runtime_seed}|gen={display_generation}"
         jobs = []
         for genome_key, genome in genomes:
             job = self.pool.apply_async(
                 eval_function,
-                (genome, config, seed_for_generation, int(self.generation), int(genome_key)),
+                (genome, config, seed_for_generation, int(display_generation), int(genome_key)),
             )
             jobs.append((genome_key, genome, job))
 
@@ -1030,7 +1060,7 @@ class LoggedParallelEvaluator:
             genome.fitness = float(fitness)
             record = dict(result)
             record["saved_at"] = datetime.now(timezone.utc).isoformat()
-            record["generation"] = int(self.generation)
+            record["generation"] = int(display_generation)
             record["genome_key"] = int(genome_key)
             record["seed_used"] = str(record.get("seed_used") or seed_for_generation)
             record["fitness"] = float(fitness)
@@ -1082,7 +1112,7 @@ class LoggedParallelEvaluator:
             ]
             generation_record = {
                 "saved_at": datetime.now(timezone.utc).isoformat(),
-                "generation": int(self.generation),
+                "generation": int(display_generation),
                 "seed_used": seed_for_generation,
                 "population_size": len(records),
                 "valid_record_count": len(valid_records),
@@ -1140,7 +1170,7 @@ class LoggedParallelEvaluator:
         else:
             generation_record = {
                 "saved_at": datetime.now(timezone.utc).isoformat(),
-                "generation": int(self.generation),
+                "generation": int(display_generation),
                 "seed_used": seed_for_generation,
                 "population_size": 0,
                 "valid_record_count": 0,
@@ -1396,6 +1426,68 @@ def _build_seeded_population(cfg, seed_genome_path: str):
     return population
 
 
+def _parse_checkpoint_display_generation(path: str) -> Optional[int]:
+    name = os.path.basename(os.path.abspath(str(path or "").strip()))
+    m = re.search(r"gen(\d+)$", name)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+
+def _resolve_effective_base_generation(
+    resume_path: str,
+    start_generation: int,
+    explicit_base_generation: int,
+) -> int:
+    explicit = max(0, int(explicit_base_generation))
+    if explicit > 0:
+        return explicit
+    resume_raw = str(resume_path or "").strip()
+    if not resume_raw:
+        return 0
+    display_generation = _parse_checkpoint_display_generation(resume_raw)
+    if display_generation is None:
+        return 0
+    return max(0, int(display_generation) - int(start_generation))
+
+
+def _restore_population_from_checkpoint(filename: str, new_config=None):
+    with gzip.open(filename, "rb") as f:
+        data = pickle.load(f)
+
+    if not isinstance(data, tuple) or len(data) < 5:
+        raise RuntimeError(f"Unsupported checkpoint payload: {filename}")
+
+    generation, saved_config, population, species_set, rndstate = data[:5]
+    extra = data[5] if len(data) >= 6 else None
+    metadata: Dict[str, Any] = extra if isinstance(extra, dict) else {}
+
+    random.setstate(rndstate)
+
+    saved_innovation_tracker = None
+    if hasattr(saved_config.genome_config, "innovation_tracker"):
+        saved_innovation_tracker = saved_config.genome_config.innovation_tracker
+
+    config = new_config if new_config is not None else saved_config
+    restored_pop = neat.Population(config, (population, species_set, generation))
+
+    if saved_innovation_tracker is not None:
+        restored_pop.reproduction.innovation_tracker = saved_innovation_tracker
+        config.genome_config.innovation_tracker = saved_innovation_tracker
+
+    restored_best = metadata.get("best_genome")
+    if restored_best is not None:
+        restored_pop.best_genome = restored_best
+    restored_best_display_generation = metadata.get("best_genome_display_generation")
+    if restored_best_display_generation is not None:
+        setattr(restored_pop, "best_genome_display_generation", int(restored_best_display_generation))
+
+    return restored_pop
+
+
 if neat is not None:
 
     class OffsetCheckpointer(neat.Checkpointer):
@@ -1406,19 +1498,39 @@ if neat is not None:
             total_generations: int,
             generation_interval: int,
             filename_prefix: str,
+            initial_best_genome=None,
+            initial_best_display_generation: Optional[int] = None,
         ):
             super().__init__(
                 generation_interval=max(1, int(generation_interval)),
                 filename_prefix=str(filename_prefix),
             )
             self.base_generation = int(base_generation)
-            self._start_generation = int(start_generation)
-            self.total_generations = max(1, int(total_generations))
             self.last_generation_checkpoint = int(start_generation)
             self._last_saved_display_generation = None
+            self.best_genome_snapshot = copy.deepcopy(initial_best_genome)
+            self.best_genome_display_generation = (
+                int(initial_best_display_generation)
+                if initial_best_display_generation is not None
+                else None
+            )
 
-        def _display_from_next_generation(self, next_generation: int) -> int:
-            return int(self.base_generation + (int(next_generation) - self._start_generation))
+        def _display_from_generation(self, generation: int) -> int:
+            return int(self.base_generation + int(generation))
+
+        def post_evaluate(self, config, population, species, best_genome):
+            if best_genome is None:
+                return
+            best_fitness = getattr(best_genome, "fitness", None)
+            snapshot_fitness = getattr(self.best_genome_snapshot, "fitness", None)
+            if (
+                self.best_genome_snapshot is None
+                or snapshot_fitness is None
+                or (best_fitness is not None and float(best_fitness) > float(snapshot_fitness))
+            ):
+                self.best_genome_snapshot = copy.deepcopy(best_genome)
+                current_generation = int(getattr(self, "current_generation", 0))
+                self.best_genome_display_generation = self._display_from_generation(current_generation)
 
         def _save_checkpoint_with_display(
             self,
@@ -1431,12 +1543,23 @@ if neat is not None:
             filename = f"{self.filename_prefix}gen{int(display_generation)}"
             print(f"Saving checkpoint to {filename}", file=sys.stderr)
             with gzip.open(filename, "w", compresslevel=5) as f:
-                data = (int(state_generation), config, population, species_set, random.getstate())
+                metadata = {
+                    "best_genome": copy.deepcopy(self.best_genome_snapshot),
+                    "best_genome_display_generation": self.best_genome_display_generation,
+                }
+                data = (
+                    int(state_generation),
+                    config,
+                    population,
+                    species_set,
+                    random.getstate(),
+                    metadata,
+                )
                 pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
             self._last_saved_display_generation = int(display_generation)
 
         def save_checkpoint(self, config, population, species_set, generation):
-            display_generation = self._display_from_next_generation(int(generation))
+            display_generation = self._display_from_generation(int(generation))
             self._save_checkpoint_with_display(
                 config=config,
                 population=population,
@@ -1463,23 +1586,13 @@ if neat is not None:
             if not checkpoint_due:
                 return
 
-            is_final_generation = (next_generation - self._start_generation) >= self.total_generations
-            if self.base_generation > 0 and is_final_generation:
-                return
-
             self.save_checkpoint(config, population, species_set, next_generation)
             self.last_generation_checkpoint = next_generation
             self.last_time_checkpoint = time.time()
 
         def save_final_checkpoint(self, config, population, species_set, state_generation: int) -> None:
             state_generation = int(state_generation)
-            if state_generation <= self._start_generation:
-                return
-
-            if self.base_generation > 0:
-                display_generation = self._display_from_next_generation(state_generation - 1)
-            else:
-                display_generation = self._display_from_next_generation(state_generation)
+            display_generation = self._display_from_generation(state_generation)
 
             if self._last_saved_display_generation == int(display_generation):
                 return
@@ -1511,9 +1624,7 @@ def main() -> None:
         applied_overrides["seed_genome"] = seed_genome_path
     if args.resume and seed_genome_path:
         raise RuntimeError("--resume and --seed-genome are mutually exclusive")
-    base_generation = max(0, int(args.base_generation))
-    if base_generation != 0:
-        applied_overrides["base_generation"] = int(base_generation)
+    explicit_base_generation = max(0, int(args.base_generation))
     override_keys = []
     if args.generations > 0:
         runtime["generations"] = args.generations
@@ -1603,12 +1714,19 @@ def main() -> None:
     _set_eval_env(runtime, args.output_dir)
 
     if args.resume:
-        p = neat.Checkpointer.restore_checkpoint(args.resume)
+        p = _restore_population_from_checkpoint(args.resume)
     elif seed_genome_path:
         p = _build_seeded_population(cfg, seed_genome_path)
     else:
         p = neat.Population(cfg)
     start_generation = int(getattr(p, "generation", 0))
+    base_generation = _resolve_effective_base_generation(
+        resume_path=args.resume,
+        start_generation=start_generation,
+        explicit_base_generation=explicit_base_generation,
+    )
+    if base_generation != 0:
+        applied_overrides["base_generation"] = int(base_generation)
 
     # Keep training output quiet by default to reduce terminal I/O overhead.
     if bool(args.verbose):
@@ -1623,6 +1741,8 @@ def main() -> None:
         total_generations=int(runtime["generations"]),
         generation_interval=max(1, int(runtime["checkpoint_every"])),
         filename_prefix=prefix,
+        initial_best_genome=getattr(p, "best_genome", None),
+        initial_best_display_generation=getattr(p, "best_genome_display_generation", None),
     )
     p.add_reporter(checkpointer)
 
@@ -1644,6 +1764,8 @@ def main() -> None:
             num_workers=int(runtime["eval_workers"]),
             output_dir=args.output_dir,
             runtime=runtime,
+            start_generation=int(start_generation),
+            generation_display_offset=int(base_generation),
         )
         try:
             winner = _run_population(evaluator.evaluate)
@@ -1661,6 +1783,7 @@ def main() -> None:
         json.dump(_export_neat_python_genome(winner, p.config), f, ensure_ascii=False, separators=(",", ":"))
 
     best_fitness = float(getattr(winner, "fitness", float("nan")) or 0.0)
+    winner_generation = getattr(checkpointer, "best_genome_display_generation", None)
     run_finished_wall = datetime.now(timezone.utc)
     run_elapsed_sec = max(0.0, time.perf_counter() - run_started_perf)
     run_summary = {
@@ -1674,6 +1797,7 @@ def main() -> None:
         "workers": int(runtime["eval_workers"]),
         "games_per_genome": int(runtime["games_per_genome"]),
         "best_fitness": best_fitness,
+        "winner_generation": (int(winner_generation) if winner_generation is not None else None),
         "applied_overrides": applied_overrides,
         "runtime_effective": runtime,
         "eval_failure_log": os.path.join(args.output_dir, "eval_failures.log"),

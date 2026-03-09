@@ -10,8 +10,8 @@
 - `scripts/configs/runtime_phase3.json`
 
 현재 값:
-- Phase 1: `opponent_policy_mix = [H-CL 50, hybrid_play(phase3_seed202,H-CL) 50]`
-- Phase 1: `fitness_win_weight = 0.8`, `fitness_gold_weight = 0.2`, `fitness_win_neutral_rate = 0.50`
+- Phase 1: `opponent_policy_mix = [hybrid_play(phase1_seed203,H-CL) 50, hybrid_play(phase2_seed204,H-CL) 50]`
+- Phase 1: `fitness_win_weight = 0.99`, `fitness_gold_weight = 0.01`, `fitness_win_neutral_rate = 0.50`
 - Phase 2: `opponent_policy_mix = [H-CL 50, H-GPT-AllButGo+CL 50]`
 - Phase 2: `fitness_win_weight = 0.75`, `fitness_gold_weight = 0.25`, `fitness_win_neutral_rate = 0.50`
 - Phase 3: `opponent_policy_mix = [hybrid_play(phase2_seed203,H-CL) 50, H-GPT-PlayMatch+CL 50]`

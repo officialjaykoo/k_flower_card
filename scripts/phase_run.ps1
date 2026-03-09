@@ -170,6 +170,20 @@ function Get-OptionalDouble {
   }
 }
 
+function Get-PropertyValue {
+  param(
+    [Parameter(Mandatory = $false)]$Object,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+  if ($null -eq $Object) {
+    return $null
+  }
+  if ($Object.PSObject.Properties.Name -contains $Name) {
+    return $Object.$Name
+  }
+  return $null
+}
+
 $python = ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
   throw "python not found: $python"
@@ -220,11 +234,14 @@ if ($Phase -ne "1") {
   $previousAppliedOverrides = $previousSummary.applied_overrides
   $previousBaseGeneration = 0
   if ($null -ne $previousAppliedOverrides) {
-    $previousBaseGeneration = To-PositiveIntOrDefault -Value $previousAppliedOverrides.base_generation -DefaultValue 0
+    $previousBaseGeneration = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousAppliedOverrides -Name "base_generation") -DefaultValue 0
   }
-  $previousGenerations = To-PositiveIntOrDefault -Value $previousSummary.generations -DefaultValue (
-    To-PositiveIntOrDefault -Value $previousRuntime.generations -DefaultValue 20
-  )
+  $previousRuntimeGenerations = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousRuntime -Name "generations") -DefaultValue 20
+  $previousGenerations = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousSummary -Name "generations") -DefaultValue $previousRuntimeGenerations
+  $previousOverrideGenerations = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousAppliedOverrides -Name "generations") -DefaultValue 0
+  if ($previousBaseGeneration -eq 0 -and $previousOverrideGenerations -gt 0 -and $previousOverrideGenerations -lt $previousRuntimeGenerations) {
+    $previousGenerations = $previousRuntimeGenerations
+  }
   $cumulativeBaseGeneration = $previousBaseGeneration + $previousGenerations
   $previousWinnerRaw = [string]$previousSummary.winner_pickle
   if ([string]::IsNullOrWhiteSpace($previousWinnerRaw)) {

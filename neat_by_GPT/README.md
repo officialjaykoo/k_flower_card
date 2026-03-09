@@ -42,12 +42,6 @@ Duel:
 powershell -ExecutionPolicy Bypass -File neat_by_GPT/duel.ps1 -Human H-CL -Ai runtime_focus_cl_v1_seed9
 ```
 
-Regression smoke:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File neat_by_GPT/test.ps1
-```
-
 Optional runtime override:
 
 ```powershell
@@ -61,7 +55,6 @@ powershell -ExecutionPolicy Bypass -File neat_by_GPT/run.ps1 -Seed 9 -RuntimeCon
 - `run.ps1`: training entry point
 - `eval.ps1`: winner evaluation entry point
 - `duel.ps1`: GPT duel entry point
-- `test.ps1`: GPT regression smoke entry point
 - `configs/runtime_focus_cl_v1.json`: GPT runtime profile
 - `configs/runtime_base_v1.json`: shared GPT runtime base
 - `configs/runtime_phase1.json`: phase 1 GPT runtime
@@ -105,10 +98,3 @@ powershell -ExecutionPolicy Bypass -File neat_by_GPT/run.ps1 -Seed 9 -RuntimeCon
 
 - `logs/NEAT_GPT/*`
 - `logs/NEAT_GPT/duels/*`
-
-## Regression Smoke Coverage
-
-- special `playing` candidates include `shake_start:*` and `bomb:*`
-- hybrid opponent specs parse and load correctly
-- eval worker accepts hybrid opponent policy/mix
-- `fitness_overrides` merge into the selected profile as expected

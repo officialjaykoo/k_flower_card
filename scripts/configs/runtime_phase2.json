@@ -10,8 +10,8 @@
   "seed": 13,
   "opponent_policy": "",
   "opponent_policy_mix": [
-    { "policy": "hybrid_play(phase3_seed203,H-CL)", "weight": 50 },
-    { "policy": "hybrid_play(phase3_seed202,H-CL)", "weight": 50 }
+    { "policy": "hybrid_play(phase1_seed203,H-CL)", "weight": 50 },
+    { "policy": "hybrid_play(phase1_seed204,H-CL)", "weight": 50 }
   ],
   "opponent_genome": "",
   "switch_seats": true,
@@ -25,7 +25,7 @@
   "eval_pass_win_rate_min": 0.45,
   "eval_pass_mean_gold_delta_min": 0.0,
   "transition_mean_gold_delta_min": 0.0,
-  "transition_ema_imitation": 0.60,
+  "transition_ema_imitation": null,
   "transition_ema_win_rate": 0.45,
   "transition_best_fitness_min": null,
   "transition_streak": 1,
