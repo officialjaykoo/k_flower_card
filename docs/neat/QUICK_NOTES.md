@@ -10,11 +10,13 @@
 - `scripts/configs/runtime_phase3.json`
 
 현재 값:
-- Phase 1: `generations = 50`, `games_per_genome = 200`
-- Phase 1: `opponent_policy_mix = [hybrid_play(phase1_seed203,H-CL) 50, hybrid_play(phase2_seed204,H-CL) 50]`
+- Phase 1: `generations = 30`, `games_per_genome = 200`
+- Phase 1: `opponent_policy_mix = [hybrid_play(phase1_seed208,H-CL) 50, hybrid_play(phase2_seed204,H-CL) 50]`
 - Phase 1: `fitness_win_weight = 0.99`, `fitness_gold_weight = 0.01`, `fitness_win_neutral_rate = 0.50`
-- Phase 2: `opponent_policy_mix = [H-CL 50, H-GPT-AllButGo+CL 50]`
-- Phase 2: `fitness_win_weight = 0.75`, `fitness_gold_weight = 0.25`, `fitness_win_neutral_rate = 0.50`
+- Phase 2: `opponent_policy_mix = [hybrid_play(phase1_seed208,H-CL) 50, hybrid_play(phase2_seed204,H-CL) 50]`
+- Phase 2: `generations = 50`, `games_per_genome = 200`
+- Phase 2: `fitness_win_weight = 0.70`, `fitness_gold_weight = 0.30`, `fitness_bankrupt_weight = 0.20`, `fitness_win_neutral_rate = 0.50`
+- Phase 2: `control_policy_mode = hybrid_option_only`, `control_play_match_model = phase1_seed208`, `continue_from_previous_phase = false`
 - Phase 3: `opponent_policy_mix = [hybrid_play(phase2_seed203,H-CL) 50, H-GPT-PlayMatch+CL 50]`
 - Phase 3: `fitness_win_weight = 0.7`, `fitness_gold_weight = 0.3`, `fitness_win_neutral_rate = 0.50`
 
@@ -26,7 +28,7 @@
 실제 계산:
 
 ```text
-fitness = fitnessGoldWeight * goldNorm + fitnessWinWeight * resultNorm
+fitness = fitnessGoldWeight * goldNorm + fitnessWinWeight * resultNorm + fitnessBankruptWeight * bankruptScore
 ```
 
 세부:
@@ -42,6 +44,8 @@ neutralExpectedResult = 2 * fitnessWinNeutralRate - 1
 
 - `resultNorm`은 `expectedResult`를 중립점 기준 `[-1, 1]`로 정규화한 값이다.
 - `fitnessWinWeight`, `fitnessGoldWeight`는 합이 1이 되도록 내부 정규화된다.
+- `bankruptScore = inflictedBankruptCount - myBankruptCount` 이다.
+- `fitnessBankruptWeight`는 별도 항으로 더해진다. 기존 win/gold 내부 정규화는 유지된다.
 - `go_rate`, `go_count`, `go_fail_rate`는 리포트에는 남지만 fitness에 직접 들어가지 않는다.
 
 ## 3. 8:2 vs 7:3 vs 6:4 차이
@@ -134,7 +138,9 @@ fitness_8:2 - fitness_6:4 = 0.2 * (resultNorm - goldNorm)
 runtime 키:
 - `control_policy_mode = "hybrid_play_match_only"`
 - `control_policy_mode = "hybrid_go_stop_only"`
+- `control_policy_mode = "hybrid_option_only"`
 - `control_heuristic_policy = "H-CL"`
+- `control_play_match_model = "phase1_seed208"`
 
 의미:
 - 모델이 직접 맡는 것: `play`, `select-match`
@@ -145,6 +151,12 @@ runtime 키:
 - 모델이 직접 맡는 것: `play`, `select-match`, 흔들기/폭탄, 총통, 국진 등 `go/stop`을 제외한 나머지
 - `H-CL`이 맡는 것: `go/stop`만
 - imitation 집계도 모델이 실제로 움직인 `non-go-stop` 결정만 센다.
+
+`hybrid_option_only` 의미:
+- 고정 모델이 맡는 것: `play`, `select-match`
+- 현재 학습 모델이 맡는 것: `go/stop`, 흔들기/폭탄, 총통, 국진 등 `option` 결정 전부
+- `control_play_match_model`에 고정 모델 토큰을 넣는다. 예: `phase1_seed208`
+- imitation 집계도 현재 학습 모델이 실제로 움직인 `option` 결정만 센다.
 
 주의:
 - 기존 `hybrid_play(model,H-CL)` 토큰은 실전/듀얼용 hybrid이고, 이 학습 모드는 eval worker의 control actor 평가 경로를 바꾸는 별도 스위치다.

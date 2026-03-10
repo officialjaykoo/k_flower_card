@@ -3,7 +3,7 @@
   [Parameter(Mandatory = $true)][int]$Seed,
   [Parameter(Mandatory = $false)][string]$ControlPolicyMode = "",
   [Parameter(Mandatory = $false)][string]$ControlHeuristicPolicy = "",
-  [Parameter(Mandatory = $false)][string]$BootstrapSeedSpec = ""
+  [Parameter(Mandatory = $false)][string[]]$BootstrapSeedSpec = @()
 )
 
 Set-StrictMode -Version Latest
@@ -29,6 +29,36 @@ param(
   catch {
   }
   return $DefaultValue
+}
+
+function To-BoolOrDefault {
+  param(
+    [Parameter(Mandatory = $false)]$Value,
+    [Parameter(Mandatory = $true)][bool]$DefaultValue
+  )
+  if ($null -eq $Value) {
+    return $DefaultValue
+  }
+  if ($Value -is [bool]) {
+    return [bool]$Value
+  }
+  $text = [string]$Value
+  if ([string]::IsNullOrWhiteSpace($text)) {
+    return $DefaultValue
+  }
+  switch ($text.Trim().ToLowerInvariant()) {
+    "1" { return $true }
+    "true" { return $true }
+    "yes" { return $true }
+    "y" { return $true }
+    "on" { return $true }
+    "0" { return $false }
+    "false" { return $false }
+    "no" { return $false }
+    "n" { return $false }
+    "off" { return $false }
+    default { return $DefaultValue }
+  }
 }
 
 function Resolve-PreviousCheckpoint {
@@ -68,16 +98,29 @@ function Resolve-PreviousCheckpoint {
   return $latest
 }
 
-function Get-BestGenomeGoMetrics {
+function Get-OverallBestMetrics {
   param([Parameter(Mandatory = $true)]$Summary)
 
   $empty = [ordered]@{
     available = $false
+    generation = $null
+    genome_key = $null
+    fitness = $null
+    win_rate = $null
+    imitation_weighted_score = $null
+    mean_gold_delta = $null
+    go_opportunity_count = $null
+    go_opportunity_games = $null
+    go_opportunity_rate = $null
+    go_take_rate = $null
     go_count = $null
     go_games = $null
     go_fail_count = $null
     go_fail_rate = $null
     go_rate = $null
+    generation_mean_go_games = $null
+    generation_mean_go_rate = $null
+    generation_mean_go_fail_rate = $null
   }
 
   $generationMetricsPathRaw = [string]$Summary.generation_metrics_log
@@ -92,14 +135,37 @@ function Get-BestGenomeGoMetrics {
     return $empty
   }
 
-  $lastGenerationLine = Get-Content $generationMetricsPath | Select-Object -Last 1
-  if ([string]::IsNullOrWhiteSpace($lastGenerationLine)) {
-    return $empty
+  $bestRecord = Get-PropertyValue -Object $Summary -Name "best_record"
+  $generationRecord = $null
+  $targetGeneration = $null
+  $targetGenomeKey = $null
+
+  if ($null -ne $bestRecord) {
+    $bestRecordGeneration = Get-PropertyValue -Object $bestRecord -Name "generation"
+    $bestRecordGenomeKey = Get-PropertyValue -Object $bestRecord -Name "genome_key"
+    if ($null -ne $bestRecordGeneration -and $null -ne $bestRecordGenomeKey) {
+      $targetGeneration = [int]$bestRecordGeneration
+      $targetGenomeKey = [int]$bestRecordGenomeKey
+      $generationRecord =
+        Get-Content $generationMetricsPath |
+          ForEach-Object { $_ | ConvertFrom-Json } |
+          Where-Object { [int]$_.generation -eq $targetGeneration } |
+          Select-Object -First 1
+    }
   }
 
-  $generationRecord = $lastGenerationLine | ConvertFrom-Json
-  $targetGeneration = [int]$generationRecord.generation
-  $targetGenomeKey = [int]$generationRecord.best_genome_key
+  if ($null -eq $generationRecord) {
+    $generationRecord =
+      Get-Content $generationMetricsPath |
+        ForEach-Object { $_ | ConvertFrom-Json } |
+        Sort-Object { [double]$_.best_fitness } -Descending |
+        Select-Object -First 1
+    if ($null -eq $generationRecord) {
+      return $empty
+    }
+    $targetGeneration = [int]$generationRecord.generation
+    $targetGenomeKey = [int]$generationRecord.best_genome_key
+  }
 
   $bestEvalRecord =
     Get-Content $evalMetricsPath |
@@ -113,45 +179,24 @@ function Get-BestGenomeGoMetrics {
 
   return [ordered]@{
     available = $true
+    generation = [int]$targetGeneration
+    genome_key = [int]$targetGenomeKey
+    fitness = Get-OptionalDouble -Value $bestEvalRecord.fitness
+    win_rate = Get-OptionalDouble -Value $bestEvalRecord.win_rate
+    imitation_weighted_score = Get-OptionalDouble -Value $bestEvalRecord.imitation_weighted_score
+    mean_gold_delta = Get-OptionalDouble -Value $bestEvalRecord.mean_gold_delta
+    go_opportunity_count = [int]$bestEvalRecord.go_opportunity_count
+    go_opportunity_games = [int]$bestEvalRecord.go_opportunity_games
+    go_opportunity_rate = Get-OptionalDouble -Value $bestEvalRecord.go_opportunity_rate
+    go_take_rate = Get-OptionalDouble -Value $bestEvalRecord.go_take_rate
     go_count = [int]$bestEvalRecord.go_count
     go_games = [int]$bestEvalRecord.go_games
     go_fail_count = [int]$bestEvalRecord.go_fail_count
-    go_fail_rate = [double]$bestEvalRecord.go_fail_rate
-    go_rate = [double]$bestEvalRecord.go_rate
-  }
-}
-
-function Get-LatestGenerationGoAverages {
-  param([Parameter(Mandatory = $true)]$Summary)
-
-  $empty = [ordered]@{
-    available = $false
-    mean_go_games = $null
-    mean_go_rate = $null
-    mean_go_fail_rate = $null
-  }
-
-  $generationMetricsPathRaw = [string]$Summary.generation_metrics_log
-  if ([string]::IsNullOrWhiteSpace($generationMetricsPathRaw)) {
-    return $empty
-  }
-
-  $generationMetricsPath = [System.IO.Path]::GetFullPath($generationMetricsPathRaw)
-  if (-not (Test-Path $generationMetricsPath)) {
-    return $empty
-  }
-
-  $lastGenerationLine = Get-Content $generationMetricsPath | Select-Object -Last 1
-  if ([string]::IsNullOrWhiteSpace($lastGenerationLine)) {
-    return $empty
-  }
-
-  $generationRecord = $lastGenerationLine | ConvertFrom-Json
-  return [ordered]@{
-    available = $true
-    mean_go_games = Get-OptionalDouble -Value $generationRecord.mean_go_games
-    mean_go_rate = Get-OptionalDouble -Value $generationRecord.mean_go_rate
-    mean_go_fail_rate = Get-OptionalDouble -Value $generationRecord.mean_go_fail_rate
+    go_fail_rate = Get-OptionalDouble -Value $bestEvalRecord.go_fail_rate
+    go_rate = Get-OptionalDouble -Value $bestEvalRecord.go_rate
+    generation_mean_go_games = Get-OptionalDouble -Value $generationRecord.mean_go_games
+    generation_mean_go_rate = Get-OptionalDouble -Value $generationRecord.mean_go_rate
+    generation_mean_go_fail_rate = Get-OptionalDouble -Value $generationRecord.mean_go_fail_rate
   }
 }
 
@@ -204,6 +249,10 @@ function Resolve-BootstrapWinnerPath {
   $winnerPath = ""
   if (Test-Path $summaryPath) {
     $summary = Read-JsonFile -Path $summaryPath
+    $repairStatus = [string](Get-PropertyValue -Object $summary -Name "winner_repair_status")
+    if ($repairStatus -eq "summary_repaired_winner_unrecoverable") {
+      throw "bootstrap winner is unrecoverable for $Spec; run_summary was repaired but exact winner genome could not be restored"
+    }
     $winnerPath = [string](Get-PropertyValue -Object $summary -Name "winner_pickle")
   }
   if ([string]::IsNullOrWhiteSpace($winnerPath)) {
@@ -231,6 +280,7 @@ if (-not (Test-Path $configFeedforward)) {
 if (-not (Test-Path $runtimeConfig)) {
   throw "runtime config not found: $runtimeConfig"
 }
+$phaseRuntime = Read-JsonFile -Path $runtimeConfig
 
 $cmd = @(
   "scripts/neat_train.py",
@@ -253,48 +303,67 @@ if (-not [string]::IsNullOrWhiteSpace($ControlHeuristicPolicy)) {
   )
 }
 
-if (-not [string]::IsNullOrWhiteSpace($BootstrapSeedSpec)) {
-  $bootstrapWinnerPath = Resolve-BootstrapWinnerPath -Spec $BootstrapSeedSpec
-  $cmd += @(
-    "--seed-genome", "$bootstrapWinnerPath",
-    "--seed-genome-count", "16"
-  )
+if ($BootstrapSeedSpec.Count -gt 0) {
+  $bootstrapSpecs = @($BootstrapSeedSpec | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if ($bootstrapSpecs.Count -eq 0) {
+  }
+  elseif ($bootstrapSpecs.Count -eq 1) {
+    $bootstrapWinnerPath = Resolve-BootstrapWinnerPath -Spec $bootstrapSpecs[0]
+    $cmd += @(
+      "--seed-genome", "$bootstrapWinnerPath",
+      "--seed-genome-count", "16"
+    )
+  }
+  elseif ($bootstrapSpecs.Count -eq 2) {
+    $bootstrapWinnerPath1 = Resolve-BootstrapWinnerPath -Spec $bootstrapSpecs[0]
+    $bootstrapWinnerPath2 = Resolve-BootstrapWinnerPath -Spec $bootstrapSpecs[1]
+    $cmd += @(
+      "--seed-genome-spec", "$bootstrapWinnerPath1", "24",
+      "--seed-genome-spec", "$bootstrapWinnerPath2", "24"
+    )
+  }
+  else {
+    throw "BootstrapSeedSpec supports at most 2 specs for now"
+  }
 }
 elseif ($Phase -ne "1") {
-  $previousPhase = [int]$Phase - 1
-  $previousLabel = "phase$previousPhase"
-  $previousRuntimePath = "scripts/configs/runtime_phase$previousPhase.json"
-  $previousRuntime = Read-JsonFile -Path $previousRuntimePath
-  $previousSummaryPath = "logs/NEAT/neat_phase${previousPhase}_seed$Seed/run_summary.json"
-  if (-not (Test-Path $previousSummaryPath)) {
-    throw "$previousLabel run summary not found: $previousSummaryPath"
-  }
-  $previousSummary = Read-JsonFile -Path $previousSummaryPath
-  $previousAppliedOverrides = $previousSummary.applied_overrides
-  $previousBaseGeneration = 0
-  if ($null -ne $previousAppliedOverrides) {
-    $previousBaseGeneration = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousAppliedOverrides -Name "base_generation") -DefaultValue 0
-  }
-  $previousRuntimeGenerations = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousRuntime -Name "generations") -DefaultValue 20
-  $previousGenerations = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousSummary -Name "generations") -DefaultValue $previousRuntimeGenerations
-  $previousOverrideGenerations = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousAppliedOverrides -Name "generations") -DefaultValue 0
-  if ($previousBaseGeneration -eq 0 -and $previousOverrideGenerations -gt 0 -and $previousOverrideGenerations -lt $previousRuntimeGenerations) {
-    $previousGenerations = $previousRuntimeGenerations
-  }
-  $cumulativeBaseGeneration = $previousBaseGeneration + $previousGenerations
-  $previousWinnerRaw = [string]$previousSummary.winner_pickle
-  if ([string]::IsNullOrWhiteSpace($previousWinnerRaw)) {
-    $previousWinnerRaw = "logs/NEAT/neat_phase${previousPhase}_seed$Seed/models/winner_genome.pkl"
-  }
-  $previousWinnerPath = [System.IO.Path]::GetFullPath($previousWinnerRaw)
-  if (-not (Test-Path $previousWinnerPath)) {
-    throw "$previousLabel winner genome not found: $previousWinnerPath"
-  }
+  $continueFromPreviousPhase = To-BoolOrDefault -Value (Get-PropertyValue -Object $phaseRuntime -Name "continue_from_previous_phase") -DefaultValue $true
+  if ($continueFromPreviousPhase) {
+    $previousPhase = [int]$Phase - 1
+    $previousLabel = "phase$previousPhase"
+    $previousRuntimePath = "scripts/configs/runtime_phase$previousPhase.json"
+    $previousRuntime = Read-JsonFile -Path $previousRuntimePath
+    $previousSummaryPath = "logs/NEAT/neat_phase${previousPhase}_seed$Seed/run_summary.json"
+    if (-not (Test-Path $previousSummaryPath)) {
+      throw "$previousLabel run summary not found: $previousSummaryPath"
+    }
+    $previousSummary = Read-JsonFile -Path $previousSummaryPath
+    $previousAppliedOverrides = $previousSummary.applied_overrides
+    $previousBaseGeneration = 0
+    if ($null -ne $previousAppliedOverrides) {
+      $previousBaseGeneration = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousAppliedOverrides -Name "base_generation") -DefaultValue 0
+    }
+    $previousRuntimeGenerations = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousRuntime -Name "generations") -DefaultValue 20
+    $previousGenerations = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousSummary -Name "generations") -DefaultValue $previousRuntimeGenerations
+    $previousOverrideGenerations = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousAppliedOverrides -Name "generations") -DefaultValue 0
+    if ($previousBaseGeneration -eq 0 -and $previousOverrideGenerations -gt 0 -and $previousOverrideGenerations -lt $previousRuntimeGenerations) {
+      $previousGenerations = $previousRuntimeGenerations
+    }
+    $cumulativeBaseGeneration = $previousBaseGeneration + $previousGenerations
+    $previousWinnerRaw = [string]$previousSummary.winner_pickle
+    if ([string]::IsNullOrWhiteSpace($previousWinnerRaw)) {
+      $previousWinnerRaw = "logs/NEAT/neat_phase${previousPhase}_seed$Seed/models/winner_genome.pkl"
+    }
+    $previousWinnerPath = [System.IO.Path]::GetFullPath($previousWinnerRaw)
+    if (-not (Test-Path $previousWinnerPath)) {
+      throw "$previousLabel winner genome not found: $previousWinnerPath"
+    }
 
-  $cmd += @(
-    "--seed-genome", "$previousWinnerPath",
-    "--base-generation", "$cumulativeBaseGeneration"
-  )
+    $cmd += @(
+      "--seed-genome", "$previousWinnerPath",
+      "--base-generation", "$cumulativeBaseGeneration"
+    )
+  }
 }
 
 $phaseRunStartedAt = Get-Date
@@ -318,39 +387,45 @@ catch {
   throw "failed to parse neat_train output as JSON"
 }
 
-$goMetrics = Get-BestGenomeGoMetrics -Summary $summary
-$goAverages = Get-LatestGenerationGoAverages -Summary $summary
+$bestMetrics = Get-OverallBestMetrics -Summary $summary
 $summaryElapsedSec = Get-OptionalDouble -Value $summary.run_elapsed_sec -DefaultValue $phaseRunElapsedSec
 
 Write-Host "=== Phase$Phase Summary (Seed=$Seed) ==="
-Write-Host "EMA win rate:     $($summary.gate_state.ema_win_rate)"
-Write-Host "EMA imitation:    $($summary.gate_state.ema_imitation)"
-Write-Host "Latest win rate:  $($summary.gate_state.latest_win_rate)"
+if ([bool]$bestMetrics.available) {
+  Write-Host "Best gen:         $($bestMetrics.generation)"
+  Write-Host "Best genome key:  $($bestMetrics.genome_key)"
+  Write-Host "Best win rate:    $($bestMetrics.win_rate)"
+  Write-Host "Best fitness:     $($bestMetrics.fitness)"
+  Write-Host "Best gold delta:  $($bestMetrics.mean_gold_delta)"
+  Write-Host "GO opp games:     $($bestMetrics.go_opportunity_games)"
+  Write-Host "GO opp count:     $($bestMetrics.go_opportunity_count)"
+  Write-Host "GO count:         $($bestMetrics.go_count)"
+  Write-Host "GO games:         $($bestMetrics.go_games)"
+  Write-Host "GO fail count:    $($bestMetrics.go_fail_count)"
+  Write-Host "GO fail rate:     $($bestMetrics.go_fail_rate)"
+  Write-Host "GO rate:          $($bestMetrics.go_rate)"
+}
+else {
+  Write-Host "Best gen:         N/A"
+  Write-Host "Best genome key:  N/A"
+  Write-Host "Best win rate:    N/A"
+  Write-Host "Best fitness:     $($summary.best_fitness)"
+  Write-Host "Best gold delta:  N/A"
+  Write-Host "GO opp games:     "
+  Write-Host "GO opp count:     "
+  Write-Host "GO count:         "
+  Write-Host "GO games:         "
+  Write-Host "GO fail count:    "
+  Write-Host "GO fail rate:     "
+  Write-Host "GO rate:          "
+}
+Write-Host "Current EMA win:  $($summary.gate_state.ema_win_rate)"
+Write-Host "Current EMA imit: $($summary.gate_state.ema_imitation)"
+Write-Host "Current win rate: $($summary.gate_state.latest_win_rate)"
 Write-Host "Win slope(5):     $($summary.gate_state.latest_win_rate_slope_5)"
 Write-Host "Transition ready: $($summary.gate_state.transition_ready)"
 Write-Host "Transition gen:   $($summary.gate_state.transition_generation)"
-Write-Host "Best fitness:     $($summary.best_fitness)"
 Write-Host "Elapsed time:     $summaryElapsedSec s"
-if ([bool]$goAverages.available) {
-  Write-Host "GO mean games:    $($goAverages.mean_go_games)"
-  Write-Host "GO mean fail:     $($goAverages.mean_go_fail_rate)"
-  Write-Host "GO mean rate:     $($goAverages.mean_go_rate)"
-}
-else {
-  Write-Host "GO mean games:    N/A"
-  Write-Host "GO mean fail:     N/A"
-  Write-Host "GO mean rate:     N/A"
-}
-if ([bool]$goMetrics.available) {
-  Write-Host "GO count:         $($goMetrics.go_count)"
-  Write-Host "GO games:         $($goMetrics.go_games)"
-  Write-Host "GO fail count:    $($goMetrics.go_fail_count)"
-  Write-Host "GO fail rate:     $($goMetrics.go_fail_rate)"
-  Write-Host "GO rate:          $($goMetrics.go_rate)"
-}
-else {
-  Write-Host "GO metrics:       unavailable"
-}
 Write-Host "================================"
 
 exit 0

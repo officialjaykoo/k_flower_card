@@ -113,12 +113,13 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 - 결과 report(`result.json`)는 항상 1개 저장된다.
 - 기본 출력 폴더는 `logs/model_duel/<human>_vs_<ai>_<YYYYMMDD>/` 규칙을 따른다.
 - kibo/dataset은 옵션으로만 저장된다.
-- `--human`, `--ai` 입력은 정책 키 또는 `phase3_seed5` 형식 모두 지원한다.
+- `--human`, `--ai` 입력은 정책 키, `phase3_seed5`, `hybrid_play(...)`, `hybrid_play_go(...)`, `hybrid_option(...)` 형식을 지원한다.
 
 ### 7-3. `model_duel_worker.mjs` 옵션 상세
 - 공통 문법: `--key value` 또는 `--key=value` 둘 다 지원.
 - `--human` (필수): human 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase3_seed5`).
 - `--ai` (필수): ai 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase3_seed5`).
+  - 예: `hybrid_option(phase1_seed208,phase2_seed501)` = 앞 모델이 `play/match`, 뒤 모델이 `option` 판단
 - `--games` (선택, 기본 `1000`): `1000` 이상만 허용.
 - `--seed` (선택, 기본 `model-duel`): 실행 시드 문자열.
 - `--max-steps` (선택, 기본 `600`): 게임당 최대 스텝. 최소값은 `20`.

@@ -54,12 +54,21 @@ function normalizeControlPolicyMode(mode) {
   ) {
     return "hybrid_go_stop_only";
   }
+  if (
+    raw === "hybrid_option_only" ||
+    raw === "hybrid_options_only" ||
+    raw === "option_only" ||
+    raw === "options_only"
+  ) {
+    return "hybrid_option_only";
+  }
   throw new Error(
-    `invalid --control-policy-mode: ${mode} (allowed: pure_model, hybrid_play_match_only, hybrid_go_stop_only)`
+    `invalid --control-policy-mode: ${mode} (allowed: pure_model, hybrid_play_match_only, hybrid_go_stop_only, hybrid_option_only)`
   );
 }
 
 const OPPONENT_SPEC_CACHE = new Map();
+const CONTROL_MODEL_SPEC_CACHE = new Map();
 
 function parseHybridPlayGoSpec(token) {
   const m = String(token || "")
@@ -110,6 +119,22 @@ function resolvePhaseModelToken(token, label) {
   }
   const phase = Number(m[1]);
   const seed = Number(m[2]);
+  const summaryPath = path.resolve(`logs/NEAT/neat_phase${phase}_seed${seed}/run_summary.json`);
+  if (fs.existsSync(summaryPath)) {
+    try {
+      const summaryRaw = String(fs.readFileSync(summaryPath, "utf8") || "").replace(/^\uFEFF/, "");
+      const summary = JSON.parse(summaryRaw);
+      if (String(summary?.winner_repair_status || "") === "summary_repaired_winner_unrecoverable") {
+        throw new Error(
+          `unrecoverable winner for phase${phase}_seed${seed}: exact best genome was not restorable from saved artifacts`
+        );
+      }
+    } catch (err) {
+      if (String(err?.message || err).includes("unrecoverable winner")) {
+        throw err;
+      }
+    }
+  }
   const modelPath = path.resolve(`logs/NEAT/neat_phase${phase}_seed${seed}/models/winner_genome.json`);
   const loaded = loadGenomeModel(modelPath, label);
   return {
@@ -120,6 +145,34 @@ function resolvePhaseModelToken(token, label) {
     model: loaded.model,
     modelPath: loaded.modelPath,
   };
+}
+
+function resolveControlPlayMatchModel(token) {
+  const raw = String(token || "").trim();
+  if (!raw) {
+    throw new Error("control play/match model token is empty");
+  }
+  if (CONTROL_MODEL_SPEC_CACHE.has(raw)) {
+    return CONTROL_MODEL_SPEC_CACHE.get(raw);
+  }
+
+  let resolved = null;
+  const phaseToken = raw.match(/^phase([0-3])_seed(\d+)$/i);
+  if (phaseToken) {
+    resolved = resolvePhaseModelToken(raw, "control play/match model");
+  } else {
+    const loaded = loadGenomeModel(raw, "control play/match model");
+    resolved = {
+      key: raw,
+      label: raw,
+      phase: null,
+      seed: null,
+      model: loaded.model,
+      modelPath: loaded.modelPath,
+    };
+  }
+  CONTROL_MODEL_SPEC_CACHE.set(raw, resolved);
+  return resolved;
 }
 
 function resolveOpponentSpec(policyToken, opponentGenomePath) {
@@ -225,8 +278,10 @@ function parseArgs(argv) {
     fitnessWinWeight: null,
     fitnessGoldWeight: null,
     fitnessWinNeutralRate: null,
+    fitnessBankruptWeight: 0,
     controlPolicyMode: "pure_model",
     controlHeuristicPolicy: "H-CL",
+    controlPlayMatchModel: "",
   };
 
   while (args.length > 0) {
@@ -290,8 +345,10 @@ function parseArgs(argv) {
     else if (key === "--fitness-win-weight") out.fitnessWinWeight = Number(value);
     else if (key === "--fitness-gold-weight") out.fitnessGoldWeight = Number(value);
     else if (key === "--fitness-win-neutral-rate") out.fitnessWinNeutralRate = Number(value);
+    else if (key === "--fitness-bankrupt-weight") out.fitnessBankruptWeight = Number(value);
     else if (key === "--control-policy-mode") out.controlPolicyMode = normalizeControlPolicyMode(value);
     else if (key === "--control-heuristic-policy") out.controlHeuristicPolicy = String(value || "").trim();
+    else if (key === "--control-play-match-model") out.controlPlayMatchModel = String(value || "").trim();
     else throw new Error(`Unknown argument: ${key}`);
   }
 
@@ -334,6 +391,9 @@ function parseArgs(argv) {
   if (!Number.isFinite(out.fitnessWinNeutralRate) || out.fitnessWinNeutralRate <= 0 || out.fitnessWinNeutralRate >= 1) {
     throw new Error("--fitness-win-neutral-rate is required and must be in (0,1)");
   }
+  if (!Number.isFinite(out.fitnessBankruptWeight) || out.fitnessBankruptWeight < 0) {
+    throw new Error("--fitness-bankrupt-weight must be >= 0");
+  }
   if (
     out.controlPolicyMode === "hybrid_play_match_only" ||
     out.controlPolicyMode === "hybrid_go_stop_only"
@@ -345,6 +405,12 @@ function parseArgs(argv) {
       );
     }
     out.controlHeuristicPolicy = resolved;
+  }
+  if (out.controlPolicyMode === "hybrid_option_only") {
+    if (!String(out.controlPlayMatchModel || "").trim()) {
+      throw new Error("--control-play-match-model is required when --control-policy-mode=hybrid_option_only");
+    }
+    resolveControlPlayMatchModel(out.controlPlayMatchModel);
   }
   return out;
 }
@@ -768,10 +834,13 @@ function playSingleRound(
     controlPolicyMode === "hybrid_play_match_only" || controlPolicyMode === "hybrid_go_stop_only"
       ? String(controlOptions.controlHeuristicPolicy || "H-CL")
       : "";
+  const controlPlayMatchModel =
+    controlPolicyMode === "hybrid_option_only" ? controlOptions.controlPlayMatchModel || null : null;
   const imitation = {
     totals: { play: 0, match: 0, option: 0 },
     matches: { play: 0, match: 0, option: 0 },
   };
+  let goOpportunityCount = 0;
 
   let steps = 0;
   while (state.phase !== "resolution" && steps < maxSteps) {
@@ -785,6 +854,17 @@ function playSingleRound(
     const options = sp.options || null;
     const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
     const candidates = decisionType ? legalCandidatesForDecision(sp, decisionType) : [];
+    if (
+      actor === controlActor &&
+      decisionType === "option" &&
+      state?.phase === "go-stop" &&
+      state?.pendingGoStop === actor
+    ) {
+      const normalizedOptions = (candidates || []).map((candidate) => canonicalOptionAction(candidate)).filter(Boolean);
+      if (normalizedOptions.includes("go") && normalizedOptions.includes("stop")) {
+        goOpportunityCount += 1;
+      }
+    }
     let next = state;
     let controlDecisionOwnedByModel = false;
 
@@ -812,6 +892,28 @@ function playSingleRound(
         next = traced?.next || state;
         const route = String(traced?.route || "");
         controlDecisionOwnedByModel = route === "model_non_go_stop";
+      } else if (controlPolicyMode === "hybrid_option_only") {
+        const ownsPlayMatch = decisionType === "play" || decisionType === "match";
+        if (ownsPlayMatch && controlPlayMatchModel) {
+          next = aiPlay(state, actor, {
+            source: "model",
+            model: controlPlayMatchModel,
+          });
+          controlDecisionOwnedByModel = false;
+          if (!next || stateProgressKey(next) === before) {
+            next = aiPlay(state, actor, {
+              source: "model",
+              model: controlModel,
+            });
+            controlDecisionOwnedByModel = true;
+          }
+        } else {
+          next = aiPlay(state, actor, {
+            source: "model",
+            model: controlModel,
+          });
+          controlDecisionOwnedByModel = true;
+        }
       } else {
         next = aiPlay(state, actor, {
           source: "model",
@@ -886,7 +988,7 @@ function playSingleRound(
     steps += 1;
   }
 
-  return { endState: state, imitation };
+  return { endState: state, imitation, goOpportunityCount };
 }
 
 function quantile(values, q) {
@@ -955,6 +1057,10 @@ function main() {
   if (String(opts.opponentPolicy || "").trim()) {
     resolveOpponentSpec(opts.opponentPolicy, opts.opponentGenomePath);
   }
+  const controlPlayMatchModelSpec =
+    opts.controlPolicyMode === "hybrid_option_only"
+      ? resolveControlPlayMatchModel(opts.controlPlayMatchModel)
+      : null;
   for (const item of opts.opponentPolicyMix || []) {
     resolveOpponentSpec(item?.policy, opts.opponentGenomePath);
   }
@@ -972,6 +1078,8 @@ function main() {
     my_bankrupt_count: 0,
     my_inflicted_bankrupt_count: 0,
   };
+  let goOpportunityCount = 0;
+  let goOpportunityGames = 0;
   let goCount = 0;
   let goGames = 0;
   let goFailCount = 0;
@@ -1014,9 +1122,11 @@ function main() {
       {
         controlPolicyMode: opts.controlPolicyMode,
         controlHeuristicPolicy: opts.controlHeuristicPolicy,
+        controlPlayMatchModel: controlPlayMatchModelSpec?.model || null,
       }
     );
     const endState = gameResult?.endState || gameResult;
+    const controlGoOpportunityCount = Math.max(0, Number(gameResult?.goOpportunityCount || 0));
     const afterGoldDiff = controlGoldDiff(endState, controlActor);
     const goldDelta = afterGoldDiff - beforeGoldDiff;
     goldDeltas.push(goldDelta);
@@ -1025,6 +1135,10 @@ function main() {
     const controlBankrupt = controlGold <= 0;
     const opponentBankrupt = opponentGold <= 0;
     const controlGoCount = Math.max(0, Number(endState?.players?.[controlActor]?.goCount || 0));
+    goOpportunityCount += controlGoOpportunityCount;
+    if (controlGoOpportunityCount > 0) {
+      goOpportunityGames += 1;
+    }
     goCount += controlGoCount;
     if (controlGoCount > 0) {
       goGames += 1;
@@ -1063,8 +1177,10 @@ function main() {
   const winRate = wins / games;
   const lossRate = losses / games;
   const drawRate = draws / games;
+  const goOpportunityRate = goOpportunityGames / games;
   const goRate = goGames / games;
   const goFailRate = goGames > 0 ? goFailCount / goGames : 0;
+  const goTakeRate = goOpportunityCount > 0 ? goCount / goOpportunityCount : 0;
   const fitnessGoldScale = Number(opts.fitnessGoldScale);
   const fitnessGoldNeutralDelta = Number(opts.fitnessGoldNeutralDelta);
   const weightWinRaw = Number(opts.fitnessWinWeight);
@@ -1073,6 +1189,7 @@ function main() {
   const fitnessWinWeight = weightWinRaw / weightRawSum;
   const fitnessGoldWeight = weightGoldRaw / weightRawSum;
   const fitnessWinNeutralRate = Number(opts.fitnessWinNeutralRate);
+  const fitnessBankruptWeight = Number(opts.fitnessBankruptWeight);
 
   // Simplified fitness: base term only (gold + result win/loss/draw)
   const goldNorm = Math.tanh((meanGoldDelta - fitnessGoldNeutralDelta) / fitnessGoldScale);
@@ -1088,10 +1205,15 @@ function main() {
     const resultLowerSpan = Math.max(1e-9, neutralExpectedResult + 1.0);
     resultNorm = -clamp01((neutralExpectedResult - expectedResult) / resultLowerSpan);
   }
+  const myBankruptRate = bankrupt.my_bankrupt_count / games;
+  const inflictedBankruptRate = bankrupt.my_inflicted_bankrupt_count / games;
+  const bankruptScore =
+    Number(bankrupt.my_inflicted_bankrupt_count || 0) - Number(bankrupt.my_bankrupt_count || 0);
 
   let fitness =
     (fitnessGoldWeight * goldNorm) +
-    (fitnessWinWeight * resultNorm);
+    (fitnessWinWeight * resultNorm) +
+    (fitnessBankruptWeight * bankruptScore);
 
   const simImitation = buildImitationMetrics(simImitationTotals, simImitationMatches);
   const imitationTotals = cloneDecisionCounters(simImitation.totals);
@@ -1114,6 +1236,10 @@ function main() {
       opts.controlPolicyMode === "hybrid_play_match_only" || opts.controlPolicyMode === "hybrid_go_stop_only"
         ? opts.controlHeuristicPolicy
         : null,
+    control_play_match_model:
+      opts.controlPolicyMode === "hybrid_option_only"
+        ? String(controlPlayMatchModelSpec?.label || opts.controlPlayMatchModel || "")
+        : null,
     opponent_eval_tuning: {
       fast_path: false,
       imitation_reference_enabled: true,
@@ -1122,6 +1248,8 @@ function main() {
           ? "model_owned_play_match_only"
           : opts.controlPolicyMode === "hybrid_go_stop_only"
             ? "model_owned_non_go_stop_only"
+            : opts.controlPolicyMode === "hybrid_option_only"
+              ? "model_owned_option_only"
             : "all_control_decisions",
       opponent_heuristic_params: null,
     },
@@ -1131,6 +1259,8 @@ function main() {
     first_turn_counts: firstTurnCounts,
     continuous_series: !!opts.continuousSeries,
     bankrupt,
+    my_bankrupt_rate: myBankruptRate,
+    inflicted_bankrupt_rate: inflictedBankruptRate,
     session_rounds: {
       control_actor_series: seriesSession.roundsPlayed,
     },
@@ -1140,11 +1270,15 @@ function main() {
     win_rate: winRate,
     loss_rate: lossRate,
     draw_rate: drawRate,
+    go_opportunity_count: goOpportunityCount,
+    go_opportunity_games: goOpportunityGames,
+    go_opportunity_rate: goOpportunityRate,
     go_count: goCount,
     go_fail_count: goFailCount,
     go_fail_rate: goFailRate,
     go_games: goGames,
     go_rate: goRate,
+    go_take_rate: goTakeRate,
     mean_gold_delta: meanGoldDelta,
     p10_gold_delta: quantile(goldDeltas, 0.1),
     p50_gold_delta: quantile(goldDeltas, 0.5),
@@ -1154,6 +1288,7 @@ function main() {
     fitness_win_neutral_rate: fitnessWinNeutralRate,
     fitness_win_weight: fitnessWinWeight,
     fitness_gold_weight: fitnessGoldWeight,
+    fitness_bankrupt_weight: fitnessBankruptWeight,
     imitation_source: "opponent_policy",
     sim_imitation_weighted_score: Number(simImitation.weightedScore || 0),
     imitation_play_total: imitationTotals.play,
@@ -1177,9 +1312,19 @@ function main() {
       result_expected: expectedResult,
       result_neutral: neutralExpectedResult,
       win_neutral_rate: fitnessWinNeutralRate,
+      bankrupt_score: bankruptScore,
+      bankrupt_rates: {
+        my: myBankruptRate,
+        inflicted: inflictedBankruptRate,
+      },
+      bankrupt_counts: {
+        my: Number(bankrupt.my_bankrupt_count || 0),
+        inflicted: Number(bankrupt.my_inflicted_bankrupt_count || 0),
+      },
       weights: {
         win: fitnessWinWeight,
         gold: fitnessGoldWeight,
+        bankrupt: fitnessBankruptWeight,
       },
     },
     eval_time_ms: Math.max(0, Date.now() - evalStartMs),

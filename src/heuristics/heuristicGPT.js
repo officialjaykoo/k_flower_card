@@ -80,6 +80,8 @@ export const DEFAULT_PARAMS = {
   chooseMatchKwangBonus: 4.5,
   chooseMatchFiveBonus: 3.0,
   chooseMatchRibbonBonus: 1.6,
+  chooseMatchRibbonVsJunkBonus: 0.8,
+  chooseMatchJunkVsRibbonPenalty: 0.0,
   chooseMatchBlockMul: 1.7,
   chooseMatchComboMul: 2.4,
   comboFinishBirds: 28.0,
@@ -107,6 +109,18 @@ export const DEFAULT_PARAMS = {
   secondMoverBlockBonus: 2.2,
   secondMoverPiBonus: 1.4,
   tieScoreEpsilon: 0.000001,
+  ribbonComboBuildRedBonus: 0.6,
+  ribbonComboBuildBlueBonus: 0.5,
+  ribbonComboBuildPlainBonus: 0.4,
+  playMatchKnownMonthMul: 0.0,
+  playRibbonMatchBonus: 0.0,
+  playRibbonMatchWhenJunkAvailableBonus: 0.0,
+  playJunkMatchWhenRibbonAvailablePenalty: 0.0,
+  playJunkOnlyCapturePenalty: 0.0,
+  playNoMatchWhenAnyMatchPenalty: 0.0,
+  playSafeNoMatchWhenAnyMatchPenalty: 0.0,
+  playNoMatchJunkWhenAnyMatchPenalty: 0.0,
+  playNoMatchDoublePiWhenAnyMatchPenalty: 0.0,
 
   // go model (hard gates)
   goHardThreatCut: 1.08,
@@ -532,6 +546,20 @@ function ownComboFinishBonus(combo, cards, P) {
   return bonus;
 }
 
+function ribbonComboBuildBonus(combo, cards, P) {
+  let bonus = 0;
+  if (safeNum(combo?.red) === 1 && (cards || []).some((card) => hasComboTag(card, "redRibbons"))) {
+    bonus += safeNum(P?.ribbonComboBuildRedBonus, 0);
+  }
+  if (safeNum(combo?.blue) === 1 && (cards || []).some((card) => hasComboTag(card, "blueRibbons"))) {
+    bonus += safeNum(P?.ribbonComboBuildBlueBonus, 0);
+  }
+  if (safeNum(combo?.plain) === 1 && (cards || []).some((card) => hasComboTag(card, "plainRibbons"))) {
+    bonus += safeNum(P?.ribbonComboBuildPlainBonus, 0);
+  }
+  return bonus;
+}
+
 function getLiveDoublePiMonths(state, deps) {
   const capturedMonths = new Set();
   for (const key of ["human", "ai"]) {
@@ -771,6 +799,17 @@ function buildHandPackageContext(state, playerKey, deps, profile, cache) {
   const oppPlayer = state?.players?.[profile?.oppKey] || {};
   const selfPi = safeNum(profile?.ctx?.selfPi, safeNum(deps?.capturedCountByCategory?.(player, "junk")));
   const oppPi = safeNum(profile?.ctx?.oppPi, safeNum(deps?.capturedCountByCategory?.(oppPlayer, "junk")));
+  const matchableCategoryCounts = { any: 0, kwang: 0, five: 0, ribbon: 0, junk: 0 };
+  for (const card of player?.hand || []) {
+    const month = Number(card?.month);
+    const boardMatches = cache?.board?.get(month) || [];
+    if (boardMatches.length <= 0) continue;
+    matchableCategoryCounts.any += 1;
+    const category = String(card?.category || "");
+    if (Object.prototype.hasOwnProperty.call(matchableCategoryCounts, category)) {
+      matchableCategoryCounts[category] += 1;
+    }
+  }
   return {
     player,
     oppPlayer,
@@ -782,6 +821,8 @@ function buildHandPackageContext(state, playerKey, deps, profile, cache) {
     mongBak: safeNum(profile?.ctx?.selfFive) <= 0 && safeNum(profile?.ctx?.oppFive) >= 7,
     liveDoublePiMonths: getLiveDoublePiMonths(state, deps),
     comboHoldMonths: getComboHoldMonths(state, playerKey, deps),
+    matchableCategoryCounts,
+    hasAnyMatchablePlay: matchableCategoryCounts.any > 0,
     cache
   };
 }
@@ -827,6 +868,7 @@ function capturePlanScore(state, playerKey, month, capturedCards, deps, P, profi
   if ((capturedCards || []).some((card) => isDoublePi(card, deps))) immediate += safeNum(P?.doublePiBonus, 0);
   immediate += comboOpportunity * safeNum(P?.comboOpportunityMul, 0);
   immediate += ownComboFinishBonus(handCtx.combo, capturedCards, P);
+  immediate += ribbonComboBuildBonus(handCtx.combo, capturedCards, P);
   if (handCtx.ribbonCount >= 4 && (capturedCards || []).some((card) => card?.category === "ribbon")) {
     immediate += safeNum(P?.ribbonFourBonus, 0);
   }
@@ -848,6 +890,9 @@ function capturePlanScore(state, playerKey, month, capturedCards, deps, P, profi
   }
   if (profile.second && profile.trailing && piGain > 0) {
     immediate += piGain * safeNum(P?.secondMoverPiBonus, 0);
+  }
+  if ((capturedCards || []).length > 0 && (capturedCards || []).every((card) => card?.category === "junk")) {
+    immediate -= safeNum(P?.playJunkOnlyCapturePenalty, 0);
   }
   immediate += monthPriority * 0.22;
 
@@ -1174,6 +1219,7 @@ function estimateNextTurnSwingProb(core, flags, P) {
 function evaluateCard(state, playerKey, card, deps, P, profile, cache, handCtx) {
   const month = Number(card?.month);
   const matches = cache.board.get(month) || [];
+  const knownRatio = clamp(countKnownMonth(cache, month) / 4, 0, 1);
   const phaseScale = cardPhaseScales(profile.phase, P);
   const capturePlan = matches.length > 0
     ? capturePlanScore(state, playerKey, month, [card, ...matches], deps, P, profile, cache, handCtx)
@@ -1205,6 +1251,26 @@ function evaluateCard(state, playerKey, card, deps, P, profile, cache, handCtx) 
   let tempo = safeNum(discardPlan?.tempo);
   if (!profile.second && profile.trailing && comboOpportunity > 0) {
     tempo += comboOpportunity * safeNum(P.cardFirstTrailTempoBonus, 0.35);
+  }
+  if (matches.length > 0) {
+    immediate += knownRatio * safeNum(P?.playMatchKnownMonthMul, 0);
+    if (card?.category === "ribbon") {
+      immediate += safeNum(P?.playRibbonMatchBonus, 0);
+      if (safeNum(handCtx?.matchableCategoryCounts?.junk) > 0) {
+        immediate += safeNum(P?.playRibbonMatchWhenJunkAvailableBonus, 0);
+      }
+    } else if (card?.category === "junk" && safeNum(handCtx?.matchableCategoryCounts?.ribbon) > 0) {
+      immediate -= safeNum(P?.playJunkMatchWhenRibbonAvailablePenalty, 0);
+    }
+  } else if (handCtx?.hasAnyMatchablePlay) {
+    tempo -= safeNum(P?.playNoMatchWhenAnyMatchPenalty, 0);
+    tempo -= knownRatio * safeNum(P?.playSafeNoMatchWhenAnyMatchPenalty, 0);
+    if (card?.category === "junk") {
+      tempo -= safeNum(P?.playNoMatchJunkWhenAnyMatchPenalty, 0);
+    }
+    if (isDoublePi(card, deps)) {
+      tempo -= safeNum(P?.playNoMatchDoublePiWhenAnyMatchPenalty, 0);
+    }
   }
 
   let risk = 0;
@@ -1321,8 +1387,10 @@ export function chooseMatchHeuristicGPT(state, playerKey, deps, params = DEFAULT
     if (card?.category === "five") score += P.chooseMatchFiveBonus;
     if (card?.category === "ribbon") score += P.chooseMatchRibbonBonus;
 
+    const ribbonBuildBonus = ribbonComboBuildBonus(handCtx.combo, [card], P);
     score += comboOpportunity * P.chooseMatchComboMul;
     score += comboFinish;
+    score += ribbonBuildBonus;
     if (cache.blockMonths.has(month)) {
       score += (urgency.normalizedUrgency + safeNum(profile.signals.threat)) * P.chooseMatchBlockMul;
       if (profile.second) score += safeNum(P.secondMoverBlockBonus, 0);
@@ -1338,7 +1406,25 @@ export function chooseMatchHeuristicGPT(state, playerKey, deps, params = DEFAULT
       else if (pi > 0) score -= safeNum(P.handMongBakPiPenalty, 0);
     }
     score += monthPriority * 0.22;
-    candidates.push({ id: card?.id || null, score, pi, monthPriority });
+    const category = String(card?.category || "");
+    candidates.push({ id: card?.id || null, score, pi, monthPriority, category, ribbonBuildBonus });
+  }
+
+  const hasRibbonBuildCandidate = candidates.some(
+    (candidate) => candidate.category === "ribbon" && safeNum(candidate.ribbonBuildBonus) > 0
+  );
+  const hasJunkCandidate = candidates.some((candidate) => candidate.category === "junk");
+  const hasHighValueCandidate = candidates.some(
+    (candidate) => candidate.category === "kwang" || candidate.category === "five"
+  );
+  if (hasRibbonBuildCandidate && hasJunkCandidate && !hasHighValueCandidate) {
+    for (const candidate of candidates) {
+      if (candidate.category === "ribbon" && safeNum(candidate.ribbonBuildBonus) > 0) {
+        candidate.score += safeNum(P?.chooseMatchRibbonVsJunkBonus, 0);
+      } else if (candidate.category === "junk") {
+        candidate.score -= safeNum(P?.chooseMatchJunkVsRibbonPenalty, 0);
+      }
+    }
   }
 
   if (candidates.length <= 0) return null;

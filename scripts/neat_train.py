@@ -303,11 +303,15 @@ def _normalize_control_policy_mode(raw_value: object) -> str:
         "hybrid_gostop_only": "hybrid_go_stop_only",
         "go_stop_only": "hybrid_go_stop_only",
         "gostop_only": "hybrid_go_stop_only",
+        "hybrid_option_only": "hybrid_option_only",
+        "hybrid_options_only": "hybrid_option_only",
+        "option_only": "hybrid_option_only",
+        "options_only": "hybrid_option_only",
     }
     if raw in aliases:
         return aliases[raw]
     raise RuntimeError(
-        "runtime key 'control_policy_mode' must be one of: pure_model, hybrid_play_match_only, hybrid_go_stop_only"
+        "runtime key 'control_policy_mode' must be one of: pure_model, hybrid_play_match_only, hybrid_go_stop_only, hybrid_option_only"
     )
 
 
@@ -355,6 +359,7 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["fitness_win_weight"] = _required_float(cfg, "fitness_win_weight")
     cfg["fitness_gold_weight"] = _required_float(cfg, "fitness_gold_weight")
     cfg["fitness_win_neutral_rate"] = _required_float(cfg, "fitness_win_neutral_rate")
+    cfg["fitness_bankrupt_weight"] = _to_float(cfg.get("fitness_bankrupt_weight"), 0.0)
 
     gate_mode = str(_required_value(cfg, "gate_mode") or "").strip().lower()
     if gate_mode not in ("win_rate_only", "hybrid"):
@@ -376,6 +381,9 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["failure_slope_metric"] = failure_slope_metric
     cfg["control_policy_mode"] = _normalize_control_policy_mode(cfg.get("control_policy_mode"))
     cfg["control_heuristic_policy"] = str(cfg.get("control_heuristic_policy") or "H-CL").strip() or "H-CL"
+    cfg["control_play_match_model"] = str(cfg.get("control_play_match_model") or "").strip()
+    if cfg["control_policy_mode"] == "hybrid_option_only" and not cfg["control_play_match_model"]:
+        raise RuntimeError("runtime key 'control_play_match_model' is required when control_policy_mode=hybrid_option_only")
 
     if cfg["fitness_gold_scale"] <= 0:
         raise RuntimeError("runtime key 'fitness_gold_scale' must be > 0")
@@ -383,6 +391,8 @@ def _normalize_runtime_values(cfg: dict) -> dict:
         raise RuntimeError("runtime key 'fitness_win_weight' must be >= 0")
     if cfg["fitness_gold_weight"] < 0:
         raise RuntimeError("runtime key 'fitness_gold_weight' must be >= 0")
+    if cfg["fitness_bankrupt_weight"] < 0:
+        raise RuntimeError("runtime key 'fitness_bankrupt_weight' must be >= 0")
     if (cfg["fitness_win_weight"] + cfg["fitness_gold_weight"]) <= 0:
         raise RuntimeError("runtime keys 'fitness_win_weight' + 'fitness_gold_weight' must be > 0")
     if cfg["fitness_win_neutral_rate"] <= 0 or cfg["fitness_win_neutral_rate"] >= 1:
@@ -426,6 +436,9 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}FITNESS_WIN_NEUTRAL_RATE"] = str(
         float(runtime["fitness_win_neutral_rate"])
     )
+    os.environ[f"{ENV_PREFIX}FITNESS_BANKRUPT_WEIGHT"] = str(
+        float(runtime.get("fitness_bankrupt_weight", 0.0))
+    )
     os.environ[f"{ENV_PREFIX}GATE_MODE"] = str(runtime["gate_mode"])
     os.environ[f"{ENV_PREFIX}GATE_EMA_WINDOW"] = str(int(runtime["gate_ema_window"]))
     os.environ[f"{ENV_PREFIX}TRANSITION_EMA_IMITATION"] = str(runtime.get("transition_ema_imitation"))
@@ -444,6 +457,7 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}FAILURE_SLOPE_METRIC"] = str(runtime["failure_slope_metric"])
     os.environ[f"{ENV_PREFIX}CONTROL_POLICY_MODE"] = str(runtime.get("control_policy_mode") or "pure_model")
     os.environ[f"{ENV_PREFIX}CONTROL_HEURISTIC_POLICY"] = str(runtime.get("control_heuristic_policy") or "H-CL")
+    os.environ[f"{ENV_PREFIX}CONTROL_PLAY_MATCH_MODEL"] = str(runtime.get("control_play_match_model") or "")
 
 
 def _runtime_from_env() -> Dict[str, object]:
@@ -467,6 +481,7 @@ def _runtime_from_env() -> Dict[str, object]:
         "fitness_win_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"),
         "fitness_gold_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_WEIGHT"),
         "fitness_win_neutral_rate": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_NEUTRAL_RATE"),
+        "fitness_bankrupt_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_BANKRUPT_WEIGHT"),
         "gate_mode": os.environ.get(f"{ENV_PREFIX}GATE_MODE"),
         "gate_ema_window": os.environ.get(f"{ENV_PREFIX}GATE_EMA_WINDOW"),
         "transition_ema_imitation": os.environ.get(f"{ENV_PREFIX}TRANSITION_EMA_IMITATION"),
@@ -481,6 +496,7 @@ def _runtime_from_env() -> Dict[str, object]:
         "failure_slope_metric": os.environ.get(f"{ENV_PREFIX}FAILURE_SLOPE_METRIC"),
         "control_policy_mode": os.environ.get(f"{ENV_PREFIX}CONTROL_POLICY_MODE"),
         "control_heuristic_policy": os.environ.get(f"{ENV_PREFIX}CONTROL_HEURISTIC_POLICY"),
+        "control_play_match_model": os.environ.get(f"{ENV_PREFIX}CONTROL_PLAY_MATCH_MODEL"),
     }
     return _normalize_runtime_values(raw)
 
@@ -733,11 +749,20 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             str(float(runtime["fitness_gold_weight"])),
             "--fitness-win-neutral-rate",
             str(float(runtime["fitness_win_neutral_rate"])),
+            "--fitness-bankrupt-weight",
+            str(float(runtime.get("fitness_bankrupt_weight", 0.0))),
             "--control-policy-mode",
             str(runtime.get("control_policy_mode") or "pure_model"),
             "--control-heuristic-policy",
             str(runtime.get("control_heuristic_policy") or "H-CL"),
         ]
+        if str(runtime.get("control_play_match_model") or "").strip():
+            cmd.extend(
+                [
+                    "--control-play-match-model",
+                    str(runtime.get("control_play_match_model") or "").strip(),
+                ]
+            )
         if has_opponent_policy:
             cmd.extend(["--opponent-policy", opponent_policy])
         elif has_opponent_policy_mix:
@@ -835,6 +860,8 @@ class LoggedParallelEvaluator:
         self.best_imitation_history = []
         self.best_win_rate_history = []
         self.gate_state = {}
+        self.best_record_overall = None
+        self.best_genome_overall = None
 
     def _display_generation(self, generation: Optional[int] = None) -> int:
         current = self.generation if generation is None else int(generation)
@@ -1086,6 +1113,18 @@ class LoggedParallelEvaluator:
 
         if records:
             best_record = max(records, key=lambda r: _safe_float(r.get("fitness"), -1e9))
+            current_best_fitness = _safe_float(best_record.get("fitness"), -1e9)
+            snapshot_best_fitness = _safe_float(
+                (self.best_record_overall or {}).get("fitness"),
+                -1e9,
+            )
+            if self.best_record_overall is None or current_best_fitness > snapshot_best_fitness:
+                self.best_record_overall = dict(best_record)
+                best_genome_key = int(best_record.get("genome_key", -1))
+                for genome_key, genome in genomes:
+                    if int(genome_key) == best_genome_key:
+                        self.best_genome_overall = copy.deepcopy(genome)
+                        break
             fitness_values = [_safe_float(r.get("fitness"), -1e9) for r in records]
             valid_fitness_values = [_safe_float(r.get("fitness"), -1e9) for r in valid_records]
             valid_win_values = [_safe_float(r.get("win_rate"), 0.0) for r in valid_records]
@@ -1219,6 +1258,16 @@ class LoggedParallelEvaluator:
     def snapshot(self):
         return dict(self.gate_state)
 
+    def best_record_snapshot(self):
+        if self.best_record_overall is None:
+            return None
+        return dict(self.best_record_overall)
+
+    def best_genome_snapshot(self):
+        if self.best_genome_overall is None:
+            return None
+        return copy.deepcopy(self.best_genome_overall)
+
 
 # =============================================================================
 # Section 9. CLI + Config Bootstrap
@@ -1247,6 +1296,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="How many genomes in the new population should be seeded from --seed-genome; 0 fills the whole population",
+    )
+    parser.add_argument(
+        "--seed-genome-spec",
+        dest="seed_genome_specs",
+        action="append",
+        nargs=2,
+        metavar=("PATH", "COUNT"),
+        default=[],
+        help="May be repeated to seed multiple genome lineages into a fresh population",
     )
     parser.add_argument(
         "--base-generation",
@@ -1298,14 +1356,25 @@ def parse_args() -> argparse.Namespace:
         help="Override neutral baseline win rate for win_norm",
     )
     parser.add_argument(
+        "--fitness-bankrupt-weight",
+        type=float,
+        default=float("nan"),
+        help="Override bankrupt differential fitness weight",
+    )
+    parser.add_argument(
         "--control-policy-mode",
         default="",
-        help="Override control policy mode (pure_model, hybrid_play_match_only, or hybrid_go_stop_only)",
+        help="Override control policy mode (pure_model, hybrid_play_match_only, hybrid_go_stop_only, or hybrid_option_only)",
     )
     parser.add_argument(
         "--control-heuristic-policy",
         default="",
         help="Override heuristic fallback policy for hybrid control modes",
+    )
+    parser.add_argument(
+        "--control-play-match-model",
+        default="",
+        help="Override fixed play/match model token or genome JSON path for hybrid_option_only",
     )
     parser.add_argument(
         "--profile-name",
@@ -1377,10 +1446,7 @@ def _run_dry_eval(population, _config):
         genome.fitness = float(len(genome.connections)) * 0.001 + float(len(genome.nodes)) * 0.0001
 
 
-def _build_seeded_population(cfg, seed_genome_path: str, seed_genome_count: int = 0):
-    if neat is None:
-        raise RuntimeError("neat-python is not installed. Install with: pip install neat-python")
-
+def _load_seed_genome(seed_genome_path: str):
     seed_path = os.path.abspath(str(seed_genome_path or "").strip())
     if not seed_path:
         raise RuntimeError("seed genome path is empty")
@@ -1392,47 +1458,87 @@ def _build_seeded_population(cfg, seed_genome_path: str, seed_genome_count: int 
 
     if seed_genome is None or not hasattr(seed_genome, "nodes") or not hasattr(seed_genome, "connections"):
         raise RuntimeError(f"invalid seed genome pickle: {seed_genome_path}")
+    return seed_path, seed_genome
 
-    population = neat.Population(cfg)
+
+def _normalize_seed_specs(seed_specs_raw: list) -> list[dict]:
+    normalized = []
+    for item in seed_specs_raw or []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            raise RuntimeError("seed genome spec path is empty")
+        try:
+            count = int(item.get("count") or 0)
+        except Exception:
+            raise RuntimeError(f"invalid seed genome count for: {path}")
+        if count <= 0:
+            raise RuntimeError(f"seed genome count must be > 0 for: {path}")
+        _, seed_genome = _load_seed_genome(path)
+        normalized.append(
+            {
+                "path": os.path.abspath(path),
+                "count": int(count),
+                "genome": seed_genome,
+            }
+        )
+    if not normalized:
+        raise RuntimeError("seed genome specs are empty")
+    return normalized
+
+
+def _seed_population_from_specs(cfg, population, seed_specs: list[dict]):
     population_size = max(1, int(cfg.pop_size))
-    seed_count = int(seed_genome_count or 0)
-    if seed_count <= 0:
-        seed_count = population_size
-    seed_count = max(1, min(population_size, int(seed_count)))
     existing_keys = sorted(population.population.keys())
     if len(existing_keys) < population_size:
         raise RuntimeError("failed to initialize base population for seed expansion")
 
+    requested_total = sum(max(0, int(item["count"])) for item in seed_specs)
+    if requested_total > population_size:
+        raise RuntimeError(
+            f"seed genome counts exceed population size: {requested_total} > {population_size}"
+        )
+
     tracker = population.reproduction.innovation_tracker
     cfg.genome_config.innovation_tracker = tracker
     max_innovation = int(getattr(tracker, "global_counter", 0) or 0)
-    for conn_gene in (getattr(seed_genome, "connections", {}) or {}).values():
-        innovation = getattr(conn_gene, "innovation", None)
-        if innovation is None:
-            continue
-        try:
-            max_innovation = max(max_innovation, int(innovation))
-        except Exception:
-            continue
+    for item in seed_specs:
+        seed_genome = item["genome"]
+        for conn_gene in (getattr(seed_genome, "connections", {}) or {}).values():
+            innovation = getattr(conn_gene, "innovation", None)
+            if innovation is None:
+                continue
+            try:
+                max_innovation = max(max_innovation, int(innovation))
+            except Exception:
+                continue
     tracker.global_counter = int(max_innovation)
     tracker.reset_generation()
 
     seeded_population = dict(population.population)
     population.reproduction.ancestors = {}
-    seed_key = int(getattr(seed_genome, "key", 0) or 0)
-
-    for idx, genome_key in enumerate(existing_keys[:seed_count]):
-        genome = copy.deepcopy(seed_genome)
-        genome.key = int(genome_key)
-        genome.fitness = None
-        if idx > 0:
-            genome.mutate(cfg.genome_config)
-            if (idx % 4) == 0:
+    offset = 0
+    for item in seed_specs:
+        seed_genome = item["genome"]
+        seed_count = max(1, int(item["count"]))
+        seed_key = int(getattr(seed_genome, "key", 0) or 0)
+        block_keys = existing_keys[offset : offset + seed_count]
+        if len(block_keys) != seed_count:
+            raise RuntimeError("failed to allocate genome keys for seed expansion")
+        for idx, genome_key in enumerate(block_keys):
+            genome = copy.deepcopy(seed_genome)
+            genome.key = int(genome_key)
+            genome.fitness = None
+            if idx > 0:
                 genome.mutate(cfg.genome_config)
-        seeded_population[int(genome_key)] = genome
-        population.reproduction.ancestors[int(genome_key)] = (seed_key,)
+                if (idx % 4) == 0:
+                    genome.mutate(cfg.genome_config)
+            seeded_population[int(genome_key)] = genome
+            population.reproduction.ancestors[int(genome_key)] = (seed_key,)
+        offset += seed_count
 
-    for genome_key in existing_keys[seed_count:population_size]:
+    for genome_key in existing_keys[offset:population_size]:
         genome = seeded_population.get(int(genome_key))
         if genome is None:
             continue
@@ -1445,6 +1551,27 @@ def _build_seeded_population(cfg, seed_genome_path: str, seed_genome_count: int 
     population.species = cfg.species_set_type(cfg.species_set_config, population.reporters)
     population.species.speciate(cfg, population.population, population.generation)
     return population
+
+
+def _build_seeded_population(cfg, seed_genome_path: str, seed_genome_count: int = 0):
+    if neat is None:
+        raise RuntimeError("neat-python is not installed. Install with: pip install neat-python")
+
+    population = neat.Population(cfg)
+    population_size = max(1, int(cfg.pop_size))
+    seed_count = int(seed_genome_count or 0)
+    if seed_count <= 0:
+        seed_count = population_size
+    seed_count = max(1, min(population_size, int(seed_count)))
+    seed_specs = _normalize_seed_specs(
+        [
+            {
+                "path": seed_genome_path,
+                "count": int(seed_count),
+            }
+        ]
+    )
+    return _seed_population_from_specs(cfg, population, seed_specs)
 
 
 def _parse_checkpoint_display_generation(path: str) -> Optional[int]:
@@ -1642,12 +1769,30 @@ def main() -> None:
     applied_overrides = {}
     seed_genome_path = str(args.seed_genome or "").strip()
     seed_genome_count = max(0, int(args.seed_genome_count or 0))
+    seed_genome_specs = []
+    for raw_item in args.seed_genome_specs or []:
+        if not isinstance(raw_item, (list, tuple)) or len(raw_item) != 2:
+            continue
+        raw_path = str(raw_item[0] or "").strip()
+        if not raw_path:
+            raise RuntimeError("seed genome spec path is empty")
+        try:
+            raw_count = int(raw_item[1])
+        except Exception:
+            raise RuntimeError(f"invalid seed genome count for: {raw_path}")
+        seed_genome_specs.append({"path": raw_path, "count": raw_count})
     if seed_genome_path:
         applied_overrides["seed_genome"] = seed_genome_path
         if seed_genome_count > 0:
             applied_overrides["seed_genome_count"] = int(seed_genome_count)
-    if args.resume and seed_genome_path:
-        raise RuntimeError("--resume and --seed-genome are mutually exclusive")
+    if seed_genome_specs:
+        applied_overrides["seed_genome_specs"] = [
+            {"path": str(item["path"]), "count": int(item["count"])} for item in seed_genome_specs
+        ]
+    if seed_genome_path and seed_genome_specs:
+        raise RuntimeError("--seed-genome and --seed-genome-spec are mutually exclusive")
+    if args.resume and (seed_genome_path or seed_genome_specs):
+        raise RuntimeError("--resume and seed genome bootstrap args are mutually exclusive")
     explicit_base_generation = max(0, int(args.base_generation))
     override_keys = []
     if args.generations > 0:
@@ -1695,12 +1840,18 @@ def main() -> None:
     if args.fitness_win_neutral_rate == args.fitness_win_neutral_rate:
         runtime["fitness_win_neutral_rate"] = args.fitness_win_neutral_rate
         override_keys.append("fitness_win_neutral_rate")
+    if args.fitness_bankrupt_weight == args.fitness_bankrupt_weight:
+        runtime["fitness_bankrupt_weight"] = args.fitness_bankrupt_weight
+        override_keys.append("fitness_bankrupt_weight")
     if str(args.control_policy_mode).strip():
         runtime["control_policy_mode"] = str(args.control_policy_mode).strip()
         override_keys.append("control_policy_mode")
     if str(args.control_heuristic_policy).strip():
         runtime["control_heuristic_policy"] = str(args.control_heuristic_policy).strip()
         override_keys.append("control_heuristic_policy")
+    if str(args.control_play_match_model).strip():
+        runtime["control_play_match_model"] = str(args.control_play_match_model).strip()
+        override_keys.append("control_play_match_model")
     runtime = _normalize_runtime_values(runtime)
     for key in override_keys:
         applied_overrides[key] = runtime.get(key)
@@ -1739,6 +1890,8 @@ def main() -> None:
 
     if args.resume:
         p = _restore_population_from_checkpoint(args.resume)
+    elif seed_genome_specs:
+        p = _seed_population_from_specs(cfg, neat.Population(cfg), _normalize_seed_specs(seed_genome_specs))
     elif seed_genome_path:
         p = _build_seeded_population(cfg, seed_genome_path, seed_genome_count=seed_genome_count)
     else:
@@ -1798,16 +1951,29 @@ def main() -> None:
         finally:
             evaluator.close()
 
+    best_winner = None
+    if evaluator is not None:
+        best_winner = evaluator.best_genome_snapshot()
+    if best_winner is None:
+        checkpointer_best = getattr(checkpointer, "best_genome_snapshot", None)
+        if checkpointer_best is not None:
+            best_winner = copy.deepcopy(checkpointer_best)
+    if best_winner is None:
+        best_winner = winner
+
     winner_pkl = os.path.join(models_dir, "winner_genome.pkl")
     with open(winner_pkl, "wb") as f:
-        pickle.dump(winner, f)
+        pickle.dump(best_winner, f)
 
     winner_json_path = os.path.join(models_dir, "winner_genome.json")
     with open(winner_json_path, "w", encoding="utf-8") as f:
-        json.dump(_export_neat_python_genome(winner, p.config), f, ensure_ascii=False, separators=(",", ":"))
+        json.dump(_export_neat_python_genome(best_winner, p.config), f, ensure_ascii=False, separators=(",", ":"))
 
-    best_fitness = float(getattr(winner, "fitness", float("nan")) or 0.0)
-    winner_generation = getattr(checkpointer, "best_genome_display_generation", None)
+    best_record = evaluator.best_record_snapshot() if evaluator is not None else None
+    best_fitness = _safe_float((best_record or {}).get("fitness"), float("nan"))
+    if best_fitness != best_fitness:
+        best_fitness = float(getattr(best_winner, "fitness", float("nan")) or 0.0)
+    winner_generation = (best_record or {}).get("generation")
     run_finished_wall = datetime.now(timezone.utc)
     run_elapsed_sec = max(0.0, time.perf_counter() - run_started_perf)
     run_summary = {
@@ -1822,6 +1988,7 @@ def main() -> None:
         "games_per_genome": int(runtime["games_per_genome"]),
         "best_fitness": best_fitness,
         "winner_generation": (int(winner_generation) if winner_generation is not None else None),
+        "best_record": best_record,
         "applied_overrides": applied_overrides,
         "runtime_effective": runtime,
         "eval_failure_log": os.path.join(args.output_dir, "eval_failures.log"),
@@ -1832,6 +1999,7 @@ def main() -> None:
         "winner_pickle": winner_pkl,
         "winner_json": winner_json_path,
         "seed_genome": seed_genome_path or None,
+        "seed_genome_specs": seed_genome_specs or None,
         "config_feedforward": os.path.abspath(args.config_feedforward),
         "runtime_config": os.path.abspath(args.runtime_config),
     }

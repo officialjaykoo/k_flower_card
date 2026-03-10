@@ -4,7 +4,7 @@
  * - winner takes gold from opponent with bankruptcy guard
  * ========================================================================== */
 
-export const STARTING_GOLD = 1_000_000;
+export const STARTING_GOLD = 100_000;
 export const POINT_GOLD_UNIT = 100;
 
 export function pointsToGold(points) {

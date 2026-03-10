@@ -223,6 +223,26 @@ function resolvePlayerSpec(rawSpec, sideLabel) {
   const token = String(rawSpec || "").trim();
   if (!token) throw new Error(`empty player spec: ${sideLabel}`);
 
+  const hybridOption = parseHybridOptionSpec(token);
+  if (hybridOption) {
+    const playMatchModelSpec = resolvePhaseModelSpec(hybridOption.playMatchModelToken, `${sideLabel}:play_match_model`);
+    const optionModelSpec = resolvePhaseModelSpec(hybridOption.optionModelToken, `${sideLabel}:option_model`);
+    return {
+      input: token,
+      kind: "hybrid_option_model",
+      key: `hybrid_option(${playMatchModelSpec.key},${optionModelSpec.key})`,
+      label: `hybrid_option(${playMatchModelSpec.label},${optionModelSpec.label})`,
+      playMatchModel: playMatchModelSpec.model,
+      playMatchModelPath: playMatchModelSpec.modelPath,
+      playMatchPhase: playMatchModelSpec.phase,
+      playMatchSeed: playMatchModelSpec.seed,
+      optionModel: optionModelSpec.model,
+      optionModelPath: optionModelSpec.modelPath,
+      optionPhase: optionModelSpec.phase,
+      optionSeed: optionModelSpec.seed,
+    };
+  }
+
   const hybridGo = parseHybridPlayGoSpec(token);
   if (hybridGo) {
     const modelSpec = resolvePhaseModelSpec(hybridGo.modelToken, `${sideLabel}:model`);
@@ -312,6 +332,19 @@ function parseHybridPlayGoSpec(token) {
   };
 }
 
+function parseHybridOptionSpec(token) {
+  const m = String(token || "")
+    .trim()
+    .match(/^hybrid_option\(\s*([^,]+)\s*,\s*([^)]+)\s*\)$/i);
+  if (!m) {
+    return null;
+  }
+  return {
+    playMatchModelToken: String(m[1] || "").trim(),
+    optionModelToken: String(m[2] || "").trim(),
+  };
+}
+
 function parseHybridPlaySpec(token) {
   const m = String(token || "")
     .trim()
@@ -329,11 +362,27 @@ function resolvePhaseModelSpec(token, sideLabel) {
   const m = String(token || "").trim().match(/^phase([0-3])_seed(\d+)$/i);
   if (!m) {
     throw new Error(
-      `invalid ${sideLabel} spec: ${token} (use policy key, phase0_seed9, hybrid_play(phase1_seed202,H-CL), hybrid_play_go(phase1_seed202,H-CL), or hybrid_play_go(phase1_seed202,H-NEXg,H-CL))`
+      `invalid ${sideLabel} spec: ${token} (use policy key, phase0_seed9, hybrid_play(phase1_seed202,H-CL), hybrid_play_go(phase1_seed202,H-CL), hybrid_option(phase1_seed208,phase2_seed501), or hybrid_play_go(phase1_seed202,H-NEXg,H-CL))`
     );
   }
   const phase = Number(m[1]);
   const seed = Number(m[2]);
+  const summaryPath = resolve(`logs/NEAT/neat_phase${phase}_seed${seed}/run_summary.json`);
+  if (existsSync(summaryPath)) {
+    try {
+      const summaryRaw = String(readFileSync(summaryPath, "utf8") || "").replace(/^\uFEFF/, "");
+      const summary = JSON.parse(summaryRaw);
+      if (String(summary?.winner_repair_status || "") === "summary_repaired_winner_unrecoverable") {
+        throw new Error(
+          `unrecoverable winner for ${token}: exact best genome was not restorable from saved artifacts`
+        );
+      }
+    } catch (err) {
+      if (String(err?.message || err).includes("unrecoverable winner")) {
+        throw err;
+      }
+    }
+  }
   const modelPath = resolve(`logs/NEAT/neat_phase${phase}_seed${seed}/models/winner_genome.json`);
   if (!existsSync(modelPath)) {
     throw new Error(`model not found for ${token}: ${modelPath}`);
@@ -1022,6 +1071,40 @@ function buildAiPlayOptions(playerSpec) {
 }
 
 function resolvePlayerAction(state, actor, playerSpec) {
+  if (playerSpec?.kind === "hybrid_option_model") {
+    const sp = selectPool(state, actor);
+    const cards = sp.cards || null;
+    const boardCardIds = sp.boardCardIds || null;
+    const options = sp.options || null;
+    const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
+
+    if (decisionType === "play" || decisionType === "match") {
+      let next = aiPlay(state, actor, {
+        source: "model",
+        model: playerSpec.playMatchModel,
+      });
+      let actionSource = "hybrid_option_play_match_model";
+      if (!next || stateProgressKey(next) === stateProgressKey(state)) {
+        next = aiPlay(state, actor, {
+          source: "model",
+          model: playerSpec.optionModel,
+        });
+        actionSource = "hybrid_option_play_match_fallback_option_model";
+      }
+      return {
+        next: next || state,
+        actionSource,
+      };
+    }
+
+    return {
+      next: aiPlay(state, actor, {
+        source: "model",
+        model: playerSpec.optionModel,
+      }),
+      actionSource: "hybrid_option_option_model",
+    };
+  }
   if (playerSpec?.kind === "hybrid_play_model") {
     const traced = hybridPolicyPlayDetailed(state, actor, {
       model: playerSpec.model,
