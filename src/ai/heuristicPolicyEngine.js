@@ -1502,6 +1502,11 @@ function makeHiddenCard(prefix, index) {
   };
 }
 
+function hiddenCardCopies(prefix, count) {
+  const size = Math.max(0, Number(count || 0));
+  return Array.from({ length: size }, (_, i) => makeHiddenCard(prefix, i));
+}
+
 function collectPublicShakingRevealIds(state, targetPlayerKey) {
   const ids = new Set();
   if (!state || !targetPlayerKey) return ids;
@@ -1531,6 +1536,28 @@ function getPublicKnownOpponentHandCards(state, observerKey) {
   return oppHand.filter((c) => typeof c?.id === "string" && revealIds.has(c.id));
 }
 
+function maskPendingMatchContextForObserver(state, observerKey, publicState) {
+  const pendingMatch = publicState?.pendingMatch;
+  const rawContext = state?.pendingMatch?.context;
+  if (!pendingMatch?.context || !rawContext) return;
+
+  if (Array.isArray(rawContext.deck)) {
+    pendingMatch.context.deck = hiddenCardCopies("pending_match_deck", rawContext.deck.length);
+  }
+
+  const pendingPlayerKey = String(state?.pendingMatch?.playerKey || "");
+  if (!pendingPlayerKey || pendingPlayerKey === observerKey || !Array.isArray(rawContext.hand)) return;
+
+  const knownVisibleIds = new Set(getPublicKnownOpponentHandCards(state, observerKey).map((c) => String(c?.id || "")));
+  const knownPendingCards = rawContext.hand
+    .filter((card) => knownVisibleIds.has(String(card?.id || "")))
+    .map((card) => ({ ...card }));
+  const hiddenCount = Math.max(0, rawContext.hand.length - knownPendingCards.length);
+  pendingMatch.context.hand = knownPendingCards.concat(
+    hiddenCardCopies(`pending_match_hand_${pendingPlayerKey}`, hiddenCount)
+  );
+}
+
 function createPublicState(state, observerKey) {
   const pub = cloneGameState(state);
   const opp = otherPlayerKey(observerKey);
@@ -1541,10 +1568,11 @@ function createPublicState(state, observerKey) {
 
   if (pub?.players?.[opp]) {
     pub.players[opp].hand = knownOppCards.concat(
-      Array.from({ length: hiddenOppCount }, (_, i) => makeHiddenCard(`opp_${opp}`, i))
+      hiddenCardCopies(`opp_${opp}`, hiddenOppCount)
     );
   }
-  pub.deck = Array.from({ length: deckLen }, (_, i) => makeHiddenCard("deck", i));
+  pub.deck = hiddenCardCopies("deck", deckLen);
+  maskPendingMatchContextForObserver(state, observerKey, pub);
   return pub;
 }
 
@@ -1566,6 +1594,92 @@ function knownMonthCountForObserver(state, observerKey, month) {
 function visibleHandForObserver(state, playerKey, observerKey) {
   if (playerKey === observerKey) return state?.players?.[playerKey]?.hand || [];
   return getPublicKnownOpponentHandCards(state, observerKey);
+}
+
+function estimateMonthCaptureChanceForObserver(state, actorKey, month, requiredCategory, observerKey) {
+  const hand = visibleHandForObserver(state, actorKey, observerKey);
+  const board = state.board || [];
+  const deckCount = state.deck?.length || 0;
+  const drawFactor = deckCount <= 5 ? 0.68 : deckCount <= 8 ? 0.82 : 1.0;
+  const handHasAny = hasMonthCard(hand, month);
+  const handHasRequired = hasMonthCategoryCard(hand, month, requiredCategory);
+  const boardHasAny = hasMonthCard(board, month);
+  const boardRequiredCount = board.filter((c) => c?.month === month && c?.category === requiredCategory).length;
+  let chance = 0.12 * drawFactor;
+
+  if (handHasRequired) chance = Math.max(chance, boardHasAny ? 0.64 : 0.5);
+  if (boardRequiredCount > 0) {
+    chance = Math.max(chance, handHasAny ? 0.78 : 0.42);
+  }
+  if (handHasAny) chance = Math.max(chance, 0.28);
+  if (boardRequiredCount >= 2 && handHasAny) chance = Math.max(chance, 0.86);
+  return Math.max(0, Math.min(0.92, chance));
+}
+
+function estimateJokboExpectedPotentialForObserver(state, actorKey, blockerKey, observerKey) {
+  const actor = state.players?.[actorKey];
+  const blocker = state.players?.[blockerKey];
+  if (!actor) {
+    return {
+      total: 0,
+      nearCompleteCount: 0,
+      oneAwayCount: 0
+    };
+  }
+
+  const p = comboProgress(actor);
+  const ribbons = actor.captured?.ribbon || [];
+  const fives = actor.captured?.five || [];
+  let nearCompleteCount = 0;
+  let oneAwayCount = 0;
+
+  const comboPotential = (tag, got, sourceCards, requiredCategory, nearWeight, midWeight) => {
+    const missing = availableMissingMonths(missingComboMonths(sourceCards, tag), requiredCategory, blocker);
+    if (!missing.length) return 0;
+    const probs = missing.map((m) =>
+      estimateMonthCaptureChanceForObserver(state, actorKey, m, requiredCategory, observerKey)
+    );
+    const avg = probs.reduce((sum, v) => sum + v, 0) / probs.length;
+    const top = Math.max(...probs);
+    const baseWeight = got >= 2 ? nearWeight : got === 1 ? midWeight : 0.16;
+    let score = baseWeight * (avg * 0.65 + top * 0.35);
+    if (got >= 2) nearCompleteCount += 1;
+    if (got >= 2 && missing.length === 1) {
+      score += 0.18;
+      oneAwayCount += 1;
+    }
+    return score;
+  };
+
+  const red = comboPotential("redRibbons", p.redRibbons, ribbons, "ribbon", 1.0, 0.38);
+  const blue = comboPotential("blueRibbons", p.blueRibbons, ribbons, "ribbon", 1.0, 0.38);
+  const plain = comboPotential("plainRibbons", p.plainRibbons, ribbons, "ribbon", 0.92, 0.35);
+  const birds = comboPotential("fiveBirds", p.fiveBirds, fives, "five", 1.12, 0.42);
+
+  const gwangCount = capturedCountByCategory(actor, "kwang");
+  const gwMissing = availableMissingMonths(missingGwangMonths(actor), "kwang", blocker);
+  let gwang = 0;
+  if (gwMissing.length > 0) {
+    const probs = gwMissing.map((m) =>
+      estimateMonthCaptureChanceForObserver(state, actorKey, m, "kwang", observerKey)
+    );
+    const avg = probs.reduce((sum, v) => sum + v, 0) / probs.length;
+    const top = Math.max(...probs);
+    const baseWeight = gwangCount >= 2 ? 1.2 : gwangCount === 1 ? 0.42 : 0.12;
+    gwang = baseWeight * (avg * 0.6 + top * 0.4);
+    if (gwangCount >= 2) nearCompleteCount += 1;
+    if (gwangCount >= 2 && gwMissing.length === 1) {
+      gwang += 0.2;
+      oneAwayCount += 1;
+    }
+  }
+
+  const total = Math.max(0, Math.min(3.5, red + blue + plain + birds + gwang));
+  return {
+    total,
+    nearCompleteCount,
+    oneAwayCount
+  };
 }
 
 function shakingImmediateGainScoreForObserver(state, playerKey, month, observerKey) {
@@ -1888,7 +2002,19 @@ const HEURISTIC_GEMINI_DEPS = Object.freeze({
 function createObserverSafeHeuristicDeps(baseDeps, observerKey, extraOverrides = null) {
   return Object.freeze({
     ...baseDeps,
+    boardHighValueThreatForPlayer: (state, playerKey) =>
+      boardHighValueThreatForPlayerPublic(state, playerKey, observerKey),
     countKnownMonthCards: (state, month) => knownMonthCountForObserver(state, observerKey, month),
+    estimateJokboExpectedPotential: (state, actorKey, blockerKey) =>
+      estimateJokboExpectedPotentialForObserver(state, actorKey, blockerKey, observerKey),
+    estimateOpponentImmediateGainIfDiscard: (state, playerKey, month) =>
+      estimateOpponentImmediateGainIfDiscardPublic(state, playerKey, month, observerKey),
+    estimateOpponentJokboExpectedPotential: (state, playerKey) =>
+      estimateJokboExpectedPotentialForObserver(state, otherPlayerKey(playerKey), playerKey, observerKey),
+    matchableMonthCountForPlayer: (state, playerKey) =>
+      matchableMonthCountForPlayerPublic(state, playerKey, observerKey),
+    nextTurnThreatScore: (state, playerKey) => nextTurnThreatScorePublic(state, playerKey, observerKey),
+    opponentThreatScore: (state, playerKey) => opponentThreatScorePublic(state, playerKey, observerKey),
     shakingImmediateGainScore: (state, playerKey, month) =>
       shakingImmediateGainScoreForObserver(state, playerKey, month, observerKey),
     ...(extraOverrides || {})
@@ -1900,7 +2026,7 @@ function createHeuristicGPTFairDeps(observerKey) {
     boardHighValueThreatForPlayer: (state, playerKey) =>
       boardHighValueThreatForPlayerPublic(state, playerKey, observerKey),
     estimateOpponentJokboExpectedPotential: (state, playerKey) =>
-      estimateJokboExpectedPotential(state, otherPlayerKey(playerKey), playerKey),
+      estimateJokboExpectedPotentialForObserver(state, otherPlayerKey(playerKey), playerKey, observerKey),
     estimateOpponentImmediateGainIfDiscard: (state, playerKey, month) =>
       estimateOpponentImmediateGainIfDiscardPublic(state, playerKey, month, observerKey),
     matchableMonthCountForPlayer: (state, playerKey) =>

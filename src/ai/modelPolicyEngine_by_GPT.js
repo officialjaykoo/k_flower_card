@@ -277,11 +277,32 @@ function uniqueCapturedCardCount(player, zone) {
   return seen.size;
 }
 
+function maskStateForVisibleComboSimulation(state) {
+  if (!state || typeof state !== "object") return state;
+  const pendingMatch = state?.pendingMatch
+    ? {
+        ...state.pendingMatch,
+        context: state.pendingMatch?.context
+          ? {
+              ...state.pendingMatch.context,
+              deck: []
+            }
+          : state.pendingMatch.context
+      }
+    : state?.pendingMatch ?? null;
+  return {
+    ...state,
+    deck: [],
+    pendingMatch
+  };
+}
+
 function candidateComboGain(state, actor, decisionType, candidate) {
   const beforePlayer = state?.players?.[actor];
   if (!beforePlayer) return 0;
 
-  const afterState = applyDecisionAction(state, actor, decisionType, candidate);
+  const visibleState = maskStateForVisibleComboSimulation(state);
+  const afterState = applyDecisionAction(visibleState, actor, decisionType, candidate);
   const afterPlayer = afterState?.players?.[actor];
   if (!afterPlayer) return 0;
 
