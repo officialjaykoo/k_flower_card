@@ -399,11 +399,34 @@ function applyDecisionCandidate(state, actor, decisionType, candidate) {
   return state;
 }
 
+function maskStateForVisibleComboSimulation(state) {
+  if (!state || typeof state !== "object") return state;
+  const pendingMatch = state?.pendingMatch
+    ? {
+        ...state.pendingMatch,
+        context: state.pendingMatch?.context
+          ? {
+              ...state.pendingMatch.context,
+              deck: []
+            }
+          : state.pendingMatch.context
+      }
+    : state?.pendingMatch ?? null;
+  return {
+    ...state,
+    deck: [],
+    pendingMatch
+  };
+}
+
 function candidateComboGain(state, actor, decisionType, candidate) {
   const beforePlayer = state?.players?.[actor];
   if (!beforePlayer) return 0;
 
-  const afterState = applyDecisionCandidate(state, actor, decisionType, candidate);
+  // Combo completion must not peek at hidden future draws. Simulate only with
+  // currently public state by masking the deck (and pending match deck context).
+  const visibleState = maskStateForVisibleComboSimulation(state);
+  const afterState = applyDecisionCandidate(visibleState, actor, decisionType, candidate);
   const afterPlayer = afterState?.players?.[actor];
   if (!afterPlayer) return 0;
 
@@ -1003,6 +1026,47 @@ export function getModelCandidateProbabilities(state, actor, policyModel, option
 
   const probs = scoreToProbabilityMap(candidates, scoreMap, Number(policyModel?.softmax_temp || 1.0));
   return { decisionType, candidates, probabilities: probs, scores };
+}
+
+export function debugFeatureRows(state, actor, options = {}) {
+  const sp = selectPool(state, actor, options);
+  const decisionType = resolveDecisionType(sp);
+  if (!decisionType) return null;
+
+  const candidates = legalCandidatesForDecision(sp, decisionType);
+  if (!candidates.length) return null;
+
+  const compiled = options.policyModel ? getCompiledNeatModel(options.policyModel) : null;
+  const inputDim = Math.max(
+    1,
+    Number(options.inputDim || 0) || Number(compiled?.inputKeys?.length || 0) || IQN_GO_STOP_BASE_FEATURES
+  );
+
+  const rows = [];
+  for (const candidate of candidates) {
+    const features = featureVector(state, actor, decisionType, candidate, candidates.length, inputDim);
+    let score = null;
+    if (compiled) {
+      score = forward(compiled, features);
+    }
+    rows.push({
+      candidate: String(candidate),
+      features,
+      hasNaN: features.some((v) => Number.isNaN(Number(v))),
+      hasInfinity: features.some((v) => !Number.isFinite(Number(v))),
+      minValue: features.reduce((acc, v) => Math.min(acc, Number(v)), Infinity),
+      maxValue: features.reduce((acc, v) => Math.max(acc, Number(v)), -Infinity),
+      score,
+    });
+  }
+
+  return {
+    actor: String(actor || ""),
+    decisionType,
+    inputDim,
+    legalCount: candidates.length,
+    rows,
+  };
 }
 
 function modelPickCandidate(state, actor, policyModel) {

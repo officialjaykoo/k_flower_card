@@ -179,6 +179,36 @@ function monthTotalCards(month) {
   return 0;
 }
 
+function collectPublicShakingRevealIds(state, targetPlayerKey) {
+  const ids = new Set();
+  if (!state || !targetPlayerKey) return ids;
+
+  const liveReveal = state?.shakingReveal;
+  if (liveReveal?.playerKey === targetPlayerKey) {
+    for (const card of liveReveal.cards || []) {
+      const id = String(card?.id || "");
+      if (id) ids.add(id);
+    }
+  }
+
+  for (const entry of state?.kibo || []) {
+    if (entry?.type !== "shaking_declare" || entry?.playerKey !== targetPlayerKey) continue;
+    for (const card of entry?.revealCards || []) {
+      const id = String(card?.id || "");
+      if (id) ids.add(id);
+    }
+  }
+  return ids;
+}
+
+function getPublicKnownOpponentHandCards(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const revealIds = collectPublicShakingRevealIds(state, opp);
+  if (revealIds.size <= 0) return [];
+  const oppHand = state?.players?.[opp]?.hand || [];
+  return oppHand.filter((card) => revealIds.has(String(card?.id || "")));
+}
+
 function collectKnownCardsForMonthRatio(state, actor) {
   const out = [];
   const pushAll = (cards) => {
@@ -194,6 +224,7 @@ function collectKnownCardsForMonthRatio(state, actor) {
     pushAll(captured.junk || []);
   }
   pushAll(state?.players?.[actor]?.hand || []);
+  pushAll(getPublicKnownOpponentHandCards(state, actor));
   return out;
 }
 
@@ -232,6 +263,43 @@ function currentMultiplierNorm(state, scoreSelf) {
   const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
   const mul = Math.max(1.0, Number(scoreSelf?.multiplier || 1.0));
   return clamp01(((mul * carry) - 1.0) / 15.0);
+}
+
+function uniqueCapturedCardCount(player, zone) {
+  const cards = player?.captured?.[zone] || [];
+  if (!Array.isArray(cards)) return 0;
+  const seen = new Set();
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id) continue;
+    seen.add(id);
+  }
+  return seen.size;
+}
+
+function candidateComboGain(state, actor, decisionType, candidate) {
+  const beforePlayer = state?.players?.[actor];
+  if (!beforePlayer) return 0;
+
+  const afterState = applyDecisionAction(state, actor, decisionType, candidate);
+  const afterPlayer = afterState?.players?.[actor];
+  if (!afterPlayer) return 0;
+
+  const beforeGwang = uniqueCapturedCardCount(beforePlayer, "kwang");
+  const afterGwang = uniqueCapturedCardCount(afterPlayer, "kwang");
+  const beforeGodori = countCapturedComboTag(beforePlayer, "five", "fiveBirds");
+  const afterGodori = countCapturedComboTag(afterPlayer, "five", "fiveBirds");
+  const ribbonTags = ["redRibbons", "blueRibbons", "plainRibbons"];
+  const completesDan = ribbonTags.some((tag) => {
+    const beforeCount = countCapturedComboTag(beforePlayer, "ribbon", tag);
+    const afterCount = countCapturedComboTag(afterPlayer, "ribbon", tag);
+    return beforeCount < 3 && afterCount >= 3;
+  });
+  const raw =
+    (beforeGwang < 3 && afterGwang >= 3 ? 3 : 0) +
+    (beforeGodori < 3 && afterGodori >= 3 ? 5 : 0) +
+    (completesDan ? 3 : 0);
+  return clamp01(raw / 11.0);
 }
 
 function buildDecisionBaseContext(state, actor, decisionType, legalCount) {
@@ -291,6 +359,7 @@ function buildCandidateDescriptor(base, candidate) {
     candidate: normalizedCandidate,
     month,
     piNorm: clamp01(piValue / 5.0),
+    comboGain: candidateComboGain(state, actor, decisionType, normalizedCandidate),
     category,
     isKwang: category === "kwang" ? 1 : 0,
     isRibbon: category === "ribbon" ? 1 : 0,
@@ -400,6 +469,24 @@ function buildLegacyFeatureVector(base, desc) {
   ];
 }
 
+function buildCompactFeatureVector(base, desc) {
+  return [
+    base.decisionType === "play" ? 1 : 0,
+    base.decisionType === "match" ? 1 : 0,
+    desc.optionCode,
+    tanhNorm((base.scoreSelf?.total || 0) - (base.scoreOpp?.total || 0), 10.0),
+    tanhNorm(base.scoreSelf?.total || 0, 10.0),
+    clamp01((base.scoreOpp?.total || 0) / 7.0),
+    clamp01(base.multiplierNorm),
+    desc.comboGain,
+    desc.piNorm,
+    desc.immediateMatch,
+    desc.knownRatio,
+    base.selfCanStop,
+    base.oppCanStop
+  ];
+}
+
 function buildCoreRichFeatureVector(base, desc) {
   return [
     base.phase === "playing" ? 1 : 0,
@@ -478,10 +565,11 @@ function buildExtendedFeatureVector(base, desc, stats) {
 }
 
 function buildFeatureVector(base, desc, stats, inputDim) {
+  if (inputDim === 13) return buildCompactFeatureVector(base, desc);
   if (inputDim === 40) return buildLegacyFeatureVector(base, desc);
   if (inputDim === 47) return buildCoreRichFeatureVector(base, desc);
   if (inputDim === 56) return buildExtendedFeatureVector(base, desc, stats);
-  throw new Error(`feature vector size mismatch: expected ${inputDim}, supported=40,47,56`);
+  throw new Error(`feature vector size mismatch: expected ${inputDim}, supported=13,40,47,56`);
 }
 
 /* 3) Forward-pass helpers */
@@ -688,7 +776,8 @@ function scoreDecisionCandidates(state, actor, policyModel, options = {}) {
   const scoreMap = new Map();
   const scores = {};
   const diagnostics = {};
-  const featureMode = inputDim === 56 ? "rich56" : inputDim === 47 ? "rich47" : inputDim === 40 ? "legacy40" : "unknown";
+  const featureMode =
+    inputDim === 56 ? "rich56" : inputDim === 47 ? "rich47" : inputDim === 40 ? "legacy40" : inputDim === 13 ? "compact13" : "unknown";
 
   for (const desc of descriptors) {
     const x = buildFeatureVector(base, desc, stats, inputDim);
@@ -697,6 +786,7 @@ function scoreDecisionCandidates(state, actor, policyModel, options = {}) {
     scores[String(desc.candidate)] = score;
     diagnostics[String(desc.candidate)] = {
       feature_mode: featureMode,
+      combo_gain: desc.comboGain,
       pi_norm: desc.piNorm,
       match_density: desc.matchDensity,
       known_ratio: desc.knownRatio,

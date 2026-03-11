@@ -206,6 +206,53 @@ def _parse_opponent_policy_mix(raw_value: object) -> list:
     return out
 
 
+def _parse_early_stop_win_rate_cutoffs(raw_value: object) -> list:
+    if raw_value is None:
+        return []
+
+    source = []
+    if isinstance(raw_value, list):
+        source = raw_value
+    else:
+        text = str(raw_value).strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception as exc:
+            raise RuntimeError(f"early_stop_win_rate_cutoffs must be a JSON array: {exc}") from exc
+        if not isinstance(parsed, list):
+            raise RuntimeError("early_stop_win_rate_cutoffs must be a JSON array")
+        source = parsed
+
+    out = []
+    seen_games = set()
+    for idx, item in enumerate(source):
+        if not isinstance(item, dict):
+            raise RuntimeError("early_stop_win_rate_cutoffs items must be objects")
+        try:
+            games = int(item.get("games"))
+        except Exception as exc:
+            raise RuntimeError(f"early_stop_win_rate_cutoffs[{idx}].games must be integer") from exc
+        try:
+            max_win_rate = float(item.get("max_win_rate"))
+        except Exception as exc:
+            raise RuntimeError(f"early_stop_win_rate_cutoffs[{idx}].max_win_rate must be number") from exc
+        if games < 1:
+            raise RuntimeError(f"early_stop_win_rate_cutoffs[{idx}].games must be >= 1")
+        if (not math.isfinite(max_win_rate)) or max_win_rate < 0.0 or max_win_rate > 1.0:
+            raise RuntimeError(
+                f"early_stop_win_rate_cutoffs[{idx}].max_win_rate must be finite and in [0,1]"
+            )
+        if games in seen_games:
+            raise RuntimeError(f"duplicate early_stop_win_rate_cutoffs games value: {games}")
+        seen_games.add(games)
+        out.append({"games": int(games), "max_win_rate": float(max_win_rate)})
+
+    out.sort(key=lambda item: int(item["games"]))
+    return out
+
+
 def _load_runtime_config_recursive(path: str, cfg: dict, seen: set[str]) -> None:
     abs_path = os.path.abspath(path)
     if abs_path in seen:
@@ -387,9 +434,13 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     if failure_slope_metric not in ("win_rate", "imitation"):
         raise RuntimeError("runtime key 'failure_slope_metric' must be one of: win_rate, imitation")
     cfg["failure_slope_metric"] = failure_slope_metric
+    cfg["early_stop_win_rate_cutoffs"] = _parse_early_stop_win_rate_cutoffs(
+        cfg.get("early_stop_win_rate_cutoffs")
+    )
     cfg["control_policy_mode"] = _normalize_control_policy_mode(cfg.get("control_policy_mode"))
     cfg["control_heuristic_policy"] = str(cfg.get("control_heuristic_policy") or "H-CL").strip() or "H-CL"
     cfg["control_play_match_model"] = str(cfg.get("control_play_match_model") or "").strip()
+    cfg["control_go_stop_iqn_model"] = str(cfg.get("control_go_stop_iqn_model") or "").strip()
     cfg["objective_mode"] = _normalize_objective_mode(cfg.get("objective_mode"))
     cfg["pareto_crowding_weight"] = _to_float(cfg.get("pareto_crowding_weight"), 0.05)
     cfg["pareto_scalar_tiebreak_weight"] = _to_float(cfg.get("pareto_scalar_tiebreak_weight"), 0.005)
@@ -465,9 +516,15 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}FAILURE_IMITATION_MAX"] = str(runtime.get("failure_imitation_max"))
     os.environ[f"{ENV_PREFIX}FAILURE_SLOPE_5_MAX"] = str(float(runtime["failure_slope_5_max"]))
     os.environ[f"{ENV_PREFIX}FAILURE_SLOPE_METRIC"] = str(runtime["failure_slope_metric"])
+    os.environ[f"{ENV_PREFIX}EARLY_STOP_WIN_RATE_CUTOFFS"] = json.dumps(
+        runtime.get("early_stop_win_rate_cutoffs") or [],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     os.environ[f"{ENV_PREFIX}CONTROL_POLICY_MODE"] = str(runtime.get("control_policy_mode") or "pure_model")
     os.environ[f"{ENV_PREFIX}CONTROL_HEURISTIC_POLICY"] = str(runtime.get("control_heuristic_policy") or "H-CL")
     os.environ[f"{ENV_PREFIX}CONTROL_PLAY_MATCH_MODEL"] = str(runtime.get("control_play_match_model") or "")
+    os.environ[f"{ENV_PREFIX}CONTROL_GO_STOP_IQN_MODEL"] = str(runtime.get("control_go_stop_iqn_model") or "")
 
 
 def _runtime_from_env() -> Dict[str, object]:
@@ -503,9 +560,11 @@ def _runtime_from_env() -> Dict[str, object]:
         "failure_imitation_max": os.environ.get(f"{ENV_PREFIX}FAILURE_IMITATION_MAX"),
         "failure_slope_5_max": os.environ.get(f"{ENV_PREFIX}FAILURE_SLOPE_5_MAX"),
         "failure_slope_metric": os.environ.get(f"{ENV_PREFIX}FAILURE_SLOPE_METRIC"),
+        "early_stop_win_rate_cutoffs": os.environ.get(f"{ENV_PREFIX}EARLY_STOP_WIN_RATE_CUTOFFS"),
         "control_policy_mode": os.environ.get(f"{ENV_PREFIX}CONTROL_POLICY_MODE"),
         "control_heuristic_policy": os.environ.get(f"{ENV_PREFIX}CONTROL_HEURISTIC_POLICY"),
         "control_play_match_model": os.environ.get(f"{ENV_PREFIX}CONTROL_PLAY_MATCH_MODEL"),
+        "control_go_stop_iqn_model": os.environ.get(f"{ENV_PREFIX}CONTROL_GO_STOP_IQN_MODEL"),
     }
     return _normalize_runtime_values(raw)
 
@@ -870,6 +929,12 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             str(float(runtime["fitness_gold_weight"])),
             "--fitness-win-neutral-rate",
             str(float(runtime["fitness_win_neutral_rate"])),
+            "--early-stop-win-rate-cutoffs",
+            json.dumps(
+                runtime.get("early_stop_win_rate_cutoffs") or [],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
             "--control-policy-mode",
             str(runtime.get("control_policy_mode") or "pure_model"),
             "--control-heuristic-policy",
@@ -880,6 +945,13 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
                 [
                     "--control-play-match-model",
                     str(runtime.get("control_play_match_model") or "").strip(),
+                ]
+            )
+        if str(runtime.get("control_go_stop_iqn_model") or "").strip():
+            cmd.extend(
+                [
+                    "--control-go-stop-iqn-model",
+                    str(runtime.get("control_go_stop_iqn_model") or "").strip(),
                 ]
             )
         if has_opponent_policy:
@@ -971,6 +1043,7 @@ class LoggedParallelEvaluator:
         self.failure_imitation_max = runtime.get("failure_imitation_max")
         self.failure_slope_5_max = float(runtime["failure_slope_5_max"])
         self.failure_slope_metric = str(runtime["failure_slope_metric"])
+        self.full_eval_games = int(runtime["games_per_genome"])
         self.objective_mode = str(runtime.get("objective_mode") or "scalar_v2")
         self.pareto_crowding_weight = float(runtime.get("pareto_crowding_weight", 0.05))
         self.pareto_scalar_tiebreak_weight = float(runtime.get("pareto_scalar_tiebreak_weight", 0.005))
@@ -1116,6 +1189,12 @@ class LoggedParallelEvaluator:
             if imitation != imitation:
                 return False
         return True
+
+    def _is_full_eval_record(self, record: dict) -> bool:
+        if not bool(record.get("eval_ok")):
+            return False
+        games = _safe_float(record.get("games"), 0.0)
+        return int(games) >= int(self.full_eval_games)
 
     def _update_gate(self, best_record: Optional[dict], valid_count: int, total_count: int):
         if best_record is None or valid_count <= 0:
@@ -1295,28 +1374,40 @@ class LoggedParallelEvaluator:
         self._append_lines(self.eval_metrics_log, records)
 
         valid_records = [r for r in records if self._is_valid_gate_record(r)]
+        full_eval_records = [r for r in valid_records if self._is_full_eval_record(r)]
 
         if records:
-            selection_best_record = max(records, key=lambda r: _safe_float(r.get("fitness"), -1e9))
-            scalar_best_record = max(records, key=lambda r: _safe_float(r.get("fitness_scalar_v2"), -1e9))
-            best_record = scalar_best_record if self.objective_mode == "pareto_v1" else selection_best_record
-            current_best_fitness = _safe_float(
-                best_record.get("fitness_scalar_v2" if self.objective_mode == "pareto_v1" else "fitness"),
-                -1e9,
+            selection_best_record = (
+                max(full_eval_records, key=lambda r: _safe_float(r.get("fitness"), -1e9))
+                if len(full_eval_records) > 0
+                else None
             )
-            snapshot_best_fitness = _safe_float(
-                (self.best_record_overall or {}).get(
-                    "fitness_scalar_v2" if self.objective_mode == "pareto_v1" else "fitness"
-                ),
-                -1e9,
+            scalar_best_record = (
+                max(full_eval_records, key=lambda r: _safe_float(r.get("fitness_scalar_v2"), -1e9))
+                if len(full_eval_records) > 0
+                else None
             )
-            if self.best_record_overall is None or current_best_fitness > snapshot_best_fitness:
-                self.best_record_overall = dict(best_record)
-                best_genome_key = int(best_record.get("genome_key", -1))
-                for genome_key, genome in genomes:
-                    if int(genome_key) == best_genome_key:
-                        self.best_genome_overall = copy.deepcopy(genome)
-                        break
+            best_record = (
+                scalar_best_record if self.objective_mode == "pareto_v1" else selection_best_record
+            )
+            if best_record is not None:
+                current_best_fitness = _safe_float(
+                    best_record.get("fitness_scalar_v2" if self.objective_mode == "pareto_v1" else "fitness"),
+                    -1e9,
+                )
+                snapshot_best_fitness = _safe_float(
+                    (self.best_record_overall or {}).get(
+                        "fitness_scalar_v2" if self.objective_mode == "pareto_v1" else "fitness"
+                    ),
+                    -1e9,
+                )
+                if self.best_record_overall is None or current_best_fitness > snapshot_best_fitness:
+                    self.best_record_overall = dict(best_record)
+                    best_genome_key = int(best_record.get("genome_key", -1))
+                    for genome_key, genome in genomes:
+                        if int(genome_key) == best_genome_key:
+                            self.best_genome_overall = copy.deepcopy(genome)
+                            break
             fitness_values = [_safe_float(r.get("fitness"), -1e9) for r in records]
             valid_fitness_values = [_safe_float(r.get("fitness"), -1e9) for r in valid_records]
             scalar_fitness_values = [_safe_float(r.get("fitness_scalar_v2"), -1e9) for r in records]
@@ -1357,23 +1448,37 @@ class LoggedParallelEvaluator:
                 "seed_used": seed_for_generation,
                 "population_size": len(records),
                 "valid_record_count": len(valid_records),
+                "full_eval_record_count": len(full_eval_records),
+                "early_stop_record_count": max(0, len(valid_records) - len(full_eval_records)),
                 "invalid_record_count": max(0, len(records) - len(valid_records)),
                 "data_quality": "valid_generation" if len(valid_records) > 0 else "invalid_generation",
                 "objective_mode": str(objective_meta.get("mode") or self.objective_mode),
-                "best_genome_key": int(best_record.get("genome_key", -1)),
-                "best_fitness": _safe_float(
-                    best_record.get("fitness_scalar_v2" if self.objective_mode == "pareto_v1" else "fitness"),
-                    -1e9,
+                "best_genome_key": int(best_record.get("genome_key", -1)) if best_record is not None else -1,
+                "best_fitness": (
+                    _safe_float(
+                        best_record.get("fitness_scalar_v2" if self.objective_mode == "pareto_v1" else "fitness"),
+                        -1e9,
+                    )
+                    if best_record is not None
+                    else -1e9
                 ),
-                "best_surrogate_fitness": _safe_float(selection_best_record.get("fitness"), -1e9),
+                "best_surrogate_fitness": (
+                    _safe_float(selection_best_record.get("fitness"), -1e9)
+                    if selection_best_record is not None
+                    else -1e9
+                ),
                 "mean_fitness": sum(fitness_values) / max(1, len(fitness_values)),
                 "std_fitness": _stddev(valid_fitness_values),
-                "best_scalar_fitness": _safe_float(scalar_best_record.get("fitness_scalar_v2"), -1e9),
+                "best_scalar_fitness": (
+                    _safe_float(scalar_best_record.get("fitness_scalar_v2"), -1e9)
+                    if scalar_best_record is not None
+                    else -1e9
+                ),
                 "mean_scalar_fitness": sum(scalar_fitness_values) / max(1, len(scalar_fitness_values)),
                 "std_scalar_fitness": _stddev(valid_scalar_fitness_values),
                 "best_pareto_rank": (
                     int(best_record.get("pareto_rank"))
-                    if best_record.get("pareto_rank") is not None
+                    if best_record is not None and best_record.get("pareto_rank") is not None
                     else None
                 ),
                 "mean_pareto_rank": (
@@ -1408,19 +1513,22 @@ class LoggedParallelEvaluator:
                 ),
                 "best_win_rate": (
                     _safe_float(best_record.get("win_rate"), 0.0)
-                    if self._is_valid_gate_record(best_record)
+                    if best_record is not None and self._is_valid_gate_record(best_record)
                     else None
                 ),
                 "best_imitation_weighted_score": (
                     _safe_optional_float(best_record.get("imitation_weighted_score"))
                     if (
-                        self._is_valid_gate_record(best_record)
+                        best_record is not None
+                        and self._is_valid_gate_record(best_record)
                         and "imitation_weighted_score" in best_record
                     )
                     else None
                 ),
-                "best_genome_nodes": int(best_record.get("num_nodes", 0)),
-                "best_genome_connections": int(best_record.get("num_connections", 0)),
+                "best_genome_nodes": int(best_record.get("num_nodes", 0)) if best_record is not None else 0,
+                "best_genome_connections": (
+                    int(best_record.get("num_connections", 0)) if best_record is not None else 0
+                ),
                 "mean_eval_time_ms": (
                     sum(valid_eval_ms) / max(1, len(valid_eval_ms)) if len(valid_eval_ms) > 0 else None
                 ),
@@ -1601,6 +1709,11 @@ def parse_args() -> argparse.Namespace:
         help="Override fixed play/match model token or genome JSON path for hybrid_option_only",
     )
     parser.add_argument(
+        "--control-go-stop-iqn-model",
+        default="",
+        help="Override go/stop IQN runtime JSON path",
+    )
+    parser.add_argument(
         "--profile-name",
         default="",
         help="Optional profile label included in run_summary",
@@ -1685,7 +1798,35 @@ def _load_seed_genome(seed_genome_path: str):
     return seed_path, seed_genome
 
 
-def _normalize_seed_specs(seed_specs_raw: list) -> list[dict]:
+def _adapt_seed_genome_to_config(cfg, seed_genome, seed_path: str):
+    allowed_input_keys = {int(x) for x in getattr(cfg.genome_config, "input_keys", [])}
+    if not allowed_input_keys:
+        return seed_genome
+
+    pruned = copy.deepcopy(seed_genome)
+    removed = 0
+    for conn_key, conn_gene in list((getattr(pruned, "connections", {}) or {}).items()):
+        try:
+            in_node = int(conn_key[0])
+        except Exception:
+            try:
+                in_node = int(getattr(conn_gene, "key", [0, 0])[0])
+            except Exception:
+                continue
+        if in_node < 0 and in_node not in allowed_input_keys:
+            del pruned.connections[conn_key]
+            removed += 1
+
+    if removed <= 0:
+        return seed_genome
+
+    setattr(pruned, "_codex_pruned_seed_inputs", True)
+    setattr(pruned, "_codex_pruned_seed_path", os.path.abspath(seed_path))
+    setattr(pruned, "_codex_pruned_connection_count", int(removed))
+    return pruned
+
+
+def _normalize_seed_specs(cfg, seed_specs_raw: list) -> list[dict]:
     normalized = []
     for item in seed_specs_raw or []:
         if not isinstance(item, dict):
@@ -1699,7 +1840,8 @@ def _normalize_seed_specs(seed_specs_raw: list) -> list[dict]:
             raise RuntimeError(f"invalid seed genome count for: {path}")
         if count <= 0:
             raise RuntimeError(f"seed genome count must be > 0 for: {path}")
-        _, seed_genome = _load_seed_genome(path)
+        seed_path, seed_genome = _load_seed_genome(path)
+        seed_genome = _adapt_seed_genome_to_config(cfg, seed_genome, seed_path)
         normalized.append(
             {
                 "path": os.path.abspath(path),
@@ -1788,6 +1930,7 @@ def _build_seeded_population(cfg, seed_genome_path: str, seed_genome_count: int 
         seed_count = population_size
     seed_count = max(1, min(population_size, int(seed_count)))
     seed_specs = _normalize_seed_specs(
+        cfg,
         [
             {
                 "path": seed_genome_path,
@@ -2073,6 +2216,9 @@ def main() -> None:
     if str(args.control_play_match_model).strip():
         runtime["control_play_match_model"] = str(args.control_play_match_model).strip()
         override_keys.append("control_play_match_model")
+    if str(args.control_go_stop_iqn_model).strip():
+        runtime["control_go_stop_iqn_model"] = str(args.control_go_stop_iqn_model).strip()
+        override_keys.append("control_go_stop_iqn_model")
     runtime = _normalize_runtime_values(runtime)
     for key in override_keys:
         applied_overrides[key] = runtime.get(key)
@@ -2112,7 +2258,7 @@ def main() -> None:
     if args.resume:
         p = _restore_population_from_checkpoint(args.resume)
     elif seed_genome_specs:
-        p = _seed_population_from_specs(cfg, neat.Population(cfg), _normalize_seed_specs(seed_genome_specs))
+        p = _seed_population_from_specs(cfg, neat.Population(cfg), _normalize_seed_specs(cfg, seed_genome_specs))
     elif seed_genome_path:
         p = _build_seeded_population(cfg, seed_genome_path, seed_genome_count=seed_genome_count)
     else:
@@ -2180,7 +2326,9 @@ def main() -> None:
         if checkpointer_best is not None:
             best_winner = copy.deepcopy(checkpointer_best)
     if best_winner is None:
-        best_winner = winner
+        raise RuntimeError(
+            "no full-evaluation-qualified best genome found; winner selection requires games_per_genome completion"
+        )
 
     winner_pkl = os.path.join(models_dir, "winner_genome.pkl")
     with open(winner_pkl, "wb") as f:

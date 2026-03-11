@@ -24,6 +24,7 @@
 
 새 분리 계열:
 - `pareto52` 프로필은 `scripts/configs/neat_feedforward_golddanger52.ini`와 `runtime_pareto52_phase*.json`을 쓴다.
+- active input dim은 현재 `46`이다. `pareto52`는 legacy profile 이름만 유지한다.
 - 출력 폴더는 `logs/NEAT/neat_pareto52_phase{N}_seed{S}` 형태다.
 - bootstrap / duel 토큰은 `pareto52_phase1_seed601` 같은 형식을 쓴다.
 

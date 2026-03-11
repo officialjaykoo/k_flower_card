@@ -185,6 +185,26 @@ function resolveControlPlayMatchModel(token) {
   return resolved;
 }
 
+function resolveGoStopIqnRuntime(rawPath, label) {
+  const fullPath = path.resolve(String(rawPath || "").trim());
+  if (!fs.existsSync(fullPath)) {
+    throw new Error(`${label} not found: ${fullPath}`);
+  }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(String(fs.readFileSync(fullPath, "utf8") || "").replace(/^\uFEFF/, ""));
+  } catch (err) {
+    throw new Error(`failed to parse ${label}: ${fullPath} (${String(err)})`);
+  }
+  if (String(parsed?.format_version || "").trim() !== "iqn_go_stop_runtime_v1") {
+    throw new Error(`invalid ${label} format: expected iqn_go_stop_runtime_v1`);
+  }
+  return {
+    model: parsed,
+    modelPath: fullPath,
+  };
+}
+
 function resolveOpponentSpec(policyToken, opponentGenomePath) {
   const raw = String(policyToken || "").trim();
   const cacheKey = `${raw}|oppGenome=${String(opponentGenomePath || "").trim()}`;
@@ -265,6 +285,52 @@ function resolveOpponentSpec(policyToken, opponentGenomePath) {
   return resolved;
 }
 
+function parseEarlyStopWinRateCutoffs(rawValue, label) {
+  if (Array.isArray(rawValue)) {
+    return normalizeEarlyStopWinRateCutoffs(rawValue, label);
+  }
+  const text = String(rawValue || "").trim();
+  if (!text) {
+    return [];
+  }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`invalid ${label} JSON: ${String(err && err.message ? err.message : err)}`);
+  }
+  return normalizeEarlyStopWinRateCutoffs(parsed, label);
+}
+
+function normalizeEarlyStopWinRateCutoffs(parsed, label) {
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${label} must be a JSON array`);
+  }
+  const out = [];
+  const seenGames = new Set();
+  for (let i = 0; i < parsed.length; i += 1) {
+    const item = parsed[i];
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`${label} items must be objects`);
+    }
+    const games = Number(item.games);
+    const maxWinRate = Number(item.max_win_rate);
+    if (!Number.isInteger(games) || games < 1) {
+      throw new Error(`${label}[${i}].games must be an integer >= 1`);
+    }
+    if (!Number.isFinite(maxWinRate) || maxWinRate < 0 || maxWinRate > 1) {
+      throw new Error(`${label}[${i}].max_win_rate must be finite and in [0,1]`);
+    }
+    if (seenGames.has(games)) {
+      throw new Error(`duplicate ${label} games value: ${games}`);
+    }
+    seenGames.add(games);
+    out.push({ games, maxWinRate });
+  }
+  out.sort((a, b) => a.games - b.games);
+  return out;
+}
+
 function parseArgs(argv) {
   const args = [...argv];
   const out = {
@@ -288,9 +354,11 @@ function parseArgs(argv) {
     fitnessWinWeight: null,
     fitnessGoldWeight: null,
     fitnessWinNeutralRate: null,
+    earlyStopWinRateCutoffs: [],
     controlPolicyMode: "pure_model",
     controlHeuristicPolicy: "H-CL",
     controlPlayMatchModel: "",
+    controlGoStopIqnModel: "",
   };
 
   while (args.length > 0) {
@@ -354,9 +422,15 @@ function parseArgs(argv) {
     else if (key === "--fitness-win-weight") out.fitnessWinWeight = Number(value);
     else if (key === "--fitness-gold-weight") out.fitnessGoldWeight = Number(value);
     else if (key === "--fitness-win-neutral-rate") out.fitnessWinNeutralRate = Number(value);
+    else if (key === "--early-stop-win-rate-cutoffs") {
+      out.earlyStopWinRateCutoffs = parseEarlyStopWinRateCutoffs(value, "--early-stop-win-rate-cutoffs");
+    }
     else if (key === "--control-policy-mode") out.controlPolicyMode = normalizeControlPolicyMode(value);
     else if (key === "--control-heuristic-policy") out.controlHeuristicPolicy = String(value || "").trim();
     else if (key === "--control-play-match-model") out.controlPlayMatchModel = String(value || "").trim();
+    else if (key === "--control-go-stop-iqn-model" || key === "--control-go-stop-iqn") {
+      out.controlGoStopIqnModel = String(value || "").trim();
+    }
     else throw new Error(`Unknown argument: ${key}`);
   }
 
@@ -848,6 +922,7 @@ function playSingleRound(
       : "";
   const controlPlayMatchModel =
     controlPolicyMode === "hybrid_option_only" ? controlOptions.controlPlayMatchModel || null : null;
+  const controlGoStopIqnModel = controlOptions.controlGoStopIqnModel || null;
   const imitation = {
     totals: { play: 0, match: 0, option: 0 },
     matches: { play: 0, match: 0, option: 0 },
@@ -890,32 +965,38 @@ function playSingleRound(
           specialPolicy: controlHeuristicPolicy,
           playFallbackPolicy: controlHeuristicPolicy,
           modelMatchPhase: true,
+          goStopIqnModel: controlGoStopIqnModel,
         });
         next = traced?.next || state;
         const route = String(traced?.route || "");
-        controlDecisionOwnedByModel = route === "model_play" || route === "model_match";
+        controlDecisionOwnedByModel =
+          route === "model_play" || route === "model_match" || route === "model_go_stop_iqn";
       } else if (controlPolicyMode === "hybrid_go_stop_only") {
         const traced = hybridPolicyPlayDetailed(state, actor, {
           model: controlModel,
           heuristicPolicy: controlHeuristicPolicy,
           goStopPolicy: controlHeuristicPolicy,
           goStopOnly: true,
+          goStopIqnModel: controlGoStopIqnModel,
         });
         next = traced?.next || state;
         const route = String(traced?.route || "");
-        controlDecisionOwnedByModel = route === "model_non_go_stop";
+        controlDecisionOwnedByModel =
+          route === "model_non_go_stop" || route === "model_go_stop_iqn";
       } else if (controlPolicyMode === "hybrid_option_only") {
         const ownsPlayMatch = decisionType === "play" || decisionType === "match";
         if (ownsPlayMatch && controlPlayMatchModel) {
           next = aiPlay(state, actor, {
             source: "model",
             model: controlPlayMatchModel,
+            goStopIqnModel: controlGoStopIqnModel,
           });
           controlDecisionOwnedByModel = false;
           if (!next || stateProgressKey(next) === before) {
             next = aiPlay(state, actor, {
               source: "model",
               model: controlModel,
+              goStopIqnModel: controlGoStopIqnModel,
             });
             controlDecisionOwnedByModel = true;
           }
@@ -923,6 +1004,7 @@ function playSingleRound(
           next = aiPlay(state, actor, {
             source: "model",
             model: controlModel,
+            goStopIqnModel: controlGoStopIqnModel,
           });
           controlDecisionOwnedByModel = true;
         }
@@ -930,6 +1012,7 @@ function playSingleRound(
         next = aiPlay(state, actor, {
           source: "model",
           model: controlModel,
+          goStopIqnModel: controlGoStopIqnModel,
         });
         controlDecisionOwnedByModel = true;
       }
@@ -1070,13 +1153,19 @@ function main() {
     opts.controlPolicyMode === "hybrid_option_only"
       ? resolveControlPlayMatchModel(opts.controlPlayMatchModel)
       : null;
+  const controlGoStopIqnSpec = String(opts.controlGoStopIqnModel || "").trim()
+    ? resolveGoStopIqnRuntime(opts.controlGoStopIqnModel, "control go/stop IQN runtime")
+    : null;
   for (const item of opts.opponentPolicyMix || []) {
     resolveOpponentSpec(item?.policy, opts.opponentGenomePath);
   }
 
-  const games = Math.max(1, Math.floor(opts.games));
+  const requestedGames = Math.max(1, Math.floor(opts.games));
   const maxSteps = Math.max(20, Math.floor(opts.maxSteps));
-  const evaluationSchedule = buildEvaluationSchedule(opts, games);
+  const evaluationSchedule = buildEvaluationSchedule(opts, requestedGames);
+  const earlyStopWinRateCutoffs = (opts.earlyStopWinRateCutoffs || []).filter(
+    (item) => item.games <= requestedGames
+  );
   const controlActor = "ai";
   const opponentActor = "human";
   let wins = 0;
@@ -1103,8 +1192,11 @@ function main() {
     roundsPlayed: 0,
     previousEndState: null,
   };
+  let completedGames = 0;
+  let earlyStop = null;
+  let nextEarlyStopCutoffIdx = 0;
 
-  for (let gi = 0; gi < games; gi += 1) {
+  for (let gi = 0; gi < requestedGames; gi += 1) {
     const scheduleItem = evaluationSchedule[gi];
     const firstTurnKey = String(scheduleItem?.firstTurnKey || "");
     const opponentPolicyForGame = String(scheduleItem?.opponentPolicy || "");
@@ -1132,6 +1224,7 @@ function main() {
         controlPolicyMode: opts.controlPolicyMode,
         controlHeuristicPolicy: opts.controlHeuristicPolicy,
         controlPlayMatchModel: controlPlayMatchModelSpec?.model || null,
+        controlGoStopIqnModel: controlGoStopIqnSpec?.model || null,
       }
     );
     const endState = gameResult?.endState || gameResult;
@@ -1163,6 +1256,7 @@ function main() {
       seriesSession.previousEndState = endState;
     }
     seriesSession.roundsPlayed += 1;
+    completedGames = gi + 1;
 
     const winner = endState?.result?.winner || "unknown";
     if (winner === controlActor) {
@@ -1180,8 +1274,34 @@ function main() {
       simImitationTotals[k] += Number(gt[k] || 0);
       simImitationMatches[k] += Number(gm[k] || 0);
     }
+
+    while (nextEarlyStopCutoffIdx < earlyStopWinRateCutoffs.length) {
+      const cutoff = earlyStopWinRateCutoffs[nextEarlyStopCutoffIdx];
+      if (completedGames < cutoff.games) {
+        break;
+      }
+      const currentWinRate = wins / completedGames;
+      if (currentWinRate <= cutoff.maxWinRate) {
+        earlyStop = {
+          reason: "win_rate_cutoff",
+          cutoffGames: cutoff.games,
+          maxWinRate: cutoff.maxWinRate,
+          observedWinRate: currentWinRate,
+        };
+        break;
+      }
+      nextEarlyStopCutoffIdx += 1;
+    }
+    if (earlyStop) {
+      break;
+    }
   }
 
+  if (completedGames <= 0) {
+    throw new Error("evaluation finished without any completed games");
+  }
+
+  const games = completedGames;
   const meanGoldDelta = goldDeltas.length > 0 ? goldDeltas.reduce((a, b) => a + b, 0) / goldDeltas.length : 0;
   const winRate = wins / games;
   const lossRate = losses / games;
@@ -1230,11 +1350,21 @@ function main() {
 
   const summary = {
     games,
+    requested_games: requestedGames,
     control_actor: controlActor,
     opponent_actor: opponentActor,
     opponent_policy: opts.opponentPolicy,
     opponent_policy_mix: opts.opponentPolicyMix,
     opponent_policy_counts: opponentPolicyCounts,
+    early_stop_win_rate_cutoffs: earlyStopWinRateCutoffs.map((item) => ({
+      games: item.games,
+      max_win_rate: item.maxWinRate,
+    })),
+    early_stop_triggered: !!earlyStop,
+    early_stop_reason: earlyStop?.reason || null,
+    early_stop_cutoff_games: earlyStop?.cutoffGames ?? null,
+    early_stop_cutoff_max_win_rate: earlyStop?.maxWinRate ?? null,
+    early_stop_observed_win_rate: earlyStop?.observedWinRate ?? null,
     control_policy_mode: opts.controlPolicyMode,
     control_heuristic_policy:
       opts.controlPolicyMode === "hybrid_play_match_only" || opts.controlPolicyMode === "hybrid_go_stop_only"
@@ -1244,14 +1374,19 @@ function main() {
       opts.controlPolicyMode === "hybrid_option_only"
         ? String(controlPlayMatchModelSpec?.label || opts.controlPlayMatchModel || "")
         : null,
+    control_go_stop_iqn_model: controlGoStopIqnSpec?.modelPath || null,
     opponent_eval_tuning: {
       fast_path: false,
       imitation_reference_enabled: true,
       imitation_decision_scope:
         opts.controlPolicyMode === "hybrid_play_match_only"
-          ? "model_owned_play_match_only"
+          ? controlGoStopIqnSpec
+            ? "model_owned_play_match_plus_go_stop_iqn"
+            : "model_owned_play_match_only"
           : opts.controlPolicyMode === "hybrid_go_stop_only"
-            ? "model_owned_non_go_stop_only"
+            ? controlGoStopIqnSpec
+              ? "model_owned_non_go_stop_plus_go_stop_iqn"
+              : "model_owned_non_go_stop_only"
             : opts.controlPolicyMode === "hybrid_option_only"
               ? "model_owned_option_only"
             : "all_control_decisions",

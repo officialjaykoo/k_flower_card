@@ -458,7 +458,7 @@ $displayGoMetrics = $standings | Select-Object `
   policy,
   @{ Name = "W"; Expression = { $_.wins } },
   @{ Name = "GO_G"; Expression = { $_.go_games } },
-  @{ Name = "GO_G%"; Expression = { "{0:N1}%" -f $_.go_per_win_rate_pct } },
+  @{ Name = "GO_W%"; Expression = { "{0:N1}%" -f $_.go_per_win_rate_pct } },
   @{ Name = "GO_OPP"; Expression = { $_.go_opp_count } },
   @{ Name = "GO"; Expression = { $_.go_count } },
   @{ Name = "GO_T%"; Expression = { "{0:N1}%" -f $_.go_take_rate_pct } },

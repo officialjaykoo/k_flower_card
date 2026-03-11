@@ -1,7 +1,7 @@
 import { playTurn } from "../engine/index.js";
 import { DEFAULT_BOT_POLICY, normalizeBotPolicy } from "./policies.js";
 import { botPlay } from "./heuristicPolicyEngine.js";
-import { modelPolicyPlay as runModelPolicyPlay } from "./modelPolicyEngine.js";
+import { isIqnGoStopRuntimeModel, modelPolicyPlay as runModelPolicyPlay } from "./modelPolicyEngine.js";
 
 function transitionKey(state) {
   if (!state) return "null";
@@ -79,6 +79,8 @@ function runHeuristicPolicy(state, actor, policy, heuristicParams) {
 
 export function hybridPolicyPlayDetailed(state, actor, options = {}) {
   const model = options.model || null;
+  const goStopIqnModel = options.goStopIqnModel || null;
+  const hasGoStopIqn = isIqnGoStopRuntimeModel(goStopIqnModel);
   const heuristicParams =
     options.heuristicParams && typeof options.heuristicParams === "object"
       ? options.heuristicParams
@@ -88,6 +90,18 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
   const goStopPolicy = normalizeBotPolicy(options.goStopPolicy || options.heuristicPolicy || DEFAULT_BOT_POLICY);
 
   if (isGoStopTurn(state, actor)) {
+    if (hasGoStopIqn) {
+      const iqnNext = runModelPolicyPlay(state, actor, model, {
+        goStopIqnModel,
+      });
+      if (isMoved(state, iqnNext)) {
+        return {
+          next: iqnNext,
+          actionSource: "hybrid_model_go_stop_iqn",
+          route: "model_go_stop_iqn",
+        };
+      }
+    }
     const goStopNext = runHeuristicPolicy(state, actor, goStopPolicy, heuristicParams);
     if (isMoved(state, goStopNext)) {
       return {
@@ -107,7 +121,9 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
 
   if (goStopOnly) {
     if (model) {
-      const modelNext = runModelPolicyPlay(state, actor, model);
+      const modelNext = runModelPolicyPlay(state, actor, model, {
+        goStopIqnModel,
+      });
       if (isMoved(state, modelNext)) {
         return {
           next: modelNext,
@@ -145,7 +161,9 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
 
   if (modelMatchPhase && isMatchTurn(state, actor)) {
     if (model) {
-      const modelNext = runModelPolicyPlay(state, actor, model);
+      const modelNext = runModelPolicyPlay(state, actor, model, {
+        goStopIqnModel,
+      });
       if (isMoved(state, modelNext)) {
         return {
           next: modelNext,
@@ -190,7 +208,9 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
   }
 
   if (model) {
-    const modelNext = runModelPolicyPlay(state, actor, model);
+    const modelNext = runModelPolicyPlay(state, actor, model, {
+      goStopIqnModel,
+    });
     if (isMoved(state, modelNext)) {
       return {
         next: modelNext,

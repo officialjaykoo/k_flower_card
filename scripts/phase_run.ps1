@@ -4,6 +4,7 @@
   [Parameter(Mandatory = $false)][ValidateSet("classic", "pareto52")][string]$LineageProfile = "classic",
   [Parameter(Mandatory = $false)][string]$ControlPolicyMode = "",
   [Parameter(Mandatory = $false)][string]$ControlHeuristicPolicy = "",
+  [Parameter(Mandatory = $false)][string]$ControlGoStopIqnModel = "",
   [Parameter(Mandatory = $false)][string[]]$BootstrapSeedSpec = @()
 )
 
@@ -346,6 +347,12 @@ if (-not [string]::IsNullOrWhiteSpace($ControlHeuristicPolicy)) {
   )
 }
 
+if (-not [string]::IsNullOrWhiteSpace($ControlGoStopIqnModel)) {
+  $cmd += @(
+    "--control-go-stop-iqn-model", $ControlGoStopIqnModel
+  )
+}
+
 if ($BootstrapSeedSpec.Count -gt 0) {
   $bootstrapSpecs = @($BootstrapSeedSpec | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
   if ($bootstrapSpecs.Count -eq 0) {
@@ -354,7 +361,7 @@ if ($BootstrapSeedSpec.Count -gt 0) {
     $bootstrapWinnerPath = Resolve-BootstrapWinnerPath -Spec $bootstrapSpecs[0]
     $cmd += @(
       "--seed-genome", "$bootstrapWinnerPath",
-      "--seed-genome-count", "16"
+      "--seed-genome-count", "48"
     )
   }
   elseif ($bootstrapSpecs.Count -eq 2) {
