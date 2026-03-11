@@ -654,6 +654,26 @@ function applyAction(state, actor, decisionType, rawAction) {
   return state;
 }
 
+function maskStateForVisibleComboSimulation(state) {
+  if (!state || typeof state !== "object") return state;
+  const pendingMatch = state?.pendingMatch
+    ? {
+        ...state.pendingMatch,
+        context: state.pendingMatch?.context
+          ? {
+              ...state.pendingMatch.context,
+              deck: [],
+            }
+          : state.pendingMatch.context,
+      }
+    : state?.pendingMatch ?? null;
+  return {
+    ...state,
+    deck: [],
+    pendingMatch,
+  };
+}
+
 function stateProgressKey(state) {
   if (!state) return "null";
   const hh = Number(state?.players?.human?.hand?.length || 0);
@@ -896,7 +916,8 @@ function candidateComboGain(state, actor, decisionType, candidate) {
   const beforePlayer = state?.players?.[actor];
   if (!beforePlayer) return 0;
 
-  const afterState = applyAction(state, actor, decisionType, candidate);
+  const visibleState = maskStateForVisibleComboSimulation(state);
+  const afterState = applyAction(visibleState, actor, decisionType, candidate);
   const afterPlayer = afterState?.players?.[actor];
   if (!afterPlayer) return 0;
 

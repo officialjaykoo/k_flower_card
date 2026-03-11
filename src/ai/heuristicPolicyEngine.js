@@ -1563,6 +1563,25 @@ function knownMonthCountForObserver(state, observerKey, month) {
   return count;
 }
 
+function visibleHandForObserver(state, playerKey, observerKey) {
+  if (playerKey === observerKey) return state?.players?.[playerKey]?.hand || [];
+  return getPublicKnownOpponentHandCards(state, observerKey);
+}
+
+function shakingImmediateGainScoreForObserver(state, playerKey, month, observerKey) {
+  const monthCards = visibleHandForObserver(state, playerKey, observerKey).filter((c) => c?.month === month);
+  const deckCount = state?.deck?.length || 0;
+  const known = knownMonthCountForObserver(state, observerKey, month);
+  const unseen = Math.max(0, 4 - known);
+  const hasHighCard = monthCards.some((c) => c.category === "kwang" || c.category === "five");
+  const piPayload = monthCards.reduce((sum, c) => sum + junkPiValue(c), 0);
+  const flipMatchChance = deckCount > 0 ? Math.min(1, unseen / deckCount) : 0;
+  let score = flipMatchChance * (2.1 + piPayload * 0.35 + (hasHighCard ? 0.8 : 0));
+  if (monthCards.some((c) => c.category === "junk" && junkPiValue(c) >= 2)) score += 0.25;
+  if (unseen === 0) score -= 0.7;
+  return score;
+}
+
 function hiddenPoolStatsForObserver(state, observerKey) {
   const opp = otherPlayerKey(observerKey);
   const oppHandSize = state?.players?.[opp]?.hand?.length || 0;
@@ -1866,9 +1885,18 @@ const HEURISTIC_GEMINI_DEPS = Object.freeze({
 });
 
 /* 4) Fair-teacher wrapper + decision context builders */
-function createHeuristicGPTFairDeps(observerKey) {
+function createObserverSafeHeuristicDeps(baseDeps, observerKey, extraOverrides = null) {
   return Object.freeze({
-    ...HEURISTIC_GPT_DEPS,
+    ...baseDeps,
+    countKnownMonthCards: (state, month) => knownMonthCountForObserver(state, observerKey, month),
+    shakingImmediateGainScore: (state, playerKey, month) =>
+      shakingImmediateGainScoreForObserver(state, playerKey, month, observerKey),
+    ...(extraOverrides || {})
+  });
+}
+
+function createHeuristicGPTFairDeps(observerKey) {
+  return createObserverSafeHeuristicDeps(HEURISTIC_GPT_DEPS, observerKey, {
     boardHighValueThreatForPlayer: (state, playerKey) =>
       boardHighValueThreatForPlayerPublic(state, playerKey, observerKey),
     estimateOpponentJokboExpectedPotential: (state, playerKey) =>
@@ -1905,10 +1933,11 @@ function resolveHeuristicDecisionContext(
       ? heuristicParams
       : null;
   if (resolvedPolicy === POLICY_HEURISTIC_GEMINI) {
+    const decisionState = createHeuristicPublicState(state, playerKey);
     return {
       policy: POLICY_HEURISTIC_GEMINI,
-      decisionState: createHeuristicPublicState(state, playerKey),
-      deps: HEURISTIC_GEMINI_DEPS,
+      decisionState,
+      deps: createObserverSafeHeuristicDeps(HEURISTIC_GEMINI_DEPS, playerKey),
       params: paramsOverride ? { ...HEURISTIC_GEMINI_PARAMS, ...paramsOverride } : HEURISTIC_GEMINI_PARAMS
     };
   }
@@ -1927,7 +1956,7 @@ function resolveHeuristicDecisionContext(
     return {
       policy: POLICY_HEURISTIC_NEXG,
       decisionState,
-      deps: HEURISTIC_CL_DEPS,
+      deps: createObserverSafeHeuristicDeps(HEURISTIC_CL_DEPS, playerKey),
       params: paramsOverride ? { ...HEURISTIC_NEXG_PARAMS, ...paramsOverride } : HEURISTIC_NEXG_PARAMS
     };
   }
@@ -1935,7 +1964,7 @@ function resolveHeuristicDecisionContext(
     return {
       policy: POLICY_HEURISTIC_ANTICL,
       decisionState,
-      deps: HEURISTIC_CL_DEPS,
+      deps: createObserverSafeHeuristicDeps(HEURISTIC_CL_DEPS, playerKey),
       params: paramsOverride ? { ...HEURISTIC_ANTICL_PARAMS, ...paramsOverride } : HEURISTIC_ANTICL_PARAMS
     };
   }
@@ -1943,7 +1972,7 @@ function resolveHeuristicDecisionContext(
     return {
       policy: POLICY_HEURISTIC_CL,
       decisionState,
-      deps: HEURISTIC_CL_DEPS,
+      deps: createObserverSafeHeuristicDeps(HEURISTIC_CL_DEPS, playerKey),
       params: paramsOverride ? { ...HEURISTIC_CL_PARAMS, ...paramsOverride } : HEURISTIC_CL_PARAMS
     };
   }
@@ -1951,14 +1980,14 @@ function resolveHeuristicDecisionContext(
     return {
       policy: POLICY_HEURISTIC_J2,
       decisionState,
-      deps: HEURISTIC_J2_DEPS,
+      deps: createObserverSafeHeuristicDeps(HEURISTIC_J2_DEPS, playerKey),
       params: null
     };
   }
   return {
     policy: POLICY_HEURISTIC_J1,
     decisionState,
-    deps: HEURISTIC_J1_DEPS,
+    deps: createObserverSafeHeuristicDeps(HEURISTIC_J1_DEPS, playerKey),
     params: null
   };
 }
