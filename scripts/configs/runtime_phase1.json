@@ -1,8 +1,8 @@
 ﻿{
   "format_version": "neat_runtime_phase1_v4",
-  "generations": 30,
+  "generations": 20,
   "eval_workers": 6,
-  "games_per_genome": 200,
+  "games_per_genome": 300,
   "eval_timeout_sec": 360,
   "max_eval_steps": 600,
   "checkpoint_every": 5,
@@ -11,14 +11,14 @@
   "opponent_policy": "",
   "opponent_policy_mix": [
     { "policy": "hybrid_play(phase1_seed208,H-CL)", "weight": 50 },
-    { "policy": "hybrid_play(phase1_seed204,H-CL)", "weight": 50 }
+    { "policy": "hybrid_play(phase1_seed301,H-CL)", "weight": 50 }
   ],
   "opponent_genome": "",
   "switch_seats": true,
   "fitness_gold_scale": 2500.0,
   "fitness_gold_neutral_delta": 0.0,
-  "fitness_win_weight": 0.99,
-  "fitness_gold_weight": 0.01,
+  "fitness_win_weight": 0.90,
+  "fitness_gold_weight": 0.10,
   "objective_mode": "scalar_v2",
   "pareto_crowding_weight": 0.05,
   "pareto_scalar_tiebreak_weight": 0.005,
@@ -37,6 +37,12 @@
   "failure_imitation_max": null,
   "failure_slope_5_max": 0.0,
   "failure_slope_metric": "win_rate",
+  "early_stop_win_rate_cutoffs": [
+    { "games": 100, "max_win_rate": 0.45 },
+    { "games": 150, "max_win_rate": 0.45 },
+    { "games": 200, "max_win_rate": 0.45 },
+    { "games": 250, "max_win_rate": 0.45 }
+  ],
   "_notes_fitness": {
     "fitness_gold_scale": "gold delta를 tanh로 정규화할 때 쓰는 스케일",
     "fitness_gold_neutral_delta": "골드 항의 중립 기준선 (예: 0이면 0이 0점)",

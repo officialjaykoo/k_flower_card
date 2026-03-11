@@ -18,6 +18,7 @@
   choosePresidentHold,
   chooseGukjinMode,
 } from "../src/engine/index.js";
+import { STARTING_GOLD } from "../src/engine/economy.js";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { getActionPlayerKey } from "../src/engine/runner.js";
@@ -47,6 +48,8 @@ function parseArgs(argv) {
   const out = {
     humanSpecRaw: "",
     aiSpecRaw: "",
+    humanGoStopIqnPath: "",
+    aiGoStopIqnPath: "",
     games: 1000,
     seed: "model-duel",
     maxSteps: 600,
@@ -80,6 +83,12 @@ function parseArgs(argv) {
 
     if (key === "--human") out.humanSpecRaw = String(value || "").trim();
     else if (key === "--ai") out.aiSpecRaw = String(value || "").trim();
+    else if (key === "--human-go-stop-iqn" || key === "--human-go-stop-iqn-model") {
+      out.humanGoStopIqnPath = String(value || "").trim();
+    }
+    else if (key === "--ai-go-stop-iqn" || key === "--ai-go-stop-iqn-model") {
+      out.aiGoStopIqnPath = String(value || "").trim();
+    }
     else if (key === "--policy-a" || key === "--policy-b") {
       throw new Error(`deprecated option: ${key} (use --human and --ai)`);
     }
@@ -421,6 +430,40 @@ function resolvePhaseModelSpec(token, sideLabel) {
   };
 }
 
+function resolveGoStopIqnRuntime(rawPath, sideLabel) {
+  const fullPath = resolve(String(rawPath || "").trim());
+  if (!existsSync(fullPath)) {
+    throw new Error(`go/stop IQN runtime not found for ${sideLabel}: ${fullPath}`);
+  }
+
+  let model = null;
+  try {
+    const raw = String(readFileSync(fullPath, "utf8") || "").replace(/^\uFEFF/, "");
+    model = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`failed to parse go/stop IQN runtime (${sideLabel}): ${fullPath} (${String(err)})`);
+  }
+  if (String(model?.format_version || "").trim() !== "iqn_go_stop_runtime_v1") {
+    throw new Error(`invalid go/stop IQN runtime format for ${sideLabel}: expected iqn_go_stop_runtime_v1`);
+  }
+
+  return {
+    model,
+    modelPath: fullPath,
+  };
+}
+
+function attachGoStopIqnRuntime(playerSpec, runtimePath, sideLabel) {
+  const rawPath = String(runtimePath || "").trim();
+  if (!rawPath) return playerSpec;
+  const loaded = resolveGoStopIqnRuntime(rawPath, sideLabel);
+  return {
+    ...playerSpec,
+    goStopIqnModel: loaded.model,
+    goStopIqnPath: loaded.modelPath,
+  };
+}
+
 function buildAutoOutputDir(humanLabel, aiLabel) {
   const duelKey = `${sanitizeFilePart(humanLabel)}_vs_${sanitizeFilePart(aiLabel)}_${dateTag()}`;
   const outDir = join("logs", "model_duel", duelKey);
@@ -646,6 +689,19 @@ function tanhNorm(x, scale) {
   return Math.tanh(Number(x || 0) / s);
 }
 
+function clampRange(x, minValue, maxValue) {
+  const v = Number(x || 0);
+  if (v <= minValue) return minValue;
+  if (v >= maxValue) return maxValue;
+  return v;
+}
+
+function resolveInitialGoldBase(state) {
+  const configured = Number(state?.initialGoldBase);
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return STARTING_GOLD;
+}
+
 function findCardById(cards, cardId) {
   const id = String(cardId || "");
   if (!Array.isArray(cards)) return null;
@@ -759,6 +815,36 @@ function monthTotalCards(month) {
   return 0;
 }
 
+function collectPublicShakingRevealIds(state, targetPlayerKey) {
+  const ids = new Set();
+  if (!state || !targetPlayerKey) return ids;
+
+  const liveReveal = state?.shakingReveal;
+  if (liveReveal?.playerKey === targetPlayerKey) {
+    for (const card of liveReveal.cards || []) {
+      const id = String(card?.id || "");
+      if (id) ids.add(id);
+    }
+  }
+
+  for (const entry of state?.kibo || []) {
+    if (entry?.type !== "shaking_declare" || entry?.playerKey !== targetPlayerKey) continue;
+    for (const card of entry?.revealCards || []) {
+      const id = String(card?.id || "");
+      if (id) ids.add(id);
+    }
+  }
+  return ids;
+}
+
+function getPublicKnownOpponentHandCards(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const revealIds = collectPublicShakingRevealIds(state, opp);
+  if (revealIds.size <= 0) return [];
+  const oppHand = state?.players?.[opp]?.hand || [];
+  return oppHand.filter((card) => revealIds.has(String(card?.id || "")));
+}
+
 function collectKnownCardsForMonthRatio(state, actor) {
   const out = [];
   const pushAll = (cards) => {
@@ -767,6 +853,7 @@ function collectKnownCardsForMonthRatio(state, actor) {
   };
 
   pushAll(state?.board || []);
+  pushAll(state?.players?.[actor]?.hand || []);
   for (const side of ["human", "ai"]) {
     const captured = state?.players?.[side]?.captured || {};
     pushAll(captured.kwang || []);
@@ -774,25 +861,60 @@ function collectKnownCardsForMonthRatio(state, actor) {
     pushAll(captured.ribbon || []);
     pushAll(captured.junk || []);
   }
-  pushAll(state?.players?.[actor]?.hand || []);
+  pushAll(getPublicKnownOpponentHandCards(state, actor));
   return out;
 }
 
-function candidateMonthKnownRatio(state, actor, month) {
+function candidatePublicKnownRatio(state, actor, month) {
   const total = monthTotalCards(month);
   if (total <= 0) return 0;
-
   const cards = collectKnownCardsForMonthRatio(state, actor);
   const seen = new Set();
   let known = 0;
   for (const card of cards) {
-    if (!card) continue;
-    const id = String(card.id || "");
+    const id = String(card?.id || "");
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    if (Number(card.month || 0) === Number(month)) known += 1;
+    if (Number(card?.month || 0) === Number(month)) known += 1;
   }
   return clamp01(known / total);
+}
+
+function uniqueCapturedCardCount(player, zone) {
+  const cards = player?.captured?.[zone] || [];
+  if (!Array.isArray(cards)) return 0;
+  const seen = new Set();
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id) continue;
+    seen.add(id);
+  }
+  return seen.size;
+}
+
+function candidateComboGain(state, actor, decisionType, candidate) {
+  const beforePlayer = state?.players?.[actor];
+  if (!beforePlayer) return 0;
+
+  const afterState = applyAction(state, actor, decisionType, candidate);
+  const afterPlayer = afterState?.players?.[actor];
+  if (!afterPlayer) return 0;
+
+  const beforeGwang = uniqueCapturedCardCount(beforePlayer, "kwang");
+  const afterGwang = uniqueCapturedCardCount(afterPlayer, "kwang");
+  const beforeGodori = countCapturedComboTag(beforePlayer, "five", "fiveBirds");
+  const afterGodori = countCapturedComboTag(afterPlayer, "five", "fiveBirds");
+  const ribbonTags = ["redRibbons", "blueRibbons", "plainRibbons"];
+  const completesDan = ribbonTags.some((tag) => {
+    const beforeCount = countCapturedComboTag(beforePlayer, "ribbon", tag);
+    const afterCount = countCapturedComboTag(afterPlayer, "ribbon", tag);
+    return beforeCount < 3 && afterCount >= 3;
+  });
+  const raw =
+    (beforeGwang < 3 && afterGwang >= 3 ? 3 : 0) +
+    (beforeGodori < 3 && afterGodori >= 3 ? 5 : 0) +
+    (completesDan ? 3 : 0);
+  return clamp01(raw / 11.0);
 }
 
 function decisionAvailabilityFlags(state, actor) {
@@ -817,83 +939,99 @@ function currentMultiplierNorm(state, scoreSelf) {
   return clamp01((currentMultiplier - 1.0) / 15.0);
 }
 
-function featureVectorForCandidate(state, actor, decisionType, candidate, legalCount) {
+function buildBaseFeatureVectorForCandidate(state, actor, decisionType, candidate, legalCount) {
   const opp = actor === "human" ? "ai" : "human";
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
   const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-
-  const phase = String(state.phase || "");
   const card = candidateCard(state, actor, decisionType, candidate);
   const month = resolveCandidateMonth(state, actor, decisionType, card);
-  const piValue = Number(card?.piValue || 0);
-  const category = String(card?.category || "");
-  const selfGwangCount = Number(state?.players?.[actor]?.captured?.kwang?.length || 0);
-  const oppGwangCount = Number(state?.players?.[opp]?.captured?.kwang?.length || 0);
-  const selfPiCount = Number(scoringPiCount(state.players[actor]) || 0);
-  const oppPiCount = Number(scoringPiCount(state.players[opp]) || 0);
-
-  const selfGodori = countCapturedComboTag(state.players?.[actor], "five", "fiveBirds");
-  const oppGodori = countCapturedComboTag(state.players?.[opp], "five", "fiveBirds");
-  const selfCheongdan = countCapturedComboTag(state.players?.[actor], "ribbon", "blueRibbons");
-  const oppCheongdan = countCapturedComboTag(state.players?.[opp], "ribbon", "blueRibbons");
-  const selfHongdan = countCapturedComboTag(state.players?.[actor], "ribbon", "redRibbons");
-  const oppHongdan = countCapturedComboTag(state.players?.[opp], "ribbon", "redRibbons");
-  const selfChodan = countCapturedComboTag(state.players?.[actor], "ribbon", "plainRibbons");
-  const oppChodan = countCapturedComboTag(state.players?.[opp], "ribbon", "plainRibbons");
-
   const selfCanStop = Number(scoreSelf?.total || 0) >= 7 ? 1 : 0;
   const oppCanStop = Number(scoreOpp?.total || 0) >= 7 ? 1 : 0;
-  const { hasShake, hasBomb } = decisionAvailabilityFlags(state, actor);
 
   return [
-    phase === "playing" ? 1 : 0,
-    phase === "select-match" ? 1 : 0,
-    phase === "go-stop" ? 1 : 0,
-    phase === "president-choice" ? 1 : 0,
-    phase === "gukjin-choice" ? 1 : 0,
-    phase === "shaking-confirm" ? 1 : 0,
     decisionType === "play" ? 1 : 0,
     decisionType === "match" ? 1 : 0,
-    decisionType === "option" ? 1 : 0,
-    clamp01((state.deck?.length || 0) / 30.0),
-    clamp01((state.players?.[actor]?.hand?.length || 0) / 10.0),
-    clamp01((state.players?.[opp]?.hand?.length || 0) / 10.0),
-    clamp01((state.players?.[actor]?.goCount || 0) / 5.0),
-    clamp01((state.players?.[opp]?.goCount || 0) / 5.0),
-    tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0),
-    tanhNorm((scoreSelf?.total || 0), 10.0),
-    clamp01(Number(legalCount || 0) / 10.0),
-    clamp01(piValue / 5.0),
-    category === "kwang" ? 1 : 0,
-    category === "ribbon" ? 1 : 0,
-    category === "five" ? 1 : 0,
-    category === "junk" ? 1 : 0,
-    isDoublePiCard(card) ? 1 : 0,
-    matchOpportunityDensity(state, month),
-    immediateMatchPossible(state, decisionType, month),
     optionCode(candidate),
-    clamp01(selfGwangCount / 5.0),
-    clamp01(oppGwangCount / 5.0),
-    clamp01(selfPiCount / 20.0),
-    clamp01(oppPiCount / 20.0),
-    clamp01(selfGodori / 3.0),
-    clamp01(oppGodori / 3.0),
-    clamp01(selfCheongdan / 3.0),
-    clamp01(oppCheongdan / 3.0),
-    clamp01(selfHongdan / 3.0),
-    clamp01(oppHongdan / 3.0),
-    clamp01(selfChodan / 3.0),
-    clamp01(oppChodan / 3.0),
+    tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0),
+    tanhNorm(scoreSelf?.total || 0, 10.0),
+    clamp01((scoreOpp?.total || 0) / 7.0),
+    clamp01(currentMultiplierNorm(state, scoreSelf)),
+    candidateComboGain(state, actor, decisionType, candidate),
+    clamp01(Number(card?.piValue || 0) / 5.0),
+    immediateMatchPossible(state, decisionType, month),
+    candidatePublicKnownRatio(state, actor, month),
     selfCanStop,
-    oppCanStop,
-    hasShake,
-    currentMultiplierNorm(state, scoreSelf),
-    hasBomb,
-    scoreSelf?.bak?.pi ? 1 : 0,
-    scoreSelf?.bak?.gwang ? 1 : 0,
-    scoreSelf?.bak?.mongBak ? 1 : 0,
-    candidateMonthKnownRatio(state, actor, month),
+    oppCanStop
   ];
+}
+
+function featureVectorForCandidate(state, actor, decisionType, candidate, legalCount) {
+  return buildBaseFeatureVectorForCandidate(state, actor, decisionType, candidate, legalCount);
+}
+
+function summarizeCapturedPublic(player) {
+  return {
+    kwang_count: Number(player?.captured?.kwang?.length || 0),
+    five_count: Number(player?.captured?.five?.length || 0),
+    ribbon_count: Number(player?.captured?.ribbon?.length || 0),
+    junk_count: Number(player?.captured?.junk?.length || 0),
+    pi_count: Number(scoringPiCount(player) || 0),
+    godori_count: countCapturedComboTag(player, "five", "fiveBirds"),
+    cheongdan_count: countCapturedComboTag(player, "ribbon", "blueRibbons"),
+    hongdan_count: countCapturedComboTag(player, "ribbon", "redRibbons"),
+    chodan_count: countCapturedComboTag(player, "ribbon", "plainRibbons"),
+    go_count: Number(player?.goCount || 0),
+    gukjin_mode: String(player?.gukjinMode || "five"),
+  };
+}
+
+function buildGoStopPublicSnapshot(state, actor, legalCandidates) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  return {
+    snapshot_version: 1,
+    phase: "go-stop",
+    actor,
+    opponent: opp,
+    current_turn: String(state?.currentTurn || ""),
+    pending_go_stop: String(state?.pendingGoStop || ""),
+    turn_seq: Number(state?.turnSeq || 0),
+    kibo_seq: Number(state?.kiboSeq || 0),
+    deck_count: Number(state?.deck?.length || 0),
+    board_count: Number(state?.board?.length || 0),
+    hand_count_self: Number(state?.players?.[actor]?.hand?.length || 0),
+    hand_count_opp: Number(state?.players?.[opp]?.hand?.length || 0),
+    initial_gold_base: Number(resolveInitialGoldBase(state) || STARTING_GOLD),
+    self_gold: Number(state?.players?.[actor]?.gold || 0),
+    opp_gold: Number(state?.players?.[opp]?.gold || 0),
+    carry_over_multiplier: Number(state?.carryOverMultiplier || 1),
+    self_score_total: Number(scoreSelf?.total || 0),
+    opp_score_total: Number(scoreOpp?.total || 0),
+    self_multiplier: Number(scoreSelf?.multiplier || 1),
+    opp_multiplier: Number(scoreOpp?.multiplier || 1),
+    self_can_stop: Number(scoreSelf?.total || 0) >= 7 ? 1 : 0,
+    opp_can_stop: Number(scoreOpp?.total || 0) >= 7 ? 1 : 0,
+    self_bak_pi: scoreSelf?.bak?.pi ? 1 : 0,
+    self_bak_gwang: scoreSelf?.bak?.gwang ? 1 : 0,
+    self_bak_mongbak: scoreSelf?.bak?.mongBak ? 1 : 0,
+    opp_bak_pi: scoreOpp?.bak?.pi ? 1 : 0,
+    opp_bak_gwang: scoreOpp?.bak?.gwang ? 1 : 0,
+    opp_bak_mongbak: scoreOpp?.bak?.mongBak ? 1 : 0,
+    self_captured: summarizeCapturedPublic(state?.players?.[actor]),
+    opp_captured: summarizeCapturedPublic(state?.players?.[opp]),
+    legal_candidates: Array.isArray(legalCandidates) ? legalCandidates.slice() : [],
+  };
+}
+
+function buildDecisionId(gameIndex, decision) {
+  return [
+    String(gameIndex),
+    String(decision?.step || 0),
+    String(decision?.actor || ""),
+    String(decision?.decisionType || ""),
+    String(decision?.stateBefore?.phase || ""),
+  ].join(":");
 }
 
 // =============================================================================
@@ -1075,7 +1213,11 @@ function goldDiffByActor(state, actor) {
 
 function buildAiPlayOptions(playerSpec) {
   if (playerSpec?.kind === "model" && playerSpec?.model) {
-    return { source: "model", model: playerSpec.model };
+    return {
+      source: "model",
+      model: playerSpec.model,
+      goStopIqnModel: playerSpec.goStopIqnModel || null,
+    };
   }
   return { source: "heuristic", heuristicPolicy: String(playerSpec?.key || "") };
 }
@@ -1092,12 +1234,14 @@ function resolvePlayerAction(state, actor, playerSpec) {
       let next = aiPlay(state, actor, {
         source: "model",
         model: playerSpec.playMatchModel,
+        goStopIqnModel: playerSpec.goStopIqnModel || null,
       });
       let actionSource = "hybrid_option_play_match_model";
       if (!next || stateProgressKey(next) === stateProgressKey(state)) {
         next = aiPlay(state, actor, {
           source: "model",
           model: playerSpec.optionModel,
+          goStopIqnModel: playerSpec.goStopIqnModel || null,
         });
         actionSource = "hybrid_option_play_match_fallback_option_model";
       }
@@ -1111,6 +1255,7 @@ function resolvePlayerAction(state, actor, playerSpec) {
       next: aiPlay(state, actor, {
         source: "model",
         model: playerSpec.optionModel,
+        goStopIqnModel: playerSpec.goStopIqnModel || null,
       }),
       actionSource: "hybrid_option_option_model",
     };
@@ -1121,6 +1266,7 @@ function resolvePlayerAction(state, actor, playerSpec) {
       heuristicPolicy: String(playerSpec.heuristicPolicy || ""),
       goStopPolicy: String(playerSpec.goStopPolicy || ""),
       goStopOnly: !!playerSpec.goStopOnly,
+      goStopIqnModel: playerSpec.goStopIqnModel || null,
     });
     return {
       next: traced?.next || state,
@@ -1724,8 +1870,16 @@ function formatConsoleSummaryText(summary) {
 export function runModelDuelCli(argv = process.argv.slice(2)) {
   const evalStartMs = Date.now();
   const opts = parseArgs(argv);
-  const humanPlayer = resolvePlayerSpec(opts.humanSpecRaw, "human");
-  const aiPlayer = resolvePlayerSpec(opts.aiSpecRaw, "ai");
+  const humanPlayer = attachGoStopIqnRuntime(
+    resolvePlayerSpec(opts.humanSpecRaw, "human"),
+    opts.humanGoStopIqnPath,
+    "human"
+  );
+  const aiPlayer = attachGoStopIqnRuntime(
+    resolvePlayerSpec(opts.aiSpecRaw, "ai"),
+    opts.aiGoStopIqnPath,
+    "ai"
+  );
   let autoOutputDir = "";
   const ensureAutoOutputDir = () => {
     if (!autoOutputDir) {
@@ -1894,6 +2048,13 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
         const normalizedCandidates = candidates.map((candidate) =>
           normalizeDecisionCandidate(decision.decisionType, candidate)
         );
+        const decisionId = buildDecisionId(gi, decision);
+        const isGoStopDecision =
+          decision.decisionType === "option" &&
+          String(decision?.stateBefore?.phase || "") === "go-stop";
+        const goStopSnapshot = isGoStopDecision
+          ? buildGoStopPublicSnapshot(decision.stateBefore, decision.actor, normalizedCandidates)
+          : null;
         const matched = normalizedCandidates.some(
           (candidateNorm) => candidateNorm === decision.chosenCandidate
         );
@@ -1911,6 +2072,7 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
             action_source: decision.actionSource,
             decision_type: decision.decisionType,
             legal_count: legalCount,
+            decision_id: decisionId,
             candidate: candidateNorm,
             chosen: isChosen,
             chosen_candidate: decision.chosenCandidate,
@@ -1923,6 +2085,11 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
               legalCount
             ),
           };
+          if (goStopSnapshot) {
+            row.features13 = Array.isArray(row.features) ? row.features.slice() : [];
+            row.public_snapshot = goStopSnapshot;
+            row.state_before_full = decision.stateBefore;
+          }
           datasetWriter.write(`${JSON.stringify(row)}\n`);
           datasetStats.rows += 1;
           if (isChosen) datasetStats.positive_rows += 1;
@@ -2041,12 +2208,14 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
       kind: humanPlayer.kind,
       key: humanPlayer.key,
       model_path: humanPlayer.modelPath,
+      go_stop_iqn_path: humanPlayer.goStopIqnPath || null,
     },
     player_ai: {
       input: aiPlayer.input,
       kind: aiPlayer.kind,
       key: aiPlayer.key,
       model_path: aiPlayer.modelPath,
+      go_stop_iqn_path: aiPlayer.goStopIqnPath || null,
     },
     first_turn_policy: opts.firstTurnPolicy,
     fixed_first_turn: opts.firstTurnPolicy === "fixed" ? opts.fixedFirstTurn : null,

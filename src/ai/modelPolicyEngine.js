@@ -24,9 +24,15 @@ import { STARTING_GOLD } from "../engine/economy.js";
  * - convert score to action/state transition
  * ========================================================================== */
 const NEAT_MODEL_FORMAT = "neat_python_genome_v1";
+const IQN_GO_STOP_RUNTIME_FORMAT = "iqn_go_stop_runtime_v1";
 const COMPILED_NEAT_CACHE = new WeakMap();
 const PLAY_SPECIAL_SHAKE_PREFIX = "shake_start:";
 const PLAY_SPECIAL_BOMB_PREFIX = "bomb:";
+const GO_STOP_OPTION_ONE_HOT = [1, 0, 0, 0];
+const IQN_GO_STOP_BASE_FEATURES = 13;
+const IQN_GO_STOP_LEGACY_BASE_FEATURES = 46;
+const IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES = 52;
+const IQN_GO_STOP_PAYLOAD_DIM = 10;
 
 /* 1) Candidate-space normalization */
 function canonicalOptionAction(action) {
@@ -188,21 +194,6 @@ function resolveInitialGoldBase(state) {
   return STARTING_GOLD;
 }
 
-function goldRatioNorm(gold, initialGoldBase) {
-  const base = Math.max(1, Number(initialGoldBase || STARTING_GOLD));
-  return clampRange(Number(gold || 0) / base, 0, 3);
-}
-
-function goldDiffRatioNorm(selfGold, oppGold, initialGoldBase) {
-  const base = Math.max(1, Number(initialGoldBase || STARTING_GOLD));
-  return clampRange((Number(selfGold || 0) - Number(oppGold || 0)) / base, -3, 3);
-}
-
-function goldDangerNorm(goldNorm, threshold = 0.3) {
-  const t = Math.max(1e-6, Number(threshold || 0.3));
-  return clamp01((t - Number(goldNorm || 0)) / t);
-}
-
 function findCardById(cards, cardId) {
   const id = String(cardId || "");
   if (!Array.isArray(cards)) return null;
@@ -315,13 +306,45 @@ function monthTotalCards(month) {
   return 0;
 }
 
+function collectPublicShakingRevealIds(state, targetPlayerKey) {
+  const ids = new Set();
+  if (!state || !targetPlayerKey) return ids;
+
+  const liveReveal = state?.shakingReveal;
+  if (liveReveal?.playerKey === targetPlayerKey) {
+    for (const card of liveReveal.cards || []) {
+      const id = String(card?.id || "");
+      if (id) ids.add(id);
+    }
+  }
+
+  for (const entry of state?.kibo || []) {
+    if (entry?.type !== "shaking_declare" || entry?.playerKey !== targetPlayerKey) continue;
+    for (const card of entry?.revealCards || []) {
+      const id = String(card?.id || "");
+      if (id) ids.add(id);
+    }
+  }
+  return ids;
+}
+
+function getPublicKnownOpponentHandCards(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const revealIds = collectPublicShakingRevealIds(state, opp);
+  if (revealIds.size <= 0) return [];
+  const oppHand = state?.players?.[opp]?.hand || [];
+  return oppHand.filter((card) => revealIds.has(String(card?.id || "")));
+}
+
 function collectKnownCardsForMonthRatio(state, actor) {
   const out = [];
   const pushAll = (cards) => {
     if (!Array.isArray(cards)) return;
     for (const card of cards) out.push(card);
   };
+
   pushAll(state?.board || []);
+  pushAll(state?.players?.[actor]?.hand || []);
   for (const side of ["human", "ai"]) {
     const captured = state?.players?.[side]?.captured || {};
     pushAll(captured.kwang || []);
@@ -329,24 +352,78 @@ function collectKnownCardsForMonthRatio(state, actor) {
     pushAll(captured.ribbon || []);
     pushAll(captured.junk || []);
   }
-  pushAll(state?.players?.[actor]?.hand || []);
+  pushAll(getPublicKnownOpponentHandCards(state, actor));
   return out;
 }
 
-function candidateMonthKnownRatio(state, actor, month) {
+function candidatePublicKnownRatio(state, actor, month) {
   const total = monthTotalCards(month);
   if (total <= 0) return 0;
   const cards = collectKnownCardsForMonthRatio(state, actor);
   const seen = new Set();
   let known = 0;
   for (const card of cards) {
-    if (!card) continue;
-    const id = String(card.id || "");
+    const id = String(card?.id || "");
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    if (Number(card.month || 0) === Number(month)) known += 1;
+    if (Number(card?.month || 0) === Number(month)) known += 1;
   }
   return clamp01(known / total);
+}
+
+function uniqueCapturedCardCount(player, zone) {
+  const cards = player?.captured?.[zone] || [];
+  if (!Array.isArray(cards)) return 0;
+  const seen = new Set();
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id) continue;
+    seen.add(id);
+  }
+  return seen.size;
+}
+
+function applyDecisionCandidate(state, actor, decisionType, candidate) {
+  if (decisionType === "play") return applyPlayCandidate(state, actor, candidate);
+  if (decisionType === "match") return chooseMatch(state, candidate);
+  if (decisionType !== "option") return state;
+
+  const action = canonicalOptionAction(candidate);
+  if (action === "go") return chooseGo(state, actor);
+  if (action === "stop") return chooseStop(state, actor);
+  if (action === "shaking_yes") return chooseShakingYes(state, actor);
+  if (action === "shaking_no") return chooseShakingNo(state, actor);
+  if (action === "president_stop") return choosePresidentStop(state, actor);
+  if (action === "president_hold") return choosePresidentHold(state, actor);
+  if (action === "five" || action === "junk") return chooseGukjinMode(state, actor, action);
+  return state;
+}
+
+function candidateComboGain(state, actor, decisionType, candidate) {
+  const beforePlayer = state?.players?.[actor];
+  if (!beforePlayer) return 0;
+
+  const afterState = applyDecisionCandidate(state, actor, decisionType, candidate);
+  const afterPlayer = afterState?.players?.[actor];
+  if (!afterPlayer) return 0;
+
+  const beforeGwang = uniqueCapturedCardCount(beforePlayer, "kwang");
+  const afterGwang = uniqueCapturedCardCount(afterPlayer, "kwang");
+  const beforeGodori = countCapturedComboTag(beforePlayer, "five", "fiveBirds");
+  const afterGodori = countCapturedComboTag(afterPlayer, "five", "fiveBirds");
+
+  const ribbonTags = ["redRibbons", "blueRibbons", "plainRibbons"];
+  const completesDan = ribbonTags.some((tag) => {
+    const beforeCount = countCapturedComboTag(beforePlayer, "ribbon", tag);
+    const afterCount = countCapturedComboTag(afterPlayer, "ribbon", tag);
+    return beforeCount < 3 && afterCount >= 3;
+  });
+
+  const raw =
+    (beforeGwang < 3 && afterGwang >= 3 ? 3 : 0) +
+    (beforeGodori < 3 && afterGodori >= 3 ? 5 : 0) +
+    (completesDan ? 3 : 0);
+  return clamp01(raw / 11.0);
 }
 
 function decisionAvailabilityFlags(state, actor) {
@@ -371,18 +448,46 @@ function currentMultiplierNorm(state, scoreSelf) {
   return clamp01((currentMultiplier - 1.0) / 15.0);
 }
 
-function featureVector(state, actor, decisionType, candidate, legalCount, inputDim) {
+function padDeletedTailFeatures(baseFeatures, inputDim) {
+  const baseDim = baseFeatures.length;
+  if (inputDim === baseDim) return baseFeatures;
+  if (inputDim === (baseDim + 1)) return [...baseFeatures, 0.0];
+  if (inputDim === (baseDim + 6)) {
+    return [...baseFeatures, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+  }
+  throw new Error(
+    `feature vector size mismatch: expected ${inputDim}, supported=${baseDim},${baseDim + 1},${baseDim + 6}`
+  );
+}
+
+function buildCompactFeatureVector(state, actor, decisionType, candidate) {
   const opp = actor === "human" ? "ai" : "human";
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
   const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-  const initialGoldBase = resolveInitialGoldBase(state);
-  const selfGold = Number(state?.players?.[actor]?.gold || 0);
-  const oppGold = Number(state?.players?.[opp]?.gold || 0);
-  const selfGoldNorm = goldRatioNorm(selfGold, initialGoldBase);
-  const oppGoldNorm = goldRatioNorm(oppGold, initialGoldBase);
-  const goldDiffNorm = goldDiffRatioNorm(selfGold, oppGold, initialGoldBase);
-  const selfDanger = goldDangerNorm(selfGoldNorm, 0.3);
-  const oppDanger = goldDangerNorm(oppGoldNorm, 0.3);
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+
+  return [
+    decisionType === "play" ? 1 : 0,
+    decisionType === "match" ? 1 : 0,
+    optionCode(candidate),
+    tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0),
+    tanhNorm(scoreSelf?.total || 0, 10.0),
+    clamp01((scoreOpp?.total || 0) / 7.0),
+    clamp01(currentMultiplierNorm(state, scoreSelf)),
+    candidateComboGain(state, actor, decisionType, candidate),
+    clamp01(Number(card?.piValue || 0) / 5.0),
+    immediateMatchPossible(state, decisionType, month),
+    candidatePublicKnownRatio(state, actor, month),
+    Number(scoreSelf?.total || 0) >= 7 ? 1 : 0,
+    Number(scoreOpp?.total || 0) >= 7 ? 1 : 0
+  ];
+}
+
+function buildLegacyFeatureVector(state, actor, decisionType, candidate, legalCount) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
 
   const phase = String(state.phase || "");
   const card = candidateCard(state, actor, decisionType, candidate);
@@ -462,26 +567,227 @@ function featureVector(state, actor, decisionType, candidate, legalCount, inputD
 
     scoreSelf?.bak?.pi ? 1 : 0,
     scoreSelf?.bak?.gwang ? 1 : 0,
-    scoreSelf?.bak?.mongBak ? 1 : 0,
-
-    candidateMonthKnownRatio(state, actor, month)
+    scoreSelf?.bak?.mongBak ? 1 : 0
   ];
 
-  if (inputDim === baseFeatures.length) return baseFeatures;
+  return baseFeatures;
+}
 
-  const goldDangerFeatures = [
-    selfGoldNorm,
-    oppGoldNorm,
-    goldDiffNorm,
-    selfDanger,
-    oppDanger
-  ];
-  const extendedFeatures = [...baseFeatures, ...goldDangerFeatures];
-  if (inputDim === extendedFeatures.length) return extendedFeatures;
-
+function featureVector(state, actor, decisionType, candidate, legalCount, inputDim) {
+  if (inputDim === IQN_GO_STOP_BASE_FEATURES) {
+    return buildCompactFeatureVector(state, actor, decisionType, candidate);
+  }
+  if (
+    inputDim === IQN_GO_STOP_LEGACY_BASE_FEATURES ||
+    inputDim === (IQN_GO_STOP_LEGACY_BASE_FEATURES + 1) ||
+    inputDim === IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES
+  ) {
+    return padDeletedTailFeatures(
+      buildLegacyFeatureVector(state, actor, decisionType, candidate, legalCount),
+      inputDim
+    );
+  }
   throw new Error(
-    `feature vector size mismatch: expected ${inputDim}, supported=${baseFeatures.length},${extendedFeatures.length}`
+    `feature vector size mismatch: expected ${inputDim}, supported=${IQN_GO_STOP_BASE_FEATURES},${IQN_GO_STOP_LEGACY_BASE_FEATURES},${IQN_GO_STOP_LEGACY_BASE_FEATURES + 1},${IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES}`
   );
+}
+
+function estimateStopValueForIqn(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
+  const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
+  const mul = Math.max(1.0, Number(scoreSelf?.multiplier || 1.0));
+  const estimatedGoldK = Number(scoreSelf?.total || 0) * mul * carry * 0.1;
+  return clampRange(estimatedGoldK, -12.0, 12.0);
+}
+
+function buildIqnGoStopPayload(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const initialGoldBase = resolveInitialGoldBase(state);
+  const selfGold = Number(state?.players?.[actor]?.gold || initialGoldBase);
+  const oppGold = Number(state?.players?.[opp]?.gold || initialGoldBase);
+  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  return [
+    0.0,
+    estimateStopValueForIqn(state, actor),
+    clampRange(Number(state?.carryOverMultiplier || 1.0) / 8.0, 0.0, 2.0),
+    clampRange((Number(scoreSelf?.multiplier || 1.0) * Math.max(1.0, Number(state?.carryOverMultiplier || 1.0))) / 16.0, 0.0, 2.0),
+    clampRange(Number(scoreSelf?.total || 0) / 20.0, -2.0, 2.0),
+    clampRange(Number(scoreOpp?.total || 0) / 20.0, -2.0, 2.0),
+    clampRange((selfGold - initialGoldBase) / 1000.0, -12.0, 12.0),
+    clampRange((oppGold - initialGoldBase) / 1000.0, -12.0, 12.0),
+    clampRange(Number(state?.players?.[actor]?.goCount || 0) / 6.0, 0.0, 2.0),
+    clampRange(Number(state?.deck?.length || 0) / 20.0, 0.0, 2.0),
+  ];
+}
+
+function resolveIqnBaseFeatureDim(runtimeModel) {
+  const configured = Number(runtimeModel?.feature_spec?.base_features || 0);
+  if (
+    configured === IQN_GO_STOP_BASE_FEATURES ||
+    configured === IQN_GO_STOP_LEGACY_BASE_FEATURES ||
+    configured === IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES
+  ) {
+    return configured;
+  }
+  const derived = Number(runtimeModel?.input_dim || 0) - GO_STOP_OPTION_ONE_HOT.length - IQN_GO_STOP_PAYLOAD_DIM;
+  if (
+    derived === IQN_GO_STOP_BASE_FEATURES ||
+    derived === IQN_GO_STOP_LEGACY_BASE_FEATURES ||
+    derived === IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES
+  ) {
+    return derived;
+  }
+  return IQN_GO_STOP_BASE_FEATURES;
+}
+
+function buildIqnGoStopFeatureVector(state, actor, candidate, runtimeModel = null) {
+  const baseDim = resolveIqnBaseFeatureDim(runtimeModel);
+  const baseFeatures = featureVector(state, actor, "option", candidate, 2, baseDim);
+  return [...baseFeatures, ...GO_STOP_OPTION_ONE_HOT, ...buildIqnGoStopPayload(state, actor)];
+}
+
+function isFiniteNumberArray(values) {
+  return Array.isArray(values) && values.every((v) => Number.isFinite(Number(v)));
+}
+
+export function isIqnGoStopRuntimeModel(runtimeModel) {
+  if (String(runtimeModel?.format_version || "").trim() !== IQN_GO_STOP_RUNTIME_FORMAT) return false;
+  const baseDim = resolveIqnBaseFeatureDim(runtimeModel);
+  const expectedInputDim = baseDim + GO_STOP_OPTION_ONE_HOT.length + IQN_GO_STOP_PAYLOAD_DIM;
+  if (Number(runtimeModel?.input_dim || 0) !== expectedInputDim) return false;
+  if (!Array.isArray(runtimeModel?.encoder_blocks) || runtimeModel.encoder_blocks.length <= 0) return false;
+  if (!runtimeModel?.tau_fc?.linear || !runtimeModel?.quantile_head?.hidden || !runtimeModel?.quantile_head?.output) {
+    return false;
+  }
+  return true;
+}
+
+function linearForward(layer, inputVec) {
+  const weight = Array.isArray(layer?.weight) ? layer.weight : [];
+  const bias = Array.isArray(layer?.bias) ? layer.bias : [];
+  if (weight.length <= 0) return [];
+  const out = new Array(weight.length);
+  for (let rowIndex = 0; rowIndex < weight.length; rowIndex += 1) {
+    const row = Array.isArray(weight[rowIndex]) ? weight[rowIndex] : [];
+    let acc = Number(bias[rowIndex] || 0);
+    for (let colIndex = 0; colIndex < row.length; colIndex += 1) {
+      acc += Number(row[colIndex] || 0) * Number(inputVec[colIndex] || 0);
+    }
+    out[rowIndex] = acc;
+  }
+  return out;
+}
+
+function reluForward(values) {
+  return values.map((v) => (Number(v || 0) > 0 ? Number(v || 0) : 0));
+}
+
+function layerNormForward(layer, inputVec) {
+  const values = inputVec.map((v) => Number(v || 0));
+  if (values.length <= 0) return [];
+  const eps = Math.max(1e-9, Number(layer?.eps || 1e-5));
+  const meanValue = values.reduce((sum, v) => sum + v, 0) / values.length;
+  let variance = 0;
+  for (const value of values) {
+    const diff = value - meanValue;
+    variance += diff * diff;
+  }
+  variance /= values.length;
+  const denom = Math.sqrt(variance + eps);
+  const weight = Array.isArray(layer?.weight) ? layer.weight : [];
+  const bias = Array.isArray(layer?.bias) ? layer.bias : [];
+  return values.map(
+    (value, index) => (((value - meanValue) / denom) * Number(weight[index] || 1)) + Number(bias[index] || 0)
+  );
+}
+
+function encodeIqnState(runtimeModel, featureVec) {
+  let x = featureVec.map((v) => Number(v || 0));
+  for (const block of runtimeModel.encoder_blocks || []) {
+    x = linearForward(block.linear, x);
+    x = reluForward(x);
+    x = layerNormForward(block.layer_norm, x);
+  }
+  return x;
+}
+
+function buildFixedTaus(numQuantiles) {
+  const count = Math.max(1, Number(numQuantiles || 1));
+  const out = [];
+  for (let index = 0; index < count; index += 1) {
+    out.push((index + 0.5) / count);
+  }
+  return out;
+}
+
+function forwardIqnQuantiles(runtimeModel, featureVec, numQuantiles = null) {
+  if (!isIqnGoStopRuntimeModel(runtimeModel)) return [];
+  const encoded = encodeIqnState(runtimeModel, featureVec);
+  const tauLinear = runtimeModel?.tau_fc?.linear || null;
+  const qHidden = runtimeModel?.quantile_head?.hidden || null;
+  const qOutput = runtimeModel?.quantile_head?.output || null;
+  if (!tauLinear || !qHidden || !qOutput) return [];
+  const numCosines = Math.max(1, Number(runtimeModel?.num_cosines || 64));
+  const taus = buildFixedTaus(numQuantiles ?? runtimeModel?.num_quantiles_eval ?? 64);
+  const quantiles = [];
+  for (const tau of taus) {
+    const cosineFeatures = [];
+    for (let k = 1; k <= numCosines; k += 1) {
+      cosineFeatures.push(Math.cos(Math.PI * tau * k));
+    }
+    const tauEmbed = reluForward(linearForward(tauLinear, cosineFeatures));
+    const fused = encoded.map((value, index) => Number(value || 0) * Number(tauEmbed[index] || 0));
+    const hidden = reluForward(linearForward(qHidden, fused));
+    const output = linearForward(qOutput, hidden);
+    quantiles.push(Number(output[0] || 0));
+  }
+  return quantiles;
+}
+
+function summarizeIqnQuantiles(runtimeModel, quantiles) {
+  if (!isFiniteNumberArray(quantiles) || quantiles.length <= 0) {
+    return { quantiles: [], mean: 0, cvar10: 0, score: 0 };
+  }
+  const meanValue = quantiles.reduce((sum, v) => sum + Number(v || 0), 0) / quantiles.length;
+  const sorted = [...quantiles].sort((a, b) => a - b);
+  const cvarAlpha = clampRange(Number(runtimeModel?.cvar_alpha || 0.1), 0.01, 0.5);
+  const tailCount = Math.max(1, Math.ceil(sorted.length * cvarAlpha));
+  const cvar10 = sorted.slice(0, tailCount).reduce((sum, v) => sum + Number(v || 0), 0) / tailCount;
+  const weightMean = Number(runtimeModel?.score_weights?.mean || 0.7);
+  const weightCvar = Number(runtimeModel?.score_weights?.cvar10 || 0.3);
+  return {
+    quantiles: sorted,
+    mean: meanValue,
+    cvar10,
+    score: (weightMean * meanValue) + (weightCvar * cvar10),
+  };
+}
+
+export function evaluateIqnGoStopDecision(state, actor, runtimeModel) {
+  if (!isIqnGoStopRuntimeModel(runtimeModel)) return null;
+  if (state?.phase !== "go-stop" || state?.pendingGoStop !== actor) return null;
+  const sp = selectPool(state, actor);
+  const legal = normalizeOptionCandidates(sp.options || []);
+  if (!legal.includes("go") || !legal.includes("stop")) return null;
+
+  const goEval = summarizeIqnQuantiles(
+    runtimeModel,
+    forwardIqnQuantiles(runtimeModel, buildIqnGoStopFeatureVector(state, actor, "go", runtimeModel))
+  );
+  const stopEval = summarizeIqnQuantiles(
+    runtimeModel,
+    forwardIqnQuantiles(runtimeModel, buildIqnGoStopFeatureVector(state, actor, "stop", runtimeModel))
+  );
+  const action = goEval.score > stopEval.score ? "go" : "stop";
+  return {
+    action,
+    legal_candidates: legal,
+    go: goEval,
+    stop: stopEval,
+    margin: Number(goEval.score || 0) - Number(stopEval.score || 0),
+  };
 }
 
 /* 3) Forward-pass helpers */
@@ -711,7 +1017,10 @@ function modelPickCandidate(state, actor, policyModel) {
   return { decisionType: scored.decisionType, candidate: best };
 }
 
-export function modelPolicyPlay(state, actor, policyModel) {
+export function modelPolicyPlay(state, actor, policyModel, options = {}) {
+  const iqnDecision = evaluateIqnGoStopDecision(state, actor, options?.goStopIqnModel || null);
+  if (iqnDecision?.action === "go") return chooseGo(state, actor);
+  if (iqnDecision?.action === "stop") return chooseStop(state, actor);
   if (!policyModel || !isNeatModel(policyModel)) return state;
   const picked = modelPickCandidate(state, actor, policyModel);
   if (!picked) return state;

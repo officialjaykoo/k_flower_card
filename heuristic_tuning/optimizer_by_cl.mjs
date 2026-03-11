@@ -180,28 +180,56 @@ function stats(records) {
 // Section 4: Feature decoding and record construction
 // ---------------------------------------------------------------------------
 // Feature index mapping follows model_duel_worker.mjs featureVectorForCandidate()
-function decode(features) {
+function decode(features, snapshot = null) {
   const f = Array.isArray(features) ? features : [];
-  const deck      = Math.round((Number(f[9])  || 0) * 30);
-  const goCount   = Math.round((Number(f[12]) || 0) * 5) + 1; // 1-based
-  const selfPi    = Math.round((Number(f[28]) || 0) * 20);
-  const oppPi     = Math.round((Number(f[29]) || 0) * 20);
-  const selfScore = Math.max(0, atanh(Number(f[15]) || 0) * 10);
-  const scoreDiff = atanh(Number(f[14]) || 0) * 10;
-  const oppScore  = Math.max(0, selfScore - scoreDiff);
-  const oppGwang  = Math.round((Number(f[27]) || 0) * 5);
-  const oppGodori = Math.round((Number(f[31]) || 0) * 3);
-  const oppCheong = Math.round((Number(f[33]) || 0) * 3);
-  const oppHong   = Math.round((Number(f[35]) || 0) * 3);
-  const oppCho    = Math.round((Number(f[37]) || 0) * 3);
-  const oppCombo  = [oppGodori, oppCheong, oppHong, oppCho].filter((v) => v >= 2).length;
-  const oppBurst  = (oppGwang >= 2 ? 1 : 0) + (oppCombo > 0 ? 1 : 0) + (oppScore >= 6 ? 1 : 0);
+  if (f.length >= 40) {
+    const deck      = Math.round((Number(f[9])  || 0) * 30);
+    const goCount   = Math.round((Number(f[12]) || 0) * 5) + 1; // 1-based
+    const selfPi    = Math.round((Number(f[28]) || 0) * 20);
+    const oppPi     = Math.round((Number(f[29]) || 0) * 20);
+    const selfScore = Math.max(0, atanh(Number(f[15]) || 0) * 10);
+    const scoreDiff = atanh(Number(f[14]) || 0) * 10;
+    const oppScore  = Math.max(0, selfScore - scoreDiff);
+    const oppGwang  = Math.round((Number(f[27]) || 0) * 5);
+    const oppGodori = Math.round((Number(f[31]) || 0) * 3);
+    const oppCheong = Math.round((Number(f[33]) || 0) * 3);
+    const oppHong   = Math.round((Number(f[35]) || 0) * 3);
+    const oppCho    = Math.round((Number(f[37]) || 0) * 3);
+    const oppCombo  = [oppGodori, oppCheong, oppHong, oppCho].filter((v) => v >= 2).length;
+    const oppBurst  = (oppGwang >= 2 ? 1 : 0) + (oppCombo > 0 ? 1 : 0) + (oppScore >= 6 ? 1 : 0);
+    return {
+      deck, goCount, selfPi, oppPi, piDiff: selfPi - oppPi,
+      selfScore, oppScore, scoreDiff,
+      oppCombo, oppBurst,
+      selfCanStop: Number(f[38]) > 0.5,
+      oppCanStop:  Number(f[39]) > 0.5,
+    };
+  }
+
+  const selfCaptured = snapshot?.self_captured || {};
+  const oppCaptured = snapshot?.opp_captured || {};
+  const selfScore = Number(snapshot?.self_score_total || 0);
+  const oppScore = Number(snapshot?.opp_score_total || 0);
+  const oppGwang = Number(oppCaptured?.kwang_count || 0);
+  const oppGodori = Number(oppCaptured?.godori_count || 0);
+  const oppCheong = Number(oppCaptured?.cheongdan_count || 0);
+  const oppHong = Number(oppCaptured?.hongdan_count || 0);
+  const oppCho = Number(oppCaptured?.chodan_count || 0);
+  const oppCombo = [oppGodori, oppCheong, oppHong, oppCho].filter((v) => v >= 2).length;
+  const oppBurst = (oppGwang >= 2 ? 1 : 0) + (oppCombo > 0 ? 1 : 0) + (oppScore >= 6 ? 1 : 0);
   return {
-    deck, goCount, selfPi, oppPi, piDiff: selfPi - oppPi,
-    selfScore, oppScore, scoreDiff,
-    oppCombo, oppBurst,
-    selfCanStop: Number(f[38]) > 0.5,
-    oppCanStop:  Number(f[39]) > 0.5,
+    deck: Number(snapshot?.deck_count || 0),
+    goCount: Number(selfCaptured?.go_count || 0) + 1,
+    selfPi: Number(selfCaptured?.pi_count || 0),
+    oppPi: Number(oppCaptured?.pi_count || 0),
+    piDiff: Number(selfCaptured?.pi_count || 0) - Number(oppCaptured?.pi_count || 0),
+    selfScore,
+    oppScore,
+    scoreDiff: selfScore - oppScore,
+    oppCombo,
+    oppBurst,
+    selfCanStop: Number(snapshot?.self_can_stop || 0) > 0.5,
+    oppCanStop: Number(snapshot?.opp_can_stop || 0) > 0.5,
   };
 }
 
@@ -240,7 +268,7 @@ function buildDecisionRecords(dataset, actor, actorPolicy, payoutMap) {
       game:   Number(r.game_index),
       action: r.candidate,
       gold:   Number(payoutMap.get(Number(r.game_index)) ?? 0),
-      ...decode(r.features),
+      ...decode(r.features, r.public_snapshot || null),
     }));
 }
 

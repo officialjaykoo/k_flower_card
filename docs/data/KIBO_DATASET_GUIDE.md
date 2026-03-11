@@ -107,58 +107,25 @@ File format: `JSONL` (one line = one candidate)
 - `chosen`: `0|1`
 - `chosen_candidate`: inferred selected candidate
 - `unresolved`: `0|1`
-- `features`: 47-dimensional numeric vector
+- `features`: 13-dimensional numeric vector (`compact13`)
+- `features13`: optional duplicate of `features`
 
-### 3-3. `features` (47D) Index Definition
+### 3-3. `features` (13D) Index Definition
 The order is identical to `featureVectorForCandidate()` in `model_duel_worker.mjs`.
 
-1. phase_playing
-2. phase_select_match
-3. phase_go_stop
-4. phase_president_choice
-5. phase_gukjin_choice
-6. phase_shaking_confirm
-7. decision_play
-8. decision_match
-9. decision_option
-10. deck_len_norm
-11. self_hand_len_norm
-12. opp_hand_len_norm
-13. self_go_count_norm
-14. opp_go_count_norm
-15. score_diff_tanh
-16. self_score_tanh
-17. legal_count_norm
-18. candidate_pi_value_norm
-19. candidate_is_kwang
-20. candidate_is_ribbon
-21. candidate_is_five
-22. candidate_is_junk
-23. candidate_is_double_pi
-24. match_opportunity_density
-25. immediate_match_possible
-26. option_code_norm
-27. self_gwang_norm
-28. opp_gwang_norm
-29. self_pi_norm
-30. opp_pi_norm
-31. self_godori_norm
-32. opp_godori_norm
-33. self_cheongdan_norm
-34. opp_cheongdan_norm
-35. self_hongdan_norm
-36. opp_hongdan_norm
-37. self_chodan_norm
-38. opp_chodan_norm
-39. self_can_stop
-40. opp_can_stop
-41. has_shaking_available
-42. current_multiplier_norm
-43. has_bomb_available
-44. self_bak_pi
-45. self_bak_gwang
-46. self_bak_mongbak
-47. candidate_month_known_ratio
+1. is_play_decision
+2. is_match_decision
+3. action_code_norm
+4. score_diff_tanh
+5. self_score_tanh
+6. opp_stop_pressure_norm
+7. current_multiplier_norm
+8. candidate_combo_gain
+9. candidate_pi_value_norm
+10. immediate_match_possible
+11. candidate_public_known_ratio
+12. self_can_stop
+13. opp_can_stop
 
 ### 3-4. Dataset Example
 ```json

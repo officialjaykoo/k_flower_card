@@ -324,43 +324,70 @@ function calcGameStats(payoutByGame) {
   };
 }
 
-function decodeFeatures(f) {
-  if (!Array.isArray(f)) throw new Error("invalid dataset row: features must be an array");
-  const needIdx = [9, 12, 14, 15, 27, 28, 29, 31, 33, 35, 37, 38, 39];
-  for (const idx of needIdx) {
-    const n = Number(f[idx]);
-    if (!Number.isFinite(n)) {
-      throw new Error(`invalid dataset features[${idx}] (non-finite)`);
+function decodeFeatures(f, snapshot = null) {
+  if (Array.isArray(f) && f.length >= 40) {
+    const needIdx = [9, 12, 14, 15, 27, 28, 29, 31, 33, 35, 37, 38, 39];
+    for (const idx of needIdx) {
+      const n = Number(f[idx]);
+      if (!Number.isFinite(n)) {
+        throw new Error(`invalid dataset features[${idx}] (non-finite)`);
+      }
     }
+
+    const deck = Math.round(Number(f[9]) * 30);
+    const goCount = Math.round(Number(f[12]) * 5) + 1;
+    const selfPi = Math.round(Number(f[28]) * 20);
+    const oppPi = Math.round(Number(f[29]) * 20);
+    const scoreDiff = atanhSafe(Number(f[14])) * 10.0;
+    const selfScore = Math.max(0, atanhSafe(Number(f[15])) * 10.0);
+    const oppScore = Math.max(0, selfScore - scoreDiff);
+    const oppGwang = Math.round(Number(f[27]) * 5);
+    const oppGodori = Math.round(Number(f[31]) * 3);
+    const oppCheongdan = Math.round(Number(f[33]) * 3);
+    const oppHongdan = Math.round(Number(f[35]) * 3);
+    const oppChodan = Math.round(Number(f[37]) * 3);
+    const oppComboNearCount = [oppGodori, oppCheongdan, oppHongdan, oppChodan].filter((x) => x >= 2).length;
+    const oppBurstSignals = (oppGwang >= 2 ? 1 : 0) + (oppComboNearCount > 0 ? 1 : 0) + (oppScore >= 6 ? 1 : 0);
+    return {
+      deck,
+      goCount,
+      selfPi,
+      oppPi,
+      piDiff: selfPi - oppPi,
+      scoreDiff,
+      selfScore,
+      oppScore,
+      oppComboNearCount,
+      oppBurstSignals,
+      selfCanStop: Number(f[38]) > 0.5,
+      oppCanStop: Number(f[39]) > 0.5
+    };
   }
 
-  const deck = Math.round(Number(f[9]) * 30);
-  const goCount = Math.round(Number(f[12]) * 5) + 1;
-  const selfPi = Math.round(Number(f[28]) * 20);
-  const oppPi = Math.round(Number(f[29]) * 20);
-  const scoreDiff = atanhSafe(Number(f[14])) * 10.0;
-  const selfScore = Math.max(0, atanhSafe(Number(f[15])) * 10.0);
-  const oppScore = Math.max(0, selfScore - scoreDiff);
-  const oppGwang = Math.round(Number(f[27]) * 5);
-  const oppGodori = Math.round(Number(f[31]) * 3);
-  const oppCheongdan = Math.round(Number(f[33]) * 3);
-  const oppHongdan = Math.round(Number(f[35]) * 3);
-  const oppChodan = Math.round(Number(f[37]) * 3);
+  const selfCaptured = snapshot?.self_captured || {};
+  const oppCaptured = snapshot?.opp_captured || {};
+  const selfScore = Number(snapshot?.self_score_total || 0);
+  const oppScore = Number(snapshot?.opp_score_total || 0);
+  const oppGwang = Number(oppCaptured?.kwang_count || 0);
+  const oppGodori = Number(oppCaptured?.godori_count || 0);
+  const oppCheongdan = Number(oppCaptured?.cheongdan_count || 0);
+  const oppHongdan = Number(oppCaptured?.hongdan_count || 0);
+  const oppChodan = Number(oppCaptured?.chodan_count || 0);
   const oppComboNearCount = [oppGodori, oppCheongdan, oppHongdan, oppChodan].filter((x) => x >= 2).length;
   const oppBurstSignals = (oppGwang >= 2 ? 1 : 0) + (oppComboNearCount > 0 ? 1 : 0) + (oppScore >= 6 ? 1 : 0);
   return {
-    deck,
-    goCount,
-    selfPi,
-    oppPi,
-    piDiff: selfPi - oppPi,
-    scoreDiff,
+    deck: Number(snapshot?.deck_count || 0),
+    goCount: Number(selfCaptured?.go_count || 0) + 1,
+    selfPi: Number(selfCaptured?.pi_count || 0),
+    oppPi: Number(oppCaptured?.pi_count || 0),
+    piDiff: Number(selfCaptured?.pi_count || 0) - Number(oppCaptured?.pi_count || 0),
+    scoreDiff: selfScore - oppScore,
     selfScore,
     oppScore,
     oppComboNearCount,
     oppBurstSignals,
-    selfCanStop: Number(f[38]) > 0.5,
-    oppCanStop: Number(f[39]) > 0.5
+    selfCanStop: Number(snapshot?.self_can_stop || 0) > 0.5,
+    oppCanStop: Number(snapshot?.opp_can_stop || 0) > 0.5
   };
 }
 
@@ -376,7 +403,8 @@ function collectChosenGoStop(dataset, actor, actorPolicy) {
     .map((r) => ({
       game: Number(r.game_index),
       action: r.candidate,
-      features: r.features
+      features: r.features,
+      publicSnapshot: r.public_snapshot || null
     }));
 }
 
@@ -800,7 +828,7 @@ const allRecords = chosen.map((r) => {
   }
   let decoded;
   try {
-    decoded = decodeFeatures(r.features);
+    decoded = decodeFeatures(r.features, r.publicSnapshot);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`invalid features at game_index=${r.game}, action=${r.action}: ${msg}`);

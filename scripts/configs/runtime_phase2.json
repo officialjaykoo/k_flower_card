@@ -12,7 +12,7 @@
   "opponent_policy": "",
   "opponent_policy_mix": [
     { "policy": "hybrid_play(phase1_seed208,H-CL)", "weight": 50 },
-    { "policy": "hybrid_play(phase1_seed204,H-CL)", "weight": 50 }
+    { "policy": "hybrid_play(phase1_seed301,H-CL)", "weight": 50 }
   ],
   "opponent_genome": "",
   "switch_seats": true,
@@ -38,6 +38,12 @@
   "failure_imitation_max": null,
   "failure_slope_5_max": 0.0,
   "failure_slope_metric": "win_rate",
+  "early_stop_win_rate_cutoffs": [
+    { "games": 100, "max_win_rate": 0.45 },
+    { "games": 150, "max_win_rate": 0.45 },
+    { "games": 200, "max_win_rate": 0.45 },
+    { "games": 250, "max_win_rate": 0.45 }
+  ],
   "control_policy_mode": "hybrid_option_only",
   "control_play_match_model": "phase1_seed208",
   "_notes_fitness": {

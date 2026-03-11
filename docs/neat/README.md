@@ -23,7 +23,8 @@
 - `model_duel_worker.mjs`: 휴리스틱/NEAT 모델 공용 대전 실행기 + kibo/dataset 출력
 
 ### 2-3. 설정 (`scripts/configs/`)
-- `neat_feedforward.ini`: NEAT 토폴로지/변이 설정 (`num_inputs=47`)
+- `neat_feedforward.ini`: NEAT 토폴로지/변이 설정 (`num_inputs=13`)
+- `neat_feedforward_golddanger52.ini`: `pareto52`용 NEAT 토폴로지/변이 설정 (`num_inputs=13`, legacy profile name only)
 - `runtime_phase1.json`
 - `runtime_phase2.json`
 - `runtime_phase3.json`
@@ -104,7 +105,8 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 - `docs/data/KIBO_DATASET_GUIDE.md` (kibo/dataset 구조, 필드 의미, unresolved 해석)
 
 ### 7-1. `neat_eval_worker.mjs`
-- feature vector는 47차원 고정.
+- active feature vector는 `compact13` 13차원이다.
+- 구형 46/47/52 입력 winner는 runtime legacy fallback으로만 호환한다.
 - `opponent_policy=heuristic_h_gpt`일 때 내부 fast tuning 파라미터를 적용해 평가 시간을 줄인다.
 - teacher dataset cache(`--teacher-dataset-cache`)가 있으면 imitation 계산 소스를 cache로 전환한다.
 

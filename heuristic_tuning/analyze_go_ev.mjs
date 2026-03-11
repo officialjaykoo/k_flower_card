@@ -277,20 +277,55 @@ function collectKiboGoStopStats(kiboList, actor) {
 }
 
 // Decode selected model features used by GO/STOP diagnostics.
-function decodeFeatures(f) {
+function decodeFeatures(f, snapshot = null) {
   // Feature index mapping follows model_duel_worker.mjs featureVectorForCandidate().
-  const deck = Math.round((Number(f?.[9]) || 0) * 30);
-  const goCount = Math.round((Number(f?.[12]) || 0) * 5) + 1;
-  const selfPi = Math.round((Number(f?.[28]) || 0) * 20);
-  const oppPi = Math.round((Number(f?.[29]) || 0) * 20);
-  const scoreDiff = atanhSafe(Number(f?.[14]) || 0) * 10.0;
-  const selfScore = Math.max(0, atanhSafe(Number(f?.[15]) || 0) * 10.0);
-  const oppScore = Math.max(0, selfScore - scoreDiff);
-  const oppGwang = Math.round((Number(f?.[27]) || 0) * 5);
-  const oppGodori = Math.round((Number(f?.[31]) || 0) * 3);
-  const oppCheongdan = Math.round((Number(f?.[33]) || 0) * 3);
-  const oppHongdan = Math.round((Number(f?.[35]) || 0) * 3);
-  const oppChodan = Math.round((Number(f?.[37]) || 0) * 3);
+  if (Array.isArray(f) && f.length >= 40) {
+    const deck = Math.round((Number(f?.[9]) || 0) * 30);
+    const goCount = Math.round((Number(f?.[12]) || 0) * 5) + 1;
+    const selfPi = Math.round((Number(f?.[28]) || 0) * 20);
+    const oppPi = Math.round((Number(f?.[29]) || 0) * 20);
+    const scoreDiff = atanhSafe(Number(f?.[14]) || 0) * 10.0;
+    const selfScore = Math.max(0, atanhSafe(Number(f?.[15]) || 0) * 10.0);
+    const oppScore = Math.max(0, selfScore - scoreDiff);
+    const oppGwang = Math.round((Number(f?.[27]) || 0) * 5);
+    const oppGodori = Math.round((Number(f?.[31]) || 0) * 3);
+    const oppCheongdan = Math.round((Number(f?.[33]) || 0) * 3);
+    const oppHongdan = Math.round((Number(f?.[35]) || 0) * 3);
+    const oppChodan = Math.round((Number(f?.[37]) || 0) * 3);
+    const oppComboNearCount = [oppGodori, oppCheongdan, oppHongdan, oppChodan].filter((x) => x >= 2).length;
+    const oppBurstThreatSignals =
+      (oppGwang >= 2 ? 1 : 0) +
+      (oppComboNearCount > 0 ? 1 : 0) +
+      (oppScore >= 6 ? 1 : 0);
+
+    return {
+      deck,
+      goCount,
+      piDiff: selfPi - oppPi,
+      scoreDiff,
+      selfScore,
+      oppScore,
+      oppGwang,
+      oppGodori,
+      oppCheongdan,
+      oppHongdan,
+      oppChodan,
+      oppComboNearCount,
+      oppBurstThreatSignals,
+      selfCanStop: Number(f?.[38]) > 0.5,
+      oppCanStop: Number(f?.[39]) > 0.5
+    };
+  }
+
+  const selfCaptured = snapshot?.self_captured || {};
+  const oppCaptured = snapshot?.opp_captured || {};
+  const selfScore = Number(snapshot?.self_score_total || 0);
+  const oppScore = Number(snapshot?.opp_score_total || 0);
+  const oppGwang = Number(oppCaptured?.kwang_count || 0);
+  const oppGodori = Number(oppCaptured?.godori_count || 0);
+  const oppCheongdan = Number(oppCaptured?.cheongdan_count || 0);
+  const oppHongdan = Number(oppCaptured?.hongdan_count || 0);
+  const oppChodan = Number(oppCaptured?.chodan_count || 0);
   const oppComboNearCount = [oppGodori, oppCheongdan, oppHongdan, oppChodan].filter((x) => x >= 2).length;
   const oppBurstThreatSignals =
     (oppGwang >= 2 ? 1 : 0) +
@@ -298,10 +333,10 @@ function decodeFeatures(f) {
     (oppScore >= 6 ? 1 : 0);
 
   return {
-    deck,
-    goCount,
-    piDiff: selfPi - oppPi,
-    scoreDiff,
+    deck: Number(snapshot?.deck_count || 0),
+    goCount: Number(selfCaptured?.go_count || 0) + 1,
+    piDiff: Number(selfCaptured?.pi_count || 0) - Number(oppCaptured?.pi_count || 0),
+    scoreDiff: selfScore - oppScore,
     selfScore,
     oppScore,
     oppGwang,
@@ -311,8 +346,8 @@ function decodeFeatures(f) {
     oppChodan,
     oppComboNearCount,
     oppBurstThreatSignals,
-    selfCanStop: Number(f?.[38]) > 0.5,
-    oppCanStop: Number(f?.[39]) > 0.5
+    selfCanStop: Number(snapshot?.self_can_stop || 0) > 0.5,
+    oppCanStop: Number(snapshot?.opp_can_stop || 0) > 0.5
   };
 }
 
@@ -332,7 +367,8 @@ function collectChosenGoStop(dataset, actor, actorPolicy) {
       actor: r.actor,
       actor_policy: r.actor_policy,
       action: r.candidate,
-      features: r.features
+      features: r.features,
+      publicSnapshot: r.public_snapshot || null
     }));
 }
 
@@ -1113,7 +1149,7 @@ const allRecs = chosen.map((r) => ({
   step: r.step,
   action: r.action,
   gold: Number(payoutByGame.get(r.game) ?? 0),
-  ...decodeFeatures(r.features)
+  ...decodeFeatures(r.features, r.publicSnapshot)
 }));
 
 const goRecs = allRecs.filter((r) => r.action === "go");
