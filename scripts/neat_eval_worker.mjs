@@ -112,14 +112,24 @@ function loadGenomeModel(genomePath, label) {
   };
 }
 
+function parsePhaseModelToken(rawToken) {
+  const m = String(rawToken || "").trim().match(/^(?:(pareto52)_)?phase([0-3])_seed(\d+)$/i);
+  if (!m) return null;
+  const profile = m[1] ? "pareto52" : "classic";
+  const phase = Number(m[2]);
+  const seed = Number(m[3]);
+  const outputPrefix = profile === "pareto52" ? "neat_pareto52" : "neat";
+  const tokenKey = profile === "pareto52" ? `pareto52_phase${phase}_seed${seed}` : `phase${phase}_seed${seed}`;
+  return { profile, phase, seed, outputPrefix, tokenKey };
+}
+
 function resolvePhaseModelToken(token, label) {
-  const m = String(token || "").trim().match(/^phase([0-3])_seed(\d+)$/i);
-  if (!m) {
+  const parsedToken = parsePhaseModelToken(token);
+  if (!parsedToken) {
     throw new Error(`invalid ${label}: ${token}`);
   }
-  const phase = Number(m[1]);
-  const seed = Number(m[2]);
-  const summaryPath = path.resolve(`logs/NEAT/neat_phase${phase}_seed${seed}/run_summary.json`);
+  const { phase, seed, outputPrefix, tokenKey } = parsedToken;
+  const summaryPath = path.resolve(`logs/NEAT/${outputPrefix}_phase${phase}_seed${seed}/run_summary.json`);
   if (fs.existsSync(summaryPath)) {
     try {
       const summaryRaw = String(fs.readFileSync(summaryPath, "utf8") || "").replace(/^\uFEFF/, "");
@@ -135,11 +145,11 @@ function resolvePhaseModelToken(token, label) {
       }
     }
   }
-  const modelPath = path.resolve(`logs/NEAT/neat_phase${phase}_seed${seed}/models/winner_genome.json`);
+  const modelPath = path.resolve(`logs/NEAT/${outputPrefix}_phase${phase}_seed${seed}/models/winner_genome.json`);
   const loaded = loadGenomeModel(modelPath, label);
   return {
-    key: `phase${phase}_seed${seed}`,
-    label: `phase${phase}_seed${seed}`,
+    key: tokenKey,
+    label: tokenKey,
     phase,
     seed,
     model: loaded.model,
@@ -278,7 +288,6 @@ function parseArgs(argv) {
     fitnessWinWeight: null,
     fitnessGoldWeight: null,
     fitnessWinNeutralRate: null,
-    fitnessBankruptWeight: 0,
     controlPolicyMode: "pure_model",
     controlHeuristicPolicy: "H-CL",
     controlPlayMatchModel: "",
@@ -345,7 +354,6 @@ function parseArgs(argv) {
     else if (key === "--fitness-win-weight") out.fitnessWinWeight = Number(value);
     else if (key === "--fitness-gold-weight") out.fitnessGoldWeight = Number(value);
     else if (key === "--fitness-win-neutral-rate") out.fitnessWinNeutralRate = Number(value);
-    else if (key === "--fitness-bankrupt-weight") out.fitnessBankruptWeight = Number(value);
     else if (key === "--control-policy-mode") out.controlPolicyMode = normalizeControlPolicyMode(value);
     else if (key === "--control-heuristic-policy") out.controlHeuristicPolicy = String(value || "").trim();
     else if (key === "--control-play-match-model") out.controlPlayMatchModel = String(value || "").trim();
@@ -390,9 +398,6 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(out.fitnessWinNeutralRate) || out.fitnessWinNeutralRate <= 0 || out.fitnessWinNeutralRate >= 1) {
     throw new Error("--fitness-win-neutral-rate is required and must be in (0,1)");
-  }
-  if (!Number.isFinite(out.fitnessBankruptWeight) || out.fitnessBankruptWeight < 0) {
-    throw new Error("--fitness-bankrupt-weight must be >= 0");
   }
   if (
     out.controlPolicyMode === "hybrid_play_match_only" ||
@@ -816,6 +821,13 @@ function controlGoldDiff(state, controlActor) {
   return controlGold - oppGold;
 }
 
+function clamp01(v) {
+  const x = Number(v || 0);
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  return x;
+}
+
 function playSingleRound(
   initialState,
   controlModel,
@@ -988,7 +1000,11 @@ function playSingleRound(
     steps += 1;
   }
 
-  return { endState: state, imitation, goOpportunityCount };
+  return {
+    endState: state,
+    imitation,
+    goOpportunityCount,
+  };
 }
 
 function quantile(values, q) {
@@ -996,13 +1012,6 @@ function quantile(values, q) {
   const sorted = [...values].sort((a, b) => a - b);
   const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * q)));
   return sorted[idx];
-}
-
-function clamp01(v) {
-  const x = Number(v || 0);
-  if (x <= 0) return 0;
-  if (x >= 1) return 1;
-  return x;
 }
 
 function cloneDecisionCounters(src) {
@@ -1189,9 +1198,7 @@ function main() {
   const fitnessWinWeight = weightWinRaw / weightRawSum;
   const fitnessGoldWeight = weightGoldRaw / weightRawSum;
   const fitnessWinNeutralRate = Number(opts.fitnessWinNeutralRate);
-  const fitnessBankruptWeight = Number(opts.fitnessBankruptWeight);
 
-  // Simplified fitness: base term only (gold + result win/loss/draw)
   const goldNorm = Math.tanh((meanGoldDelta - fitnessGoldNeutralDelta) / fitnessGoldScale);
   const expectedResultRaw =
     clamp01(winRate) + (0.5 * clamp01(drawRate)) - clamp01(lossRate);
@@ -1207,13 +1214,10 @@ function main() {
   }
   const myBankruptRate = bankrupt.my_bankrupt_count / games;
   const inflictedBankruptRate = bankrupt.my_inflicted_bankrupt_count / games;
-  const bankruptScore =
-    Number(bankrupt.my_inflicted_bankrupt_count || 0) - Number(bankrupt.my_bankrupt_count || 0);
-
-  let fitness =
+  const baseFitness =
     (fitnessGoldWeight * goldNorm) +
-    (fitnessWinWeight * resultNorm) +
-    (fitnessBankruptWeight * bankruptScore);
+    (fitnessWinWeight * resultNorm);
+  const fitness = baseFitness;
 
   const simImitation = buildImitationMetrics(simImitationTotals, simImitationMatches);
   const imitationTotals = cloneDecisionCounters(simImitation.totals);
@@ -1288,7 +1292,6 @@ function main() {
     fitness_win_neutral_rate: fitnessWinNeutralRate,
     fitness_win_weight: fitnessWinWeight,
     fitness_gold_weight: fitnessGoldWeight,
-    fitness_bankrupt_weight: fitnessBankruptWeight,
     imitation_source: "opponent_policy",
     sim_imitation_weighted_score: Number(simImitation.weightedScore || 0),
     imitation_play_total: imitationTotals.play,
@@ -1312,7 +1315,7 @@ function main() {
       result_expected: expectedResult,
       result_neutral: neutralExpectedResult,
       win_neutral_rate: fitnessWinNeutralRate,
-      bankrupt_score: bankruptScore,
+      base_fitness: baseFitness,
       bankrupt_rates: {
         my: myBankruptRate,
         inflicted: inflictedBankruptRate,
@@ -1324,7 +1327,6 @@ function main() {
       weights: {
         win: fitnessWinWeight,
         gold: fitnessGoldWeight,
-        bankrupt: fitnessBankruptWeight,
       },
     },
     eval_time_ms: Math.max(0, Date.now() - evalStartMs),

@@ -15,6 +15,7 @@
   chooseGukjinMode,
   chooseMatch
 } from "../engine/index.js";
+import { STARTING_GOLD } from "../engine/economy.js";
 
 /* ============================================================================
  * NEAT model policy runtime
@@ -167,9 +168,39 @@ function clamp01(x) {
   return v;
 }
 
+function clampRange(x, minValue, maxValue) {
+  const v = Number(x || 0);
+  const lo = Number(minValue || 0);
+  const hi = Number(maxValue || 0);
+  if (v <= lo) return lo;
+  if (v >= hi) return hi;
+  return v;
+}
+
 function tanhNorm(x, scale) {
   const s = Math.max(1e-6, Number(scale || 1));
   return Math.tanh(Number(x || 0) / s);
+}
+
+function resolveInitialGoldBase(state) {
+  const configured = Number(state?.initialGoldBase);
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return STARTING_GOLD;
+}
+
+function goldRatioNorm(gold, initialGoldBase) {
+  const base = Math.max(1, Number(initialGoldBase || STARTING_GOLD));
+  return clampRange(Number(gold || 0) / base, 0, 3);
+}
+
+function goldDiffRatioNorm(selfGold, oppGold, initialGoldBase) {
+  const base = Math.max(1, Number(initialGoldBase || STARTING_GOLD));
+  return clampRange((Number(selfGold || 0) - Number(oppGold || 0)) / base, -3, 3);
+}
+
+function goldDangerNorm(goldNorm, threshold = 0.3) {
+  const t = Math.max(1e-6, Number(threshold || 0.3));
+  return clamp01((t - Number(goldNorm || 0)) / t);
 }
 
 function findCardById(cards, cardId) {
@@ -344,6 +375,14 @@ function featureVector(state, actor, decisionType, candidate, legalCount, inputD
   const opp = actor === "human" ? "ai" : "human";
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
   const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const initialGoldBase = resolveInitialGoldBase(state);
+  const selfGold = Number(state?.players?.[actor]?.gold || 0);
+  const oppGold = Number(state?.players?.[opp]?.gold || 0);
+  const selfGoldNorm = goldRatioNorm(selfGold, initialGoldBase);
+  const oppGoldNorm = goldRatioNorm(oppGold, initialGoldBase);
+  const goldDiffNorm = goldDiffRatioNorm(selfGold, oppGold, initialGoldBase);
+  const selfDanger = goldDangerNorm(selfGoldNorm, 0.3);
+  const oppDanger = goldDangerNorm(oppGoldNorm, 0.3);
 
   const phase = String(state.phase || "");
   const card = candidateCard(state, actor, decisionType, candidate);
@@ -368,7 +407,7 @@ function featureVector(state, actor, decisionType, candidate, legalCount, inputD
   const oppCanStop = Number(scoreOpp?.total || 0) >= 7 ? 1 : 0;
   const { hasShake, hasBomb } = decisionAvailabilityFlags(state, actor);
 
-  const features = [
+  const baseFeatures = [
     phase === "playing" ? 1 : 0,
     phase === "select-match" ? 1 : 0,
     phase === "go-stop" ? 1 : 0,
@@ -428,8 +467,21 @@ function featureVector(state, actor, decisionType, candidate, legalCount, inputD
     candidateMonthKnownRatio(state, actor, month)
   ];
 
-  if (inputDim === features.length) return features;
-  throw new Error(`feature vector size mismatch: expected ${inputDim}, supported=${features.length}`);
+  if (inputDim === baseFeatures.length) return baseFeatures;
+
+  const goldDangerFeatures = [
+    selfGoldNorm,
+    oppGoldNorm,
+    goldDiffNorm,
+    selfDanger,
+    oppDanger
+  ];
+  const extendedFeatures = [...baseFeatures, ...goldDangerFeatures];
+  if (inputDim === extendedFeatures.length) return extendedFeatures;
+
+  throw new Error(
+    `feature vector size mismatch: expected ${inputDim}, supported=${baseFeatures.length},${extendedFeatures.length}`
+  );
 }
 
 /* 3) Forward-pass helpers */

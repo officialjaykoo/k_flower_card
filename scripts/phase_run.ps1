@@ -1,6 +1,7 @@
 ﻿param(
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed,
+  [Parameter(Mandatory = $false)][ValidateSet("classic", "pareto52")][string]$LineageProfile = "classic",
   [Parameter(Mandatory = $false)][string]$ControlPolicyMode = "",
   [Parameter(Mandatory = $false)][string]$ControlHeuristicPolicy = "",
   [Parameter(Mandatory = $false)][string[]]$BootstrapSeedSpec = @()
@@ -155,10 +156,12 @@ function Get-OverallBestMetrics {
   }
 
   if ($null -eq $generationRecord) {
+    $objectiveMode = Get-PropertyValue -Object (Get-PropertyValue -Object $Summary -Name "runtime_effective") -Name "objective_mode"
+    $bestFitnessField = if ($objectiveMode -eq "pareto_v1") { "best_scalar_fitness" } else { "best_fitness" }
     $generationRecord =
       Get-Content $generationMetricsPath |
         ForEach-Object { $_ | ConvertFrom-Json } |
-        Sort-Object { [double]$_.best_fitness } -Descending |
+        Sort-Object { [double](Get-PropertyValue -Object $_ -Name $bestFitnessField) } -Descending |
         Select-Object -First 1
     if ($null -eq $generationRecord) {
       return $empty
@@ -181,22 +184,29 @@ function Get-OverallBestMetrics {
     available = $true
     generation = [int]$targetGeneration
     genome_key = [int]$targetGenomeKey
-    fitness = Get-OptionalDouble -Value $bestEvalRecord.fitness
-    win_rate = Get-OptionalDouble -Value $bestEvalRecord.win_rate
-    imitation_weighted_score = Get-OptionalDouble -Value $bestEvalRecord.imitation_weighted_score
-    mean_gold_delta = Get-OptionalDouble -Value $bestEvalRecord.mean_gold_delta
-    go_opportunity_count = [int]$bestEvalRecord.go_opportunity_count
-    go_opportunity_games = [int]$bestEvalRecord.go_opportunity_games
-    go_opportunity_rate = Get-OptionalDouble -Value $bestEvalRecord.go_opportunity_rate
-    go_take_rate = Get-OptionalDouble -Value $bestEvalRecord.go_take_rate
-    go_count = [int]$bestEvalRecord.go_count
-    go_games = [int]$bestEvalRecord.go_games
-    go_fail_count = [int]$bestEvalRecord.go_fail_count
-    go_fail_rate = Get-OptionalDouble -Value $bestEvalRecord.go_fail_rate
-    go_rate = Get-OptionalDouble -Value $bestEvalRecord.go_rate
-    generation_mean_go_games = Get-OptionalDouble -Value $generationRecord.mean_go_games
-    generation_mean_go_rate = Get-OptionalDouble -Value $generationRecord.mean_go_rate
-    generation_mean_go_fail_rate = Get-OptionalDouble -Value $generationRecord.mean_go_fail_rate
+    fitness = Get-OptionalDouble -Value (
+      $(if ((Get-PropertyValue -Object $bestEvalRecord -Name "objective_mode") -eq "pareto_v1") {
+          Get-PropertyValue -Object $bestEvalRecord -Name "fitness_scalar_v2"
+        } else {
+          Get-PropertyValue -Object $bestEvalRecord -Name "fitness"
+        })
+    )
+    surrogate_fitness = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "fitness")
+    win_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "win_rate")
+    imitation_weighted_score = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "imitation_weighted_score")
+    mean_gold_delta = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "mean_gold_delta")
+    go_opportunity_count = [int](Get-PropertyValue -Object $bestEvalRecord -Name "go_opportunity_count")
+    go_opportunity_games = [int](Get-PropertyValue -Object $bestEvalRecord -Name "go_opportunity_games")
+    go_opportunity_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "go_opportunity_rate")
+    go_take_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "go_take_rate")
+    go_count = [int](Get-PropertyValue -Object $bestEvalRecord -Name "go_count")
+    go_games = [int](Get-PropertyValue -Object $bestEvalRecord -Name "go_games")
+    go_fail_count = [int](Get-PropertyValue -Object $bestEvalRecord -Name "go_fail_count")
+    go_fail_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "go_fail_rate")
+    go_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "go_rate")
+    generation_mean_go_games = Get-OptionalDouble -Value (Get-PropertyValue -Object $generationRecord -Name "mean_go_games")
+    generation_mean_go_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $generationRecord -Name "mean_go_rate")
+    generation_mean_go_fail_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $generationRecord -Name "mean_go_fail_rate")
   }
 }
 
@@ -230,6 +240,36 @@ function Get-PropertyValue {
   return $null
 }
 
+function Get-LineageLayout {
+  param([Parameter(Mandatory = $true)][string]$Profile)
+
+  switch ($Profile) {
+    "classic" {
+      return [ordered]@{
+        profile = "classic"
+        token_prefix = ""
+        output_prefix = "neat"
+        config_feedforward = "scripts/configs/neat_feedforward.ini"
+        runtime_prefix = "runtime"
+        profile_name_prefix = ""
+      }
+    }
+    "pareto52" {
+      return [ordered]@{
+        profile = "pareto52"
+        token_prefix = "pareto52_"
+        output_prefix = "neat_pareto52"
+        config_feedforward = "scripts/configs/neat_feedforward_golddanger52.ini"
+        runtime_prefix = "runtime_pareto52"
+        profile_name_prefix = "pareto52_"
+      }
+    }
+    default {
+      throw "unsupported lineage profile: $Profile"
+    }
+  }
+}
+
 function Resolve-BootstrapWinnerPath {
   param([Parameter(Mandatory = $true)][string]$Spec)
 
@@ -238,14 +278,16 @@ function Resolve-BootstrapWinnerPath {
     throw "bootstrap seed spec is empty"
   }
 
-  $m = [regex]::Match($raw.Trim(), "^phase([123])_seed(\d+)$", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  $m = [regex]::Match($raw.Trim(), "^(?:(pareto52)_)?phase([123])_seed(\d+)$", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
   if (-not $m.Success) {
-    throw "invalid bootstrap seed spec: $Spec (use phase1_seed203)"
+    throw "invalid bootstrap seed spec: $Spec (use phase1_seed203 or pareto52_phase1_seed601)"
   }
 
-  $bootstrapPhase = [int]$m.Groups[1].Value
-  $bootstrapSeed = [int]$m.Groups[2].Value
-  $summaryPath = "logs/NEAT/neat_phase${bootstrapPhase}_seed$bootstrapSeed/run_summary.json"
+  $bootstrapProfile = if ([string]::IsNullOrWhiteSpace($m.Groups[1].Value)) { "classic" } else { "pareto52" }
+  $bootstrapLayout = Get-LineageLayout -Profile $bootstrapProfile
+  $bootstrapPhase = [int]$m.Groups[2].Value
+  $bootstrapSeed = [int]$m.Groups[3].Value
+  $summaryPath = "logs/NEAT/$($bootstrapLayout.output_prefix)_phase${bootstrapPhase}_seed$bootstrapSeed/run_summary.json"
   $winnerPath = ""
   if (Test-Path $summaryPath) {
     $summary = Read-JsonFile -Path $summaryPath
@@ -256,7 +298,7 @@ function Resolve-BootstrapWinnerPath {
     $winnerPath = [string](Get-PropertyValue -Object $summary -Name "winner_pickle")
   }
   if ([string]::IsNullOrWhiteSpace($winnerPath)) {
-    $winnerPath = "logs/NEAT/neat_phase${bootstrapPhase}_seed$bootstrapSeed/models/winner_genome.pkl"
+    $winnerPath = "logs/NEAT/$($bootstrapLayout.output_prefix)_phase${bootstrapPhase}_seed$bootstrapSeed/models/winner_genome.pkl"
   }
   $fullPath = [System.IO.Path]::GetFullPath($winnerPath)
   if (-not (Test-Path $fullPath)) {
@@ -270,9 +312,10 @@ if (-not (Test-Path $python)) {
   throw "python not found: $python"
 }
 
-$configFeedforward = "scripts/configs/neat_feedforward.ini"
-$runtimeConfig = "scripts/configs/runtime_phase$Phase.json"
-$outputDir = "logs/NEAT/neat_phase${Phase}_seed$Seed"
+$lineageLayout = Get-LineageLayout -Profile $LineageProfile
+$configFeedforward = [string]$lineageLayout.config_feedforward
+$runtimeConfig = "scripts/configs/$($lineageLayout.runtime_prefix)_phase$Phase.json"
+$outputDir = "logs/NEAT/$($lineageLayout.output_prefix)_phase${Phase}_seed$Seed"
 
 if (-not (Test-Path $configFeedforward)) {
   throw "config not found: $configFeedforward"
@@ -288,7 +331,7 @@ $cmd = @(
   "--runtime-config", $runtimeConfig,
   "--output-dir", $outputDir,
   "--seed", "$Seed",
-  "--profile-name", "phase${Phase}_seed$Seed"
+  "--profile-name", "$($lineageLayout.profile_name_prefix)phase${Phase}_seed$Seed"
 )
 
 if (-not [string]::IsNullOrWhiteSpace($ControlPolicyMode)) {
@@ -331,9 +374,9 @@ elseif ($Phase -ne "1") {
   if ($continueFromPreviousPhase) {
     $previousPhase = [int]$Phase - 1
     $previousLabel = "phase$previousPhase"
-    $previousRuntimePath = "scripts/configs/runtime_phase$previousPhase.json"
+    $previousRuntimePath = "scripts/configs/$($lineageLayout.runtime_prefix)_phase$previousPhase.json"
     $previousRuntime = Read-JsonFile -Path $previousRuntimePath
-    $previousSummaryPath = "logs/NEAT/neat_phase${previousPhase}_seed$Seed/run_summary.json"
+    $previousSummaryPath = "logs/NEAT/$($lineageLayout.output_prefix)_phase${previousPhase}_seed$Seed/run_summary.json"
     if (-not (Test-Path $previousSummaryPath)) {
       throw "$previousLabel run summary not found: $previousSummaryPath"
     }
@@ -352,7 +395,7 @@ elseif ($Phase -ne "1") {
     $cumulativeBaseGeneration = $previousBaseGeneration + $previousGenerations
     $previousWinnerRaw = [string]$previousSummary.winner_pickle
     if ([string]::IsNullOrWhiteSpace($previousWinnerRaw)) {
-      $previousWinnerRaw = "logs/NEAT/neat_phase${previousPhase}_seed$Seed/models/winner_genome.pkl"
+      $previousWinnerRaw = "logs/NEAT/$($lineageLayout.output_prefix)_phase${previousPhase}_seed$Seed/models/winner_genome.pkl"
     }
     $previousWinnerPath = [System.IO.Path]::GetFullPath($previousWinnerRaw)
     if (-not (Test-Path $previousWinnerPath)) {
@@ -390,7 +433,7 @@ catch {
 $bestMetrics = Get-OverallBestMetrics -Summary $summary
 $summaryElapsedSec = Get-OptionalDouble -Value $summary.run_elapsed_sec -DefaultValue $phaseRunElapsedSec
 
-Write-Host "=== Phase$Phase Summary (Seed=$Seed) ==="
+Write-Host "=== Phase$Phase Summary (Seed=$Seed, Profile=$LineageProfile) ==="
 if ([bool]$bestMetrics.available) {
   Write-Host "Best gen:         $($bestMetrics.generation)"
   Write-Host "Best genome key:  $($bestMetrics.genome_key)"
@@ -418,6 +461,12 @@ else {
   Write-Host "GO fail count:    "
   Write-Host "GO fail rate:     "
   Write-Host "GO rate:          "
+  Write-Host "Danger samples:   "
+  Write-Host "Mean self danger: "
+  Write-Host "Max self danger:  "
+  Write-Host "Mean opp danger:  "
+  Write-Host "Terminal self G:  "
+  Write-Host "Terminal opp G:   "
 }
 Write-Host "Current EMA win:  $($summary.gate_state.ema_win_rate)"
 Write-Host "Current EMA imit: $($summary.gate_state.ema_imitation)"

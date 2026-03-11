@@ -1,5 +1,5 @@
 ﻿{
-  "format_version": "neat_runtime_phase1_v3",
+  "format_version": "neat_runtime_phase1_v4",
   "generations": 30,
   "eval_workers": 6,
   "games_per_genome": 200,
@@ -11,7 +11,7 @@
   "opponent_policy": "",
   "opponent_policy_mix": [
     { "policy": "hybrid_play(phase1_seed208,H-CL)", "weight": 50 },
-    { "policy": "hybrid_play(phase2_seed204,H-CL)", "weight": 50 }
+    { "policy": "hybrid_play(phase1_seed204,H-CL)", "weight": 50 }
   ],
   "opponent_genome": "",
   "switch_seats": true,
@@ -19,6 +19,9 @@
   "fitness_gold_neutral_delta": 0.0,
   "fitness_win_weight": 0.99,
   "fitness_gold_weight": 0.01,
+  "objective_mode": "scalar_v2",
+  "pareto_crowding_weight": 0.05,
+  "pareto_scalar_tiebreak_weight": 0.005,
   "fitness_win_neutral_rate": 0.50,
   "gate_mode": "win_rate_only",
   "gate_ema_window": 5,
@@ -39,6 +42,9 @@
     "fitness_gold_neutral_delta": "골드 항의 중립 기준선 (예: 0이면 0이 0점)",
     "fitness_win_weight": "승률 항 가중치 (gold와 함께 내부 정규화)",
     "fitness_gold_weight": "골드 항 가중치 (win과 함께 내부 정규화)",
+    "objective_mode": "selection에 쓸 목적 모드. scalar_v2 또는 pareto_v1",
+    "pareto_crowding_weight": "pareto_v1에서 crowding 보너스 강도",
+    "pareto_scalar_tiebreak_weight": "pareto_v1에서 기존 scalar fitness를 미세 tie-break로 섞는 강도",
     "fitness_win_neutral_rate": "승률 항의 중립 기준선 (예: 0.50이면 50%가 0점)"
   }
 }

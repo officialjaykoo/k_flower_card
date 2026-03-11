@@ -358,16 +358,26 @@ function parseHybridPlaySpec(token) {
   };
 }
 
+function parsePhaseModelToken(rawToken) {
+  const m = String(rawToken || "").trim().match(/^(?:(pareto52)_)?phase([0-3])_seed(\d+)$/i);
+  if (!m) return null;
+  const profile = m[1] ? "pareto52" : "classic";
+  const phase = Number(m[2]);
+  const seed = Number(m[3]);
+  const outputPrefix = profile === "pareto52" ? "neat_pareto52" : "neat";
+  const tokenKey = profile === "pareto52" ? `pareto52_phase${phase}_seed${seed}` : `phase${phase}_seed${seed}`;
+  return { profile, phase, seed, outputPrefix, tokenKey };
+}
+
 function resolvePhaseModelSpec(token, sideLabel) {
-  const m = String(token || "").trim().match(/^phase([0-3])_seed(\d+)$/i);
-  if (!m) {
+  const parsedToken = parsePhaseModelToken(token);
+  if (!parsedToken) {
     throw new Error(
-      `invalid ${sideLabel} spec: ${token} (use policy key, phase0_seed9, hybrid_play(phase1_seed202,H-CL), hybrid_play_go(phase1_seed202,H-CL), hybrid_option(phase1_seed208,phase2_seed501), or hybrid_play_go(phase1_seed202,H-NEXg,H-CL))`
+      `invalid ${sideLabel} spec: ${token} (use policy key, phase0_seed9, pareto52_phase1_seed601, hybrid_play(phase1_seed202,H-CL), hybrid_play_go(phase1_seed202,H-CL), hybrid_option(phase1_seed208,phase2_seed501), or hybrid_play_go(phase1_seed202,H-NEXg,H-CL))`
     );
   }
-  const phase = Number(m[1]);
-  const seed = Number(m[2]);
-  const summaryPath = resolve(`logs/NEAT/neat_phase${phase}_seed${seed}/run_summary.json`);
+  const { phase, seed, outputPrefix, tokenKey } = parsedToken;
+  const summaryPath = resolve(`logs/NEAT/${outputPrefix}_phase${phase}_seed${seed}/run_summary.json`);
   if (existsSync(summaryPath)) {
     try {
       const summaryRaw = String(readFileSync(summaryPath, "utf8") || "").replace(/^\uFEFF/, "");
@@ -383,7 +393,7 @@ function resolvePhaseModelSpec(token, sideLabel) {
       }
     }
   }
-  const modelPath = resolve(`logs/NEAT/neat_phase${phase}_seed${seed}/models/winner_genome.json`);
+  const modelPath = resolve(`logs/NEAT/${outputPrefix}_phase${phase}_seed${seed}/models/winner_genome.json`);
   if (!existsSync(modelPath)) {
     throw new Error(`model not found for ${token}: ${modelPath}`);
   }
@@ -402,8 +412,8 @@ function resolvePhaseModelSpec(token, sideLabel) {
   return {
     input: token,
     kind: "model",
-    key: `phase${phase}_seed${seed}`,
-    label: `phase${phase}_seed${seed}`,
+    key: tokenKey,
+    label: tokenKey,
     model,
     modelPath,
     phase,

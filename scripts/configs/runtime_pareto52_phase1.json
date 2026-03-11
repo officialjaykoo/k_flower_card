@@ -1,6 +1,6 @@
-﻿{
-  "format_version": "neat_runtime_phase2_v4",
-  "generations": 50,
+{
+  "format_version": "neat_runtime_pareto52_phase1_v1",
+  "generations": 30,
   "eval_workers": 6,
   "games_per_genome": 200,
   "eval_timeout_sec": 360,
@@ -8,7 +8,6 @@
   "checkpoint_every": 5,
   "eval_script": "scripts/neat_eval_worker.mjs",
   "seed": 13,
-  "continue_from_previous_phase": false,
   "opponent_policy": "",
   "opponent_policy_mix": [
     { "policy": "hybrid_play(phase1_seed208,H-CL)", "weight": 50 },
@@ -18,8 +17,8 @@
   "switch_seats": true,
   "fitness_gold_scale": 2500.0,
   "fitness_gold_neutral_delta": 0.0,
-  "fitness_win_weight": 0.70,
-  "fitness_gold_weight": 0.30,
+  "fitness_win_weight": 0.99,
+  "fitness_gold_weight": 0.01,
   "objective_mode": "pareto_v1",
   "pareto_crowding_weight": 0.05,
   "pareto_scalar_tiebreak_weight": 0.005,
@@ -29,25 +28,16 @@
   "eval_pass_win_rate_min": 0.45,
   "eval_pass_mean_gold_delta_min": 0.0,
   "transition_mean_gold_delta_min": 0.0,
-  "transition_ema_imitation": null,
+  "transition_ema_imitation": 0.60,
   "transition_ema_win_rate": 0.45,
   "transition_best_fitness_min": null,
   "transition_streak": 1,
-  "failure_generation_min": 30,
+  "failure_generation_min": 999,
   "failure_ema_win_rate_max": 0.30,
   "failure_imitation_max": null,
   "failure_slope_5_max": 0.0,
   "failure_slope_metric": "win_rate",
-  "control_policy_mode": "hybrid_option_only",
-  "control_play_match_model": "phase1_seed208",
   "_notes_fitness": {
-    "fitness_gold_scale": "gold delta를 tanh로 정규화할 때 쓰는 스케일",
-    "fitness_gold_neutral_delta": "골드 항의 중립 기준선 (예: 0이면 0이 0점)",
-    "fitness_win_weight": "승률 항 가중치 (gold와 함께 내부 정규화)",
-    "fitness_gold_weight": "골드 항 가중치 (win과 함께 내부 정규화)",
-    "objective_mode": "selection에 쓸 목적 모드. scalar_v2 또는 pareto_v1",
-    "pareto_crowding_weight": "pareto_v1에서 crowding 보너스 강도",
-    "pareto_scalar_tiebreak_weight": "pareto_v1에서 기존 scalar fitness를 미세 tie-break로 섞는 강도",
-    "fitness_win_neutral_rate": "승률 항의 중립 기준선 (예: 0.50이면 50%가 0점)"
+    "objective_mode": "pareto52 분리 계열 전용. 52-input + pareto_v1 selection"
   }
 }

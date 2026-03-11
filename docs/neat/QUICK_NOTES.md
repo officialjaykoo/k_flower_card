@@ -11,24 +11,33 @@
 
 현재 값:
 - Phase 1: `generations = 30`, `games_per_genome = 200`
-- Phase 1: `opponent_policy_mix = [hybrid_play(phase1_seed208,H-CL) 50, hybrid_play(phase2_seed204,H-CL) 50]`
+- Phase 1: `opponent_policy_mix = [hybrid_play(phase1_seed208,H-CL) 50, hybrid_play(phase1_seed204,H-CL) 50]`
 - Phase 1: `fitness_win_weight = 0.99`, `fitness_gold_weight = 0.01`, `fitness_win_neutral_rate = 0.50`
-- Phase 2: `opponent_policy_mix = [hybrid_play(phase1_seed208,H-CL) 50, hybrid_play(phase2_seed204,H-CL) 50]`
+- Phase 1: `objective_mode = scalar_v2`
+- Phase 2: `opponent_policy_mix = [hybrid_play(phase1_seed208,H-CL) 50, hybrid_play(phase1_seed204,H-CL) 50]`
 - Phase 2: `generations = 50`, `games_per_genome = 200`
-- Phase 2: `fitness_win_weight = 0.70`, `fitness_gold_weight = 0.30`, `fitness_bankrupt_weight = 0.20`, `fitness_win_neutral_rate = 0.50`
+- Phase 2: `fitness_win_weight = 0.70`, `fitness_gold_weight = 0.30`, `fitness_win_neutral_rate = 0.50`
+- Phase 2: `objective_mode = pareto_v1`, `pareto_crowding_weight = 0.05`, `pareto_scalar_tiebreak_weight = 0.005`
 - Phase 2: `control_policy_mode = hybrid_option_only`, `control_play_match_model = phase1_seed208`, `continue_from_previous_phase = false`
 - Phase 3: `opponent_policy_mix = [hybrid_play(phase2_seed203,H-CL) 50, H-GPT-PlayMatch+CL 50]`
 - Phase 3: `fitness_win_weight = 0.7`, `fitness_gold_weight = 0.3`, `fitness_win_neutral_rate = 0.50`
+
+새 분리 계열:
+- `pareto52` 프로필은 `scripts/configs/neat_feedforward_golddanger52.ini`와 `runtime_pareto52_phase*.json`을 쓴다.
+- 출력 폴더는 `logs/NEAT/neat_pareto52_phase{N}_seed{S}` 형태다.
+- bootstrap / duel 토큰은 `pareto52_phase1_seed601` 같은 형식을 쓴다.
 
 ## 2. Fitness 식
 
 코드 기준 위치:
 - `scripts/neat_eval_worker.mjs` 983행 부근
 
-실제 계산:
+현재 scalar v2 계산:
 
 ```text
-fitness = fitnessGoldWeight * goldNorm + fitnessWinWeight * resultNorm + fitnessBankruptWeight * bankruptScore
+base = fitnessGoldWeight * goldNorm + fitnessWinWeight * resultNorm
+
+fitness = base
 ```
 
 세부:
@@ -44,8 +53,7 @@ neutralExpectedResult = 2 * fitnessWinNeutralRate - 1
 
 - `resultNorm`은 `expectedResult`를 중립점 기준 `[-1, 1]`로 정규화한 값이다.
 - `fitnessWinWeight`, `fitnessGoldWeight`는 합이 1이 되도록 내부 정규화된다.
-- `bankruptScore = inflictedBankruptCount - myBankruptCount` 이다.
-- `fitnessBankruptWeight`는 별도 항으로 더해진다. 기존 win/gold 내부 정규화는 유지된다.
+- `bankruptScore`와 파산 count/rate는 경기 결과 진단용 통계다.
 - `go_rate`, `go_count`, `go_fail_rate`는 리포트에는 남지만 fitness에 직접 들어가지 않는다.
 
 ## 3. 8:2 vs 7:3 vs 6:4 차이
@@ -72,6 +80,16 @@ fitness_8:2 - fitness_6:4 = 0.2 * (resultNorm - goldNorm)
 - `goldNorm > resultNorm`이면 `7:3`이 유리하다.
 - 따라서 `7:3`은 승률이 비슷한 후보들 사이에서 골드 많이 먹는 개체를 더 강하게 밀어준다.
 - 같은 방향으로 `6:4`는 `7:3`보다도 골드형 개체를 더 강하게 밀어준다.
+
+## 3A. Pareto v1 메모
+
+- `objective_mode = pareto_v1`이면 selection 직전에 scalar fitness를 그대로 쓰지 않는다.
+- objective vector:
+  - `win_rate`
+  - `gold_norm`
+- `front rank + crowding + tiny scalar tie-break`를 surrogate fitness로 바꿔 breeder selection에 넣는다.
+- `eval_metrics.ndjson`에는 `fitness_scalar_v2`, `pareto_rank`, `pareto_crowding`, `fitness_surrogate`가 같이 남는다.
+- `generation_metrics.ndjson`에는 `best_scalar_fitness`, `best_pareto_rank`, `pareto_front_count`가 추가된다.
 
 ## 4. 정책 조합 메모
 

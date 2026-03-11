@@ -1,6 +1,7 @@
 ﻿param(
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
-  [Parameter(Mandatory = $true)][int]$Seed
+  [Parameter(Mandatory = $true)][int]$Seed,
+  [Parameter(Mandatory = $false)][ValidateSet("classic", "pareto52")][string]$LineageProfile = "classic"
 )
 
 Set-StrictMode -Version Latest
@@ -78,8 +79,31 @@ function ConvertTo-NativeJsonArg {
   return $JsonText.Replace('"', '\"')
 }
 
-$runtimeConfigPath = "scripts/configs/runtime_phase$Phase.json"
-$outputDir = "logs/NEAT/neat_phase${Phase}_seed$Seed"
+function Get-LineageLayout {
+  param([Parameter(Mandatory = $true)][string]$Profile)
+
+  switch ($Profile) {
+    "classic" {
+      return [ordered]@{
+        output_prefix = "neat"
+        runtime_prefix = "runtime"
+      }
+    }
+    "pareto52" {
+      return [ordered]@{
+        output_prefix = "neat_pareto52"
+        runtime_prefix = "runtime_pareto52"
+      }
+    }
+    default {
+      throw "unsupported lineage profile: $Profile"
+    }
+  }
+}
+
+$lineageLayout = Get-LineageLayout -Profile $LineageProfile
+$runtimeConfigPath = "scripts/configs/$($lineageLayout.runtime_prefix)_phase$Phase.json"
+$outputDir = "logs/NEAT/$($lineageLayout.output_prefix)_phase${Phase}_seed$Seed"
 $gateStatePath = Join-Path $outputDir "gate_state.json"
 $genomePath = Join-Path $outputDir "models/winner_genome.json"
 
@@ -169,7 +193,7 @@ $goFailRate = [double](Get-OptionalDouble -Value $r.go_fail_rate -DefaultValue 0
 $goRate = [double](Get-OptionalDouble -Value $r.go_rate -DefaultValue 0.0)
 
 Write-Host ""
-Write-Host "=== Phase$Phase Evaluation (Seed=$Seed) ==="
+Write-Host "=== Phase$Phase Evaluation (Seed=$Seed, Profile=$LineageProfile) ==="
 Write-Host "Win rate:        $($r.win_rate)"
 Write-Host "Mean gold delta: $($r.mean_gold_delta)"
 Write-Host "Fitness:         $($r.fitness)"

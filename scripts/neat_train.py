@@ -315,6 +315,15 @@ def _normalize_control_policy_mode(raw_value: object) -> str:
     )
 
 
+def _normalize_objective_mode(raw_value: object) -> str:
+    raw = str(raw_value or "").strip().lower()
+    if raw in ("", "scalar", "scalar_v2"):
+        return "scalar_v2"
+    if raw in ("pareto", "pareto_v1"):
+        return "pareto_v1"
+    raise RuntimeError("runtime key 'objective_mode' must be one of: scalar_v2, pareto_v1")
+
+
 # =============================================================================
 # Section 2. Runtime Config Normalization
 # =============================================================================
@@ -359,7 +368,6 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["fitness_win_weight"] = _required_float(cfg, "fitness_win_weight")
     cfg["fitness_gold_weight"] = _required_float(cfg, "fitness_gold_weight")
     cfg["fitness_win_neutral_rate"] = _required_float(cfg, "fitness_win_neutral_rate")
-    cfg["fitness_bankrupt_weight"] = _to_float(cfg.get("fitness_bankrupt_weight"), 0.0)
 
     gate_mode = str(_required_value(cfg, "gate_mode") or "").strip().lower()
     if gate_mode not in ("win_rate_only", "hybrid"):
@@ -382,6 +390,9 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["control_policy_mode"] = _normalize_control_policy_mode(cfg.get("control_policy_mode"))
     cfg["control_heuristic_policy"] = str(cfg.get("control_heuristic_policy") or "H-CL").strip() or "H-CL"
     cfg["control_play_match_model"] = str(cfg.get("control_play_match_model") or "").strip()
+    cfg["objective_mode"] = _normalize_objective_mode(cfg.get("objective_mode"))
+    cfg["pareto_crowding_weight"] = _to_float(cfg.get("pareto_crowding_weight"), 0.05)
+    cfg["pareto_scalar_tiebreak_weight"] = _to_float(cfg.get("pareto_scalar_tiebreak_weight"), 0.005)
     if cfg["control_policy_mode"] == "hybrid_option_only" and not cfg["control_play_match_model"]:
         raise RuntimeError("runtime key 'control_play_match_model' is required when control_policy_mode=hybrid_option_only")
 
@@ -391,8 +402,10 @@ def _normalize_runtime_values(cfg: dict) -> dict:
         raise RuntimeError("runtime key 'fitness_win_weight' must be >= 0")
     if cfg["fitness_gold_weight"] < 0:
         raise RuntimeError("runtime key 'fitness_gold_weight' must be >= 0")
-    if cfg["fitness_bankrupt_weight"] < 0:
-        raise RuntimeError("runtime key 'fitness_bankrupt_weight' must be >= 0")
+    if cfg["pareto_crowding_weight"] < 0:
+        raise RuntimeError("runtime key 'pareto_crowding_weight' must be >= 0")
+    if cfg["pareto_scalar_tiebreak_weight"] < 0:
+        raise RuntimeError("runtime key 'pareto_scalar_tiebreak_weight' must be >= 0")
     if (cfg["fitness_win_weight"] + cfg["fitness_gold_weight"]) <= 0:
         raise RuntimeError("runtime keys 'fitness_win_weight' + 'fitness_gold_weight' must be > 0")
     if cfg["fitness_win_neutral_rate"] <= 0 or cfg["fitness_win_neutral_rate"] >= 1:
@@ -436,9 +449,6 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}FITNESS_WIN_NEUTRAL_RATE"] = str(
         float(runtime["fitness_win_neutral_rate"])
     )
-    os.environ[f"{ENV_PREFIX}FITNESS_BANKRUPT_WEIGHT"] = str(
-        float(runtime.get("fitness_bankrupt_weight", 0.0))
-    )
     os.environ[f"{ENV_PREFIX}GATE_MODE"] = str(runtime["gate_mode"])
     os.environ[f"{ENV_PREFIX}GATE_EMA_WINDOW"] = str(int(runtime["gate_ema_window"]))
     os.environ[f"{ENV_PREFIX}TRANSITION_EMA_IMITATION"] = str(runtime.get("transition_ema_imitation"))
@@ -481,7 +491,6 @@ def _runtime_from_env() -> Dict[str, object]:
         "fitness_win_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_WEIGHT"),
         "fitness_gold_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_WEIGHT"),
         "fitness_win_neutral_rate": os.environ.get(f"{ENV_PREFIX}FITNESS_WIN_NEUTRAL_RATE"),
-        "fitness_bankrupt_weight": os.environ.get(f"{ENV_PREFIX}FITNESS_BANKRUPT_WEIGHT"),
         "gate_mode": os.environ.get(f"{ENV_PREFIX}GATE_MODE"),
         "gate_ema_window": os.environ.get(f"{ENV_PREFIX}GATE_EMA_WINDOW"),
         "transition_ema_imitation": os.environ.get(f"{ENV_PREFIX}TRANSITION_EMA_IMITATION"),
@@ -605,6 +614,118 @@ def _quantile(values, q):
     vals.sort()
     idx = max(0, min(len(vals) - 1, int((len(vals) - 1) * float(q))))
     return vals[idx]
+
+
+def _clamp_unit(value):
+    x = _safe_float(value, 0.0)
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    return x
+
+
+def _normalize_unit_range(value, min_value, max_value):
+    x = _safe_float(value, 0.0)
+    lo = _safe_float(min_value, 0.0)
+    hi = _safe_float(max_value, 0.0)
+    span = hi - lo
+    if not math.isfinite(span) or abs(span) <= 1e-12:
+        return 0.5
+    return _clamp_unit((x - lo) / span)
+
+
+def _pareto_extract_objectives(record: dict) -> Dict[str, float]:
+    fitness_components = record.get("fitness_components") if isinstance(record.get("fitness_components"), dict) else {}
+    return {
+        "win_rate": _safe_float(record.get("win_rate"), 0.0),
+        "gold_norm": _safe_float(fitness_components.get("gold_norm"), 0.0),
+    }
+
+
+def _pareto_dominates(left: Dict[str, float], right: Dict[str, float], objective_names) -> bool:
+    better_or_equal = True
+    strictly_better = False
+    for name in objective_names:
+        lv = _safe_float(left.get(name), float("-inf"))
+        rv = _safe_float(right.get(name), float("-inf"))
+        if lv < rv:
+            better_or_equal = False
+            break
+        if lv > rv:
+            strictly_better = True
+    return better_or_equal and strictly_better
+
+
+def _pareto_fronts(objective_rows, objective_names):
+    count = len(objective_rows)
+    dominates = [set() for _ in range(count)]
+    dominated_count = [0 for _ in range(count)]
+    fronts = []
+    first_front = []
+
+    for i in range(count):
+        for j in range(i + 1, count):
+            left = objective_rows[i]
+            right = objective_rows[j]
+            if _pareto_dominates(left, right, objective_names):
+                dominates[i].add(j)
+                dominated_count[j] += 1
+            elif _pareto_dominates(right, left, objective_names):
+                dominates[j].add(i)
+                dominated_count[i] += 1
+        if dominated_count[i] == 0:
+            first_front.append(i)
+
+    current = list(first_front)
+    while current:
+        fronts.append(list(current))
+        next_front = []
+        for i in current:
+            for j in dominates[i]:
+                dominated_count[j] -= 1
+                if dominated_count[j] == 0:
+                    next_front.append(j)
+        current = next_front
+    return fronts
+
+
+def _pareto_crowding(front_indexes, objective_rows, objective_names) -> Dict[int, float]:
+    if not front_indexes:
+        return {}
+    if len(front_indexes) <= 2:
+        return {idx: 1.0 for idx in front_indexes}
+
+    distances = {idx: 0.0 for idx in front_indexes}
+    for name in objective_names:
+        sorted_front = sorted(front_indexes, key=lambda idx: _safe_float(objective_rows[idx].get(name), float("-inf")))
+        min_value = _safe_float(objective_rows[sorted_front[0]].get(name), 0.0)
+        max_value = _safe_float(objective_rows[sorted_front[-1]].get(name), 0.0)
+        distances[sorted_front[0]] = float("inf")
+        distances[sorted_front[-1]] = float("inf")
+        span = max_value - min_value
+        if abs(span) <= 1e-12:
+            continue
+        for pos in range(1, len(sorted_front) - 1):
+            idx = sorted_front[pos]
+            if math.isinf(distances[idx]):
+                continue
+            prev_value = _safe_float(objective_rows[sorted_front[pos - 1]].get(name), 0.0)
+            next_value = _safe_float(objective_rows[sorted_front[pos + 1]].get(name), 0.0)
+            distances[idx] += (next_value - prev_value) / span
+
+    finite_values = [v for v in distances.values() if math.isfinite(v)]
+    if len(finite_values) <= 0:
+        return {idx: 1.0 for idx in front_indexes}
+    min_finite = min(finite_values)
+    max_finite = max(finite_values)
+    normalized = {}
+    for idx, value in distances.items():
+        if math.isinf(value):
+            normalized[idx] = 1.0
+        else:
+            normalized[idx] = _normalize_unit_range(value, min_finite, max_finite)
+    return normalized
 
 
 def _stable_unit_float(token: str) -> float:
@@ -749,8 +870,6 @@ def eval_function(genome, config, seed_override="", generation=-1, genome_key=-1
             str(float(runtime["fitness_gold_weight"])),
             "--fitness-win-neutral-rate",
             str(float(runtime["fitness_win_neutral_rate"])),
-            "--fitness-bankrupt-weight",
-            str(float(runtime.get("fitness_bankrupt_weight", 0.0))),
             "--control-policy-mode",
             str(runtime.get("control_policy_mode") or "pure_model"),
             "--control-heuristic-policy",
@@ -852,6 +971,9 @@ class LoggedParallelEvaluator:
         self.failure_imitation_max = runtime.get("failure_imitation_max")
         self.failure_slope_5_max = float(runtime["failure_slope_5_max"])
         self.failure_slope_metric = str(runtime["failure_slope_metric"])
+        self.objective_mode = str(runtime.get("objective_mode") or "scalar_v2")
+        self.pareto_crowding_weight = float(runtime.get("pareto_crowding_weight", 0.05))
+        self.pareto_scalar_tiebreak_weight = float(runtime.get("pareto_scalar_tiebreak_weight", 0.005))
         self.ema_imitation = None
         self.ema_win_rate = None
         self.gate_streak = 0
@@ -878,6 +1000,7 @@ class LoggedParallelEvaluator:
     def _thresholds(self) -> Dict[str, Any]:
         return {
             "gate_mode": self.gate_mode,
+            "objective_mode": self.objective_mode,
             "ema_window": int(self.ema_window),
             "transition_ema_imitation": (
                 float(self.transition_ema_imitation)
@@ -913,6 +1036,62 @@ class LoggedParallelEvaluator:
             ),
             "failure_slope_5_max": float(self.failure_slope_5_max),
             "failure_slope_metric": self.failure_slope_metric,
+        }
+
+    def _apply_objective_mode(self, records, genomes):
+        objective_mode = str(self.objective_mode or "scalar_v2")
+        if objective_mode != "pareto_v1":
+            return {"mode": objective_mode}
+
+        valid_records = [r for r in records if bool(r.get("eval_ok"))]
+        if len(valid_records) <= 0:
+            return {"mode": objective_mode}
+
+        objective_names = [
+            "win_rate",
+            "gold_norm",
+        ]
+        objective_rows = [_pareto_extract_objectives(record) for record in valid_records]
+        fronts = _pareto_fronts(objective_rows, objective_names)
+        scalar_values = [
+            _safe_float(r.get("fitness_scalar_v2"), _safe_float(r.get("fitness"), -1e9))
+            for r in valid_records
+        ]
+        scalar_min = min(scalar_values) if scalar_values else -1e9
+        scalar_max = max(scalar_values) if scalar_values else -1e9
+        genome_map = {int(genome_key): genome for genome_key, genome in genomes}
+        max_front_size = max((len(front) for front in fronts), default=0)
+
+        for rank, front in enumerate(fronts):
+            crowding = _pareto_crowding(front, objective_rows, objective_names)
+            for idx in front:
+                record = valid_records[idx]
+                scalar_value = _safe_float(
+                    record.get("fitness_scalar_v2"),
+                    _safe_float(record.get("fitness"), -1e9),
+                )
+                scalar_norm = _normalize_unit_range(scalar_value, scalar_min, scalar_max)
+                crowding_norm = _clamp_unit(crowding.get(idx, 0.0))
+                surrogate = (
+                    -float(rank)
+                    + (self.pareto_crowding_weight * crowding_norm)
+                    + (self.pareto_scalar_tiebreak_weight * scalar_norm)
+                )
+                record["objective_mode"] = objective_mode
+                record["objective_vector"] = dict(objective_rows[idx])
+                record["pareto_rank"] = int(rank)
+                record["pareto_front"] = int(rank + 1)
+                record["pareto_crowding"] = float(crowding_norm)
+                record["fitness_surrogate"] = float(surrogate)
+                record["fitness"] = float(surrogate)
+                genome_key = int(record.get("genome_key", -1))
+                if genome_key in genome_map:
+                    genome_map[genome_key].fitness = float(surrogate)
+
+        return {
+            "mode": objective_mode,
+            "front_count": int(len(fronts)),
+            "max_front_size": int(max_front_size),
         }
 
     def _is_imitation_required(self) -> bool:
@@ -978,7 +1157,10 @@ class LoggedParallelEvaluator:
         imitation = _safe_float(best_record.get("imitation_weighted_score"), 0.0)
         win_rate = _safe_float(best_record.get("win_rate"), 0.0)
         mean_gold_delta = _safe_float(best_record.get("mean_gold_delta"), float("nan"))
-        best_fitness = _safe_float(best_record.get("fitness"), -1e9)
+        best_fitness = _safe_float(
+            best_record.get("fitness_scalar_v2" if self.objective_mode == "pareto_v1" else "fitness"),
+            -1e9,
+        )
         self.best_imitation_history.append(imitation)
         self.best_win_rate_history.append(win_rate)
 
@@ -1094,6 +1276,7 @@ class LoggedParallelEvaluator:
             record["generation"] = int(display_generation)
             record["genome_key"] = int(genome_key)
             record["seed_used"] = str(record.get("seed_used") or seed_for_generation)
+            record["fitness_scalar_v2"] = float(fitness)
             record["fitness"] = float(fitness)
             record["eval_ok"] = bool(record.get("eval_ok", False))
             node_count = len(getattr(genome, "nodes", {}) or {})
@@ -1107,15 +1290,24 @@ class LoggedParallelEvaluator:
             record["num_connections_total"] = int(len(conn_genes))
             records.append(record)
 
+        objective_meta = self._apply_objective_mode(records, genomes)
+
         self._append_lines(self.eval_metrics_log, records)
 
         valid_records = [r for r in records if self._is_valid_gate_record(r)]
 
         if records:
-            best_record = max(records, key=lambda r: _safe_float(r.get("fitness"), -1e9))
-            current_best_fitness = _safe_float(best_record.get("fitness"), -1e9)
+            selection_best_record = max(records, key=lambda r: _safe_float(r.get("fitness"), -1e9))
+            scalar_best_record = max(records, key=lambda r: _safe_float(r.get("fitness_scalar_v2"), -1e9))
+            best_record = scalar_best_record if self.objective_mode == "pareto_v1" else selection_best_record
+            current_best_fitness = _safe_float(
+                best_record.get("fitness_scalar_v2" if self.objective_mode == "pareto_v1" else "fitness"),
+                -1e9,
+            )
             snapshot_best_fitness = _safe_float(
-                (self.best_record_overall or {}).get("fitness"),
+                (self.best_record_overall or {}).get(
+                    "fitness_scalar_v2" if self.objective_mode == "pareto_v1" else "fitness"
+                ),
                 -1e9,
             )
             if self.best_record_overall is None or current_best_fitness > snapshot_best_fitness:
@@ -1127,11 +1319,14 @@ class LoggedParallelEvaluator:
                         break
             fitness_values = [_safe_float(r.get("fitness"), -1e9) for r in records]
             valid_fitness_values = [_safe_float(r.get("fitness"), -1e9) for r in valid_records]
+            scalar_fitness_values = [_safe_float(r.get("fitness_scalar_v2"), -1e9) for r in records]
+            valid_scalar_fitness_values = [_safe_float(r.get("fitness_scalar_v2"), -1e9) for r in valid_records]
             valid_win_values = [_safe_float(r.get("win_rate"), 0.0) for r in valid_records]
             valid_imit_values = []
             valid_go_games_values = []
             valid_go_rate_values = []
             valid_go_fail_rate_values = []
+            valid_pareto_ranks = []
             for r in valid_records:
                 if "imitation_weighted_score" not in r:
                     pass
@@ -1148,6 +1343,9 @@ class LoggedParallelEvaluator:
                 go_fail_rate = _safe_optional_float(r.get("go_fail_rate"))
                 if go_fail_rate is not None:
                     valid_go_fail_rate_values.append(go_fail_rate)
+                pareto_rank = r.get("pareto_rank")
+                if pareto_rank is not None:
+                    valid_pareto_ranks.append(_safe_float(pareto_rank, 0.0))
             valid_eval_ms = [
                 max(0.0, _safe_float(r.get("eval_time_ms"), 0.0))
                 for r in valid_records
@@ -1161,10 +1359,30 @@ class LoggedParallelEvaluator:
                 "valid_record_count": len(valid_records),
                 "invalid_record_count": max(0, len(records) - len(valid_records)),
                 "data_quality": "valid_generation" if len(valid_records) > 0 else "invalid_generation",
+                "objective_mode": str(objective_meta.get("mode") or self.objective_mode),
                 "best_genome_key": int(best_record.get("genome_key", -1)),
-                "best_fitness": _safe_float(best_record.get("fitness"), -1e9),
+                "best_fitness": _safe_float(
+                    best_record.get("fitness_scalar_v2" if self.objective_mode == "pareto_v1" else "fitness"),
+                    -1e9,
+                ),
+                "best_surrogate_fitness": _safe_float(selection_best_record.get("fitness"), -1e9),
                 "mean_fitness": sum(fitness_values) / max(1, len(fitness_values)),
                 "std_fitness": _stddev(valid_fitness_values),
+                "best_scalar_fitness": _safe_float(scalar_best_record.get("fitness_scalar_v2"), -1e9),
+                "mean_scalar_fitness": sum(scalar_fitness_values) / max(1, len(scalar_fitness_values)),
+                "std_scalar_fitness": _stddev(valid_scalar_fitness_values),
+                "best_pareto_rank": (
+                    int(best_record.get("pareto_rank"))
+                    if best_record.get("pareto_rank") is not None
+                    else None
+                ),
+                "mean_pareto_rank": (
+                    sum(valid_pareto_ranks) / max(1, len(valid_pareto_ranks))
+                    if len(valid_pareto_ranks) > 0
+                    else None
+                ),
+                "pareto_front_count": objective_meta.get("front_count"),
+                "pareto_max_front_size": objective_meta.get("max_front_size"),
                 "mean_win_rate": (
                     sum(valid_win_values) / max(1, len(valid_win_values)) if len(valid_win_values) > 0 else None
                 ),
@@ -1219,10 +1437,18 @@ class LoggedParallelEvaluator:
                 "valid_record_count": 0,
                 "invalid_record_count": 0,
                 "data_quality": "invalid_generation",
+                "objective_mode": str(objective_meta.get("mode") or self.objective_mode),
                 "best_genome_key": -1,
                 "best_fitness": -1e9,
                 "mean_fitness": -1e9,
                 "std_fitness": 0.0,
+                "best_scalar_fitness": -1e9,
+                "mean_scalar_fitness": -1e9,
+                "std_scalar_fitness": 0.0,
+                "best_pareto_rank": None,
+                "mean_pareto_rank": None,
+                "pareto_front_count": objective_meta.get("front_count"),
+                "pareto_max_front_size": objective_meta.get("max_front_size"),
                 "mean_win_rate": None,
                 "mean_imitation_weighted_score": None,
                 "mean_go_games": None,
@@ -1238,7 +1464,11 @@ class LoggedParallelEvaluator:
             best_record = None
 
         best_gate_record = (
-            max(valid_records, key=lambda r: _safe_float(r.get("fitness"), -1e9))
+            (
+                max(valid_records, key=lambda r: _safe_float(r.get("fitness_scalar_v2"), -1e9))
+                if self.objective_mode == "pareto_v1"
+                else max(valid_records, key=lambda r: _safe_float(r.get("fitness"), -1e9))
+            )
             if len(valid_records) > 0
             else None
         )
@@ -1354,12 +1584,6 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=float("nan"),
         help="Override neutral baseline win rate for win_norm",
-    )
-    parser.add_argument(
-        "--fitness-bankrupt-weight",
-        type=float,
-        default=float("nan"),
-        help="Override bankrupt differential fitness weight",
     )
     parser.add_argument(
         "--control-policy-mode",
@@ -1840,9 +2064,6 @@ def main() -> None:
     if args.fitness_win_neutral_rate == args.fitness_win_neutral_rate:
         runtime["fitness_win_neutral_rate"] = args.fitness_win_neutral_rate
         override_keys.append("fitness_win_neutral_rate")
-    if args.fitness_bankrupt_weight == args.fitness_bankrupt_weight:
-        runtime["fitness_bankrupt_weight"] = args.fitness_bankrupt_weight
-        override_keys.append("fitness_bankrupt_weight")
     if str(args.control_policy_mode).strip():
         runtime["control_policy_mode"] = str(args.control_policy_mode).strip()
         override_keys.append("control_policy_mode")
@@ -1970,7 +2191,12 @@ def main() -> None:
         json.dump(_export_neat_python_genome(best_winner, p.config), f, ensure_ascii=False, separators=(",", ":"))
 
     best_record = evaluator.best_record_snapshot() if evaluator is not None else None
-    best_fitness = _safe_float((best_record or {}).get("fitness"), float("nan"))
+    objective_mode = str((runtime or {}).get("objective_mode") or "scalar_v2")
+    best_fitness = _safe_float(
+        (best_record or {}).get("fitness_scalar_v2" if objective_mode == "pareto_v1" else "fitness"),
+        float("nan"),
+    )
+    best_surrogate_fitness = _safe_optional_float((best_record or {}).get("fitness"))
     if best_fitness != best_fitness:
         best_fitness = float(getattr(best_winner, "fitness", float("nan")) or 0.0)
     winner_generation = (best_record or {}).get("generation")
@@ -1987,6 +2213,7 @@ def main() -> None:
         "workers": int(runtime["eval_workers"]),
         "games_per_genome": int(runtime["games_per_genome"]),
         "best_fitness": best_fitness,
+        "best_surrogate_fitness": best_surrogate_fitness,
         "winner_generation": (int(winner_generation) if winner_generation is not None else None),
         "best_record": best_record,
         "applied_overrides": applied_overrides,
