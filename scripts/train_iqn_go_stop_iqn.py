@@ -22,7 +22,7 @@ RUNTIME_FORMAT_VERSION = "iqn_go_stop_runtime_v1"
 GO_STOP_ONE_HOT = [1.0, 0.0, 0.0, 0.0]
 DEFAULT_HIDDEN_SIZES = (128, 128)
 ACTION_ORDER = ("go", "stop")
-BASE_FEATURES = 13
+BASE_FEATURES = 16
 INPUT_DIM = BASE_FEATURES + len(GO_STOP_ONE_HOT) + 10
 
 
@@ -187,16 +187,10 @@ def build_payload(snapshot: Dict[str, Any]) -> List[float]:
 
 
 def build_action_feature(row: Dict[str, Any], action: str) -> List[float]:
-    features_by_action = row.get("features13_by_action")
-    expected_label = "13D"
+    features_by_action = row.get("features16_by_action")
+    expected_label = "16D"
     if not isinstance(features_by_action, dict):
-        features_by_action = row.get("features46_by_action")
-        expected_label = "46D"
-    if not isinstance(features_by_action, dict):
-        features_by_action = row.get("features52_by_action")
-        expected_label = "legacy"
-    if not isinstance(features_by_action, dict):
-        fail("teacher row missing features13_by_action object")
+        fail("teacher row missing features16_by_action object")
     base = features_by_action.get(action)
     if not isinstance(base, list) or len(base) < BASE_FEATURES:
         fail(f"teacher row has invalid {expected_label} features for action={action}")

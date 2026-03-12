@@ -598,26 +598,18 @@ function cvar(values, q) {
   return mean(sorted.slice(0, count));
 }
 
-const ACTIVE_GO_STOP_BASE_FEATURES = 13;
+const ACTIVE_GO_STOP_BASE_FEATURES = 16;
 
 function resolveTeacherBaseFeatures(row) {
-  const feature13 = Array.isArray(row?.features13)
-    ? row.features13
+  const feature16 = Array.isArray(row?.features16)
+    ? row.features16
     : Array.isArray(row?.features)
       ? row.features
       : null;
-  if (Array.isArray(feature13) && feature13.length >= ACTIVE_GO_STOP_BASE_FEATURES) {
-    return feature13.slice(0, ACTIVE_GO_STOP_BASE_FEATURES);
+  if (!Array.isArray(feature16) || feature16.length < ACTIVE_GO_STOP_BASE_FEATURES) {
+    return null;
   }
-  const feature46 = Array.isArray(row?.features46) ? row.features46 : null;
-  if (Array.isArray(feature46) && feature46.length >= ACTIVE_GO_STOP_BASE_FEATURES) {
-    return feature46.slice(0, ACTIVE_GO_STOP_BASE_FEATURES);
-  }
-  const legacy52 = Array.isArray(row?.features52) ? row.features52 : null;
-  if (Array.isArray(legacy52) && legacy52.length >= ACTIVE_GO_STOP_BASE_FEATURES) {
-    return legacy52.slice(0, ACTIVE_GO_STOP_BASE_FEATURES);
-  }
-  return null;
+  return feature16.slice(0, ACTIVE_GO_STOP_BASE_FEATURES);
 }
 
 async function loadGoStopDecisionGroups(datasetPath, limit = 0) {
@@ -652,22 +644,22 @@ async function loadGoStopDecisionGroups(datasetPath, limit = 0) {
         chosen_candidate: canonicalOptionAction(row.chosen_candidate),
         public_snapshot: row.public_snapshot || null,
         state_before_full: row.state_before_full,
-        features13_by_action: {},
+        features16_by_action: {},
       };
       groups.set(row.decision_id, group);
     }
     const baseFeatures = resolveTeacherBaseFeatures(row);
     if (!Array.isArray(baseFeatures)) continue;
-    group.features13_by_action[candidate] = baseFeatures;
+    group.features16_by_action[candidate] = baseFeatures;
 
-    if (limit > 0 && groups.size >= limit && group.features13_by_action.go && group.features13_by_action.stop) {
+    if (limit > 0 && groups.size >= limit && group.features16_by_action.go && group.features16_by_action.stop) {
       // continue reading current stream line-by-line to keep parser simple; stop after exact group cap.
       // The output is deterministic because we only keep the first `limit` decision ids encountered.
     }
   }
 
   const decisions = [...groups.values()].filter(
-    (group) => Array.isArray(group.features13_by_action.go) && Array.isArray(group.features13_by_action.stop)
+    (group) => Array.isArray(group.features16_by_action.go) && Array.isArray(group.features16_by_action.stop)
   );
   return {
     decisions: limit > 0 ? decisions.slice(0, limit) : decisions,
@@ -709,7 +701,7 @@ function buildOutputRow(decision, teacherSpecToken, samplesPerAction, returnsByA
     teacher_policy: teacherSpecToken,
     samples_per_action: samplesPerAction,
     public_snapshot: decision.public_snapshot,
-    features13_by_action: decision.features13_by_action,
+    features16_by_action: decision.features16_by_action,
     returns: {
       go: goReturns,
       stop: stopReturns,

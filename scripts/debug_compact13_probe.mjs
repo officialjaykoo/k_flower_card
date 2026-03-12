@@ -9,11 +9,11 @@ function parseArgs(argv) {
   const args = [...argv];
   const out = {
     genome: "",
-    seed: "compact13-probe",
+    seed: "compact16-probe",
     firstTurn: "ai",
     maxSteps: 80,
     actor: "ai",
-    inputDim: 13,
+    inputDim: 16,
     opponentPolicy: "H-CL",
   };
   while (args.length > 0) {

@@ -31,7 +31,7 @@ const PLAY_SPECIAL_BOMB_PREFIX = "bomb:";
 const GO_STOP_OPTION_ONE_HOT = [1, 0, 0, 0];
 const NEAT_COMPACT_FEATURES = 16;
 const LEGACY_NEAT_COMPACT_FEATURES = 13;
-const IQN_GO_STOP_BASE_FEATURES = 13;
+const IQN_GO_STOP_BASE_FEATURES = 16;
 const IQN_GO_STOP_LEGACY_BASE_FEATURES = 46;
 const IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES = 52;
 const IQN_GO_STOP_PAYLOAD_DIM = 10;
@@ -624,7 +624,7 @@ function featureVector(state, actor, decisionType, candidate, legalCount, inputD
     }
     return features;
   }
-  if (inputDim === LEGACY_NEAT_COMPACT_FEATURES || inputDim === IQN_GO_STOP_BASE_FEATURES) {
+  if (inputDim === LEGACY_NEAT_COMPACT_FEATURES) {
     const features = buildLegacyCompactFeatureVector(state, actor, decisionType, candidate);
     if (features.length !== LEGACY_NEAT_COMPACT_FEATURES) {
       throw new Error(`legacy compact feature length mismatch: expected ${LEGACY_NEAT_COMPACT_FEATURES}, got ${features.length}`);
