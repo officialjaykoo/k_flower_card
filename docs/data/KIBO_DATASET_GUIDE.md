@@ -107,10 +107,10 @@ File format: `JSONL` (one line = one candidate)
 - `chosen`: `0|1`
 - `chosen_candidate`: inferred selected candidate
 - `unresolved`: `0|1`
-- `features`: 13-dimensional numeric vector (`compact13`)
-- `features13`: optional duplicate of `features`
+- `features`: 16-dimensional numeric vector (`compact16`)
+- `features13`: optional legacy compact13 prefix slice for go-stop dataset rows
 
-### 3-3. `features` (13D) Index Definition
+### 3-3. `features` (16D) Index Definition
 The order is identical to `featureVectorForCandidate()` in `model_duel_worker.mjs`.
 
 1. is_play_decision
@@ -126,6 +126,9 @@ The order is identical to `featureVectorForCandidate()` in `model_duel_worker.mj
 11. candidate_public_known_ratio
 12. self_can_stop
 13. opp_can_stop
+14. is_go_candidate_gated
+15. self_go_count_norm_gated
+16. opp_go_count_norm_gated
 
 ### 3-4. Dataset Example
 ```json

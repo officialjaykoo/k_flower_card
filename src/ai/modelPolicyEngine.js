@@ -29,6 +29,8 @@ const COMPILED_NEAT_CACHE = new WeakMap();
 const PLAY_SPECIAL_SHAKE_PREFIX = "shake_start:";
 const PLAY_SPECIAL_BOMB_PREFIX = "bomb:";
 const GO_STOP_OPTION_ONE_HOT = [1, 0, 0, 0];
+const NEAT_COMPACT_FEATURES = 16;
+const LEGACY_NEAT_COMPACT_FEATURES = 13;
 const IQN_GO_STOP_BASE_FEATURES = 13;
 const IQN_GO_STOP_LEGACY_BASE_FEATURES = 46;
 const IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES = 52;
@@ -471,6 +473,17 @@ function currentMultiplierNorm(state, scoreSelf) {
   return clamp01((currentMultiplier - 1.0) / 15.0);
 }
 
+function compactGoStopGatedFeatures(state, actor, decisionType, candidate) {
+  const isGoStopOption = decisionType === "option" && state?.phase === "go-stop";
+  const action = canonicalOptionAction(candidate);
+  const opp = actor === "human" ? "ai" : "human";
+  return [
+    !isGoStopOption ? 0.5 : action === "go" ? 1.0 : action === "stop" ? 0.0 : 0.5,
+    isGoStopOption ? clamp01((state?.players?.[actor]?.goCount || 0) / 5.0) : 0.0,
+    isGoStopOption ? clamp01((state?.players?.[opp]?.goCount || 0) / 5.0) : 0.0
+  ];
+}
+
 function padDeletedTailFeatures(baseFeatures, inputDim) {
   const baseDim = baseFeatures.length;
   if (inputDim === baseDim) return baseFeatures;
@@ -483,7 +496,7 @@ function padDeletedTailFeatures(baseFeatures, inputDim) {
   );
 }
 
-function buildCompactFeatureVector(state, actor, decisionType, candidate) {
+function buildLegacyCompactFeatureVector(state, actor, decisionType, candidate) {
   const opp = actor === "human" ? "ai" : "human";
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
   const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
@@ -504,6 +517,13 @@ function buildCompactFeatureVector(state, actor, decisionType, candidate) {
     candidatePublicKnownRatio(state, actor, month),
     Number(scoreSelf?.total || 0) >= 7 ? 1 : 0,
     Number(scoreOpp?.total || 0) >= 7 ? 1 : 0
+  ];
+}
+
+function buildCompactFeatureVector(state, actor, decisionType, candidate) {
+  return [
+    ...buildLegacyCompactFeatureVector(state, actor, decisionType, candidate),
+    ...compactGoStopGatedFeatures(state, actor, decisionType, candidate)
   ];
 }
 
@@ -597,8 +617,19 @@ function buildLegacyFeatureVector(state, actor, decisionType, candidate, legalCo
 }
 
 function featureVector(state, actor, decisionType, candidate, legalCount, inputDim) {
-  if (inputDim === IQN_GO_STOP_BASE_FEATURES) {
-    return buildCompactFeatureVector(state, actor, decisionType, candidate);
+  if (inputDim === NEAT_COMPACT_FEATURES) {
+    const features = buildCompactFeatureVector(state, actor, decisionType, candidate);
+    if (features.length !== NEAT_COMPACT_FEATURES) {
+      throw new Error(`compact feature length mismatch: expected ${NEAT_COMPACT_FEATURES}, got ${features.length}`);
+    }
+    return features;
+  }
+  if (inputDim === LEGACY_NEAT_COMPACT_FEATURES || inputDim === IQN_GO_STOP_BASE_FEATURES) {
+    const features = buildLegacyCompactFeatureVector(state, actor, decisionType, candidate);
+    if (features.length !== LEGACY_NEAT_COMPACT_FEATURES) {
+      throw new Error(`legacy compact feature length mismatch: expected ${LEGACY_NEAT_COMPACT_FEATURES}, got ${features.length}`);
+    }
+    return features;
   }
   if (
     inputDim === IQN_GO_STOP_LEGACY_BASE_FEATURES ||
@@ -611,7 +642,7 @@ function featureVector(state, actor, decisionType, candidate, legalCount, inputD
     );
   }
   throw new Error(
-    `feature vector size mismatch: expected ${inputDim}, supported=${IQN_GO_STOP_BASE_FEATURES},${IQN_GO_STOP_LEGACY_BASE_FEATURES},${IQN_GO_STOP_LEGACY_BASE_FEATURES + 1},${IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES}`
+    `feature vector size mismatch: expected ${inputDim}, supported=${NEAT_COMPACT_FEATURES},${LEGACY_NEAT_COMPACT_FEATURES},${IQN_GO_STOP_LEGACY_BASE_FEATURES},${IQN_GO_STOP_LEGACY_BASE_FEATURES + 1},${IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES}`
   );
 }
 
@@ -1039,7 +1070,7 @@ export function debugFeatureRows(state, actor, options = {}) {
   const compiled = options.policyModel ? getCompiledNeatModel(options.policyModel) : null;
   const inputDim = Math.max(
     1,
-    Number(options.inputDim || 0) || Number(compiled?.inputKeys?.length || 0) || IQN_GO_STOP_BASE_FEATURES
+    Number(options.inputDim || 0) || Number(compiled?.inputKeys?.length || 0) || NEAT_COMPACT_FEATURES
   );
 
   const rows = [];

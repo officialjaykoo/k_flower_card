@@ -23,6 +23,8 @@ import {
  * ========================================================================== */
 const NEAT_MODEL_FORMAT = "neat_python_genome_v1";
 const COMPILED_NEAT_CACHE = new WeakMap();
+const NEAT_COMPACT_FEATURES = 16;
+const LEGACY_NEAT_COMPACT_FEATURES = 13;
 
 /* 1) Feature extraction helpers */
 function clamp01(x) {
@@ -491,6 +493,31 @@ function buildLegacyFeatureVector(base, desc) {
 }
 
 function buildCompactFeatureVector(base, desc) {
+  const isGoStopOption = base.decisionType === "option" && base.phase === "go-stop";
+  const selfGoCountNorm = isGoStopOption ? clamp01((base.state?.players?.[base.actor]?.goCount || 0) / 5.0) : 0.0;
+  const oppGoCountNorm = isGoStopOption ? clamp01((base.state?.players?.[base.opp]?.goCount || 0) / 5.0) : 0.0;
+  const isGoCandidate = !isGoStopOption ? 0.5 : desc.candidate === "go" ? 1.0 : desc.candidate === "stop" ? 0.0 : 0.5;
+  return [
+    base.decisionType === "play" ? 1 : 0,
+    base.decisionType === "match" ? 1 : 0,
+    desc.optionCode,
+    tanhNorm((base.scoreSelf?.total || 0) - (base.scoreOpp?.total || 0), 10.0),
+    tanhNorm(base.scoreSelf?.total || 0, 10.0),
+    clamp01((base.scoreOpp?.total || 0) / 7.0),
+    clamp01(base.multiplierNorm),
+    desc.comboGain,
+    desc.piNorm,
+    desc.immediateMatch,
+    desc.knownRatio,
+    base.selfCanStop,
+    base.oppCanStop,
+    isGoCandidate,
+    selfGoCountNorm,
+    oppGoCountNorm
+  ];
+}
+
+function buildLegacyCompactFeatureVector(base, desc) {
   return [
     base.decisionType === "play" ? 1 : 0,
     base.decisionType === "match" ? 1 : 0,
@@ -586,11 +613,24 @@ function buildExtendedFeatureVector(base, desc, stats) {
 }
 
 function buildFeatureVector(base, desc, stats, inputDim) {
-  if (inputDim === 13) return buildCompactFeatureVector(base, desc);
+  if (inputDim === NEAT_COMPACT_FEATURES) {
+    const features = buildCompactFeatureVector(base, desc);
+    if (features.length !== NEAT_COMPACT_FEATURES) {
+      throw new Error(`compact feature length mismatch: expected ${NEAT_COMPACT_FEATURES}, got ${features.length}`);
+    }
+    return features;
+  }
+  if (inputDim === LEGACY_NEAT_COMPACT_FEATURES) {
+    const features = buildLegacyCompactFeatureVector(base, desc);
+    if (features.length !== LEGACY_NEAT_COMPACT_FEATURES) {
+      throw new Error(`legacy compact feature length mismatch: expected ${LEGACY_NEAT_COMPACT_FEATURES}, got ${features.length}`);
+    }
+    return features;
+  }
   if (inputDim === 40) return buildLegacyFeatureVector(base, desc);
   if (inputDim === 47) return buildCoreRichFeatureVector(base, desc);
   if (inputDim === 56) return buildExtendedFeatureVector(base, desc, stats);
-  throw new Error(`feature vector size mismatch: expected ${inputDim}, supported=13,40,47,56`);
+  throw new Error(`feature vector size mismatch: expected ${inputDim}, supported=16,13,40,47,56`);
 }
 
 /* 3) Forward-pass helpers */
@@ -798,7 +838,17 @@ function scoreDecisionCandidates(state, actor, policyModel, options = {}) {
   const scores = {};
   const diagnostics = {};
   const featureMode =
-    inputDim === 56 ? "rich56" : inputDim === 47 ? "rich47" : inputDim === 40 ? "legacy40" : inputDim === 13 ? "compact13" : "unknown";
+    inputDim === 56
+      ? "rich56"
+      : inputDim === 47
+        ? "rich47"
+        : inputDim === 40
+          ? "legacy40"
+          : inputDim === NEAT_COMPACT_FEATURES
+            ? "compact16"
+            : inputDim === LEGACY_NEAT_COMPACT_FEATURES
+              ? "compact13"
+              : "unknown";
 
   for (const desc of descriptors) {
     const x = buildFeatureVector(base, desc, stats, inputDim);

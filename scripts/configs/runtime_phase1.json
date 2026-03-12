@@ -10,8 +10,8 @@
   "seed": 13,
   "opponent_policy": "",
   "opponent_policy_mix": [
-    { "policy": "hybrid_play(phase1_seed208,H-CL)", "weight": 50 },
-    { "policy": "hybrid_play(phase1_seed301,H-CL)", "weight": 50 }
+    { "policy": "phase1_seed805", "weight": 50 },
+    { "policy": "phase1_seed808", "weight": 50 }
   ],
   "opponent_genome": "",
   "switch_seats": true,
@@ -41,7 +41,7 @@
     { "games": 100, "max_win_rate": 0.45 },
     { "games": 150, "max_win_rate": 0.45 },
     { "games": 200, "max_win_rate": 0.45 },
-    { "games": 250, "max_win_rate": 0.45 }
+    { "games": 250, "max_win_rate": 0.48 }
   ],
   "_notes_fitness": {
     "fitness_gold_scale": "gold delta를 tanh로 정규화할 때 쓰는 스케일",

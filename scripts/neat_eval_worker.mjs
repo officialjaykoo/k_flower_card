@@ -267,16 +267,25 @@ function resolveOpponentSpec(policyToken, opponentGenomePath) {
       } else {
         const heuristicPolicy = resolveBotPolicy(raw);
         if (!heuristicPolicy) {
-          throw new Error(`invalid opponent policy: ${raw}`);
+          const modelSpec = resolvePhaseModelToken(raw, "opponent model");
+          resolved = {
+            kind: "model",
+            key: modelSpec.key,
+            label: modelSpec.label,
+            model: modelSpec.model,
+            modelPath: modelSpec.modelPath,
+            heuristicPolicy: "",
+          };
+        } else {
+          resolved = {
+            kind: "heuristic",
+            key: heuristicPolicy,
+            label: heuristicPolicy,
+            model: null,
+            modelPath: null,
+            heuristicPolicy,
+          };
         }
-        resolved = {
-          kind: "heuristic",
-          key: heuristicPolicy,
-          label: heuristicPolicy,
-          model: null,
-          modelPath: null,
-          heuristicPolicy,
-        };
       }
     }
   }

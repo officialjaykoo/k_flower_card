@@ -492,6 +492,9 @@ function setToReportList(setLike) {
 // =============================================================================
 // Section 2. Engine Action Helpers + Feature Helpers
 // =============================================================================
+const ACTIVE_COMPACT_FEATURES = 16;
+const LEGACY_COMPACT_FEATURES = 13;
+
 function canonicalOptionAction(action) {
   const a = String(action || "").trim();
   if (!a) return "";
@@ -960,6 +963,17 @@ function currentMultiplierNorm(state, scoreSelf) {
   return clamp01((currentMultiplier - 1.0) / 15.0);
 }
 
+function compactGoStopGatedFeatures(state, actor, decisionType, candidate) {
+  const isGoStopOption = decisionType === "option" && state?.phase === "go-stop";
+  const action = canonicalOptionAction(candidate);
+  const opp = actor === "human" ? "ai" : "human";
+  return [
+    !isGoStopOption ? 0.5 : action === "go" ? 1.0 : action === "stop" ? 0.0 : 0.5,
+    isGoStopOption ? clamp01((state?.players?.[actor]?.goCount || 0) / 5.0) : 0.0,
+    isGoStopOption ? clamp01((state?.players?.[opp]?.goCount || 0) / 5.0) : 0.0,
+  ];
+}
+
 function buildBaseFeatureVectorForCandidate(state, actor, decisionType, candidate, legalCount) {
   const opp = actor === "human" ? "ai" : "human";
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
@@ -982,12 +996,17 @@ function buildBaseFeatureVectorForCandidate(state, actor, decisionType, candidat
     immediateMatchPossible(state, decisionType, month),
     candidatePublicKnownRatio(state, actor, month),
     selfCanStop,
-    oppCanStop
+    oppCanStop,
+    ...compactGoStopGatedFeatures(state, actor, decisionType, candidate)
   ];
 }
 
 function featureVectorForCandidate(state, actor, decisionType, candidate, legalCount) {
-  return buildBaseFeatureVectorForCandidate(state, actor, decisionType, candidate, legalCount);
+  const features = buildBaseFeatureVectorForCandidate(state, actor, decisionType, candidate, legalCount);
+  if (features.length !== ACTIVE_COMPACT_FEATURES) {
+    throw new Error(`compact feature length mismatch: expected ${ACTIVE_COMPACT_FEATURES}, got ${features.length}`);
+  }
+  return features;
 }
 
 function summarizeCapturedPublic(player) {
@@ -2107,7 +2126,7 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
             ),
           };
           if (goStopSnapshot) {
-            row.features13 = Array.isArray(row.features) ? row.features.slice() : [];
+            row.features13 = Array.isArray(row.features) ? row.features.slice(0, LEGACY_COMPACT_FEATURES) : [];
             row.public_snapshot = goStopSnapshot;
             row.state_before_full = decision.stateBefore;
           }
