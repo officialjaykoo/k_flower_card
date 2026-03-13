@@ -26,6 +26,8 @@ import { aiPlay } from "../src/ai/aiPlay.js";
 import { resolveBotPolicy } from "../src/ai/policies.js";
 import { hybridPolicyPlayDetailed } from "../src/ai/hybridPolicyEngine.js";
 
+const NON_BRIGHT_KWANG_ID = "L0";
+
 // Pipeline Stage: 3/3 (neat_train.py -> neat_eval_worker.mjs -> model_duel_worker.mjs)
 // Execution Flow Map:
 // 1) main()
@@ -766,6 +768,12 @@ function candidateCard(state, actor, decisionType, candidate) {
   return null;
 }
 
+function compactCandidatePiNorm(card) {
+  const piValue = Math.max(0, Number(card?.piValue || 0));
+  const stealPi = Math.max(0, Number(card?.bonus?.stealPi || 0));
+  return clamp01((piValue + stealPi) / 4.0);
+}
+
 function countCardsByMonth(cards, month) {
   const targetMonth = Number(month || 0);
   if (!Array.isArray(cards) || targetMonth <= 0) return 0;
@@ -904,15 +912,29 @@ function candidatePublicKnownRatio(state, actor, month) {
 }
 
 function uniqueCapturedCardCount(player, zone) {
+  return uniqueCapturedCards(player, zone).length;
+}
+
+function uniqueCapturedCards(player, zone) {
   const cards = player?.captured?.[zone] || [];
-  if (!Array.isArray(cards)) return 0;
+  if (!Array.isArray(cards)) return [];
   const seen = new Set();
+  const out = [];
   for (const card of cards) {
     const id = String(card?.id || "");
-    if (!id) continue;
+    if (!id || seen.has(id)) continue;
     seen.add(id);
+    out.push(card);
   }
-  return seen.size;
+  return out;
+}
+
+function compactKwangBaseScore(kwangCards) {
+  const count = Array.isArray(kwangCards) ? kwangCards.length : 0;
+  if (count < 3) return 0;
+  if (count === 3) return kwangCards.some((c) => String(c?.id || "") === NON_BRIGHT_KWANG_ID) ? 2 : 3;
+  if (count === 4) return 4;
+  return 15;
 }
 
 function candidateComboGain(state, actor, decisionType, candidate) {
@@ -924,8 +946,9 @@ function candidateComboGain(state, actor, decisionType, candidate) {
   const afterPlayer = afterState?.players?.[actor];
   if (!afterPlayer) return 0;
 
-  const beforeGwang = uniqueCapturedCardCount(beforePlayer, "kwang");
-  const afterGwang = uniqueCapturedCardCount(afterPlayer, "kwang");
+  const beforeGwangCards = uniqueCapturedCards(beforePlayer, "kwang");
+  const afterGwangCards = uniqueCapturedCards(afterPlayer, "kwang");
+  const kwangGain = Math.max(0, compactKwangBaseScore(afterGwangCards) - compactKwangBaseScore(beforeGwangCards));
   const beforeGodori = countCapturedComboTag(beforePlayer, "five", "fiveBirds");
   const afterGodori = countCapturedComboTag(afterPlayer, "five", "fiveBirds");
   const ribbonTags = ["redRibbons", "blueRibbons", "plainRibbons"];
@@ -935,7 +958,7 @@ function candidateComboGain(state, actor, decisionType, candidate) {
     return beforeCount < 3 && afterCount >= 3;
   });
   const raw =
-    (beforeGwang < 3 && afterGwang >= 3 ? 3 : 0) +
+    kwangGain +
     (beforeGodori < 3 && afterGodori >= 3 ? 5 : 0) +
     (completesDan ? 3 : 0);
   return clamp01(raw / 11.0);
@@ -960,7 +983,38 @@ function currentMultiplierNorm(state, scoreSelf) {
   const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
   const mul = Math.max(1.0, Number(scoreSelf?.multiplier || 1.0));
   const currentMultiplier = mul * carry;
-  return clamp01((currentMultiplier - 1.0) / 15.0);
+  return clamp01(Math.log2(currentMultiplier) / 4.0);
+}
+
+function compactSelfScoreProgressNorm(scoreTotal) {
+  const s = Math.max(0, Number(scoreTotal || 0));
+  if (s <= 7) {
+    return clamp01(0.72 * Math.pow(s / 7.0, 1.35));
+  }
+  const tail = Math.log2(1 + Math.min(s - 7, 8)) / Math.log2(9);
+  return clamp01(0.72 + 0.28 * tail);
+}
+
+function compactOppStopPressureNorm(scoreTotal) {
+  const s = Math.max(0, Number(scoreTotal || 0));
+  if (s <= 0) return 0.0;
+  if (s === 1) return 0.05;
+  if (s === 2) return 0.1;
+  if (s === 3) return 0.15;
+  if (s === 4) return 0.3;
+  if (s === 5) return 0.6;
+  if (s === 6) return 0.9;
+  return 1.0;
+}
+
+function compactGoStageNorm(goCount) {
+  const g = Math.max(0, Number(goCount || 0));
+  if (g <= 0) return 0.0;
+  if (g === 1) return 0.2;
+  if (g === 2) return 0.35;
+  if (g === 3) return 0.7;
+  if (g === 4) return 0.9;
+  return 1.0;
 }
 
 function compactGoStopGatedFeatures(state, actor, decisionType, candidate) {
@@ -969,8 +1023,8 @@ function compactGoStopGatedFeatures(state, actor, decisionType, candidate) {
   const opp = actor === "human" ? "ai" : "human";
   return [
     !isGoStopOption ? 0.5 : action === "go" ? 1.0 : action === "stop" ? 0.0 : 0.5,
-    isGoStopOption ? clamp01((state?.players?.[actor]?.goCount || 0) / 5.0) : 0.0,
-    isGoStopOption ? clamp01((state?.players?.[opp]?.goCount || 0) / 5.0) : 0.0,
+    isGoStopOption ? compactGoStageNorm(state?.players?.[actor]?.goCount || 0) : 0.0,
+    isGoStopOption ? compactGoStageNorm(state?.players?.[opp]?.goCount || 0) : 0.0,
   ];
 }
 
@@ -988,11 +1042,11 @@ function buildBaseFeatureVectorForCandidate(state, actor, decisionType, candidat
     decisionType === "match" ? 1 : 0,
     optionCode(candidate),
     tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0),
-    tanhNorm(scoreSelf?.total || 0, 10.0),
-    clamp01((scoreOpp?.total || 0) / 7.0),
+    compactSelfScoreProgressNorm(scoreSelf?.total || 0),
+    compactOppStopPressureNorm(scoreOpp?.total || 0),
     clamp01(currentMultiplierNorm(state, scoreSelf)),
     candidateComboGain(state, actor, decisionType, candidate),
-    clamp01(Number(card?.piValue || 0) / 5.0),
+    compactCandidatePiNorm(card),
     immediateMatchPossible(state, decisionType, month),
     candidatePublicKnownRatio(state, actor, month),
     selfCanStop,

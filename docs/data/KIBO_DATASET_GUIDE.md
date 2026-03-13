@@ -113,22 +113,106 @@ File format: `JSONL` (one line = one candidate)
 ### 3-3. `features` (16D) Index Definition
 The order is identical to `featureVectorForCandidate()` in `model_duel_worker.mjs`.
 
-1. is_play_decision
-2. is_match_decision
-3. action_code_norm
-4. score_diff_tanh
-5. self_score_tanh
-6. opp_stop_pressure_norm
-7. current_multiplier_norm
-8. candidate_combo_gain
-9. candidate_pi_value_norm
-10. immediate_match_possible
-11. candidate_public_known_ratio
-12. self_can_stop
-13. opp_can_stop
-14. is_go_candidate_gated
-15. self_go_count_norm_gated
-16. opp_go_count_norm_gated
+#### Decision Context
+
+1. `is_play_decision`
+Range: `0/1`
+Rule: `decisionType === "play" ? 1 : 0`
+Examples: `play=[1,0]`, `match=[0,1]`, `option=[0,0]`
+
+2. `is_match_decision`
+Range: `0/1`
+Rule: `decisionType === "match" ? 1 : 0`
+Note: `1,2` are context flags because normal play/match cards usually have `3=0.0`
+
+3. `action_code_norm`
+Range: `0..1`
+Role: candidate action kind code
+Values: `go=0.125`, `stop=0.25`, `shaking_yes=0.375`, `shaking_no=0.5`, `president_stop=0.625`, `president_hold=0.75`, `five=0.875`, `junk=1.0`, `shake_start=0.9`, `bomb=0.95`
+Note: normal play/match card candidates usually use `0.0`
+
+#### Score Context
+
+4. `score_diff_tanh`
+Range: `-1..1`
+Rule: `tanh((selfScore.total - oppScore.total) / 10)`
+Meaning: positive when leading, negative when trailing, `0` when tied
+Examples: `self 6, opp 3 -> 0.291`, `self 3, opp 6 -> -0.291`, `self 7, opp 6 -> 0.100`
+
+5. `self_score_progress_norm`
+Range: `0..1`
+Stage 1 (`0..7`): `0.72 * (score / 7)^1.35`
+Stage 2 (`7+`): `0.72 + 0.28 * log2(1 + min(score - 7, 8)) / log2(9)`
+Examples: `1->0.05`, `5->0.46`, `7->0.72`, `10->0.90`, `15+->1.0`
+
+6. `opp_stop_pressure_norm`
+Range: `0..1`
+Rule: staged by opponent score
+Values: `0->0.0`, `1->0.05`, `2->0.1`, `3->0.15`, `4->0.3`, `5->0.6`, `6->0.9`, `7+->1.0`
+Note: soft pressure only; `13` separately marks hard stop availability
+
+7. `current_multiplier_norm`
+Range: `0..1`
+Rule: `clamp01(log2(scoreSelf.multiplier * state.carryOverMultiplier) / 4)`
+Includes: go multiplier (`3go x2`, `4go x4`, `5go x8`, ...), shaking, bomb, bak, carry-over
+Excludes: additive go score (`+1` per go), president-hold post-resolution multiplier
+Examples: `x1->0`, `x2->0.25`, `x4->0.5`, `x8->0.75`, `x16+->1.0`
+
+#### Candidate Value
+
+8. `candidate_combo_gain`
+Range: `0..1`
+Rule: `clamp01((kwang_gain_delta + godori_gain + dan_gain) / 11)`
+Details: visible-state simulation only
+Examples: `2kwang->bi3kwang=+2`, `2kwang->3kwang=+3`, `3kwang->4kwang=+1/+2`, `4kwang->5kwang=+11`, `godori=+5`, `hong/cheong/cho-dan=+3`
+
+9. `candidate_pi_value_norm`
+Range: `0..1`
+Rule: `effective_pi = card.piValue + card.bonus.stealPi`; `clamp01(effective_pi / 4)`
+Examples: normal pi `1->0.25`, double pi `2->0.5`, bonus double+steal `3->0.75`, bonus triple+steal `4->1.0`
+
+10. `immediate_match_possible`
+Range: `0/1`
+Rule: `decisionType === "match" ? 1 : (month>0 && board has same-month card ? 1 : 0)`
+Meaning: just match availability, not match quality or count
+
+11. `candidate_public_known_ratio`
+Range: `0..1`
+Rule: `known_month_cards / total_month_cards`
+Note: total cards are `4` for months `1..12`, `2` for bonus month `13`
+Examples: `13-month 1/2 -> 0.5`, `13-month 2/2 -> 1.0`
+
+#### Thresholds And Go/Stop
+
+12. `self_can_stop`
+Range: `0/1`
+Rule: `selfScore.total >= 7 ? 1 : 0`
+Meaning: hard threshold flag for my stop availability
+
+13. `opp_can_stop`
+Range: `0/1`
+Rule: `oppScore.total >= 7 ? 1 : 0`
+Meaning: hard threshold flag for opponent stop availability
+
+14. `is_go_candidate_gated`
+Range: `0/0.5/1`
+Rule: if not `go-stop`: `0.5`; in `go-stop`: `go->1.0`, `stop->0.0`, else `0.5`
+Meaning: only active in go-stop option context
+
+15. `self_go_count_norm_gated`
+Range: `0..1`
+Rule: in `go-stop` only, staged from my `goCount`; otherwise `0.0`
+Values: `0go->0.0`, `1go->0.2`, `2go->0.35`, `3go->0.7`, `4go->0.9`, `5go+->1.0`
+
+16. `opp_go_count_norm_gated`
+Range: `0..1`
+Rule: in `go-stop` only, staged from opponent `goCount`; otherwise `0.0`
+Values: same staged mapping as `15`
+
+Notes:
+- `1,2` are not redundant with `3`. `3` mainly distinguishes option/special action kind, while `1,2` tell the model whether the current candidate is a play-card choice or a match-choice context.
+- `4,5,6,7,12,13` split score information into different roles: gap (`4`), my progress (`5`), opponent stop pressure (`6`), multiplier pressure (`7`), and hard threshold flags (`12,13`).
+- `10` is intentionally binary. Match quality/count is not encoded here; it is partially reflected elsewhere through public-known ratio (`11`) and the outcome-sensitive combo/pi features (`8,9`).
 
 ### 3-4. Dataset Example
 ```json

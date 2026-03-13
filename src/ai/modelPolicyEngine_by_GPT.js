@@ -23,6 +23,7 @@ import {
  * ========================================================================== */
 const NEAT_MODEL_FORMAT = "neat_python_genome_v1";
 const COMPILED_NEAT_CACHE = new WeakMap();
+const NON_BRIGHT_KWANG_ID = "L0";
 const NEAT_COMPACT_FEATURES = 16;
 const LEGACY_NEAT_COMPACT_FEATURES = 13;
 
@@ -98,6 +99,12 @@ function candidateCard(state, actor, decisionType, candidate) {
   return null;
 }
 
+function compactCandidatePiNorm(card) {
+  const piValue = Math.max(0, Number(card?.piValue || 0));
+  const stealPi = Math.max(0, Number(card?.bonus?.stealPi || 0));
+  return clamp01((piValue + stealPi) / 4.0);
+}
+
 function countCardsByMonth(cards, month) {
   const targetMonth = Number(month || 0);
   if (!Array.isArray(cards) || targetMonth <= 0) return 0;
@@ -136,6 +143,20 @@ function countCapturedComboTag(player, zone, tag) {
     if (hasComboTag(card, tag)) count += 1;
   }
   return count;
+}
+
+function uniqueCapturedCards(player, zone) {
+  const cards = player?.captured?.[zone] || [];
+  if (!Array.isArray(cards)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(card);
+  }
+  return out;
 }
 
 function isDoublePiCard(card) {
@@ -264,19 +285,50 @@ function decisionAvailabilityFlags(state, actor) {
 function currentMultiplierNorm(state, scoreSelf) {
   const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
   const mul = Math.max(1.0, Number(scoreSelf?.multiplier || 1.0));
-  return clamp01(((mul * carry) - 1.0) / 15.0);
+  return clamp01(Math.log2(mul * carry) / 4.0);
+}
+
+function compactSelfScoreProgressNorm(scoreTotal) {
+  const s = Math.max(0, Number(scoreTotal || 0));
+  if (s <= 7) {
+    return clamp01(0.72 * Math.pow(s / 7.0, 1.35));
+  }
+  const tail = Math.log2(1 + Math.min(s - 7, 8)) / Math.log2(9);
+  return clamp01(0.72 + 0.28 * tail);
+}
+
+function compactOppStopPressureNorm(scoreTotal) {
+  const s = Math.max(0, Number(scoreTotal || 0));
+  if (s <= 0) return 0.0;
+  if (s === 1) return 0.05;
+  if (s === 2) return 0.1;
+  if (s === 3) return 0.15;
+  if (s === 4) return 0.3;
+  if (s === 5) return 0.6;
+  if (s === 6) return 0.9;
+  return 1.0;
+}
+
+function compactGoStageNorm(goCount) {
+  const g = Math.max(0, Number(goCount || 0));
+  if (g <= 0) return 0.0;
+  if (g === 1) return 0.2;
+  if (g === 2) return 0.35;
+  if (g === 3) return 0.7;
+  if (g === 4) return 0.9;
+  return 1.0;
 }
 
 function uniqueCapturedCardCount(player, zone) {
-  const cards = player?.captured?.[zone] || [];
-  if (!Array.isArray(cards)) return 0;
-  const seen = new Set();
-  for (const card of cards) {
-    const id = String(card?.id || "");
-    if (!id) continue;
-    seen.add(id);
-  }
-  return seen.size;
+  return uniqueCapturedCards(player, zone).length;
+}
+
+function compactKwangBaseScore(kwangCards) {
+  const count = Array.isArray(kwangCards) ? kwangCards.length : 0;
+  if (count < 3) return 0;
+  if (count === 3) return kwangCards.some((c) => String(c?.id || "") === NON_BRIGHT_KWANG_ID) ? 2 : 3;
+  if (count === 4) return 4;
+  return 15;
 }
 
 function maskStateForVisibleComboSimulation(state) {
@@ -308,8 +360,9 @@ function candidateComboGain(state, actor, decisionType, candidate) {
   const afterPlayer = afterState?.players?.[actor];
   if (!afterPlayer) return 0;
 
-  const beforeGwang = uniqueCapturedCardCount(beforePlayer, "kwang");
-  const afterGwang = uniqueCapturedCardCount(afterPlayer, "kwang");
+  const beforeGwangCards = uniqueCapturedCards(beforePlayer, "kwang");
+  const afterGwangCards = uniqueCapturedCards(afterPlayer, "kwang");
+  const kwangGain = Math.max(0, compactKwangBaseScore(afterGwangCards) - compactKwangBaseScore(beforeGwangCards));
   const beforeGodori = countCapturedComboTag(beforePlayer, "five", "fiveBirds");
   const afterGodori = countCapturedComboTag(afterPlayer, "five", "fiveBirds");
   const ribbonTags = ["redRibbons", "blueRibbons", "plainRibbons"];
@@ -319,7 +372,7 @@ function candidateComboGain(state, actor, decisionType, candidate) {
     return beforeCount < 3 && afterCount >= 3;
   });
   const raw =
-    (beforeGwang < 3 && afterGwang >= 3 ? 3 : 0) +
+    kwangGain +
     (beforeGodori < 3 && afterGodori >= 3 ? 5 : 0) +
     (completesDan ? 3 : 0);
   return clamp01(raw / 11.0);
@@ -375,13 +428,12 @@ function buildCandidateDescriptor(base, candidate) {
   const normalizedCandidate = normalizeDecisionCandidate(decisionType, candidate);
   const card = candidateCard(state, actor, decisionType, normalizedCandidate);
   const month = resolveCandidateMonth(state, actor, decisionType, card);
-  const piValue = Number(card?.piValue || 0);
   const category = String(card?.category || "");
 
   return {
     candidate: normalizedCandidate,
     month,
-    piNorm: clamp01(piValue / 5.0),
+    piNorm: compactCandidatePiNorm(card),
     comboGain: candidateComboGain(state, actor, decisionType, normalizedCandidate),
     category,
     isKwang: category === "kwang" ? 1 : 0,
@@ -494,16 +546,16 @@ function buildLegacyFeatureVector(base, desc) {
 
 function buildCompactFeatureVector(base, desc) {
   const isGoStopOption = base.decisionType === "option" && base.phase === "go-stop";
-  const selfGoCountNorm = isGoStopOption ? clamp01((base.state?.players?.[base.actor]?.goCount || 0) / 5.0) : 0.0;
-  const oppGoCountNorm = isGoStopOption ? clamp01((base.state?.players?.[base.opp]?.goCount || 0) / 5.0) : 0.0;
+  const selfGoCountNorm = isGoStopOption ? compactGoStageNorm(base.state?.players?.[base.actor]?.goCount || 0) : 0.0;
+  const oppGoCountNorm = isGoStopOption ? compactGoStageNorm(base.state?.players?.[base.opp]?.goCount || 0) : 0.0;
   const isGoCandidate = !isGoStopOption ? 0.5 : desc.candidate === "go" ? 1.0 : desc.candidate === "stop" ? 0.0 : 0.5;
   return [
     base.decisionType === "play" ? 1 : 0,
     base.decisionType === "match" ? 1 : 0,
     desc.optionCode,
     tanhNorm((base.scoreSelf?.total || 0) - (base.scoreOpp?.total || 0), 10.0),
-    tanhNorm(base.scoreSelf?.total || 0, 10.0),
-    clamp01((base.scoreOpp?.total || 0) / 7.0),
+    compactSelfScoreProgressNorm(base.scoreSelf?.total || 0),
+    compactOppStopPressureNorm(base.scoreOpp?.total || 0),
     clamp01(base.multiplierNorm),
     desc.comboGain,
     desc.piNorm,
@@ -523,8 +575,8 @@ function buildLegacyCompactFeatureVector(base, desc) {
     base.decisionType === "match" ? 1 : 0,
     desc.optionCode,
     tanhNorm((base.scoreSelf?.total || 0) - (base.scoreOpp?.total || 0), 10.0),
-    tanhNorm(base.scoreSelf?.total || 0, 10.0),
-    clamp01((base.scoreOpp?.total || 0) / 7.0),
+    compactSelfScoreProgressNorm(base.scoreSelf?.total || 0),
+    compactOppStopPressureNorm(base.scoreOpp?.total || 0),
     clamp01(base.multiplierNorm),
     desc.comboGain,
     desc.piNorm,
