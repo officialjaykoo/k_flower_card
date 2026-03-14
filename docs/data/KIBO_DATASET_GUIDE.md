@@ -182,7 +182,7 @@ Rule: `known_month_cards / total_month_cards`
 Note: total cards are `4` for months `1..12`, `2` for bonus month `13`
 Examples: `13-month 1/2 -> 0.5`, `13-month 2/2 -> 1.0`
 
-#### Thresholds And Go/Stop
+#### Thresholds
 
 12. `self_can_stop`
 Range: `0/1`
@@ -194,25 +194,11 @@ Range: `0/1`
 Rule: `oppScore.total >= 7 ? 1 : 0`
 Meaning: hard threshold flag for opponent stop availability
 
-14. `is_go_candidate_gated`
-Range: `0/0.5/1`
-Rule: if not `go-stop`: `0.5`; in `go-stop`: `go->1.0`, `stop->0.0`, else `0.5`
-Meaning: only active in go-stop option context
-
-15. `self_go_count_norm_gated`
-Range: `0..1`
-Rule: in `go-stop` only, staged from my `goCount`; otherwise `0.0`
-Values: `0go->0.0`, `1go->0.2`, `2go->0.35`, `3go->0.7`, `4go->0.9`, `5go+->1.0`
-
-16. `opp_go_count_norm_gated`
-Range: `0..1`
-Rule: in `go-stop` only, staged from opponent `goCount`; otherwise `0.0`
-Values: same staged mapping as `15`
-
 Notes:
 - `1,2` are not redundant with `3`. `3` mainly distinguishes option/special action kind, while `1,2` tell the model whether the current candidate is a play-card choice or a match-choice context.
 - `4,5,6,7,12,13` split score information into different roles: gap (`4`), my progress (`5`), opponent stop pressure (`6`), multiplier pressure (`7`), and hard threshold flags (`12,13`).
 - `10` is intentionally binary. Match quality/count is not encoded here; it is partially reflected elsewhere through public-known ratio (`11`) and the outcome-sensitive combo/pi features (`8,9`).
+- Features `14,15,16` were retired from the active EthoNEAT training profile. New training runs use the 13D compact profile (`1..13`). Legacy 16D models are still supported for inference and comparison.
 
 ### 3-4. Dataset Example
 ```json

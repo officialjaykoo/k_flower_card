@@ -22,16 +22,35 @@ import { STARTING_GOLD } from "../src/engine/economy.js";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { getActionPlayerKey } from "../src/engine/runner.js";
-import { aiPlay } from "../src/ai/aiPlay.js";
 import { resolveBotPolicy } from "../src/ai/policies.js";
-import { hybridPolicyPlayDetailed } from "../src/ai/hybridPolicyEngine.js";
+import { resolvePlayerSpecCore } from "../src/ai/evalCore/playerSpecCore.js";
+import { resolveResolvedPlayerAction } from "../src/ai/evalCore/resolvedPlayerAction.js";
+import {
+  resolveGoStopIqnRuntime,
+  canonicalOptionAction,
+  normalizeOptionCandidates,
+  parsePlaySpecialCandidate,
+  buildPlayingSpecialActions,
+  applyPlayCandidate,
+  selectPool,
+  legalCandidatesForDecision,
+  applyAction,
+  stateProgressKey,
+  normalizeDecisionCandidate,
+  randomChoice,
+  randomLegalAction,
+  startRound,
+  continueRound,
+  clamp01,
+  quantile,
+} from "../src/ai/evalCore/sharedGameHelpers.js";
 
 const NON_BRIGHT_KWANG_ID = "L0";
 
 // Pipeline Stage: 3/3 (neat_train.py -> neat_eval_worker.mjs -> model_duel_worker.mjs)
 // Execution Flow Map:
 // 1) main()
-// 2) playSingleRound(): duel loop + decision callback
+// 2) runDuelRound(): duel loop + decision callback
 // 3) featureVectorForCandidate(): dataset feature construction
 // 4) inferChosenCandidateFromTransition(): chosen-label reconstruction
 //
@@ -117,9 +136,6 @@ function parseArgs(argv) {
 
   if (!out.humanSpecRaw) throw new Error("--human is required");
   if (!out.aiSpecRaw) throw new Error("--ai is required");
-  if (Math.floor(out.games) < 1000) {
-    throw new Error("this worker requires --games >= 1000");
-  }
   out.games = Math.floor(out.games);
 
   if (out.firstTurnPolicy !== "alternate" && out.firstTurnPolicy !== "fixed") {
@@ -231,165 +247,37 @@ function dateTag() {
 }
 
 function resolvePlayerSpec(rawSpec, sideLabel) {
-  const token = String(rawSpec || "").trim();
-  if (!token) throw new Error(`empty player spec: ${sideLabel}`);
-
-  const hybridOption = parseHybridOptionSpec(token);
-  if (hybridOption) {
-    const playMatchModelSpec = resolvePhaseModelSpec(hybridOption.playMatchModelToken, `${sideLabel}:play_match_model`);
-    const optionModelSpec = resolvePhaseModelSpec(hybridOption.optionModelToken, `${sideLabel}:option_model`);
-    return {
-      input: token,
-      kind: "hybrid_option_model",
-      key: `hybrid_option(${playMatchModelSpec.key},${optionModelSpec.key})`,
-      label: `hybrid_option(${playMatchModelSpec.label},${optionModelSpec.label})`,
-      playMatchModel: playMatchModelSpec.model,
-      playMatchModelPath: playMatchModelSpec.modelPath,
-      playMatchPhase: playMatchModelSpec.phase,
-      playMatchSeed: playMatchModelSpec.seed,
-      optionModel: optionModelSpec.model,
-      optionModelPath: optionModelSpec.modelPath,
-      optionPhase: optionModelSpec.phase,
-      optionSeed: optionModelSpec.seed,
-    };
-  }
-
-  const hybridGo = parseHybridPlayGoSpec(token);
-  if (hybridGo) {
-    const modelSpec = resolvePhaseModelSpec(hybridGo.modelToken, `${sideLabel}:model`);
-    const goStopPolicy = resolveBotPolicy(hybridGo.goStopToken);
-    if (!goStopPolicy) {
-      throw new Error(
-        `invalid ${sideLabel} hybrid go-stop policy: ${hybridGo.goStopToken} (use a policy key from src/ai/policies.js)`
-      );
-    }
-    const heuristicToken = String(hybridGo.heuristicToken || "").trim();
-    const heuristicPolicy = heuristicToken ? resolveBotPolicy(heuristicToken) : "";
-    if (heuristicToken && !heuristicPolicy) {
-      throw new Error(
-        `invalid ${sideLabel} hybrid heuristic policy: ${hybridGo.heuristicToken} (use a policy key from src/ai/policies.js)`
-      );
-    }
-    const goStopOnly = !heuristicPolicy;
-    return {
-      input: token,
-      kind: "hybrid_play_model",
-      key: goStopOnly
-        ? `hybrid_play_go(${modelSpec.key},${goStopPolicy})`
-        : `hybrid_play_go(${modelSpec.key},${goStopPolicy},${heuristicPolicy})`,
-      label: goStopOnly
-        ? `hybrid_play_go(${modelSpec.label},${goStopPolicy})`
-        : `hybrid_play_go(${modelSpec.label},${goStopPolicy},${heuristicPolicy})`,
-      model: modelSpec.model,
-      modelPath: modelSpec.modelPath,
-      phase: modelSpec.phase,
-      seed: modelSpec.seed,
-      heuristicPolicy,
-      goStopPolicy,
-      goStopOnly,
-    };
-  }
-
-  const hybrid = parseHybridPlaySpec(token);
-  if (hybrid) {
-    const modelSpec = resolvePhaseModelSpec(hybrid.modelToken, `${sideLabel}:model`);
-    const heuristicPolicy = resolveBotPolicy(hybrid.heuristicToken);
-    if (!heuristicPolicy) {
-      throw new Error(
-        `invalid ${sideLabel} hybrid heuristic policy: ${hybrid.heuristicToken} (use a policy key from src/ai/policies.js)`
-      );
-    }
-    return {
-      input: token,
-      kind: "hybrid_play_model",
-      key: `hybrid_play(${modelSpec.key},${heuristicPolicy})`,
-      label: `hybrid_play(${modelSpec.label},${heuristicPolicy})`,
-      model: modelSpec.model,
-      modelPath: modelSpec.modelPath,
-      phase: modelSpec.phase,
-      seed: modelSpec.seed,
-      heuristicPolicy,
-    };
-  }
-
-  const resolvedPolicy = resolveBotPolicy(token);
-  if (resolvedPolicy) {
-    return {
-      input: token,
-      kind: "heuristic",
-      key: resolvedPolicy,
-      label: resolvedPolicy,
-      model: null,
-      modelPath: null,
-      phase: null,
-      seed: null,
-    };
-  }
-
-  return resolvePhaseModelSpec(token, sideLabel);
-}
-
-function parseHybridPlayGoSpec(token) {
-  const m = String(token || "")
-    .trim()
-    .match(/^hybrid_play_go\(\s*([^,]+)\s*,\s*([^,]+?)(?:\s*,\s*([^)]+)\s*)?\)$/i);
-  if (!m) {
-    return null;
-  }
-  return {
-    modelToken: String(m[1] || "").trim(),
-    goStopToken: String(m[2] || "").trim(),
-    heuristicToken: String(m[3] || "").trim(),
-  };
-}
-
-function parseHybridOptionSpec(token) {
-  const m = String(token || "")
-    .trim()
-    .match(/^hybrid_option\(\s*([^,]+)\s*,\s*([^)]+)\s*\)$/i);
-  if (!m) {
-    return null;
-  }
-  return {
-    playMatchModelToken: String(m[1] || "").trim(),
-    optionModelToken: String(m[2] || "").trim(),
-  };
-}
-
-function parseHybridPlaySpec(token) {
-  const m = String(token || "")
-    .trim()
-    .match(/^hybrid_play\(\s*([^,]+)\s*,\s*([^)]+)\s*\)$/i);
-  if (!m) {
-    return null;
-  }
-  return {
-    modelToken: String(m[1] || "").trim(),
-    heuristicToken: String(m[2] || "").trim(),
-  };
+  return resolvePlayerSpecCore(rawSpec, {
+    label: `${sideLabel} spec`,
+    resolveHeuristic: (token) => resolveBotPolicy(token),
+    resolveModel: (token, modelLabel) => resolvePhaseModelSpec(token, modelLabel),
+  });
 }
 
 function parsePhaseModelToken(rawToken) {
-  const m = String(rawToken || "").trim().match(/^(?:(pareto52)_)?phase([0-3])_seed(\d+)$/i);
+  const m = String(rawToken || "")
+    .trim()
+    .match(/^phase([0-3])_seed(\d+)(?::(winner_genome))?$/i);
   if (!m) return null;
-  const profile = m[1] ? "pareto52" : "classic";
-  const phase = Number(m[2]);
-  const seed = Number(m[3]);
-  const outputPrefix = profile === "pareto52" ? "neat_pareto52" : "neat";
-  const tokenKey = profile === "pareto52" ? `pareto52_phase${phase}_seed${seed}` : `phase${phase}_seed${seed}`;
-  return { profile, phase, seed, outputPrefix, tokenKey };
+  const phase = Number(m[1]);
+  const seed = Number(m[2]);
+  const modelName = String(m[3] || "winner_genome").trim().toLowerCase();
+  const outputPrefix = "neat";
+  const baseTokenKey = `phase${phase}_seed${seed}`;
+  const tokenKey = modelName === "winner_genome" ? baseTokenKey : `${baseTokenKey}:${modelName}`;
+  return { phase, seed, outputPrefix, tokenKey, modelName };
 }
 
 function resolvePhaseModelSpec(token, sideLabel) {
   const parsedToken = parsePhaseModelToken(token);
   if (!parsedToken) {
     throw new Error(
-      `invalid ${sideLabel} spec: ${token} (use policy key, phase0_seed9, pareto52_phase1_seed601, hybrid_play(phase1_seed202,H-CL), hybrid_play_go(phase1_seed202,H-CL), hybrid_option(phase1_seed208,phase2_seed501), or hybrid_play_go(phase1_seed202,H-NEXg,H-CL))`
+      `invalid ${sideLabel} spec: ${token} (use policy key, phase0_seed9, or hybrid_play(phase1_seed202,H-CL))`
     );
   }
-  const { phase, seed, outputPrefix, tokenKey } = parsedToken;
+  const { phase, seed, outputPrefix, tokenKey, modelName } = parsedToken;
   const summaryPath = resolve(`logs/NEAT/${outputPrefix}_phase${phase}_seed${seed}/run_summary.json`);
-  if (existsSync(summaryPath)) {
+  if (modelName === "winner_genome" && existsSync(summaryPath)) {
     try {
       const summaryRaw = String(readFileSync(summaryPath, "utf8") || "").replace(/^\uFEFF/, "");
       const summary = JSON.parse(summaryRaw);
@@ -404,7 +292,7 @@ function resolvePhaseModelSpec(token, sideLabel) {
       }
     }
   }
-  const modelPath = resolve(`logs/NEAT/${outputPrefix}_phase${phase}_seed${seed}/models/winner_genome.json`);
+  const modelPath = resolve(`logs/NEAT/${outputPrefix}_phase${phase}_seed${seed}/models/${modelName}.json`);
   if (!existsSync(modelPath)) {
     throw new Error(`model not found for ${token}: ${modelPath}`);
   }
@@ -429,29 +317,6 @@ function resolvePhaseModelSpec(token, sideLabel) {
     modelPath,
     phase,
     seed,
-  };
-}
-
-function resolveGoStopIqnRuntime(rawPath, sideLabel) {
-  const fullPath = resolve(String(rawPath || "").trim());
-  if (!existsSync(fullPath)) {
-    throw new Error(`go/stop IQN runtime not found for ${sideLabel}: ${fullPath}`);
-  }
-
-  let model = null;
-  try {
-    const raw = String(readFileSync(fullPath, "utf8") || "").replace(/^\uFEFF/, "");
-    model = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`failed to parse go/stop IQN runtime (${sideLabel}): ${fullPath} (${String(err)})`);
-  }
-  if (String(model?.format_version || "").trim() !== "iqn_go_stop_runtime_v1") {
-    throw new Error(`invalid go/stop IQN runtime format for ${sideLabel}: expected iqn_go_stop_runtime_v1`);
-  }
-
-  return {
-    model,
-    modelPath: fullPath,
   };
 }
 
@@ -497,35 +362,6 @@ function setToReportList(setLike) {
 const ACTIVE_COMPACT_FEATURES = 16;
 const LEGACY_COMPACT_FEATURES = 13;
 
-function canonicalOptionAction(action) {
-  const a = String(action || "").trim();
-  if (!a) return "";
-  const aliases = {
-    choose_go: "go",
-    choose_stop: "stop",
-    choose_shaking_yes: "shaking_yes",
-    choose_shaking_no: "shaking_no",
-    choose_president_stop: "president_stop",
-    choose_president_hold: "president_hold",
-    choose_five: "five",
-    choose_junk: "junk",
-  };
-  return aliases[a] || a;
-}
-
-function normalizeOptionCandidates(items) {
-  if (!Array.isArray(items)) return [];
-  const out = [];
-  const seen = new Set();
-  for (const raw of items) {
-    const v = canonicalOptionAction(raw);
-    if (!v || seen.has(v)) continue;
-    seen.add(v);
-    out.push(v);
-  }
-  return out;
-}
-
 function isGoStopOpportunityDecision(decision) {
   if (!decision || decision.decisionType !== "option") return false;
   if (String(decision?.stateBefore?.phase || "") !== "go-stop") return false;
@@ -547,118 +383,6 @@ function isGukjinOpportunityDecision(decision) {
   return options.includes("five") && options.includes("junk");
 }
 
-const PLAY_SPECIAL_SHAKE_PREFIX = "shake_start:";
-const PLAY_SPECIAL_BOMB_PREFIX = "bomb:";
-
-function parsePlaySpecialCandidate(candidate) {
-  const raw = String(candidate || "").trim();
-  if (!raw) return null;
-  if (raw.startsWith(PLAY_SPECIAL_SHAKE_PREFIX)) {
-    const cardId = raw.slice(PLAY_SPECIAL_SHAKE_PREFIX.length).trim();
-    if (!cardId) return null;
-    return { kind: "shake_start", cardId };
-  }
-  if (raw.startsWith(PLAY_SPECIAL_BOMB_PREFIX)) {
-    const month = Number(raw.slice(PLAY_SPECIAL_BOMB_PREFIX.length).trim());
-    if (!Number.isInteger(month) || month < 1 || month > 12) return null;
-    return { kind: "bomb", month };
-  }
-  return null;
-}
-
-function buildPlayingSpecialActions(state, actor) {
-  if (state?.phase !== "playing" || state?.currentTurn !== actor) return [];
-  const out = [];
-  const shakingMonths = new Set(getDeclarableShakingMonths(state, actor));
-  if (shakingMonths.size > 0) {
-    for (const card of state?.players?.[actor]?.hand || []) {
-      const cardId = String(card?.id || "").trim();
-      if (!cardId || card?.passCard) continue;
-      const month = Number(card?.month || 0);
-      if (shakingMonths.has(month)) out.push(`${PLAY_SPECIAL_SHAKE_PREFIX}${cardId}`);
-    }
-  }
-  for (const month of getDeclarableBombMonths(state, actor)) {
-    const monthNum = Number(month || 0);
-    if (monthNum >= 1 && monthNum <= 12) out.push(`${PLAY_SPECIAL_BOMB_PREFIX}${monthNum}`);
-  }
-  return out;
-}
-
-function applyPlayCandidate(state, actor, candidate) {
-  const special = parsePlaySpecialCandidate(candidate);
-  if (!special) return playTurn(state, candidate);
-  if (special.kind === "shake_start") {
-    const selected = findCardById(state?.players?.[actor]?.hand || [], special.cardId);
-    const month = Number(selected?.month || 0);
-    if (month < 1) return state;
-    const declared = declareShaking(state, actor, month);
-    if (!declared || declared === state) return state;
-    return playTurn(declared, special.cardId) || declared;
-  }
-  if (special.kind === "bomb") return declareBomb(state, actor, special.month);
-  return state;
-}
-
-function selectPool(state, actor) {
-  if (state.phase === "playing" && state.currentTurn === actor) {
-    return {
-      cards: (state.players?.[actor]?.hand || []).map((c) => c.id),
-      specialActions: buildPlayingSpecialActions(state, actor),
-    };
-  }
-  if (state.phase === "select-match" && state.pendingMatch?.playerKey === actor) {
-    return { boardCardIds: state.pendingMatch.boardCardIds || [] };
-  }
-  if (state.phase === "go-stop" && state.pendingGoStop === actor) {
-    return { options: ["go", "stop"] };
-  }
-  if (state.phase === "president-choice" && state.pendingPresident?.playerKey === actor) {
-    return { options: ["president_stop", "president_hold"] };
-  }
-  if (state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey === actor) {
-    return { options: ["five", "junk"] };
-  }
-  if (state.phase === "shaking-confirm" && state.pendingShakingConfirm?.playerKey === actor) {
-    return { options: ["shaking_yes", "shaking_no"] };
-  }
-  return {};
-}
-
-function legalCandidatesForDecision(sp, decisionType) {
-  if (decisionType === "play") {
-    return [
-      ...(sp.cards || []).map((x) => String(x)).filter((x) => x.length > 0),
-      ...(sp.specialActions || []).map((x) => String(x)).filter((x) => x.length > 0),
-    ];
-  }
-  if (decisionType === "match") {
-    return (sp.boardCardIds || []).map((x) => String(x)).filter((x) => x.length > 0);
-  }
-  if (decisionType === "option") {
-    return normalizeOptionCandidates(sp.options || []);
-  }
-  return [];
-}
-
-function applyAction(state, actor, decisionType, rawAction) {
-  let action = String(rawAction || "").trim();
-  if (!action) return state;
-  if (decisionType === "play") return applyPlayCandidate(state, actor, action);
-  if (decisionType === "match") return chooseMatch(state, action);
-  if (decisionType !== "option") return state;
-
-  action = canonicalOptionAction(action);
-  if (action === "go") return chooseGo(state, actor);
-  if (action === "stop") return chooseStop(state, actor);
-  if (action === "shaking_yes") return chooseShakingYes(state, actor);
-  if (action === "shaking_no") return chooseShakingNo(state, actor);
-  if (action === "president_stop") return choosePresidentStop(state, actor);
-  if (action === "president_hold") return choosePresidentHold(state, actor);
-  if (action === "five" || action === "junk") return chooseGukjinMode(state, actor, action);
-  return state;
-}
-
 function maskStateForVisibleComboSimulation(state) {
   if (!state || typeof state !== "object") return state;
   const pendingMatch = state?.pendingMatch
@@ -677,36 +401,6 @@ function maskStateForVisibleComboSimulation(state) {
     deck: [],
     pendingMatch,
   };
-}
-
-function stateProgressKey(state) {
-  if (!state) return "null";
-  const hh = Number(state?.players?.human?.hand?.length || 0);
-  const ah = Number(state?.players?.ai?.hand?.length || 0);
-  const d = Number(state?.deck?.length || 0);
-  return [
-    String(state.phase || ""),
-    String(state.currentTurn || ""),
-    String(state.pendingGoStop || ""),
-    String(state.pendingMatch?.stage || ""),
-    String(state.pendingPresident?.playerKey || ""),
-    String(state.pendingShakingConfirm?.playerKey || ""),
-    String(state.pendingShakingConfirm?.cardId || ""),
-    String(state.pendingShakingConfirm?.month || ""),
-    String(state.pendingGukjinChoice?.playerKey || ""),
-    String(state.turnSeq || 0),
-    String(state.kiboSeq || 0),
-    String(hh),
-    String(ah),
-    String(d),
-  ].join("|");
-}
-
-function clamp01(x) {
-  const v = Number(x || 0);
-  if (v <= 0) return 0;
-  if (v >= 1) return 1;
-  return v;
 }
 
 function tanhNorm(x, scale) {
@@ -1131,11 +825,6 @@ function buildDecisionId(gameIndex, decision) {
 // =============================================================================
 // Section 3. Chosen Candidate Inference (for dataset labels)
 // =============================================================================
-function normalizeDecisionCandidate(decisionType, candidate) {
-  if (decisionType === "option") return canonicalOptionAction(candidate);
-  return String(candidate || "").trim();
-}
-
 function inferCandidateFromKiboTransition(stateBefore, actor, decisionType, candidates, stateAfter) {
   const beforeLen = Array.isArray(stateBefore?.kibo) ? stateBefore.kibo.length : 0;
   const afterKibo = Array.isArray(stateAfter?.kibo) ? stateAfter.kibo : [];
@@ -1168,13 +857,13 @@ function inferCandidateFromKiboTransition(stateBefore, actor, decisionType, cand
 
     if (decisionType === "play" && actionType === "play") {
       const playedId = String(ev?.action?.card?.id || "").trim();
-      const shakingCandidate = `${PLAY_SPECIAL_SHAKE_PREFIX}${playedId}`;
+      const shakingCandidate = `shake_start:${playedId}`;
       if (playedId && shakingDeclared && candidateSet.has(shakingCandidate)) return shakingCandidate;
       if (playedId && candidateSet.has(playedId)) return playedId;
     }
     if (decisionType === "play" && actionType === "declare_bomb") {
       const bombMonth = Number(ev?.action?.month || 0);
-      const bombCandidate = `${PLAY_SPECIAL_BOMB_PREFIX}${bombMonth}`;
+      const bombCandidate = `bomb:${bombMonth}`;
       if (bombMonth >= 1 && candidateSet.has(bombCandidate)) return bombCandidate;
     }
     if (decisionType === "match" && actionType === "play") {
@@ -1249,25 +938,6 @@ function collectTransitionEventCounts(stateBefore, stateAfter) {
   return out;
 }
 
-function randomChoice(arr, rng) {
-  if (!arr.length) return null;
-  const idx = Math.max(0, Math.min(arr.length - 1, Math.floor(Number(rng() || 0) * arr.length)));
-  return arr[idx];
-}
-
-function randomLegalAction(state, actor, rng) {
-  const sp = selectPool(state, actor);
-  const cards = sp.cards || null;
-  const boardCardIds = sp.boardCardIds || null;
-  const options = sp.options || null;
-  const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
-  if (!decisionType) return state;
-  const candidates = legalCandidatesForDecision(sp, decisionType);
-  if (!candidates.length) return state;
-  const picked = randomChoice(candidates, rng);
-  return applyAction(state, actor, decisionType, picked);
-}
-
 function incrementCounter(map, key) {
   const k = String(key || "");
   if (!k) return;
@@ -1282,22 +952,6 @@ function resolveFirstTurnKey(opts, gameIndex) {
   return gameIndex % 2 === 0 ? "ai" : "human";
 }
 
-function startRound(seed, firstTurnKey, kiboDetail) {
-  return initSimulationGame("A", createSeededRng(`${seed}|game`), {
-    kiboDetail,
-    firstTurnKey,
-  });
-}
-
-function continueRound(prevEndState, seed, firstTurnKey, kiboDetail) {
-  return startSimulationGame(prevEndState, createSeededRng(`${seed}|game`), {
-    kiboDetail,
-    keepGold: true,
-    useCarryOver: true,
-    firstTurnKey,
-  });
-}
-
 function goldDiffByActor(state, actor) {
   const opp = actor === "human" ? "ai" : "human";
   const selfGold = Number(state?.players?.[actor]?.gold || 0);
@@ -1305,81 +959,7 @@ function goldDiffByActor(state, actor) {
   return selfGold - oppGold;
 }
 
-function buildAiPlayOptions(playerSpec) {
-  if (playerSpec?.kind === "model" && playerSpec?.model) {
-    return {
-      source: "model",
-      model: playerSpec.model,
-      goStopIqnModel: playerSpec.goStopIqnModel || null,
-    };
-  }
-  return { source: "heuristic", heuristicPolicy: String(playerSpec?.key || "") };
-}
-
-function resolvePlayerAction(state, actor, playerSpec) {
-  if (playerSpec?.kind === "hybrid_option_model") {
-    const sp = selectPool(state, actor);
-    const cards = sp.cards || null;
-    const boardCardIds = sp.boardCardIds || null;
-    const options = sp.options || null;
-    const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
-
-    if (decisionType === "play" || decisionType === "match") {
-      let next = aiPlay(state, actor, {
-        source: "model",
-        model: playerSpec.playMatchModel,
-        goStopIqnModel: playerSpec.goStopIqnModel || null,
-      });
-      let actionSource = "hybrid_option_play_match_model";
-      if (!next || stateProgressKey(next) === stateProgressKey(state)) {
-        next = aiPlay(state, actor, {
-          source: "model",
-          model: playerSpec.optionModel,
-          goStopIqnModel: playerSpec.goStopIqnModel || null,
-        });
-        actionSource = "hybrid_option_play_match_fallback_option_model";
-      }
-      return {
-        next: next || state,
-        actionSource,
-      };
-    }
-
-    return {
-      next: aiPlay(state, actor, {
-        source: "model",
-        model: playerSpec.optionModel,
-        goStopIqnModel: playerSpec.goStopIqnModel || null,
-      }),
-      actionSource: "hybrid_option_option_model",
-    };
-  }
-  if (playerSpec?.kind === "hybrid_play_model") {
-    const traced = hybridPolicyPlayDetailed(state, actor, {
-      model: playerSpec.model,
-      heuristicPolicy: String(playerSpec.heuristicPolicy || ""),
-      goStopPolicy: String(playerSpec.goStopPolicy || ""),
-      goStopOnly: !!playerSpec.goStopOnly,
-      goStopIqnModel: playerSpec.goStopIqnModel || null,
-    });
-    return {
-      next: traced?.next || state,
-      actionSource: String(traced?.actionSource || "hybrid_play_model"),
-    };
-  }
-  if (playerSpec?.kind === "model" && playerSpec?.model) {
-    return {
-      next: aiPlay(state, actor, buildAiPlayOptions(playerSpec)),
-      actionSource: "model",
-    };
-  }
-  return {
-    next: aiPlay(state, actor, buildAiPlayOptions(playerSpec)),
-    actionSource: "heuristic",
-  };
-}
-
-function playSingleRound(initialState, seed, playerByActor, maxSteps, onDecision = null) {
+function runDuelRound(initialState, seed, playerByActor, maxSteps, onDecision = null) {
   const rng = createSeededRng(`${seed}|rng`);
   let state = initialState;
   let steps = 0;
@@ -1398,7 +978,7 @@ function playSingleRound(initialState, seed, playerByActor, maxSteps, onDecision
     const specialFlags = decisionAvailabilityFlags(state, actor);
     const playerSpec = playerByActor[actor];
     const policy = String(playerSpec?.label || "");
-    const action = resolvePlayerAction(state, actor, playerSpec);
+    const action = resolveResolvedPlayerAction(state, actor, playerSpec);
     let actionSource = String(action?.actionSource || "heuristic");
     let next = action?.next || state;
 
@@ -1443,13 +1023,6 @@ function playSingleRound(initialState, seed, playerByActor, maxSteps, onDecision
   return state;
 }
 
-function quantile(values, q) {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * q)));
-  return sorted[idx];
-}
-
 function createSeatRecord() {
   return {
     games: 0,
@@ -1466,11 +1039,16 @@ function createSeatRecord() {
     shaking_win_game_count: 0,
     shaking_opportunity_count_total: 0,
     shaking_opportunity_game_count: 0,
+    shaking_plain_play_total: 0,
+    shaking_skip_other_play_total: 0,
+    shaking_no_total: 0,
     bomb_count_total: 0,
     bomb_game_count: 0,
     bomb_win_game_count: 0,
     bomb_opportunity_count_total: 0,
     bomb_opportunity_game_count: 0,
+    bomb_plain_play_total: 0,
+    bomb_skip_other_play_total: 0,
     president_stop_total: 0,
     president_hold_total: 0,
     president_stop_win_total: 0,
@@ -1494,8 +1072,13 @@ function createRoundSpecialMetrics() {
     go_opportunity_count: 0,
     shaking_count: 0,
     shaking_opportunity_count: 0,
+    shaking_plain_play_count: 0,
+    shaking_skip_other_play_count: 0,
+    shaking_no_count: 0,
     bomb_count: 0,
     bomb_opportunity_count: 0,
+    bomb_plain_play_count: 0,
+    bomb_skip_other_play_count: 0,
     president_stop_count: 0,
     president_hold_count: 0,
     president_opportunity_count: 0,
@@ -1555,6 +1138,88 @@ function collectUniqueBombOpportunitySignatures(state, actor) {
   return signatures;
 }
 
+function parseShakingOpportunitySignature(signature) {
+  const raw = String(signature || "");
+  const sep = raw.indexOf(":");
+  if (sep < 0) return { month: 0, cardIds: [] };
+  const month = Number(raw.slice(0, sep));
+  const cardIds = raw
+    .slice(sep + 1)
+    .split("|")
+    .map((id) => String(id || "").trim())
+    .filter(Boolean);
+  return { month, cardIds };
+}
+
+function parseBombOpportunitySignature(signature) {
+  const raw = String(signature || "");
+  const boardSep = raw.indexOf("::");
+  const left = boardSep >= 0 ? raw.slice(0, boardSep) : raw;
+  const monthSep = left.indexOf(":");
+  if (monthSep < 0) return { month: 0 };
+  return { month: Number(left.slice(0, monthSep)) };
+}
+
+function classifyPlaySpecialOpportunityResolution(
+  state,
+  actor,
+  chosenCandidate,
+  shakingSignatures = null,
+  bombSignatures = null
+) {
+  const out = {
+    shaking_plain_play_count: 0,
+    shaking_skip_other_play_count: 0,
+    bomb_plain_play_count: 0,
+    bomb_skip_other_play_count: 0,
+  };
+  if (state?.phase !== "playing" || state?.currentTurn !== actor) return out;
+
+  const normalizedChosen = normalizeDecisionCandidate("play", chosenCandidate);
+  if (!normalizedChosen) return out;
+
+  const chosenSpecial = parsePlaySpecialCandidate(normalizedChosen);
+  const player = state?.players?.[actor];
+  const chosenCard =
+    !chosenSpecial && player
+      ? (player.hand || []).find((card) => String(card?.id || "") === normalizedChosen) || null
+      : null;
+
+  const effectiveShakingSignatures = Array.isArray(shakingSignatures)
+    ? shakingSignatures
+    : collectUniqueShakingOpportunitySignatures(state, actor);
+  const effectiveBombSignatures = Array.isArray(bombSignatures)
+    ? bombSignatures
+    : collectUniqueBombOpportunitySignatures(state, actor);
+
+  for (const signature of effectiveShakingSignatures) {
+    const { cardIds } = parseShakingOpportunitySignature(signature);
+    if (
+      chosenSpecial?.kind === "shake_start" &&
+      cardIds.includes(String(chosenSpecial.cardId || ""))
+    ) {
+      continue;
+    }
+    if (chosenCard && cardIds.includes(String(chosenCard.id || ""))) {
+      out.shaking_plain_play_count += 1;
+    } else {
+      out.shaking_skip_other_play_count += 1;
+    }
+  }
+
+  for (const signature of effectiveBombSignatures) {
+    const { month } = parseBombOpportunitySignature(signature);
+    if (chosenSpecial?.kind === "bomb" && Number(chosenSpecial.month || 0) === month) continue;
+    if (chosenCard && Number(chosenCard.month || 0) === month) {
+      out.bomb_plain_play_count += 1;
+    } else {
+      out.bomb_skip_other_play_count += 1;
+    }
+  }
+
+  return out;
+}
+
 function updateSeatRecord(
   record,
   winner,
@@ -1571,8 +1236,19 @@ function updateSeatRecord(
   const goOpportunityCount = Math.max(0, Number(roundMetrics?.go_opportunity_count || 0));
   const shakingCount = Math.max(0, Number(roundMetrics?.shaking_count || 0));
   const shakingOpportunityCount = Math.max(0, Number(roundMetrics?.shaking_opportunity_count || 0));
+  const shakingPlainPlayCount = Math.max(0, Number(roundMetrics?.shaking_plain_play_count || 0));
+  const shakingSkipOtherPlayCount = Math.max(
+    0,
+    Number(roundMetrics?.shaking_skip_other_play_count || 0)
+  );
+  const shakingNoCount = Math.max(0, Number(roundMetrics?.shaking_no_count || 0));
   const bombCount = Math.max(0, Number(roundMetrics?.bomb_count || 0));
   const bombOpportunityCount = Math.max(0, Number(roundMetrics?.bomb_opportunity_count || 0));
+  const bombPlainPlayCount = Math.max(0, Number(roundMetrics?.bomb_plain_play_count || 0));
+  const bombSkipOtherPlayCount = Math.max(
+    0,
+    Number(roundMetrics?.bomb_skip_other_play_count || 0)
+  );
   const presidentStopCount = Math.max(0, Number(roundMetrics?.president_stop_count || 0));
   const presidentHoldCount = Math.max(0, Number(roundMetrics?.president_hold_count || 0));
   const presidentOpportunityCount = Math.max(0, Number(roundMetrics?.president_opportunity_count || 0));
@@ -1594,11 +1270,16 @@ function updateSeatRecord(
   }
   record.shaking_count_total += shakingCount;
   record.shaking_opportunity_count_total += shakingOpportunityCount;
+  record.shaking_plain_play_total += shakingPlainPlayCount;
+  record.shaking_skip_other_play_total += shakingSkipOtherPlayCount;
+  record.shaking_no_total += shakingNoCount;
   if (shakingCount > 0) record.shaking_game_count += 1;
   if (shakingCount > 0 && winner === selfActor) record.shaking_win_game_count += 1;
   if (shakingOpportunityCount > 0) record.shaking_opportunity_game_count += 1;
   record.bomb_count_total += bombCount;
   record.bomb_opportunity_count_total += bombOpportunityCount;
+  record.bomb_plain_play_total += bombPlainPlayCount;
+  record.bomb_skip_other_play_total += bombSkipOtherPlayCount;
   if (bombCount > 0) record.bomb_game_count += 1;
   if (bombCount > 0 && winner === selfActor) record.bomb_win_game_count += 1;
   if (bombOpportunityCount > 0) record.bomb_opportunity_game_count += 1;
@@ -1638,11 +1319,16 @@ function finalizeSeatRecord(record) {
   const shakingWinGameCount = Number(record?.shaking_win_game_count || 0);
   const shakingOpportunityCountTotal = Number(record?.shaking_opportunity_count_total || 0);
   const shakingOpportunityGameCount = Number(record?.shaking_opportunity_game_count || 0);
+  const shakingPlainPlayTotal = Number(record?.shaking_plain_play_total || 0);
+  const shakingSkipOtherPlayTotal = Number(record?.shaking_skip_other_play_total || 0);
+  const shakingNoTotal = Number(record?.shaking_no_total || 0);
   const bombCountTotal = Number(record?.bomb_count_total || 0);
   const bombGameCount = Number(record?.bomb_game_count || 0);
   const bombWinGameCount = Number(record?.bomb_win_game_count || 0);
   const bombOpportunityCountTotal = Number(record?.bomb_opportunity_count_total || 0);
   const bombOpportunityGameCount = Number(record?.bomb_opportunity_game_count || 0);
+  const bombPlainPlayTotal = Number(record?.bomb_plain_play_total || 0);
+  const bombSkipOtherPlayTotal = Number(record?.bomb_skip_other_play_total || 0);
   const presidentStopTotal = Number(record?.president_stop_total || 0);
   const presidentHoldTotal = Number(record?.president_hold_total || 0);
   const presidentStopWinTotal = Number(record?.president_stop_win_total || 0);
@@ -1684,6 +1370,16 @@ function finalizeSeatRecord(record) {
     shaking_opportunity_game_count: shakingOpportunityGameCount,
     shaking_opportunity_rate: games > 0 ? shakingOpportunityGameCount / games : 0,
     shaking_take_rate: shakingOpportunityCountTotal > 0 ? shakingCountTotal / shakingOpportunityCountTotal : 0,
+    shaking_plain_play_total: shakingPlainPlayTotal,
+    shaking_skip_other_play_total: shakingSkipOtherPlayTotal,
+    shaking_no_total: shakingNoTotal,
+    shaking_plain_play_rate:
+      shakingOpportunityCountTotal > 0 ? shakingPlainPlayTotal / shakingOpportunityCountTotal : 0,
+    shaking_skip_other_play_rate:
+      shakingOpportunityCountTotal > 0
+        ? shakingSkipOtherPlayTotal / shakingOpportunityCountTotal
+        : 0,
+    shaking_no_rate: shakingOpportunityCountTotal > 0 ? shakingNoTotal / shakingOpportunityCountTotal : 0,
     bomb_count_total: bombCountTotal,
     bomb_game_count: bombGameCount,
     bomb_win_game_count: bombWinGameCount,
@@ -1691,6 +1387,12 @@ function finalizeSeatRecord(record) {
     bomb_opportunity_game_count: bombOpportunityGameCount,
     bomb_opportunity_rate: games > 0 ? bombOpportunityGameCount / games : 0,
     bomb_take_rate: bombOpportunityCountTotal > 0 ? bombCountTotal / bombOpportunityCountTotal : 0,
+    bomb_plain_play_total: bombPlainPlayTotal,
+    bomb_skip_other_play_total: bombSkipOtherPlayTotal,
+    bomb_plain_play_rate:
+      bombOpportunityCountTotal > 0 ? bombPlainPlayTotal / bombOpportunityCountTotal : 0,
+    bomb_skip_other_play_rate:
+      bombOpportunityCountTotal > 0 ? bombSkipOtherPlayTotal / bombOpportunityCountTotal : 0,
     president_stop_total: presidentStopTotal,
     president_hold_total: presidentHoldTotal,
     president_stop_win_total: presidentStopWinTotal,
@@ -1748,6 +1450,14 @@ function buildSeatSplitSummary(firstRecord, secondRecord) {
   combined.shaking_opportunity_game_count =
     Number(firstRecord.shaking_opportunity_game_count || 0) +
     Number(secondRecord.shaking_opportunity_game_count || 0);
+  combined.shaking_plain_play_total =
+    Number(firstRecord.shaking_plain_play_total || 0) +
+    Number(secondRecord.shaking_plain_play_total || 0);
+  combined.shaking_skip_other_play_total =
+    Number(firstRecord.shaking_skip_other_play_total || 0) +
+    Number(secondRecord.shaking_skip_other_play_total || 0);
+  combined.shaking_no_total =
+    Number(firstRecord.shaking_no_total || 0) + Number(secondRecord.shaking_no_total || 0);
   combined.bomb_count_total =
     Number(firstRecord.bomb_count_total || 0) + Number(secondRecord.bomb_count_total || 0);
   combined.bomb_game_count =
@@ -1760,6 +1470,12 @@ function buildSeatSplitSummary(firstRecord, secondRecord) {
   combined.bomb_opportunity_game_count =
     Number(firstRecord.bomb_opportunity_game_count || 0) +
     Number(secondRecord.bomb_opportunity_game_count || 0);
+  combined.bomb_plain_play_total =
+    Number(firstRecord.bomb_plain_play_total || 0) +
+    Number(secondRecord.bomb_plain_play_total || 0);
+  combined.bomb_skip_other_play_total =
+    Number(firstRecord.bomb_skip_other_play_total || 0) +
+    Number(secondRecord.bomb_skip_other_play_total || 0);
   combined.president_stop_total =
     Number(firstRecord.president_stop_total || 0) + Number(secondRecord.president_stop_total || 0);
   combined.president_hold_total =
@@ -1818,6 +1534,7 @@ function buildConsoleSummary(report) {
     fixed_first_turn: report?.fixed_first_turn ?? null,
     continuous_series: !!report?.continuous_series,
     kibo_detail: String(report?.kibo_detail || "none"),
+    result_out: String(report?.result_out || ""),
     wins_a: Number(report?.wins_a || 0),
     losses_a: Number(report?.losses_a || 0),
     wins_b: Number(report?.wins_b || 0),
@@ -1878,6 +1595,12 @@ function buildConsoleSummary(report) {
     shaking_opportunity_games_b: Number(report?.shaking_opportunity_games_b || 0),
     shaking_take_rate_a: Number(report?.shaking_take_rate_a || 0),
     shaking_take_rate_b: Number(report?.shaking_take_rate_b || 0),
+    shaking_plain_play_a: Number(report?.shaking_plain_play_a || 0),
+    shaking_plain_play_b: Number(report?.shaking_plain_play_b || 0),
+    shaking_skip_other_play_a: Number(report?.shaking_skip_other_play_a || 0),
+    shaking_skip_other_play_b: Number(report?.shaking_skip_other_play_b || 0),
+    shaking_no_a: Number(report?.shaking_no_a || 0),
+    shaking_no_b: Number(report?.shaking_no_b || 0),
     bomb_count_a: Number(report?.bomb_count_a || 0),
     bomb_count_b: Number(report?.bomb_count_b || 0),
     bomb_games_a: Number(report?.bomb_games_a || 0),
@@ -1890,6 +1613,10 @@ function buildConsoleSummary(report) {
     bomb_opportunity_games_b: Number(report?.bomb_opportunity_games_b || 0),
     bomb_take_rate_a: Number(report?.bomb_take_rate_a || 0),
     bomb_take_rate_b: Number(report?.bomb_take_rate_b || 0),
+    bomb_plain_play_a: Number(report?.bomb_plain_play_a || 0),
+    bomb_plain_play_b: Number(report?.bomb_plain_play_b || 0),
+    bomb_skip_other_play_a: Number(report?.bomb_skip_other_play_a || 0),
+    bomb_skip_other_play_b: Number(report?.bomb_skip_other_play_b || 0),
     president_stop_a: Number(report?.president_stop_a || 0),
     president_stop_b: Number(report?.president_stop_b || 0),
     president_hold_a: Number(report?.president_hold_a || 0),
@@ -1919,39 +1646,40 @@ function buildConsoleSummary(report) {
 }
 
 function formatConsoleSummaryText(summary) {
+  const safe = buildConsoleSummary(summary || {});
   const fmtRate = (value) => {
     const n = Number(value || 0);
     return Number.isFinite(n) ? n.toFixed(3) : "0.000";
   };
-  const aFirst = summary?.seat_split_a?.when_first || {};
-  const aSecond = summary?.seat_split_a?.when_second || {};
-  const bFirst = summary?.seat_split_b?.when_first || {};
-  const bSecond = summary?.seat_split_b?.when_second || {};
-  const bankrupt = summary?.bankrupt || { a_bankrupt_count: 0, b_bankrupt_count: 0 };
+  const aFirst = safe.seat_split_a?.when_first || {};
+  const aSecond = safe.seat_split_a?.when_second || {};
+  const bFirst = safe.seat_split_b?.when_first || {};
+  const bSecond = safe.seat_split_b?.when_second || {};
+  const bankrupt = safe.bankrupt || { a_bankrupt_count: 0, b_bankrupt_count: 0 };
   const lines = [
     "",
-    `=== Model Duel (${summary.human} vs ${summary.ai}, games=${summary.games}) ===`,
-    `Win/Loss/Draw(A):  ${summary.wins_a} / ${summary.losses_a} / ${summary.draws}  (WR=${fmtRate(summary.win_rate_a)})`,
-    `Win/Loss/Draw(B):  ${summary.wins_b} / ${summary.losses_b} / ${summary.draws}  (WR=${fmtRate(summary.win_rate_b)})`,
+    `=== Model Duel (${safe.human} vs ${safe.ai}, games=${safe.games}) ===`,
+    `Win/Loss/Draw(A):  ${safe.wins_a} / ${safe.losses_a} / ${safe.draws}  (WR=${fmtRate(safe.win_rate_a)})`,
+    `Win/Loss/Draw(B):  ${safe.wins_b} / ${safe.losses_b} / ${safe.draws}  (WR=${fmtRate(safe.win_rate_b)})`,
     `Seat A first:      WR=${fmtRate(aFirst.win_rate)}, mean_gold_delta=${aFirst.mean_gold_delta}`,
     `Seat A second:     WR=${fmtRate(aSecond.win_rate)}, mean_gold_delta=${aSecond.mean_gold_delta}`,
     `Seat B first:      WR=${fmtRate(bFirst.win_rate)}, mean_gold_delta=${bFirst.mean_gold_delta}`,
     `Seat B second:     WR=${fmtRate(bSecond.win_rate)}, mean_gold_delta=${bSecond.mean_gold_delta}`,
-    `Gold delta(A):     mean=${summary.mean_gold_delta_a}, p10=${summary.p10_gold_delta_a}, p50=${summary.p50_gold_delta_a}, p90=${summary.p90_gold_delta_a}`,
-    `GO A:              games=${summary.go_games_a}, count=${summary.go_count_a}, fail=${summary.go_fail_count_a}, fail_rate=${fmtRate(summary.go_fail_rate_a)}`,
-    `GO B:              games=${summary.go_games_b}, count=${summary.go_count_b}, fail=${summary.go_fail_count_b}, fail_rate=${fmtRate(summary.go_fail_rate_b)}`,
-    `GO Opp A:          opp_games=${summary.go_opportunity_games_a}, opp_turns=${summary.go_opportunity_count_a}, opp_rate=${fmtRate(summary.go_opportunity_rate_a)}, take_rate=${fmtRate(summary.go_take_rate_a)}`,
-    `GO Opp B:          opp_games=${summary.go_opportunity_games_b}, opp_turns=${summary.go_opportunity_count_b}, opp_rate=${fmtRate(summary.go_opportunity_rate_b)}, take_rate=${fmtRate(summary.go_take_rate_b)}`,
-    `Shake A:           opp_games=${summary.shaking_opportunity_games_a}, opp_unique=${summary.shaking_opportunity_count_a}, games=${summary.shaking_games_a}, count=${summary.shaking_count_a}, win=${summary.shaking_win_a}, take_rate=${fmtRate(summary.shaking_take_rate_a)}`,
-    `Shake B:           opp_games=${summary.shaking_opportunity_games_b}, opp_unique=${summary.shaking_opportunity_count_b}, games=${summary.shaking_games_b}, count=${summary.shaking_count_b}, win=${summary.shaking_win_b}, take_rate=${fmtRate(summary.shaking_take_rate_b)}`,
-    `Bomb A:            opp_games=${summary.bomb_opportunity_games_a}, opp_unique=${summary.bomb_opportunity_count_a}, games=${summary.bomb_games_a}, count=${summary.bomb_count_a}, win=${summary.bomb_win_a}, take_rate=${fmtRate(summary.bomb_take_rate_a)}`,
-    `Bomb B:            opp_games=${summary.bomb_opportunity_games_b}, opp_unique=${summary.bomb_opportunity_count_b}, games=${summary.bomb_games_b}, count=${summary.bomb_count_b}, win=${summary.bomb_win_b}, take_rate=${fmtRate(summary.bomb_take_rate_b)}`,
-    `President A:       opp_total=${summary.president_opportunity_count_a}, hold=${summary.president_hold_a}, hold_win=${summary.president_hold_win_a}, stop=${summary.president_stop_a}`,
-    `President B:       opp_total=${summary.president_opportunity_count_b}, hold=${summary.president_hold_b}, hold_win=${summary.president_hold_win_b}, stop=${summary.president_stop_b}`,
-    `Gukjin A:          opp_total=${summary.gukjin_opportunity_count_a}, five=${summary.gukjin_five_a}, junk=${summary.gukjin_junk_a}, five_rate=${fmtRate(summary.gukjin_five_rate_a)}, five_mongbak=${summary.gukjin_five_mongbak_a}(${fmtRate(summary.gukjin_five_mongbak_rate_a)}), junk_mongbak=${summary.gukjin_junk_mongbak_a}(${fmtRate(summary.gukjin_junk_mongbak_rate_a)})`,
-    `Gukjin B:          opp_total=${summary.gukjin_opportunity_count_b}, five=${summary.gukjin_five_b}, junk=${summary.gukjin_junk_b}, five_rate=${fmtRate(summary.gukjin_five_rate_b)}, five_mongbak=${summary.gukjin_five_mongbak_b}(${fmtRate(summary.gukjin_five_mongbak_rate_b)}), junk_mongbak=${summary.gukjin_junk_mongbak_b}(${fmtRate(summary.gukjin_junk_mongbak_rate_b)})`,
+    `Gold delta(A):     mean=${safe.mean_gold_delta_a}, p10=${safe.p10_gold_delta_a}, p50=${safe.p50_gold_delta_a}, p90=${safe.p90_gold_delta_a}`,
+    `GO A:              games=${safe.go_games_a}, count=${safe.go_count_a}, fail=${safe.go_fail_count_a}, fail_rate=${fmtRate(safe.go_fail_rate_a)}`,
+    `GO B:              games=${safe.go_games_b}, count=${safe.go_count_b}, fail=${safe.go_fail_count_b}, fail_rate=${fmtRate(safe.go_fail_rate_b)}`,
+    `GO Opp A:          opp_games=${safe.go_opportunity_games_a}, opp_turns=${safe.go_opportunity_count_a}, opp_rate=${fmtRate(safe.go_opportunity_rate_a)}, take_rate=${fmtRate(safe.go_take_rate_a)}`,
+    `GO Opp B:          opp_games=${safe.go_opportunity_games_b}, opp_turns=${safe.go_opportunity_count_b}, opp_rate=${fmtRate(safe.go_opportunity_rate_b)}, take_rate=${fmtRate(safe.go_take_rate_b)}`,
+    `Shake A:           opp_games=${safe.shaking_opportunity_games_a}, opp_unique=${safe.shaking_opportunity_count_a}, games=${safe.shaking_games_a}, count=${safe.shaking_count_a}, plain=${safe.shaking_plain_play_a}, other=${safe.shaking_skip_other_play_a}, no=${safe.shaking_no_a}, win=${safe.shaking_win_a}, take_rate=${fmtRate(safe.shaking_take_rate_a)}`,
+    `Shake B:           opp_games=${safe.shaking_opportunity_games_b}, opp_unique=${safe.shaking_opportunity_count_b}, games=${safe.shaking_games_b}, count=${safe.shaking_count_b}, plain=${safe.shaking_plain_play_b}, other=${safe.shaking_skip_other_play_b}, no=${safe.shaking_no_b}, win=${safe.shaking_win_b}, take_rate=${fmtRate(safe.shaking_take_rate_b)}`,
+    `Bomb A:            opp_games=${safe.bomb_opportunity_games_a}, opp_unique=${safe.bomb_opportunity_count_a}, games=${safe.bomb_games_a}, count=${safe.bomb_count_a}, plain=${safe.bomb_plain_play_a}, other=${safe.bomb_skip_other_play_a}, win=${safe.bomb_win_a}, take_rate=${fmtRate(safe.bomb_take_rate_a)}`,
+    `Bomb B:            opp_games=${safe.bomb_opportunity_games_b}, opp_unique=${safe.bomb_opportunity_count_b}, games=${safe.bomb_games_b}, count=${safe.bomb_count_b}, plain=${safe.bomb_plain_play_b}, other=${safe.bomb_skip_other_play_b}, win=${safe.bomb_win_b}, take_rate=${fmtRate(safe.bomb_take_rate_b)}`,
+    `President A:       opp_total=${safe.president_opportunity_count_a}, hold=${safe.president_hold_a}, hold_win=${safe.president_hold_win_a}, stop=${safe.president_stop_a}`,
+    `President B:       opp_total=${safe.president_opportunity_count_b}, hold=${safe.president_hold_b}, hold_win=${safe.president_hold_win_b}, stop=${safe.president_stop_b}`,
+    `Gukjin A:          opp_total=${safe.gukjin_opportunity_count_a}, five=${safe.gukjin_five_a}, junk=${safe.gukjin_junk_a}, five_rate=${fmtRate(safe.gukjin_five_rate_a)}, five_mongbak=${safe.gukjin_five_mongbak_a}(${fmtRate(safe.gukjin_five_mongbak_rate_a)}), junk_mongbak=${safe.gukjin_junk_mongbak_a}(${fmtRate(safe.gukjin_junk_mongbak_rate_a)})`,
+    `Gukjin B:          opp_total=${safe.gukjin_opportunity_count_b}, five=${safe.gukjin_five_b}, junk=${safe.gukjin_junk_b}, five_rate=${fmtRate(safe.gukjin_five_rate_b)}, five_mongbak=${safe.gukjin_five_mongbak_b}(${fmtRate(safe.gukjin_five_mongbak_rate_b)}), junk_mongbak=${safe.gukjin_junk_mongbak_b}(${fmtRate(safe.gukjin_junk_mongbak_rate_b)})`,
     `Bankrupt:          A=${bankrupt.a_bankrupt_count}, B=${bankrupt.b_bankrupt_count}`,
-    `Result file:       ${summary.result_out || ""}`,
+    `Result file:       ${safe.result_out || ""}`,
     "===========================================================",
     "",
   ];
@@ -2079,7 +1807,7 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
     };
 
     const beforeDiffA = goldDiffByActor(roundStart, actorA);
-    const endState = playSingleRound(
+    const endState = runDuelRound(
       roundStart,
       seed,
       playerByActor,
@@ -2088,6 +1816,7 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
         if (decision?.actor === "human" || decision?.actor === "ai") {
           const actorMetrics = roundSpecial[decision.actor];
           if (decision?.stateBefore?.phase === "playing") {
+            const newShakingSignatures = [];
             for (const signature of collectUniqueShakingOpportunitySignatures(
               decision.stateBefore,
               decision.actor
@@ -2096,7 +1825,9 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
               if (seen.has(signature)) continue;
               seen.add(signature);
               actorMetrics.shaking_opportunity_count += 1;
+              newShakingSignatures.push(signature);
             }
+            const newBombSignatures = [];
             for (const signature of collectUniqueBombOpportunitySignatures(
               decision.stateBefore,
               decision.actor
@@ -2105,10 +1836,33 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
               if (seen.has(signature)) continue;
               seen.add(signature);
               actorMetrics.bomb_opportunity_count += 1;
+              newBombSignatures.push(signature);
             }
+            const playSpecialResolution = classifyPlaySpecialOpportunityResolution(
+              decision.stateBefore,
+              decision.actor,
+              decision.chosenCandidate,
+              newShakingSignatures,
+              newBombSignatures
+            );
+            actorMetrics.shaking_plain_play_count += Number(
+              playSpecialResolution.shaking_plain_play_count || 0
+            );
+            actorMetrics.shaking_skip_other_play_count += Number(
+              playSpecialResolution.shaking_skip_other_play_count || 0
+            );
+            actorMetrics.bomb_plain_play_count += Number(
+              playSpecialResolution.bomb_plain_play_count || 0
+            );
+            actorMetrics.bomb_skip_other_play_count += Number(
+              playSpecialResolution.bomb_skip_other_play_count || 0
+            );
           }
           actorMetrics.shaking_count += Math.max(0, Number(decision?.transitionEvents?.shaking_declare_count || 0));
           actorMetrics.bomb_count += Math.max(0, Number(decision?.transitionEvents?.bomb_declare_count || 0));
+          if (decision.decisionType === "option" && decision.chosenCandidate === "shaking_no") {
+            actorMetrics.shaking_no_count += 1;
+          }
           if (isPresidentOpportunityDecision(decision)) {
             actorMetrics.president_opportunity_count += 1;
             if (decision.chosenCandidate === "president_stop") actorMetrics.president_stop_count += 1;
@@ -2376,6 +2130,12 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
     shaking_opportunity_games_b: splitSummaryB.combined.shaking_opportunity_game_count,
     shaking_take_rate_a: splitSummaryA.combined.shaking_take_rate,
     shaking_take_rate_b: splitSummaryB.combined.shaking_take_rate,
+    shaking_plain_play_a: splitSummaryA.combined.shaking_plain_play_total,
+    shaking_plain_play_b: splitSummaryB.combined.shaking_plain_play_total,
+    shaking_skip_other_play_a: splitSummaryA.combined.shaking_skip_other_play_total,
+    shaking_skip_other_play_b: splitSummaryB.combined.shaking_skip_other_play_total,
+    shaking_no_a: splitSummaryA.combined.shaking_no_total,
+    shaking_no_b: splitSummaryB.combined.shaking_no_total,
     bomb_count_a: splitSummaryA.combined.bomb_count_total,
     bomb_count_b: splitSummaryB.combined.bomb_count_total,
     bomb_games_a: splitSummaryA.combined.bomb_game_count,
@@ -2388,6 +2148,10 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
     bomb_opportunity_games_b: splitSummaryB.combined.bomb_opportunity_game_count,
     bomb_take_rate_a: splitSummaryA.combined.bomb_take_rate,
     bomb_take_rate_b: splitSummaryB.combined.bomb_take_rate,
+    bomb_plain_play_a: splitSummaryA.combined.bomb_plain_play_total,
+    bomb_plain_play_b: splitSummaryB.combined.bomb_plain_play_total,
+    bomb_skip_other_play_a: splitSummaryA.combined.bomb_skip_other_play_total,
+    bomb_skip_other_play_b: splitSummaryB.combined.bomb_skip_other_play_total,
     president_stop_a: splitSummaryA.combined.president_stop_total,
     president_stop_b: splitSummaryB.combined.president_stop_total,
     president_hold_a: splitSummaryA.combined.president_hold_total,

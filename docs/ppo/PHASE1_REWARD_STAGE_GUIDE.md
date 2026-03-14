@@ -111,8 +111,8 @@ Notes:
 
 | Stage | Update Range (default total=2000) | Opponent Policy |
 |---|---|---|
-| 1 | `1..500` | `H-J1:0.50|H-Gemini:0.20|H-AntiCL:0.20|H-J2:0.10` |
-| 2 | `501..1000` | `H-J2:0.40|H-NEXg:0.30|H-AntiCL:0.20|H-GPT:0.10` |
+| 1 | `1..500` | `H-CL:0.50|H-Gemini:0.20|H-NEXg:0.20|H-J2:0.10` |
+| 2 | `501..1000` | `H-J2:0.40|H-NEXg:0.30|H-CL:0.20|H-GPT:0.10` |
 | 3 | `1001..2000` | `H-CL:0.40|H-J2:0.30|H-NEXg:0.20|H-GPT:0.10` |
 
 Stage index is derived from `opponent_policy_schedule.start_update`.
@@ -217,4 +217,3 @@ Recommended read order:
 2. last `metrics_update_*.json`
 3. `best_metrics_stage1/2/3.json`
 4. compare stage trend by `win_rate_1000`, `mean_final_gold_diff_1000`, `catastrophic_loss_rate_1000`
-

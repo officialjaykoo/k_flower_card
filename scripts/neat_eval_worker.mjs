@@ -1,31 +1,34 @@
 ﻿import fs from "node:fs";
 import path from "node:path";
-import {
-  initSimulationGame,
-  startSimulationGame,
-  createSeededRng,
-  getDeclarableShakingMonths,
-  getDeclarableBombMonths,
-  declareShaking,
-  declareBomb,
-  playTurn,
-  chooseMatch,
-  chooseGo,
-  chooseStop,
-  chooseShakingYes,
-  chooseShakingNo,
-  choosePresidentStop,
-  choosePresidentHold,
-  chooseGukjinMode,
-} from "../src/engine/index.js";
+import { createSeededRng } from "../src/engine/index.js";
 import { getActionPlayerKey } from "../src/engine/runner.js";
 import { aiPlay } from "../src/ai/aiPlay.js";
-import { hybridPolicyPlayDetailed } from "../src/ai/hybridPolicyEngine.js";
 import { resolveBotPolicy } from "../src/ai/policies.js";
+import { resolvePlayerSpecCore } from "../src/ai/evalCore/playerSpecCore.js";
+import { resolveResolvedPlayerAction } from "../src/ai/evalCore/resolvedPlayerAction.js";
+import {
+  resolveGoStopIqnRuntime,
+  canonicalOptionAction,
+  normalizeOptionCandidates,
+  parsePlaySpecialCandidate,
+  buildPlayingSpecialActions,
+  applyPlayCandidate,
+  selectPool,
+  legalCandidatesForDecision,
+  applyAction,
+  stateProgressKey,
+  normalizeDecisionCandidate,
+  randomChoice,
+  randomLegalAction,
+  startRound,
+  continueRound,
+  clamp01,
+  quantile,
+} from "../src/ai/evalCore/sharedGameHelpers.js";
 
 // Quick Read Map (top-down):
 // 1) main()
-// 2) playSingleRound(): per-game simulation loop
+// 2) runEvalRound(): per-game simulation loop
 // 3) decision inference helpers (imitation counters)
 // 4) parseArgs()/state transition helpers
 
@@ -39,63 +42,10 @@ function normalizePolicyName(policy) {
 function normalizeControlPolicyMode(mode) {
   const raw = String(mode || "").trim().toLowerCase();
   if (!raw || raw === "pure_model") return "pure_model";
-  if (
-    raw === "hybrid_play_match_only" ||
-    raw === "hybrid_playmatch_only" ||
-    raw === "play_match_only"
-  ) {
-    return "hybrid_play_match_only";
-  }
-  if (
-    raw === "hybrid_go_stop_only" ||
-    raw === "hybrid_gostop_only" ||
-    raw === "go_stop_only" ||
-    raw === "gostop_only"
-  ) {
-    return "hybrid_go_stop_only";
-  }
-  if (
-    raw === "hybrid_option_only" ||
-    raw === "hybrid_options_only" ||
-    raw === "option_only" ||
-    raw === "options_only"
-  ) {
-    return "hybrid_option_only";
-  }
-  throw new Error(
-    `invalid --control-policy-mode: ${mode} (allowed: pure_model, hybrid_play_match_only, hybrid_go_stop_only, hybrid_option_only)`
-  );
+  throw new Error(`invalid --control-policy-mode: ${mode} (allowed: pure_model)`);
 }
 
 const OPPONENT_SPEC_CACHE = new Map();
-const CONTROL_MODEL_SPEC_CACHE = new Map();
-
-function parseHybridPlayGoSpec(token) {
-  const m = String(token || "")
-    .trim()
-    .match(/^hybrid_play_go\(\s*([^,]+)\s*,\s*([^,]+?)(?:\s*,\s*([^)]+)\s*)?\)$/i);
-  if (!m) {
-    return null;
-  }
-  return {
-    modelToken: String(m[1] || "").trim(),
-    goStopToken: String(m[2] || "").trim(),
-    heuristicToken: String(m[3] || "").trim(),
-  };
-}
-
-function parseHybridPlaySpec(token) {
-  const m = String(token || "")
-    .trim()
-    .match(/^hybrid_play\(\s*([^,]+)\s*,\s*([^)]+)\s*\)$/i);
-  if (!m) {
-    return null;
-  }
-  return {
-    modelToken: String(m[1] || "").trim(),
-    heuristicToken: String(m[2] || "").trim(),
-  };
-}
 
 function loadGenomeModel(genomePath, label) {
   const full = path.resolve(String(genomePath || "").trim());
@@ -113,14 +63,13 @@ function loadGenomeModel(genomePath, label) {
 }
 
 function parsePhaseModelToken(rawToken) {
-  const m = String(rawToken || "").trim().match(/^(?:(pareto52)_)?phase([0-3])_seed(\d+)$/i);
+  const m = String(rawToken || "").trim().match(/^phase([0-3])_seed(\d+)$/i);
   if (!m) return null;
-  const profile = m[1] ? "pareto52" : "classic";
-  const phase = Number(m[2]);
-  const seed = Number(m[3]);
-  const outputPrefix = profile === "pareto52" ? "neat_pareto52" : "neat";
-  const tokenKey = profile === "pareto52" ? `pareto52_phase${phase}_seed${seed}` : `phase${phase}_seed${seed}`;
-  return { profile, phase, seed, outputPrefix, tokenKey };
+  const phase = Number(m[1]);
+  const seed = Number(m[2]);
+  const outputPrefix = "neat";
+  const tokenKey = `phase${phase}_seed${seed}`;
+  return { phase, seed, outputPrefix, tokenKey };
 }
 
 function resolvePhaseModelToken(token, label) {
@@ -157,54 +106,6 @@ function resolvePhaseModelToken(token, label) {
   };
 }
 
-function resolveControlPlayMatchModel(token) {
-  const raw = String(token || "").trim();
-  if (!raw) {
-    throw new Error("control play/match model token is empty");
-  }
-  if (CONTROL_MODEL_SPEC_CACHE.has(raw)) {
-    return CONTROL_MODEL_SPEC_CACHE.get(raw);
-  }
-
-  let resolved = null;
-  const phaseToken = raw.match(/^phase([0-3])_seed(\d+)$/i);
-  if (phaseToken) {
-    resolved = resolvePhaseModelToken(raw, "control play/match model");
-  } else {
-    const loaded = loadGenomeModel(raw, "control play/match model");
-    resolved = {
-      key: raw,
-      label: raw,
-      phase: null,
-      seed: null,
-      model: loaded.model,
-      modelPath: loaded.modelPath,
-    };
-  }
-  CONTROL_MODEL_SPEC_CACHE.set(raw, resolved);
-  return resolved;
-}
-
-function resolveGoStopIqnRuntime(rawPath, label) {
-  const fullPath = path.resolve(String(rawPath || "").trim());
-  if (!fs.existsSync(fullPath)) {
-    throw new Error(`${label} not found: ${fullPath}`);
-  }
-  let parsed = null;
-  try {
-    parsed = JSON.parse(String(fs.readFileSync(fullPath, "utf8") || "").replace(/^\uFEFF/, ""));
-  } catch (err) {
-    throw new Error(`failed to parse ${label}: ${fullPath} (${String(err)})`);
-  }
-  if (String(parsed?.format_version || "").trim() !== "iqn_go_stop_runtime_v1") {
-    throw new Error(`invalid ${label} format: expected iqn_go_stop_runtime_v1`);
-  }
-  return {
-    model: parsed,
-    modelPath: fullPath,
-  };
-}
-
 function resolveOpponentSpec(policyToken, opponentGenomePath) {
   const raw = String(policyToken || "").trim();
   const cacheKey = `${raw}|oppGenome=${String(opponentGenomePath || "").trim()}`;
@@ -223,71 +124,11 @@ function resolveOpponentSpec(policyToken, opponentGenomePath) {
       modelPath: loaded.modelPath,
     };
   } else {
-    const hybridGo = parseHybridPlayGoSpec(raw);
-    if (hybridGo) {
-      const modelSpec = resolvePhaseModelToken(hybridGo.modelToken, "hybrid opponent model");
-      const goStopPolicy = resolveBotPolicy(hybridGo.goStopToken);
-      const heuristicToken = String(hybridGo.heuristicToken || "").trim();
-      const heuristicPolicy = heuristicToken ? resolveBotPolicy(heuristicToken) : "";
-      if (!goStopPolicy || (heuristicToken && !heuristicPolicy)) {
-        throw new Error(`invalid hybrid opponent policy: ${raw}`);
-      }
-      const goStopOnly = !heuristicPolicy;
-      resolved = {
-        kind: "hybrid_play_model",
-        key: goStopOnly
-          ? `hybrid_play_go(${modelSpec.key},${goStopPolicy})`
-          : `hybrid_play_go(${modelSpec.key},${goStopPolicy},${heuristicPolicy})`,
-        label: goStopOnly
-          ? `hybrid_play_go(${modelSpec.label},${goStopPolicy})`
-          : `hybrid_play_go(${modelSpec.label},${goStopPolicy},${heuristicPolicy})`,
-        model: modelSpec.model,
-        modelPath: modelSpec.modelPath,
-        heuristicPolicy,
-        goStopPolicy,
-        goStopOnly,
-      };
-    } else {
-      const hybrid = parseHybridPlaySpec(raw);
-      if (hybrid) {
-        const modelSpec = resolvePhaseModelToken(hybrid.modelToken, "hybrid opponent model");
-        const heuristicPolicy = resolveBotPolicy(hybrid.heuristicToken);
-        if (!heuristicPolicy) {
-          throw new Error(`invalid hybrid opponent policy: ${raw}`);
-        }
-        resolved = {
-          kind: "hybrid_play_model",
-          key: `hybrid_play(${modelSpec.key},${heuristicPolicy})`,
-          label: `hybrid_play(${modelSpec.label},${heuristicPolicy})`,
-          model: modelSpec.model,
-          modelPath: modelSpec.modelPath,
-          heuristicPolicy,
-          goStopPolicy: "",
-        };
-      } else {
-        const heuristicPolicy = resolveBotPolicy(raw);
-        if (!heuristicPolicy) {
-          const modelSpec = resolvePhaseModelToken(raw, "opponent model");
-          resolved = {
-            kind: "model",
-            key: modelSpec.key,
-            label: modelSpec.label,
-            model: modelSpec.model,
-            modelPath: modelSpec.modelPath,
-            heuristicPolicy: "",
-          };
-        } else {
-          resolved = {
-            kind: "heuristic",
-            key: heuristicPolicy,
-            label: heuristicPolicy,
-            model: null,
-            modelPath: null,
-            heuristicPolicy,
-          };
-        }
-      }
-    }
+    resolved = resolvePlayerSpecCore(raw, {
+      label: "opponent policy",
+      resolveHeuristic: (token) => resolveBotPolicy(token),
+      resolveModel: (token, modelLabel) => resolvePhaseModelToken(token, modelLabel),
+    });
   }
 
   OPPONENT_SPEC_CACHE.set(cacheKey, resolved);
@@ -340,6 +181,72 @@ function normalizeEarlyStopWinRateCutoffs(parsed, label) {
   return out;
 }
 
+function parseEarlyStopGoTakeRateCutoffs(rawValue, label) {
+  if (Array.isArray(rawValue)) {
+    return normalizeEarlyStopGoTakeRateCutoffs(rawValue, label);
+  }
+  const text = String(rawValue || "").trim();
+  if (!text) {
+    return [];
+  }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`invalid ${label} JSON: ${String(err && err.message ? err.message : err)}`);
+  }
+  return normalizeEarlyStopGoTakeRateCutoffs(parsed, label);
+}
+
+function normalizeEarlyStopGoTakeRateCutoffs(parsed, label) {
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${label} must be a JSON array`);
+  }
+  const out = [];
+  const seenGames = new Set();
+  for (let i = 0; i < parsed.length; i += 1) {
+    const item = parsed[i];
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`${label} items must be objects`);
+    }
+    const games = Number(item.games);
+    const minGoOpportunityCount = Number(item.min_go_opportunity_count);
+    const minGoTakeRate =
+      item.min_go_take_rate === null || item.min_go_take_rate === undefined || String(item.min_go_take_rate).trim() === ""
+        ? null
+        : Number(item.min_go_take_rate);
+    const maxGoTakeRate =
+      item.max_go_take_rate === null || item.max_go_take_rate === undefined || String(item.max_go_take_rate).trim() === ""
+        ? null
+        : Number(item.max_go_take_rate);
+    if (!Number.isInteger(games) || games < 1) {
+      throw new Error(`${label}[${i}].games must be an integer >= 1`);
+    }
+    if (!Number.isInteger(minGoOpportunityCount) || minGoOpportunityCount < 0) {
+      throw new Error(`${label}[${i}].min_go_opportunity_count must be an integer >= 0`);
+    }
+    if (minGoTakeRate === null && maxGoTakeRate === null) {
+      throw new Error(`${label}[${i}] must define min_go_take_rate or max_go_take_rate`);
+    }
+    for (const [fieldName, value] of [["min_go_take_rate", minGoTakeRate], ["max_go_take_rate", maxGoTakeRate]]) {
+      if (value === null) continue;
+      if (!Number.isFinite(value) || value < 0 || value > 1) {
+        throw new Error(`${label}[${i}].${fieldName} must be finite and in [0,1] or null`);
+      }
+    }
+    if (minGoTakeRate !== null && maxGoTakeRate !== null && minGoTakeRate > maxGoTakeRate) {
+      throw new Error(`${label}[${i}].min_go_take_rate must be <= max_go_take_rate`);
+    }
+    if (seenGames.has(games)) {
+      throw new Error(`duplicate ${label} games value: ${games}`);
+    }
+    seenGames.add(games);
+    out.push({ games, minGoOpportunityCount, minGoTakeRate, maxGoTakeRate });
+  }
+  out.sort((a, b) => a.games - b.games);
+  return out;
+}
+
 function parseArgs(argv) {
   const args = [...argv];
   const out = {
@@ -353,6 +260,7 @@ function parseArgs(argv) {
     firstTurnPolicy: "alternate",
     fixedFirstTurn: "human",
     continuousSeries: true,
+    kiboOut: "",
     // NOTE:
     // - fitnessGoldScale is used as tanh normalization scale for mean_gold_delta.
     // - fitnessGoldNeutralDelta shifts gold neutral baseline (0-score point).
@@ -364,9 +272,8 @@ function parseArgs(argv) {
     fitnessGoldWeight: null,
     fitnessWinNeutralRate: null,
     earlyStopWinRateCutoffs: [],
+    earlyStopGoTakeRateCutoffs: [],
     controlPolicyMode: "pure_model",
-    controlHeuristicPolicy: "H-CL",
-    controlPlayMatchModel: "",
     controlGoStopIqnModel: "",
   };
 
@@ -426,6 +333,7 @@ function parseArgs(argv) {
       out.firstTurnPolicy = String(value || "1").trim() === "0" ? "fixed" : "alternate";
     }
     else if (key === "--continuous-series") out.continuousSeries = !(String(value || "1").trim() === "0");
+    else if (key === "--kibo-out") out.kiboOut = String(value || "").trim();
     else if (key === "--fitness-gold-scale") out.fitnessGoldScale = Number(value);
     else if (key === "--fitness-gold-neutral-delta") out.fitnessGoldNeutralDelta = Number(value);
     else if (key === "--fitness-win-weight") out.fitnessWinWeight = Number(value);
@@ -434,9 +342,19 @@ function parseArgs(argv) {
     else if (key === "--early-stop-win-rate-cutoffs") {
       out.earlyStopWinRateCutoffs = parseEarlyStopWinRateCutoffs(value, "--early-stop-win-rate-cutoffs");
     }
+    else if (key === "--early-stop-go-take-rate-cutoffs") {
+      out.earlyStopGoTakeRateCutoffs = parseEarlyStopGoTakeRateCutoffs(
+        value,
+        "--early-stop-go-take-rate-cutoffs"
+      );
+    }
     else if (key === "--control-policy-mode") out.controlPolicyMode = normalizeControlPolicyMode(value);
-    else if (key === "--control-heuristic-policy") out.controlHeuristicPolicy = String(value || "").trim();
-    else if (key === "--control-play-match-model") out.controlPlayMatchModel = String(value || "").trim();
+    else if (key === "--control-heuristic-policy") {
+      throw new Error(`deprecated option: ${key} (control fallback modes were removed)`);
+    }
+    else if (key === "--control-play-match-model") {
+      throw new Error(`deprecated option: ${key} (hybrid option control mode was removed)`);
+    }
     else if (key === "--control-go-stop-iqn-model" || key === "--control-go-stop-iqn") {
       out.controlGoStopIqnModel = String(value || "").trim();
     }
@@ -482,204 +400,25 @@ function parseArgs(argv) {
   if (!Number.isFinite(out.fitnessWinNeutralRate) || out.fitnessWinNeutralRate <= 0 || out.fitnessWinNeutralRate >= 1) {
     throw new Error("--fitness-win-neutral-rate is required and must be in (0,1)");
   }
-  if (
-    out.controlPolicyMode === "hybrid_play_match_only" ||
-    out.controlPolicyMode === "hybrid_go_stop_only"
-  ) {
-    const resolved = resolveBotPolicy(out.controlHeuristicPolicy);
-    if (!resolved) {
-      throw new Error(
-        `invalid --control-heuristic-policy: ${out.controlHeuristicPolicy} (use a policy key from src/ai/policies.js)`
-      );
-    }
-    out.controlHeuristicPolicy = resolved;
-  }
-  if (out.controlPolicyMode === "hybrid_option_only") {
-    if (!String(out.controlPlayMatchModel || "").trim()) {
-      throw new Error("--control-play-match-model is required when --control-policy-mode=hybrid_option_only");
-    }
-    resolveControlPlayMatchModel(out.controlPlayMatchModel);
-  }
   return out;
+}
+
+function classifyOptionDecision(candidates) {
+  const set = new Set((candidates || []).map((c) => String(c || "")));
+  if (set.has("go") && set.has("stop")) return "go_stop";
+  if (set.has("shaking_yes") && set.has("shaking_no")) return "shaking";
+  if (set.has("president_stop") && set.has("president_hold")) return "president";
+  if (set.has("five") && set.has("junk")) return "gukjin";
+  return null;
 }
 
 // =============================================================================
 // Section 2. Engine Action Helpers + Feature Helpers
 // =============================================================================
-function canonicalOptionAction(action) {
-  const a = String(action || "").trim();
-  if (!a) return "";
-  const aliases = {
-    choose_go: "go",
-    choose_stop: "stop",
-    choose_shaking_yes: "shaking_yes",
-    choose_shaking_no: "shaking_no",
-    choose_president_stop: "president_stop",
-    choose_president_hold: "president_hold",
-    choose_five: "five",
-    choose_junk: "junk",
-  };
-  return aliases[a] || a;
-}
-
-function normalizeOptionCandidates(items) {
-  if (!Array.isArray(items)) return [];
-  const out = [];
-  const seen = new Set();
-  for (const raw of items) {
-    const v = canonicalOptionAction(raw);
-    if (!v || seen.has(v)) continue;
-    seen.add(v);
-    out.push(v);
-  }
-  return out;
-}
-
-const PLAY_SPECIAL_SHAKE_PREFIX = "shake_start:";
-const PLAY_SPECIAL_BOMB_PREFIX = "bomb:";
-
-function parsePlaySpecialCandidate(candidate) {
-  const raw = String(candidate || "").trim();
-  if (!raw) return null;
-  if (raw.startsWith(PLAY_SPECIAL_SHAKE_PREFIX)) {
-    const cardId = raw.slice(PLAY_SPECIAL_SHAKE_PREFIX.length).trim();
-    if (!cardId) return null;
-    return { kind: "shake_start", cardId };
-  }
-  if (raw.startsWith(PLAY_SPECIAL_BOMB_PREFIX)) {
-    const month = Number(raw.slice(PLAY_SPECIAL_BOMB_PREFIX.length).trim());
-    if (!Number.isInteger(month) || month < 1 || month > 12) return null;
-    return { kind: "bomb", month };
-  }
-  return null;
-}
-
-function buildPlayingSpecialActions(state, actor) {
-  if (state?.phase !== "playing" || state?.currentTurn !== actor) return [];
-  const out = [];
-  const shakingMonths = new Set(getDeclarableShakingMonths(state, actor));
-  if (shakingMonths.size > 0) {
-    for (const card of state?.players?.[actor]?.hand || []) {
-      const cardId = String(card?.id || "").trim();
-      if (!cardId || card?.passCard) continue;
-      const month = Number(card?.month || 0);
-      if (shakingMonths.has(month)) out.push(`${PLAY_SPECIAL_SHAKE_PREFIX}${cardId}`);
-    }
-  }
-  for (const month of getDeclarableBombMonths(state, actor)) {
-    const monthNum = Number(month || 0);
-    if (monthNum >= 1 && monthNum <= 12) out.push(`${PLAY_SPECIAL_BOMB_PREFIX}${monthNum}`);
-  }
-  return out;
-}
-
-function applyPlayCandidate(state, actor, candidate) {
-  const special = parsePlaySpecialCandidate(candidate);
-  if (!special) return playTurn(state, candidate);
-  if (special.kind === "shake_start") {
-    const selected = (state?.players?.[actor]?.hand || []).find(
-      (card) => String(card?.id || "") === String(special.cardId || "")
-    );
-    const month = Number(selected?.month || 0);
-    if (month < 1) return state;
-    const declared = declareShaking(state, actor, month);
-    if (!declared || declared === state) return state;
-    return playTurn(declared, special.cardId) || declared;
-  }
-  if (special.kind === "bomb") return declareBomb(state, actor, special.month);
-  return state;
-}
-
-function selectPool(state, actor) {
-  if (state.phase === "playing" && state.currentTurn === actor) {
-    return {
-      cards: (state.players?.[actor]?.hand || []).map((c) => c.id),
-      specialActions: buildPlayingSpecialActions(state, actor),
-    };
-  }
-  if (state.phase === "select-match" && state.pendingMatch?.playerKey === actor) {
-    return { boardCardIds: state.pendingMatch.boardCardIds || [] };
-  }
-  if (state.phase === "go-stop" && state.pendingGoStop === actor) {
-    return { options: ["go", "stop"] };
-  }
-  if (state.phase === "president-choice" && state.pendingPresident?.playerKey === actor) {
-    return { options: ["president_stop", "president_hold"] };
-  }
-  if (state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey === actor) {
-    return { options: ["five", "junk"] };
-  }
-  if (state.phase === "shaking-confirm" && state.pendingShakingConfirm?.playerKey === actor) {
-    return { options: ["shaking_yes", "shaking_no"] };
-  }
-  return {};
-}
-
-function legalCandidatesForDecision(sp, decisionType) {
-  if (decisionType === "play") {
-    return [
-      ...(sp.cards || []).map((x) => String(x)).filter((x) => x.length > 0),
-      ...(sp.specialActions || []).map((x) => String(x)).filter((x) => x.length > 0),
-    ];
-  }
-  if (decisionType === "match") {
-    return (sp.boardCardIds || []).map((x) => String(x)).filter((x) => x.length > 0);
-  }
-  if (decisionType === "option") {
-    return normalizeOptionCandidates(sp.options || []);
-  }
-  return [];
-}
-
-function applyAction(state, actor, decisionType, rawAction) {
-  let action = String(rawAction || "").trim();
-  if (!action) return state;
-  if (decisionType === "play") return applyPlayCandidate(state, actor, action);
-  if (decisionType === "match") return chooseMatch(state, action);
-  if (decisionType !== "option") return state;
-
-  action = canonicalOptionAction(action);
-  if (action === "go") return chooseGo(state, actor);
-  if (action === "stop") return chooseStop(state, actor);
-  if (action === "shaking_yes") return chooseShakingYes(state, actor);
-  if (action === "shaking_no") return chooseShakingNo(state, actor);
-  if (action === "president_stop") return choosePresidentStop(state, actor);
-  if (action === "president_hold") return choosePresidentHold(state, actor);
-  if (action === "five" || action === "junk") return chooseGukjinMode(state, actor, action);
-  return state;
-}
-
-function stateProgressKey(state) {
-  if (!state) return "null";
-  const hh = Number(state?.players?.human?.hand?.length || 0);
-  const ah = Number(state?.players?.ai?.hand?.length || 0);
-  const d = Number(state?.deck?.length || 0);
-  return [
-    String(state.phase || ""),
-    String(state.currentTurn || ""),
-    String(state.pendingGoStop || ""),
-    String(state.pendingMatch?.stage || ""),
-    String(state.pendingPresident?.playerKey || ""),
-    String(state.pendingShakingConfirm?.playerKey || ""),
-    String(state.pendingShakingConfirm?.cardId || ""),
-    String(state.pendingShakingConfirm?.month || ""),
-    String(state.pendingGukjinChoice?.playerKey || ""),
-    String(state.turnSeq || 0),
-    String(state.kiboSeq || 0),
-    String(hh),
-    String(ah),
-    String(d),
-  ].join("|");
-}
 
 // =============================================================================
 // Section 3. Decision Inference Helpers
 // =============================================================================
-function normalizeDecisionCandidate(decisionType, candidate) {
-  if (decisionType === "option") return canonicalOptionAction(candidate);
-  return String(candidate || "").trim();
-}
-
 function heuristicCandidateForDecision(state, actor, decisionType, candidates, heuristicPolicy) {
   if (!Array.isArray(candidates) || !candidates.length) return null;
   const nextByHeuristic = aiPlay(state, actor, {
@@ -714,12 +453,6 @@ function inferChosenCandidateFromTransition(stateBefore, actor, decisionType, ca
 // =============================================================================
 // Section 4. Round Simulation + Metrics
 // =============================================================================
-function randomChoice(arr, rng) {
-  if (!arr.length) return null;
-  const idx = Math.max(0, Math.min(arr.length - 1, Math.floor(Number(rng() || 0) * arr.length)));
-  return arr[idx];
-}
-
 function buildWeightedOpponentPlan(opts, totalGames) {
   const fixedPolicy = String(opts.opponentPolicy || "").trim();
   if (fixedPolicy) {
@@ -786,115 +519,34 @@ function buildEvaluationSchedule(opts, totalGames) {
   if (plan.length <= 0) {
     throw new Error("resolved empty opponent policy schedule");
   }
-
-  if (opts.firstTurnPolicy === "fixed") {
-    const fixedSchedule = [];
-    for (const item of plan) {
-      for (let i = 0; i < item.count; i += 1) {
-        fixedSchedule.push({
-          opponentPolicy: item.policy,
-          firstTurnKey: opts.fixedFirstTurn,
-        });
-      }
-    }
-    shuffleInPlace(fixedSchedule, createSeededRng(`${opts.seed}|schedule|fixed`));
-    return fixedSchedule;
-  }
-
-  const aiTarget = Math.ceil(totalGames / 2);
-  const humanTarget = totalGames - aiTarget;
-  const seatPlan = plan.map((item) => {
-    const base = Math.floor(item.count / 2);
-    return {
-      policy: item.policy,
-      count: item.count,
-      aiFirstCount: base,
-      humanFirstCount: base,
-      odd: item.count % 2,
-      order: item.order,
-    };
-  });
-
-  let aiAssigned = 0;
-  let humanAssigned = 0;
-  const oddEntries = [];
-  for (const item of seatPlan) {
-    aiAssigned += item.aiFirstCount;
-    humanAssigned += item.humanFirstCount;
-    if (item.odd) {
-      oddEntries.push(item);
-    }
-  }
-
-  let aiRemaining = aiTarget - aiAssigned;
-  let humanRemaining = humanTarget - humanAssigned;
-  const oddOrder = oddEntries.map((item, idx) => ({
-    item,
-    idx,
-    ticket: Number(createSeededRng(`${opts.seed}|schedule|odd|${item.policy}|${idx}`)() || 0),
+  const remaining = plan.map((item) => ({
+    policy: item.policy,
+    count: Math.max(0, Math.floor(Number(item.count || 0))),
   }));
-  oddOrder.sort((a, b) => {
-    if (a.ticket !== b.ticket) return a.ticket - b.ticket;
-    return a.idx - b.idx;
-  });
-
-  for (const entry of oddOrder) {
-    if (aiRemaining > humanRemaining) {
-      entry.item.aiFirstCount += 1;
-      aiRemaining -= 1;
-    } else if (humanRemaining > 0) {
-      entry.item.humanFirstCount += 1;
-      humanRemaining -= 1;
-    } else {
-      entry.item.aiFirstCount += 1;
-      aiRemaining -= 1;
-    }
-  }
-
   const schedule = [];
-  for (const item of seatPlan) {
-    for (let i = 0; i < item.aiFirstCount; i += 1) {
-      schedule.push({ opponentPolicy: item.policy, firstTurnKey: "ai" });
+  while (schedule.length < totalGames) {
+    let progressed = false;
+    for (const item of remaining) {
+      if (item.count <= 0) continue;
+      const gi = schedule.length;
+      schedule.push({
+        opponentPolicy: item.policy,
+        firstTurnKey:
+          opts.firstTurnPolicy === "fixed"
+            ? opts.fixedFirstTurn
+            : gi % 2 === 0
+              ? "ai"
+              : "human",
+      });
+      item.count -= 1;
+      progressed = true;
+      if (schedule.length >= totalGames) break;
     }
-    for (let i = 0; i < item.humanFirstCount; i += 1) {
-      schedule.push({ opponentPolicy: item.policy, firstTurnKey: "human" });
+    if (!progressed) {
+      throw new Error("evaluation schedule exhausted before requested game count");
     }
   }
-
-  if (schedule.length !== totalGames) {
-    throw new Error(`invalid evaluation schedule length: expected=${totalGames}, actual=${schedule.length}`);
-  }
-  shuffleInPlace(schedule, createSeededRng(`${opts.seed}|schedule|shuffle`));
   return schedule;
-}
-
-function randomLegalAction(state, actor, rng) {
-  const sp = selectPool(state, actor);
-  const cards = sp.cards || null;
-  const boardCardIds = sp.boardCardIds || null;
-  const options = sp.options || null;
-  const decisionType = cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
-  if (!decisionType) return state;
-  const candidates = legalCandidatesForDecision(sp, decisionType);
-  if (!candidates.length) return state;
-  const picked = randomChoice(candidates, rng);
-  return applyAction(state, actor, decisionType, picked);
-}
-
-function startRound(seed, firstTurnKey) {
-  return initSimulationGame("A", createSeededRng(`${seed}|game`), {
-    kiboDetail: "lean",
-    firstTurnKey,
-  });
-}
-
-function continueRound(prevEndState, seed, firstTurnKey) {
-  return startSimulationGame(prevEndState, createSeededRng(`${seed}|game`), {
-    kiboDetail: "lean",
-    keepGold: true,
-    useCarryOver: true,
-    firstTurnKey,
-  });
 }
 
 function controlGoldDiff(state, controlActor) {
@@ -904,14 +556,7 @@ function controlGoldDiff(state, controlActor) {
   return controlGold - oppGold;
 }
 
-function clamp01(v) {
-  const x = Number(v || 0);
-  if (x <= 0) return 0;
-  if (x >= 1) return 1;
-  return x;
-}
-
-function playSingleRound(
+function runEvalRound(
   initialState,
   controlModel,
   seed,
@@ -925,16 +570,19 @@ function playSingleRound(
   let state = initialState;
   const opponentSpec = resolveOpponentSpec(opponentPolicy, opponentGenomePath);
   const controlPolicyMode = normalizeControlPolicyMode(controlOptions.controlPolicyMode || "pure_model");
-  const controlHeuristicPolicy =
-    controlPolicyMode === "hybrid_play_match_only" || controlPolicyMode === "hybrid_go_stop_only"
-      ? String(controlOptions.controlHeuristicPolicy || "H-CL")
-      : "";
-  const controlPlayMatchModel =
-    controlPolicyMode === "hybrid_option_only" ? controlOptions.controlPlayMatchModel || null : null;
   const controlGoStopIqnModel = controlOptions.controlGoStopIqnModel || null;
   const imitation = {
     totals: { play: 0, match: 0, option: 0 },
     matches: { play: 0, match: 0, option: 0 },
+  };
+  const behaviorDecisions = {
+    shaking_opportunities: 0,
+    shaking_yes_count: 0,
+    president_opportunities: 0,
+    president_hold_count: 0,
+    gukjin_opportunities: 0,
+    gukjin_junk_count: 0,
+    gukjin_five_count: 0,
   };
   let goOpportunityCount = 0;
 
@@ -965,86 +613,16 @@ function playSingleRound(
     let controlDecisionOwnedByModel = false;
 
     if (actor === controlActor) {
-      if (controlPolicyMode === "hybrid_play_match_only") {
-        const traced = hybridPolicyPlayDetailed(state, actor, {
-          model: controlModel,
-          heuristicPolicy: controlHeuristicPolicy,
-          goStopPolicy: controlHeuristicPolicy,
-          phasePolicy: controlHeuristicPolicy,
-          specialPolicy: controlHeuristicPolicy,
-          playFallbackPolicy: controlHeuristicPolicy,
-          modelMatchPhase: true,
-          goStopIqnModel: controlGoStopIqnModel,
-        });
-        next = traced?.next || state;
-        const route = String(traced?.route || "");
-        controlDecisionOwnedByModel =
-          route === "model_play" || route === "model_match" || route === "model_go_stop_iqn";
-      } else if (controlPolicyMode === "hybrid_go_stop_only") {
-        const traced = hybridPolicyPlayDetailed(state, actor, {
-          model: controlModel,
-          heuristicPolicy: controlHeuristicPolicy,
-          goStopPolicy: controlHeuristicPolicy,
-          goStopOnly: true,
-          goStopIqnModel: controlGoStopIqnModel,
-        });
-        next = traced?.next || state;
-        const route = String(traced?.route || "");
-        controlDecisionOwnedByModel =
-          route === "model_non_go_stop" || route === "model_go_stop_iqn";
-      } else if (controlPolicyMode === "hybrid_option_only") {
-        const ownsPlayMatch = decisionType === "play" || decisionType === "match";
-        if (ownsPlayMatch && controlPlayMatchModel) {
-          next = aiPlay(state, actor, {
-            source: "model",
-            model: controlPlayMatchModel,
-            goStopIqnModel: controlGoStopIqnModel,
-          });
-          controlDecisionOwnedByModel = false;
-          if (!next || stateProgressKey(next) === before) {
-            next = aiPlay(state, actor, {
-              source: "model",
-              model: controlModel,
-              goStopIqnModel: controlGoStopIqnModel,
-            });
-            controlDecisionOwnedByModel = true;
-          }
-        } else {
-          next = aiPlay(state, actor, {
-            source: "model",
-            model: controlModel,
-            goStopIqnModel: controlGoStopIqnModel,
-          });
-          controlDecisionOwnedByModel = true;
-        }
-      } else {
-        next = aiPlay(state, actor, {
-          source: "model",
+      next = (
+        resolveResolvedPlayerAction(state, actor, {
+          kind: "model",
           model: controlModel,
           goStopIqnModel: controlGoStopIqnModel,
-        });
-        controlDecisionOwnedByModel = true;
-      }
+        })?.next || state
+      );
+      controlDecisionOwnedByModel = true;
     } else {
-      if (opponentSpec.kind === "model") {
-        next = aiPlay(state, actor, {
-          source: "model",
-          model: opponentSpec.model,
-        });
-      } else if (opponentSpec.kind === "hybrid_play_model") {
-        const traced = hybridPolicyPlayDetailed(state, actor, {
-          model: opponentSpec.model,
-          heuristicPolicy: String(opponentSpec.heuristicPolicy || ""),
-          goStopPolicy: String(opponentSpec.goStopPolicy || ""),
-          goStopOnly: !!opponentSpec.goStopOnly,
-        });
-        next = traced?.next || state;
-      } else {
-        next = aiPlay(state, actor, {
-          source: "heuristic",
-          heuristicPolicy: opponentSpec.heuristicPolicy,
-        });
-      }
+      next = resolveResolvedPlayerAction(state, actor, opponentSpec)?.next || state;
     }
 
     if (!next || stateProgressKey(next) === before) {
@@ -1068,21 +646,48 @@ function playSingleRound(
         next
       );
       if (chosen) {
-        const imitationRefPolicy =
-          opponentSpec.kind === "model"
-            ? "H-J2"
-            : String(opponentSpec.heuristicPolicy || opponentPolicy || "");
-        const refCandidate = heuristicCandidateForDecision(
-          state,
-          actor,
-          decisionType,
-          candidates,
-          imitationRefPolicy
-        );
-        if (refCandidate) {
-          imitation.totals[decisionType] += 1;
-          if (chosen === refCandidate) {
-            imitation.matches[decisionType] += 1;
+        if (decisionType === "option") {
+          const optionKind = classifyOptionDecision(candidates);
+          if (optionKind === "shaking") {
+            behaviorDecisions.shaking_opportunities += 1;
+            if (chosen === "shaking_yes") {
+              behaviorDecisions.shaking_yes_count += 1;
+            }
+          } else if (optionKind === "president") {
+            behaviorDecisions.president_opportunities += 1;
+            if (chosen === "president_hold") {
+              behaviorDecisions.president_hold_count += 1;
+            }
+          } else if (optionKind === "gukjin") {
+            behaviorDecisions.gukjin_opportunities += 1;
+            if (chosen === "junk") {
+              behaviorDecisions.gukjin_junk_count += 1;
+            } else if (chosen === "five") {
+              behaviorDecisions.gukjin_five_count += 1;
+            }
+          }
+        }
+        const imitationDecisionType =
+          decisionType === "play" || decisionType === "match" || decisionType === "option"
+            ? decisionType
+            : null;
+        if (imitationDecisionType) {
+          const imitationRefPolicy =
+            opponentSpec.kind === "model"
+              ? "H-J2"
+              : String(opponentSpec.heuristicPolicy || opponentPolicy || "");
+          const refCandidate = heuristicCandidateForDecision(
+            state,
+            actor,
+            decisionType,
+            candidates,
+            imitationRefPolicy
+          );
+          if (refCandidate) {
+            imitation.totals[imitationDecisionType] += 1;
+            if (chosen === refCandidate) {
+              imitation.matches[imitationDecisionType] += 1;
+            }
           }
         }
       }
@@ -1096,14 +701,8 @@ function playSingleRound(
     endState: state,
     imitation,
     goOpportunityCount,
+    behaviorDecisions,
   };
-}
-
-function quantile(values, q) {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * q)));
-  return sorted[idx];
 }
 
 function cloneDecisionCounters(src) {
@@ -1158,10 +757,6 @@ function main() {
   if (String(opts.opponentPolicy || "").trim()) {
     resolveOpponentSpec(opts.opponentPolicy, opts.opponentGenomePath);
   }
-  const controlPlayMatchModelSpec =
-    opts.controlPolicyMode === "hybrid_option_only"
-      ? resolveControlPlayMatchModel(opts.controlPlayMatchModel)
-      : null;
   const controlGoStopIqnSpec = String(opts.controlGoStopIqnModel || "").trim()
     ? resolveGoStopIqnRuntime(opts.controlGoStopIqnModel, "control go/stop IQN runtime")
     : null;
@@ -1175,6 +770,9 @@ function main() {
   const earlyStopWinRateCutoffs = (opts.earlyStopWinRateCutoffs || []).filter(
     (item) => item.games <= requestedGames
   );
+  const earlyStopGoTakeRateCutoffs = (opts.earlyStopGoTakeRateCutoffs || []).filter(
+    (item) => item.games <= requestedGames
+  );
   const controlActor = "ai";
   const opponentActor = "human";
   let wins = 0;
@@ -1184,6 +782,10 @@ function main() {
   const bankrupt = {
     my_bankrupt_count: 0,
     my_inflicted_bankrupt_count: 0,
+  };
+  const seatStats = {
+    first: { games: 0, wins: 0, losses: 0, draws: 0, goldSum: 0 },
+    second: { games: 0, wins: 0, losses: 0, draws: 0, goldSum: 0 },
   };
   let goOpportunityCount = 0;
   let goOpportunityGames = 0;
@@ -1204,105 +806,165 @@ function main() {
   let completedGames = 0;
   let earlyStop = null;
   let nextEarlyStopCutoffIdx = 0;
+  let nextEarlyStopGoTakeRateCutoffIdx = 0;
+  const kiboWriter = opts.kiboOut ? fs.createWriteStream(opts.kiboOut, { encoding: "utf8" }) : null;
 
-  for (let gi = 0; gi < requestedGames; gi += 1) {
-    const scheduleItem = evaluationSchedule[gi];
-    const firstTurnKey = String(scheduleItem?.firstTurnKey || "");
-    const opponentPolicyForGame = String(scheduleItem?.opponentPolicy || "");
-    if (!opponentPolicyForGame) {
-      throw new Error("resolved empty opponent policy");
-    }
-    opponentPolicyCounts[opponentPolicyForGame] = Number(opponentPolicyCounts[opponentPolicyForGame] || 0) + 1;
-    firstTurnCounts[firstTurnKey] += 1;
-    const seed = `${opts.seed}|g=${gi}|first=${firstTurnKey}|sr=${seriesSession.roundsPlayed}`;
-    const roundStart = opts.continuousSeries
-      ? seriesSession.previousEndState
-        ? continueRound(seriesSession.previousEndState, seed, firstTurnKey)
-        : startRound(seed, firstTurnKey)
-      : startRound(seed, firstTurnKey);
-    const beforeGoldDiff = controlGoldDiff(roundStart, controlActor);
-    const gameResult = playSingleRound(
-      roundStart,
-      controlModel,
-      seed,
-      controlActor,
-      opponentPolicyForGame,
-      maxSteps,
-      opts.opponentGenomePath,
-      {
-        controlPolicyMode: opts.controlPolicyMode,
-        controlHeuristicPolicy: opts.controlHeuristicPolicy,
-        controlPlayMatchModel: controlPlayMatchModelSpec?.model || null,
-        controlGoStopIqnModel: controlGoStopIqnSpec?.model || null,
+  try {
+    for (let gi = 0; gi < requestedGames; gi += 1) {
+      const scheduleItem = evaluationSchedule[gi];
+      const firstTurnKey = String(scheduleItem?.firstTurnKey || "");
+      const opponentPolicyForGame = String(scheduleItem?.opponentPolicy || "");
+      if (!opponentPolicyForGame) {
+        throw new Error("resolved empty opponent policy");
       }
-    );
-    const endState = gameResult?.endState || gameResult;
-    const controlGoOpportunityCount = Math.max(0, Number(gameResult?.goOpportunityCount || 0));
-    const afterGoldDiff = controlGoldDiff(endState, controlActor);
-    const goldDelta = afterGoldDiff - beforeGoldDiff;
-    goldDeltas.push(goldDelta);
-    const controlGold = Number(endState?.players?.[controlActor]?.gold || 0);
-    const opponentGold = Number(endState?.players?.[opponentActor]?.gold || 0);
-    const controlBankrupt = controlGold <= 0;
-    const opponentBankrupt = opponentGold <= 0;
-    const controlGoCount = Math.max(0, Number(endState?.players?.[controlActor]?.goCount || 0));
-    goOpportunityCount += controlGoOpportunityCount;
-    if (controlGoOpportunityCount > 0) {
-      goOpportunityGames += 1;
-    }
-    goCount += controlGoCount;
-    if (controlGoCount > 0) {
-      goGames += 1;
-    }
-    if (opponentBankrupt) {
-      bankrupt.my_inflicted_bankrupt_count += 1;
-    }
-    if (controlBankrupt) {
-      bankrupt.my_bankrupt_count += 1;
-    }
+      opponentPolicyCounts[opponentPolicyForGame] = Number(opponentPolicyCounts[opponentPolicyForGame] || 0) + 1;
+      firstTurnCounts[firstTurnKey] += 1;
+      const seed = `${opts.seed}|g=${gi}|first=${firstTurnKey}|sr=${seriesSession.roundsPlayed}`;
+      const roundStart = opts.continuousSeries
+        ? seriesSession.previousEndState
+          ? continueRound(seriesSession.previousEndState, seed, firstTurnKey)
+          : startRound(seed, firstTurnKey)
+        : startRound(seed, firstTurnKey);
+      const beforeGoldDiff = controlGoldDiff(roundStart, controlActor);
+      const gameResult = runEvalRound(
+        roundStart,
+        controlModel,
+        seed,
+        controlActor,
+        opponentPolicyForGame,
+        maxSteps,
+        opts.opponentGenomePath,
+        {
+          controlPolicyMode: opts.controlPolicyMode,
+          controlGoStopIqnModel: controlGoStopIqnSpec?.model || null,
+        }
+      );
+      const endState = gameResult?.endState || gameResult;
+      const controlGoOpportunityCount = Math.max(0, Number(gameResult?.goOpportunityCount || 0));
+      const afterGoldDiff = controlGoldDiff(endState, controlActor);
+      const goldDelta = afterGoldDiff - beforeGoldDiff;
+      goldDeltas.push(goldDelta);
+      const seatKey = firstTurnKey === controlActor ? "first" : "second";
+      const seatRecord = seatStats[seatKey];
+      seatRecord.games += 1;
+      seatRecord.goldSum += goldDelta;
+      const controlGold = Number(endState?.players?.[controlActor]?.gold || 0);
+      const opponentGold = Number(endState?.players?.[opponentActor]?.gold || 0);
+      const controlBankrupt = controlGold <= 0;
+      const opponentBankrupt = opponentGold <= 0;
+      const controlGoCount = Math.max(0, Number(endState?.players?.[controlActor]?.goCount || 0));
+      goOpportunityCount += controlGoOpportunityCount;
+      if (controlGoOpportunityCount > 0) {
+        goOpportunityGames += 1;
+      }
+      goCount += controlGoCount;
+      if (controlGoCount > 0) {
+        goGames += 1;
+      }
+      if (opponentBankrupt) {
+        bankrupt.my_inflicted_bankrupt_count += 1;
+      }
+      if (controlBankrupt) {
+        bankrupt.my_bankrupt_count += 1;
+      }
 
-    if (opts.continuousSeries) {
-      seriesSession.previousEndState = endState;
-    }
-    seriesSession.roundsPlayed += 1;
-    completedGames = gi + 1;
+      if (kiboWriter) {
+        kiboWriter.write(
+          `${JSON.stringify({
+            game_index: gi,
+            seed,
+            first_turn: firstTurnKey,
+            control_actor: controlActor,
+            opponent_actor: opponentActor,
+            opponent_policy: opponentPolicyForGame,
+            winner: endState?.result?.winner || "",
+            gold_delta: goldDelta,
+            control_go_count: controlGoCount,
+            result: endState?.result || null,
+            kibo_detail: endState?.kiboDetail || "lean",
+            kibo: Array.isArray(endState?.kibo) ? endState.kibo : [],
+          })}\n`
+        );
+      }
 
-    const winner = endState?.result?.winner || "unknown";
-    if (winner === controlActor) {
-      wins += 1;
-    }
-    else if (winner === opponentActor) losses += 1;
-    else draws += 1;
-    if (controlGoCount > 0 && winner !== controlActor) {
-      goFailCount += 1;
-    }
+      if (opts.continuousSeries) {
+        seriesSession.previousEndState = endState;
+      }
+      seriesSession.roundsPlayed += 1;
+      completedGames = gi + 1;
 
-    const gt = gameResult?.imitation?.totals || {};
-    const gm = gameResult?.imitation?.matches || {};
-    for (const k of ["play", "match", "option"]) {
-      simImitationTotals[k] += Number(gt[k] || 0);
-      simImitationMatches[k] += Number(gm[k] || 0);
-    }
+      const winner = endState?.result?.winner || "unknown";
+      if (winner === controlActor) {
+        wins += 1;
+        seatRecord.wins += 1;
+      }
+      else if (winner === opponentActor) {
+        losses += 1;
+        seatRecord.losses += 1;
+      }
+      else {
+        draws += 1;
+        seatRecord.draws += 1;
+      }
+      if (controlGoCount > 0 && winner !== controlActor) {
+        goFailCount += 1;
+      }
 
-    while (nextEarlyStopCutoffIdx < earlyStopWinRateCutoffs.length) {
-      const cutoff = earlyStopWinRateCutoffs[nextEarlyStopCutoffIdx];
-      if (completedGames < cutoff.games) {
+      const gt = gameResult?.imitation?.totals || {};
+      const gm = gameResult?.imitation?.matches || {};
+      for (const k of ["play", "match", "option"]) {
+        simImitationTotals[k] += Number(gt[k] || 0);
+        simImitationMatches[k] += Number(gm[k] || 0);
+      }
+
+      while (nextEarlyStopCutoffIdx < earlyStopWinRateCutoffs.length) {
+        const cutoff = earlyStopWinRateCutoffs[nextEarlyStopCutoffIdx];
+        if (completedGames < cutoff.games) {
+          break;
+        }
+        const currentWinRate = wins / completedGames;
+        if (currentWinRate <= cutoff.maxWinRate) {
+          earlyStop = {
+            reason: "win_rate_cutoff",
+            cutoffGames: cutoff.games,
+            maxWinRate: cutoff.maxWinRate,
+            observedWinRate: currentWinRate,
+          };
+          break;
+        }
+        nextEarlyStopCutoffIdx += 1;
+      }
+      while (nextEarlyStopGoTakeRateCutoffIdx < earlyStopGoTakeRateCutoffs.length) {
+        const cutoff = earlyStopGoTakeRateCutoffs[nextEarlyStopGoTakeRateCutoffIdx];
+        if (completedGames < cutoff.games) {
+          break;
+        }
+        if (goOpportunityCount >= cutoff.minGoOpportunityCount) {
+          const currentGoTakeRate = goOpportunityCount > 0 ? (goCount / goOpportunityCount) : 0;
+          const tooLow = cutoff.minGoTakeRate !== null && currentGoTakeRate <= cutoff.minGoTakeRate;
+          const tooHigh = cutoff.maxGoTakeRate !== null && currentGoTakeRate >= cutoff.maxGoTakeRate;
+          if (tooLow || tooHigh) {
+            earlyStop = {
+              reason: "go_take_rate_cutoff",
+              cutoffGames: cutoff.games,
+              minGoOpportunityCount: cutoff.minGoOpportunityCount,
+              minGoTakeRate: cutoff.minGoTakeRate,
+              maxGoTakeRate: cutoff.maxGoTakeRate,
+              observedGoTakeRate: currentGoTakeRate,
+              observedGoOpportunityCount: goOpportunityCount,
+            };
+            break;
+          }
+        }
+        nextEarlyStopGoTakeRateCutoffIdx += 1;
+      }
+      if (earlyStop) {
         break;
       }
-      const currentWinRate = wins / completedGames;
-      if (currentWinRate <= cutoff.maxWinRate) {
-        earlyStop = {
-          reason: "win_rate_cutoff",
-          cutoffGames: cutoff.games,
-          maxWinRate: cutoff.maxWinRate,
-          observedWinRate: currentWinRate,
-        };
-        break;
-      }
-      nextEarlyStopCutoffIdx += 1;
     }
-    if (earlyStop) {
-      break;
+  } finally {
+    if (kiboWriter) {
+      kiboWriter.end();
     }
   }
 
@@ -1315,6 +977,16 @@ function main() {
   const winRate = wins / games;
   const lossRate = losses / games;
   const drawRate = draws / games;
+  const firstGames = Math.max(0, Number(seatStats.first.games || 0));
+  const secondGames = Math.max(0, Number(seatStats.second.games || 0));
+  const firstWinRate = firstGames > 0 ? seatStats.first.wins / firstGames : 0;
+  const firstLossRate = firstGames > 0 ? seatStats.first.losses / firstGames : 0;
+  const firstDrawRate = firstGames > 0 ? seatStats.first.draws / firstGames : 0;
+  const secondWinRate = secondGames > 0 ? seatStats.second.wins / secondGames : 0;
+  const secondLossRate = secondGames > 0 ? seatStats.second.losses / secondGames : 0;
+  const secondDrawRate = secondGames > 0 ? seatStats.second.draws / secondGames : 0;
+  const firstMeanGoldDelta = firstGames > 0 ? seatStats.first.goldSum / firstGames : 0;
+  const secondMeanGoldDelta = secondGames > 0 ? seatStats.second.goldSum / secondGames : 0;
   const goOpportunityRate = goOpportunityGames / games;
   const goRate = goGames / games;
   const goFailRate = goGames > 0 ? goFailCount / goGames : 0;
@@ -1328,9 +1000,13 @@ function main() {
   const fitnessGoldWeight = weightGoldRaw / weightRawSum;
   const fitnessWinNeutralRate = Number(opts.fitnessWinNeutralRate);
 
-  const goldNorm = Math.tanh((meanGoldDelta - fitnessGoldNeutralDelta) / fitnessGoldScale);
+  const weightedWinRate = (0.48 * firstWinRate) + (0.52 * secondWinRate);
+  const weightedLossRate = (0.48 * firstLossRate) + (0.52 * secondLossRate);
+  const weightedDrawRate = (0.48 * firstDrawRate) + (0.52 * secondDrawRate);
+  const weightedMeanGoldDelta = (0.48 * firstMeanGoldDelta) + (0.52 * secondMeanGoldDelta);
+  const goldNorm = Math.tanh((weightedMeanGoldDelta - fitnessGoldNeutralDelta) / fitnessGoldScale);
   const expectedResultRaw =
-    clamp01(winRate) + (0.5 * clamp01(drawRate)) - clamp01(lossRate);
+    clamp01(weightedWinRate) + (0.5 * clamp01(weightedDrawRate)) - clamp01(weightedLossRate);
   const expectedResult = Math.max(-1.0, Math.min(1.0, expectedResultRaw));
   const neutralExpectedResult = (2.0 * fitnessWinNeutralRate) - 1.0;
   let resultNorm = 0.0;
@@ -1369,36 +1045,28 @@ function main() {
       games: item.games,
       max_win_rate: item.maxWinRate,
     })),
+    early_stop_go_take_rate_cutoffs: earlyStopGoTakeRateCutoffs.map((item) => ({
+      games: item.games,
+      min_go_opportunity_count: item.minGoOpportunityCount,
+      min_go_take_rate: item.minGoTakeRate,
+      max_go_take_rate: item.maxGoTakeRate,
+    })),
     early_stop_triggered: !!earlyStop,
     early_stop_reason: earlyStop?.reason || null,
     early_stop_cutoff_games: earlyStop?.cutoffGames ?? null,
     early_stop_cutoff_max_win_rate: earlyStop?.maxWinRate ?? null,
     early_stop_observed_win_rate: earlyStop?.observedWinRate ?? null,
+    early_stop_cutoff_min_go_opportunity_count: earlyStop?.minGoOpportunityCount ?? null,
+    early_stop_cutoff_min_go_take_rate: earlyStop?.minGoTakeRate ?? null,
+    early_stop_cutoff_max_go_take_rate: earlyStop?.maxGoTakeRate ?? null,
+    early_stop_observed_go_take_rate: earlyStop?.observedGoTakeRate ?? null,
+    early_stop_observed_go_opportunity_count: earlyStop?.observedGoOpportunityCount ?? null,
     control_policy_mode: opts.controlPolicyMode,
-    control_heuristic_policy:
-      opts.controlPolicyMode === "hybrid_play_match_only" || opts.controlPolicyMode === "hybrid_go_stop_only"
-        ? opts.controlHeuristicPolicy
-        : null,
-    control_play_match_model:
-      opts.controlPolicyMode === "hybrid_option_only"
-        ? String(controlPlayMatchModelSpec?.label || opts.controlPlayMatchModel || "")
-        : null,
     control_go_stop_iqn_model: controlGoStopIqnSpec?.modelPath || null,
     opponent_eval_tuning: {
       fast_path: false,
       imitation_reference_enabled: true,
-      imitation_decision_scope:
-        opts.controlPolicyMode === "hybrid_play_match_only"
-          ? controlGoStopIqnSpec
-            ? "model_owned_play_match_plus_go_stop_iqn"
-            : "model_owned_play_match_only"
-          : opts.controlPolicyMode === "hybrid_go_stop_only"
-            ? controlGoStopIqnSpec
-              ? "model_owned_non_go_stop_plus_go_stop_iqn"
-              : "model_owned_non_go_stop_only"
-            : opts.controlPolicyMode === "hybrid_option_only"
-              ? "model_owned_option_only"
-            : "all_control_decisions",
+      imitation_decision_scope: "all_control_decisions",
       opponent_heuristic_params: null,
     },
     opponent_genome: String(opts.opponentGenomePath || "") || null,
@@ -1418,6 +1086,36 @@ function main() {
     win_rate: winRate,
     loss_rate: lossRate,
     draw_rate: drawRate,
+    seat_breakdown: {
+      first: {
+        games: firstGames,
+        wins: seatStats.first.wins,
+        losses: seatStats.first.losses,
+        draws: seatStats.first.draws,
+        win_rate: firstWinRate,
+        loss_rate: firstLossRate,
+        draw_rate: firstDrawRate,
+        mean_gold_delta: firstMeanGoldDelta,
+      },
+      second: {
+        games: secondGames,
+        wins: seatStats.second.wins,
+        losses: seatStats.second.losses,
+        draws: seatStats.second.draws,
+        win_rate: secondWinRate,
+        loss_rate: secondLossRate,
+        draw_rate: secondDrawRate,
+        mean_gold_delta: secondMeanGoldDelta,
+      },
+      weighted: {
+        win_rate: weightedWinRate,
+        loss_rate: weightedLossRate,
+        draw_rate: weightedDrawRate,
+        mean_gold_delta: weightedMeanGoldDelta,
+        win_weights: { first: 0.48, second: 0.52 },
+        gold_weights: { first: 0.45, second: 0.55 },
+      },
+    },
     go_opportunity_count: goOpportunityCount,
     go_opportunity_games: goOpportunityGames,
     go_opportunity_rate: goOpportunityRate,
@@ -1444,6 +1142,9 @@ function main() {
     imitation_match_total: imitationTotals.match,
     imitation_match_matches: imitationMatches.match,
     imitation_match_ratio: imitationMatchRatio,
+    imitation_go_stop_total: imitationTotals.option,
+    imitation_go_stop_matches: imitationMatches.option,
+    imitation_go_stop_ratio: imitationOptionRatio,
     imitation_option_total: imitationTotals.option,
     imitation_option_matches: imitationMatches.option,
     imitation_option_ratio: imitationOptionRatio,
@@ -1453,11 +1154,15 @@ function main() {
     imitation_weighted_score: imitationWeightedScore,
     fitness_components: {
       gold_norm: goldNorm,
+      weighted_gold_delta: weightedMeanGoldDelta,
       gold_neutral_delta: fitnessGoldNeutralDelta,
       win_norm: resultNorm,
       result_norm: resultNorm,
       result_expected: expectedResult,
       result_neutral: neutralExpectedResult,
+      weighted_win_rate: weightedWinRate,
+      weighted_draw_rate: weightedDrawRate,
+      weighted_loss_rate: weightedLossRate,
       win_neutral_rate: fitnessWinNeutralRate,
       base_fitness: baseFitness,
       bankrupt_rates: {

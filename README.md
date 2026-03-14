@@ -47,7 +47,7 @@ pip install torch neat-python optuna
 
 ## Troubleshooting
 - `python not found` or `python executable not found`: verify venv path, or pass `-Python .\.venv\Scripts\python` to scripts.
-- `phase1 checkpoint not found` in phase2/phase3: run previous phase first with same seed, or provide resume checkpoint.
+- `phase1 checkpoint not found`: run the previous phase first with the same seed, or provide a resume checkpoint.
 - `opponent-policy=genome requires opponent_genome path`: set runtime `opponent_genome` or pass CLI override.
 - `feature vector size mismatch`: sync NEAT input config with worker feature size (`scripts/configs/neat_feedforward*.ini`).
 

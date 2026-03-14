@@ -6,27 +6,11 @@
 
 기준 파일:
 - `scripts/configs/runtime_phase1.json`
-- `scripts/configs/runtime_phase2.json`
-- `scripts/configs/runtime_phase3.json`
 
 현재 값:
-- Phase 1: `generations = 30`, `games_per_genome = 200`
-- Phase 1: `opponent_policy_mix = [hybrid_play(phase1_seed208,H-CL) 50, hybrid_play(phase1_seed204,H-CL) 50]`
-- Phase 1: `fitness_win_weight = 0.99`, `fitness_gold_weight = 0.01`, `fitness_win_neutral_rate = 0.50`
-- Phase 1: `objective_mode = scalar_v2`
-- Phase 2: `opponent_policy_mix = [hybrid_play(phase1_seed208,H-CL) 50, hybrid_play(phase1_seed204,H-CL) 50]`
-- Phase 2: `generations = 50`, `games_per_genome = 200`
-- Phase 2: `fitness_win_weight = 0.70`, `fitness_gold_weight = 0.30`, `fitness_win_neutral_rate = 0.50`
-- Phase 2: `objective_mode = pareto_v1`, `pareto_crowding_weight = 0.05`, `pareto_scalar_tiebreak_weight = 0.005`
-- Phase 2: `control_policy_mode = hybrid_option_only`, `control_play_match_model = phase1_seed208`, `continue_from_previous_phase = false`
-- Phase 3: `opponent_policy_mix = [hybrid_play(phase2_seed203,H-CL) 50, H-GPT-PlayMatch+CL 50]`
-- Phase 3: `fitness_win_weight = 0.7`, `fitness_gold_weight = 0.3`, `fitness_win_neutral_rate = 0.50`
-
-새 분리 계열:
-- `pareto52` 프로필은 `scripts/configs/neat_feedforward_golddanger52.ini`와 `runtime_pareto52_phase*.json`을 쓴다.
-- active input dim은 현재 `46`이다. `pareto52`는 legacy profile 이름만 유지한다.
-- 출력 폴더는 `logs/NEAT/neat_pareto52_phase{N}_seed{S}` 형태다.
-- bootstrap / duel 토큰은 `pareto52_phase1_seed601` 같은 형식을 쓴다.
+- `generations = 30`, `games_per_genome = 200`
+- `opponent_policy_mix = [hybrid_play(phase1_seed208,H-CL) 50, hybrid_play(phase1_seed204,H-CL) 50]`
+- `fitness_win_weight = 0.99`, `fitness_gold_weight = 0.01`, `fitness_win_neutral_rate = 0.50`
 
 ## 2. Fitness 식
 
@@ -82,28 +66,7 @@ fitness_8:2 - fitness_6:4 = 0.2 * (resultNorm - goldNorm)
 - 따라서 `7:3`은 승률이 비슷한 후보들 사이에서 골드 많이 먹는 개체를 더 강하게 밀어준다.
 - 같은 방향으로 `6:4`는 `7:3`보다도 골드형 개체를 더 강하게 밀어준다.
 
-## 3A. Pareto v1 메모
-
-- `objective_mode = pareto_v1`이면 selection 직전에 scalar fitness를 그대로 쓰지 않는다.
-- objective vector:
-  - `win_rate`
-  - `gold_norm`
-- `front rank + crowding + tiny scalar tie-break`를 surrogate fitness로 바꿔 breeder selection에 넣는다.
-- `eval_metrics.ndjson`에는 `fitness_scalar_v2`, `pareto_rank`, `pareto_crowding`, `fitness_surrogate`가 같이 남는다.
-- `generation_metrics.ndjson`에는 `best_scalar_fitness`, `best_pareto_rank`, `pareto_front_count`가 추가된다.
-
-## 4. 정책 조합 메모
-
-- 기본 `H-GPT`는 `go/stop`도 GPT가 한다.
-- `H-GPT-AllButGo+CL`은 `go/stop`만 CL을 쓰고, 나머지는 GPT를 쓴다.
-- `H-GPT-PlayMatch+CL`은 play/match만 GPT를 쓰고, 나머지는 CL을 쓴다.
-- `H-GPT-PlayMatchGo+CL`은 play/match/go만 GPT를 쓰고, 나머지는 CL을 쓴다.
-
-관련 파일:
-- `src/ai/heuristicPolicyEngine.js`
-- `src/ai/policies.js`
-
-## 5. 순수 모델 액션 공간 메모
+## 4. 순수 모델 액션 공간 메모
 
 현재는 순수 NEAT 모델도 실제로 흔들기와 폭탄을 사용할 수 있다.
 
@@ -120,7 +83,7 @@ fitness_8:2 - fitness_6:4 = 0.2 * (resultNorm - goldNorm)
 
 즉 예전의 `Shake B = 0`, `Bomb B = 0`은 전략 문제가 아니라 액션 공간 누락 문제였다.
 
-## 6. 최근 4개 휴리스틱 풀리그 메모
+## 5. 최근 4개 휴리스틱 풀리그 메모
 
 결과 파일:
 - `logs/full_league/full_league_20260308_233716_top4_gpt_allbutgo_cl_20260308/full_league_summary.json`
@@ -128,55 +91,58 @@ fitness_8:2 - fitness_6:4 = 0.2 * (resultNorm - goldNorm)
 정책:
 - `H-CL`
 - `H-J2`
-- `H-GPT-AllButGo+CL`
+- `H-GPT`
 - `H-NEXg`
 
 순위:
 - `H-CL`: `1582-1403-15`, 승률 `52.7%`, 평균 골드 `+342`
 - `H-NEXg`: `1475-1504-21`, 승률 `49.2%`, 평균 골드 `-225`
 - `H-J2`: `1473-1512-15`, 승률 `49.1%`, 평균 골드 `-358`
-- `H-GPT-AllButGo+CL`: `1437-1548-15`, 승률 `47.9%`, 평균 골드 `+241`
+- `H-GPT`: 실운영 비교 대상에서 제외된 구형 혼합 정책 대신 순수 GPT 계열만 유지
 
-`H-GPT-AllButGo+CL` 평균 골드 `+241`의 출처:
-- vs `H-CL`: `+684.8`
-- vs `H-NEXg`: `+196.0`
-- vs `H-J2`: `-156.6`
-
-즉 이 정책은 종합 승률은 낮지만, `H-CL` 상대로는 골드 기대값이 높게 나오는 편이다.
-
-## 7. 해석 메모
+## 6. 해석 메모
 
 - `continuous-series = 1`이면 승률과 평균 골드가 어긋날 수 있다.
 - `transition_ready = false`인 winner는 다음 phase 기준 모델로 보기 애매할 수 있다.
 - phase 상대 선택은 "누구를 더 자주 이기느냐"와 "누구 상대로 큰 골드를 먹느냐"를 구분해서 봐야 한다.
 
-## 8. Seed204 학습 모드 메모
+## 7. Control 평가 메모
 
-`play/match`만 모델이 하고, 나머지는 `H-CL`이 강제로 처리하는 학습 모드를 지원한다.
+- 현재 `neat_eval_worker.mjs`의 control actor는 `pure_model`만 사용한다.
+- control 전용 hybrid mode(`hybrid_play_match_only`, `hybrid_go_stop_only`, `hybrid_option_only`)는 제거됐다.
+- 상대 정책 spec은 `heuristic`, `model`, `hybrid_play(model,heuristic)` 3종만 지원한다.
 
-runtime 키:
-- `control_policy_mode = "hybrid_play_match_only"`
-- `control_policy_mode = "hybrid_go_stop_only"`
-- `control_policy_mode = "hybrid_option_only"`
-- `control_heuristic_policy = "H-CL"`
-- `control_play_match_model = "phase1_seed208"`
+## 8. 공식 문서 기준 개조 메모
 
-의미:
-- 모델이 직접 맡는 것: `play`, `select-match`
-- `H-CL`이 맡는 것: `go/stop`, 흔들기/폭탄, 총통, 국진, 기타 phase
-- imitation 집계도 모델이 실제로 움직인 `play/match`만 센다.
+공식 문서 링크:
+- `Customizing Behavior`
+- `Genome Interface`
+- `Reproduction Interface`
+- `Configuration file description`
+- `FAQ`
+- `Module summaries`
 
-`hybrid_go_stop_only` 의미:
-- 모델이 직접 맡는 것: `play`, `select-match`, 흔들기/폭탄, 총통, 국진 등 `go/stop`을 제외한 나머지
-- `H-CL`이 맡는 것: `go/stop`만
-- imitation 집계도 모델이 실제로 움직인 `non-go-stop` 결정만 센다.
+정리:
+- `Genome / Reproduction / SpeciesSet / Stagnation` 교체는 공식 확장 포인트다.
+- 맞고용 NEAT 개조는 문서 기준으로도 정식 경로다.
+- 다만 진짜 `2축 selection`은 결국 `Reproduction`과 필요 시 `Population.run`까지 손댈 가능성이 크다.
 
-`hybrid_option_only` 의미:
-- 고정 모델이 맡는 것: `play`, `select-match`
-- 현재 학습 모델이 맡는 것: `go/stop`, 흔들기/폭탄, 총통, 국진 등 `option` 결정 전부
-- `control_play_match_model`에 고정 모델 토큰을 넣는다. 예: `phase1_seed208`
-- imitation 집계도 현재 학습 모델이 실제로 움직인 `option` 결정만 센다.
+현재 repo 반영 상태:
+- `stock neat-python 2.0` 기반 유지
+- genome-level threshold gene 4개 추가
+  - `go_stop_threshold`
+  - `shaking_threshold`
+  - `president_threshold`
+  - `gukjin_threshold`
+- output head는 `10개`
+  - `play`, `match`, `go`, `stop`, `shaking_yes`, `shaking_no`, `president_stop`, `president_hold`, `gukjin_five`, `gukjin_junk`
 
-주의:
-- 기존 `hybrid_play(model,H-CL)` 토큰은 실전/듀얼용 hybrid이고, 이 학습 모드는 eval worker의 control actor 평가 경로를 바꾸는 별도 스위치다.
-- 메인 학습 런처 [phase_run.ps1](C:/k_flower_card/scripts/phase_run.ps1)에 `-ControlPolicyMode hybrid_play_match_only -ControlHeuristicPolicy H-CL`를 넘겨서 켠다.
+현재 설계 해석:
+- 1차는 `CustomGenome`만으로 decision boundary를 넣는다.
+- 2차부터 `CustomReproduction`이 핵심이다.
+- `behavior-aware speciation`이 필요하면 `SpeciesSet`까지 간다.
+
+현재 `scripts/configs/neat_feedforward.ini` 프로필은 `중간형`으로 본다.
+- output `10개`와 threshold gene `4개`를 감안해 구조 mutation은 약간 보수적으로 낮췄다.
+- 대신 `pop_size`, `compatibility_threshold`, `max_stagnation`, `min_species_size`는 조금 올려서 장기 학습 안정성을 확보한다.
+- 목적은 `과도한 판 흔들기`가 아니라 `threshold gene이 천천히 누적 적응`되게 하는 것이다.

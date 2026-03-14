@@ -113,6 +113,47 @@ function Get-MatchupKey {
   return "$b|$a"
 }
 
+function Get-PropertyValue {
+  param(
+    [Parameter(Mandatory = $false)]$Object,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+  if ($null -eq $Object) { return $null }
+  if ($Object.PSObject.Properties.Name -contains $Name) {
+    return $Object.$Name
+  }
+  return $null
+}
+
+function Get-NestedPropertyValue {
+  param(
+    [Parameter(Mandatory = $false)]$Object,
+    [Parameter(Mandatory = $true)][string[]]$Path
+  )
+  $current = $Object
+  foreach ($segment in $Path) {
+    $current = Get-PropertyValue -Object $current -Name $segment
+    if ($null -eq $current) { return $null }
+  }
+  return $current
+}
+
+function Get-OptionalInt {
+  param(
+    [Parameter(Mandatory = $false)]$Value,
+    [Parameter(Mandatory = $false)][int]$DefaultValue = 0
+  )
+  try { return [int]$Value } catch { return $DefaultValue }
+}
+
+function Get-OptionalDouble {
+  param(
+    [Parameter(Mandatory = $false)]$Value,
+    [Parameter(Mandatory = $false)][double]$DefaultValue = 0.0
+  )
+  try { return [double]$Value } catch { return $DefaultValue }
+}
+
 function Convert-DuelResultToMatchSummary {
   param(
     [psobject]$ResultObject,
@@ -121,15 +162,17 @@ function Convert-DuelResultToMatchSummary {
 
   if ($null -eq $ResultObject) { return $null }
 
-  $humanKey = if ($null -ne $ResultObject.human -and -not [string]::IsNullOrWhiteSpace([string]$ResultObject.human)) {
-    [string]$ResultObject.human
+  $humanLabel = Get-PropertyValue -Object $ResultObject -Name "human"
+  $aiLabel = Get-PropertyValue -Object $ResultObject -Name "ai"
+  $humanKey = if ($null -ne $humanLabel -and -not [string]::IsNullOrWhiteSpace([string]$humanLabel)) {
+    [string]$humanLabel
   } else {
-    [string]$ResultObject.policy_a
+    [string](Get-PropertyValue -Object $ResultObject -Name "policy_a")
   }
-  $aiKey = if ($null -ne $ResultObject.ai -and -not [string]::IsNullOrWhiteSpace([string]$ResultObject.ai)) {
-    [string]$ResultObject.ai
+  $aiKey = if ($null -ne $aiLabel -and -not [string]::IsNullOrWhiteSpace([string]$aiLabel)) {
+    [string]$aiLabel
   } else {
-    [string]$ResultObject.policy_b
+    [string](Get-PropertyValue -Object $ResultObject -Name "policy_b")
   }
 
   $humanKey = ConvertTo-PolicyKey $humanKey
@@ -142,23 +185,23 @@ function Convert-DuelResultToMatchSummary {
   return [PSCustomObject]@{
     policy_a          = $humanKey
     policy_b          = $aiKey
-    games             = [int]$ResultObject.games
-    wins_a            = [int]$ResultObject.wins_a
-    wins_b            = [int]$ResultObject.wins_b
-    draws             = [int]$ResultObject.draws
-    bankrupt_a        = [int]$ResultObject.bankrupt.a_bankrupt_count
-    bankrupt_b        = [int]$ResultObject.bankrupt.b_bankrupt_count
-    go_count_a        = [int]$ResultObject.go_count_a
-    go_count_b        = [int]$ResultObject.go_count_b
-    go_games_a        = [int]$ResultObject.go_games_a
-    go_games_b        = [int]$ResultObject.go_games_b
-    go_fail_count_a   = [int]$ResultObject.go_fail_count_a
-    go_fail_count_b   = [int]$ResultObject.go_fail_count_b
-    go_opp_count_a    = [int]$ResultObject.go_opportunity_count_a
-    go_opp_count_b    = [int]$ResultObject.go_opportunity_count_b
-    go_opp_games_a    = [int]$ResultObject.go_opportunity_games_a
-    go_opp_games_b    = [int]$ResultObject.go_opportunity_games_b
-    mean_gold_delta_a = [double]$ResultObject.mean_gold_delta_a
+    games             = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "games")
+    wins_a            = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "wins_a")
+    wins_b            = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "wins_b")
+    draws             = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "draws")
+    bankrupt_a        = Get-OptionalInt -Value (Get-NestedPropertyValue -Object $ResultObject -Path @("bankrupt", "a_bankrupt_count"))
+    bankrupt_b        = Get-OptionalInt -Value (Get-NestedPropertyValue -Object $ResultObject -Path @("bankrupt", "b_bankrupt_count"))
+    go_count_a        = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "go_count_a")
+    go_count_b        = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "go_count_b")
+    go_games_a        = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "go_games_a")
+    go_games_b        = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "go_games_b")
+    go_fail_count_a   = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "go_fail_count_a")
+    go_fail_count_b   = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "go_fail_count_b")
+    go_opp_count_a    = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "go_opportunity_count_a")
+    go_opp_count_b    = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "go_opportunity_count_b")
+    go_opp_games_a    = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "go_opportunity_games_a")
+    go_opp_games_b    = Get-OptionalInt -Value (Get-PropertyValue -Object $ResultObject -Name "go_opportunity_games_b")
+    mean_gold_delta_a = Get-OptionalDouble -Value (Get-PropertyValue -Object $ResultObject -Name "mean_gold_delta_a")
     file              = $resolvedFile
   }
 }

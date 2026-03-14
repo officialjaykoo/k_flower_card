@@ -1,7 +1,7 @@
 ﻿param(
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed,
-  [Parameter(Mandatory = $false)][ValidateSet("classic", "pareto52")][string]$LineageProfile = "classic"
+  [Parameter(Mandatory = $false)][ValidateSet("classic")][string]$LineageProfile = "classic"
 )
 
 Set-StrictMode -Version Latest
@@ -31,15 +31,44 @@ function Get-OptionalDouble {
   }
 }
 
+function Get-PropertyValue {
+  param(
+    [Parameter(Mandatory = $false)]$Object,
+    [Parameter(Mandatory = $true)][string]$Name
+  )
+  if ($null -eq $Object) {
+    return $null
+  }
+  if ($Object.PSObject.Properties.Name -contains $Name) {
+    return $Object.$Name
+  }
+  return $null
+}
+
+function Get-NestedPropertyValue {
+  param(
+    [Parameter(Mandatory = $false)]$Object,
+    [Parameter(Mandatory = $true)][string[]]$Path
+  )
+  $current = $Object
+  foreach ($segment in $Path) {
+    $current = Get-PropertyValue -Object $current -Name $segment
+    if ($null -eq $current) {
+      return $null
+    }
+  }
+  return $current
+}
+
 function Get-RequiredDouble {
   param(
     [Parameter(Mandatory = $true)]$Object,
     [Parameter(Mandatory = $true)][string]$Key
   )
-  if (-not ($Object.PSObject.Properties.Name -contains $Key)) {
+  if (-not ((Get-PropertyValue -Object $Object -Name $Key) -ne $null -or $Object.PSObject.Properties.Name -contains $Key)) {
     throw "runtime missing required key: $Key"
   }
-  $v = Get-OptionalDouble -Value $Object.$Key -DefaultValue ([double]::NaN)
+  $v = Get-OptionalDouble -Value (Get-PropertyValue -Object $Object -Name $Key) -DefaultValue ([double]::NaN)
   if ([double]::IsNaN($v)) {
     throw "runtime key '$Key' must be finite number"
   }
@@ -55,7 +84,7 @@ function Assert-RequiredRuntimeKeys {
     if (-not ($Runtime.PSObject.Properties.Name -contains $k)) {
       throw "runtime missing required key: $k"
     }
-    if ($null -eq $Runtime.$k) {
+    if ($null -eq (Get-PropertyValue -Object $Runtime -Name $k)) {
       throw "runtime key '$k' must not be null"
     }
   }
@@ -86,13 +115,6 @@ function Get-LineageLayout {
     "classic" {
       return [ordered]@{
         output_prefix = "neat"
-        runtime_prefix = "runtime"
-      }
-    }
-    "pareto52" {
-      return [ordered]@{
-        output_prefix = "neat_pareto52"
-        runtime_prefix = "runtime_pareto52"
       }
     }
     default {
@@ -102,7 +124,7 @@ function Get-LineageLayout {
 }
 
 $lineageLayout = Get-LineageLayout -Profile $LineageProfile
-$runtimeConfigPath = "scripts/configs/$($lineageLayout.runtime_prefix)_phase$Phase.json"
+$runtimeConfigPath = "scripts/configs/runtime_phase1.json"
 $outputDir = "logs/NEAT/$($lineageLayout.output_prefix)_phase${Phase}_seed$Seed"
 $gateStatePath = Join-Path $outputDir "gate_state.json"
 $genomePath = Join-Path $outputDir "models/winner_genome.json"
@@ -133,13 +155,13 @@ $games = 1000
 $seedTag = "phase${Phase}_eval_$Seed"
 $policyValue = ""
 if ($runtime.PSObject.Properties.Name -contains "opponent_policy") {
-  $policyValue = [string]$runtime.opponent_policy
+  $policyValue = [string](Get-PropertyValue -Object $runtime -Name "opponent_policy")
 }
 $hasPolicy = -not [string]::IsNullOrWhiteSpace($policyValue)
 $hasPolicyMix = $false
 $mixValue = $null
 if ($runtime.PSObject.Properties.Name -contains "opponent_policy_mix") {
-  $mixValue = $runtime.opponent_policy_mix
+  $mixValue = Get-PropertyValue -Object $runtime -Name "opponent_policy_mix"
   $hasPolicyMix = ($null -ne $mixValue) -and ($mixValue.Count -gt 0)
 }
 if (-not $hasPolicy -and -not $hasPolicyMix) {
@@ -151,13 +173,13 @@ $cmd = @(
   "--genome", $genomePath,
   "--games", "$games",
   "--seed", $seedTag,
-  "--max-steps", "$($runtime.max_eval_steps)",
+  "--max-steps", "$(Get-PropertyValue -Object $runtime -Name 'max_eval_steps')",
   "--first-turn-policy", "alternate",
-  "--fitness-gold-scale", "$($runtime.fitness_gold_scale)",
-  "--fitness-gold-neutral-delta", "$($runtime.fitness_gold_neutral_delta)",
-  "--fitness-win-weight", "$($runtime.fitness_win_weight)",
-  "--fitness-gold-weight", "$($runtime.fitness_gold_weight)",
-  "--fitness-win-neutral-rate", "$($runtime.fitness_win_neutral_rate)"
+  "--fitness-gold-scale", "$(Get-PropertyValue -Object $runtime -Name 'fitness_gold_scale')",
+  "--fitness-gold-neutral-delta", "$(Get-PropertyValue -Object $runtime -Name 'fitness_gold_neutral_delta')",
+  "--fitness-win-weight", "$(Get-PropertyValue -Object $runtime -Name 'fitness_win_weight')",
+  "--fitness-gold-weight", "$(Get-PropertyValue -Object $runtime -Name 'fitness_gold_weight')",
+  "--fitness-win-neutral-rate", "$(Get-PropertyValue -Object $runtime -Name 'fitness_win_neutral_rate')"
 )
 if (-not $hasPolicy -and $hasPolicyMix) {
   $mixJson = $mixValue | ConvertTo-Json -Depth 8 -Compress
@@ -186,30 +208,30 @@ $enc = New-Object System.Text.UTF8Encoding($true)
 [System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($savePath), $resultJson, $enc)
 
 $r = $resultJson | ConvertFrom-Json
-$goCount = [int](Get-OptionalDouble -Value $r.go_count -DefaultValue 0.0)
-$goGames = [int](Get-OptionalDouble -Value $r.go_games -DefaultValue 0.0)
-$goFailCount = [int](Get-OptionalDouble -Value $r.go_fail_count -DefaultValue 0.0)
-$goFailRate = [double](Get-OptionalDouble -Value $r.go_fail_rate -DefaultValue 0.0)
-$goRate = [double](Get-OptionalDouble -Value $r.go_rate -DefaultValue 0.0)
+$goCount = [int](Get-OptionalDouble -Value (Get-PropertyValue -Object $r -Name "go_count") -DefaultValue 0.0)
+$goGames = [int](Get-OptionalDouble -Value (Get-PropertyValue -Object $r -Name "go_games") -DefaultValue 0.0)
+$goFailCount = [int](Get-OptionalDouble -Value (Get-PropertyValue -Object $r -Name "go_fail_count") -DefaultValue 0.0)
+$goFailRate = [double](Get-OptionalDouble -Value (Get-PropertyValue -Object $r -Name "go_fail_rate") -DefaultValue 0.0)
+$goRate = [double](Get-OptionalDouble -Value (Get-PropertyValue -Object $r -Name "go_rate") -DefaultValue 0.0)
 
 Write-Host ""
 Write-Host "=== Phase$Phase Evaluation (Seed=$Seed, Profile=$LineageProfile) ==="
-Write-Host "Win rate:        $($r.win_rate)"
-Write-Host "Mean gold delta: $($r.mean_gold_delta)"
-Write-Host "Fitness:         $($r.fitness)"
+Write-Host "Win rate:        $(Get-PropertyValue -Object $r -Name 'win_rate')"
+Write-Host "Mean gold delta: $(Get-PropertyValue -Object $r -Name 'mean_gold_delta')"
+Write-Host "Fitness:         $(Get-PropertyValue -Object $r -Name 'fitness')"
 Write-Host "GO count:        $goCount"
 Write-Host "GO games:        $goGames"
 Write-Host "GO fail count:   $goFailCount"
 Write-Host "GO fail rate:    $goFailRate"
 Write-Host "GO rate:         $goRate"
-Write-Host "Imit play ratio: $($r.imitation_play_ratio)"
-Write-Host "Imit match ratio:$($r.imitation_match_ratio)"
-Write-Host "Imit opt ratio:  $($r.imitation_option_ratio)"
-Write-Host "Bankrupt count:  $($r.bankrupt.my_bankrupt_count)"
+Write-Host "Imit play ratio: $(Get-PropertyValue -Object $r -Name 'imitation_play_ratio')"
+Write-Host "Imit match ratio:$(Get-PropertyValue -Object $r -Name 'imitation_match_ratio')"
+Write-Host "Imit opt ratio:  $(Get-PropertyValue -Object $r -Name 'imitation_option_ratio')"
+Write-Host "Bankrupt count:  $(Get-NestedPropertyValue -Object $r -Path @('bankrupt', 'my_bankrupt_count'))"
 Write-Host "================================"
 
-$passMeanGold = ([double]$r.mean_gold_delta -ge [double]$passRule.mean_gold_delta_min)
-$passWinRate = ([double]$r.win_rate -ge [double]$passRule.win_rate_min)
+$passMeanGold = ([double](Get-PropertyValue -Object $r -Name "mean_gold_delta") -ge [double]$passRule.mean_gold_delta_min)
+$passWinRate = ([double](Get-PropertyValue -Object $r -Name "win_rate") -ge [double]$passRule.win_rate_min)
 $passed = $passMeanGold -and $passWinRate
 
 $failReasons = @()
@@ -225,9 +247,9 @@ $passState = [ordered]@{
     mean_gold_delta_min = [double]$passRule.mean_gold_delta_min
     win_rate_min = [double]$passRule.win_rate_min
   }
-  win_rate = [double]$r.win_rate
-  mean_gold_delta = [double]$r.mean_gold_delta
-  fitness = [double]$r.fitness
+  win_rate = [double](Get-PropertyValue -Object $r -Name "win_rate")
+  mean_gold_delta = [double](Get-PropertyValue -Object $r -Name "mean_gold_delta")
+  fitness = [double](Get-PropertyValue -Object $r -Name "fitness")
   go_count = $goCount
   go_games = $goGames
   go_fail_count = $goFailCount
@@ -235,8 +257,8 @@ $passState = [ordered]@{
   go_rate = $goRate
   eval_result_path = $savePath
   gate_state_path = $gateStatePath
-  transition_ready = [bool]$gate.transition_ready
-  transition_generation = $gate.transition_generation
+  transition_ready = [bool](Get-PropertyValue -Object $gate -Name "transition_ready")
+  transition_generation = Get-PropertyValue -Object $gate -Name "transition_generation"
 }
 
 $passStatePath = Join-Path $outputDir "phase${Phase}_pass_state.json"

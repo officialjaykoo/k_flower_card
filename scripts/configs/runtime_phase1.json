@@ -1,27 +1,21 @@
 ﻿{
   "format_version": "neat_runtime_phase1_v4",
-  "generations": 20,
+  "generations": 10,
   "eval_workers": 6,
-  "games_per_genome": 300,
+  "games_per_genome": 500,
   "eval_timeout_sec": 360,
   "max_eval_steps": 600,
-  "checkpoint_every": 5,
+  "checkpoint_every": 1,
   "eval_script": "scripts/neat_eval_worker.mjs",
   "seed": 13,
-  "opponent_policy": "",
-  "opponent_policy_mix": [
-    { "policy": "phase1_seed805", "weight": 50 },
-    { "policy": "phase1_seed808", "weight": 50 }
-  ],
+  "opponent_policy": "hybrid_play(phase1_seed811,H-CL)",
+  "opponent_policy_mix": [],
   "opponent_genome": "",
   "switch_seats": true,
-  "fitness_gold_scale": 2500.0,
+  "fitness_gold_scale": 1500.0,
   "fitness_gold_neutral_delta": 0.0,
   "fitness_win_weight": 0.90,
   "fitness_gold_weight": 0.10,
-  "objective_mode": "scalar_v2",
-  "pareto_crowding_weight": 0.05,
-  "pareto_scalar_tiebreak_weight": 0.005,
   "fitness_win_neutral_rate": 0.50,
   "gate_mode": "win_rate_only",
   "gate_ema_window": 5,
@@ -37,20 +31,22 @@
   "failure_imitation_max": null,
   "failure_slope_5_max": 0.0,
   "failure_slope_metric": "win_rate",
+  "winner_playoff_topk": 5,
+  "winner_playoff_finalists": 2,
+  "winner_playoff_stage1_games": 1000,
+  "winner_playoff_stage2_games": 1000,
   "early_stop_win_rate_cutoffs": [
-    { "games": 100, "max_win_rate": 0.45 },
     { "games": 150, "max_win_rate": 0.45 },
-    { "games": 200, "max_win_rate": 0.45 },
-    { "games": 250, "max_win_rate": 0.48 }
+    { "games": 250, "max_win_rate": 0.47 },
+    { "games": 350, "max_win_rate": 0.48 },
+    { "games": 450, "max_win_rate": 0.49 }
   ],
+  "early_stop_go_take_rate_cutoffs": [],
   "_notes_fitness": {
     "fitness_gold_scale": "gold delta를 tanh로 정규화할 때 쓰는 스케일",
     "fitness_gold_neutral_delta": "골드 항의 중립 기준선 (예: 0이면 0이 0점)",
     "fitness_win_weight": "승률 항 가중치 (gold와 함께 내부 정규화)",
     "fitness_gold_weight": "골드 항 가중치 (win과 함께 내부 정규화)",
-    "objective_mode": "selection에 쓸 목적 모드. scalar_v2 또는 pareto_v1",
-    "pareto_crowding_weight": "pareto_v1에서 crowding 보너스 강도",
-    "pareto_scalar_tiebreak_weight": "pareto_v1에서 기존 scalar fitness를 미세 tie-break로 섞는 강도",
     "fitness_win_neutral_rate": "승률 항의 중립 기준선 (예: 0.50이면 50%가 0점)"
   }
 }

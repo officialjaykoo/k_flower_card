@@ -3,7 +3,7 @@
 ## 결론
 - 현재 학습/평가 기준 파이프라인은 `scripts/neat_train.py -> scripts/neat_eval_worker.mjs -> scripts/model_duel_worker.mjs`다.
 - Phase 실행·평가는 단일 진입점(`scripts/phase_run.ps1`, `scripts/phase_eval.ps1`)으로 통합되었다.
-- 모든 런타임 설정은 `scripts/configs/runtime_phase*.json`을 단일 기준(Source of Truth)으로 사용한다.
+- 모든 런타임 설정은 `scripts/configs/runtime_phase1.json`을 단일 기준(Source of Truth)으로 사용한다.
 
 빠른 참고:
 - 반복 확인하는 설정/fitness/정책 메모는 `docs/neat/QUICK_NOTES.md`
@@ -24,26 +24,22 @@
 
 ### 2-3. 설정 (`scripts/configs/`)
 - `neat_feedforward.ini`: NEAT 토폴로지/변이 설정 (`num_inputs=13`)
-- `neat_feedforward_golddanger52.ini`: `pareto52`용 NEAT 토폴로지/변이 설정 (`num_inputs=13`, legacy profile name only)
-- `runtime_phase1.json`
-- `runtime_phase2.json`
-- `runtime_phase3.json`
+- `runtime_phase1.json`: 모든 phase/classic 런의 공통 runtime 기준 파일
 
 ## 3. 파이프라인 흐름
 ### 3-1. Phase 1
 1. `phase_run.ps1 -Phase 1 -Seed <N>`
 2. `phase_eval.ps1 -Phase 1 -Seed <N>`
 
-### 3-2. Phase 2
+### 3-2. Phase 2/3
 1. `phase_run.ps1 -Phase 2 -Seed <N>`
 2. `phase_eval.ps1 -Phase 2 -Seed <N>`
+3. `phase_run.ps1 -Phase 3 -Seed <N>`
+4. `phase_eval.ps1 -Phase 3 -Seed <N>`
 
 참고:
-- `phase_run.ps1`는 Phase 2 실행 시 Phase 1 체크포인트를 자동 탐색한다.
-- 우선순위: `runtime_phase1.json.generations`에 해당하는 체크포인트 -> 없으면 최신 세대 체크포인트.
-
-### 3-3. Phase 3
-- `phase_run.ps1 -Phase 3`는 phase2 체크포인트 디렉터리에서 우선순위(목표 세대 -> 최신)로 재개 체크포인트를 자동 선택한다.
+- phase 번호는 출력 경로/재개 흐름에만 쓰고, runtime 값은 모두 `runtime_phase1.json`에서 읽는다.
+- `phase_run.ps1`는 Phase 2/3 실행 시 이전 phase 체크포인트를 자동 탐색한다.
 
 ## 4. 실행 명령
 ### 4-1. 학습
@@ -70,7 +66,7 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 - `generations`, `eval_workers`, `games_per_genome`
 - `max_eval_steps`, `eval_timeout_sec`
 - `opponent_policy`, (`opponent_genome` when policy=`genome`)
-- `fitness_gold_scale`, `fitness_win_weight`, `fitness_loss_weight`, `fitness_draw_weight`
+- `fitness_gold_scale`, `fitness_gold_neutral_delta`, `fitness_win_weight`, `fitness_gold_weight`, `fitness_win_neutral_rate`
 - `gate_mode`, `gate_ema_window`, `transition_*`, `failure_*`
 
 ### 5-2. Phase 1/2 평가 통과 기준
@@ -107,23 +103,22 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 ### 7-1. `neat_eval_worker.mjs`
 - active feature vector는 `compact16` 16차원이다.
 - 구형 `compact13` winner는 runtime legacy fallback으로만 호환한다.
-- 구형 46/47/52 입력 winner는 runtime legacy fallback으로만 호환한다.
 - `opponent_policy=heuristic_h_gpt`일 때 내부 fast tuning 파라미터를 적용해 평가 시간을 줄인다.
 - teacher dataset cache(`--teacher-dataset-cache`)가 있으면 imitation 계산 소스를 cache로 전환한다.
 
 ### 7-2. `model_duel_worker.mjs`
-- `--games`는 `1000` 이상만 허용된다. (기본값 `1000`)
+- `--games`는 양의 정수만 허용된다. (기본값 `1000`)
 - 결과 report(`result.json`)는 항상 1개 저장된다.
 - 기본 출력 폴더는 `logs/model_duel/<human>_vs_<ai>_<YYYYMMDD>/` 규칙을 따른다.
 - kibo/dataset은 옵션으로만 저장된다.
-- `--human`, `--ai` 입력은 정책 키, `phase3_seed5`, `hybrid_play(...)`, `hybrid_play_go(...)`, `hybrid_option(...)` 형식을 지원한다.
+- `--human`, `--ai` 입력은 정책 키, `phase3_seed5`, `hybrid_play(...)` 형식을 지원한다.
 
 ### 7-3. `model_duel_worker.mjs` 옵션 상세
 - 공통 문법: `--key value` 또는 `--key=value` 둘 다 지원.
 - `--human` (필수): human 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase3_seed5`).
 - `--ai` (필수): ai 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase3_seed5`).
-  - 예: `hybrid_option(phase1_seed208,phase2_seed501)` = 앞 모델이 `play/match`, 뒤 모델이 `option` 판단
-- `--games` (선택, 기본 `1000`): `1000` 이상만 허용.
+  - 예: `hybrid_play(phase1_seed208,H-CL)`
+- `--games` (선택, 기본 `1000`): 양의 정수만 허용.
 - `--seed` (선택, 기본 `model-duel`): 실행 시드 문자열.
 - `--max-steps` (선택, 기본 `600`): 게임당 최대 스텝. 최소값은 `20`.
 - `--first-turn-policy` (선택, 기본 `alternate`): `alternate` 또는 `fixed`.
@@ -159,14 +154,72 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 ## 8. 트러블슈팅
 - `python not found: .venv\Scripts\python.exe`
   - 가상환경 생성/활성화 후 `neat-python` 설치 확인.
-- `phase1 checkpoint not found` (Phase 2)
-  - 먼저 같은 Seed로 Phase 1 학습 결과가 생성되어야 한다.
+- `phase1 checkpoint not found`
+  - 먼저 같은 Seed로 이전 phase 학습 결과가 생성되어야 한다.
 - `opponent-policy=genome requires opponent_genome path`
   - runtime 또는 CLI에 opponent genome 경로를 설정한다.
 - `feature vector size mismatch`
   - `scripts/configs/neat_feedforward.ini`의 `num_inputs`와 worker feature 정의를 맞춘다.
 
-## 9. 운영 체크리스트
+## 9. 공식 확장 포인트 기준 현재 방향
+공식 문서 기준 핵심 링크:
+- `Customizing Behavior`: `https://neat-python.readthedocs.io/en/latest/customization.html`
+- `Genome Interface`: `https://neat-python.readthedocs.io/en/latest/genome-interface.html`
+- `Reproduction Interface`: `https://neat-python.readthedocs.io/en/latest/reproduction-interface.html`
+- `Configuration file description`: `https://neat-python.readthedocs.io/en/latest/config_file.html`
+- `FAQ`: `https://neat-python.readthedocs.io/en/latest/faq.html`
+- `Module summaries`: `https://neat-python.readthedocs.io/en/latest/module_summaries.html`
+
+해석:
+- `CustomGenome`, `CustomReproduction`, `CustomSpeciesSet`, `CustomStagnation` 교체는 공식 확장 포인트다.
+- 따라서 맞고용 NEAT 개조는 억지 포크가 아니라 문서가 허용한 정식 개조 경로로 보는 게 맞다.
+- 다만 라이브러리 기본 루프는 여전히 scalar `fitness` 중심이므로, 진짜 2축 selection은 `Reproduction`만이 아니라 `Population.run` 또는 수동 generation loop까지 손볼 가능성이 있다.
+
+현재 repo 기준 1차 방향:
+- `stock neat-python 2.0` 위에 genome-level decision parameter만 얹는다.
+- 현재 반영된 파라미터:
+  - `go_stop_threshold`
+  - `shaking_threshold`
+  - `president_threshold`
+  - `gukjin_threshold`
+- 이 4개는 `vendor/neat/genome.py`의 per-genome scalar attribute로 추가되어 있고, export 시 `decision_params`에 저장된다.
+- 런타임은 `src/ai/modelPolicyEngine.js`에서 typed decision pair를 해석할 때 threshold를 사용한다.
+
+현재 output head 기준:
+- `play`
+- `match`
+- `go`
+- `stop`
+- `shaking_yes`
+- `shaking_no`
+- `president_stop`
+- `president_hold`
+- `gukjin_five`
+- `gukjin_junk`
+
+의미:
+- `play`와 `match`는 일반 candidate scoring head다.
+- `go/stop`, `shaking yes/no`, `president stop/hold`, `gukjin five/junk`는 각각 대응하는 threshold gene으로 최종 선택 경계를 조정한다.
+- 즉 지금 단계는 `CustomGenome + typed output heads`까지 반영된 상태다.
+
+다음 확장 우선순위:
+1. `CustomReproduction`
+   - outcome 축 + decision quality 축을 같이 쓰는 selection
+   - archive 주입, quota, multi-criterion survivor rule 같은 로직은 여기서 다루는 게 맞다.
+2. `CustomSpeciesSet`
+   - 유전 거리만이 아니라 행동 거리까지 speciation에 반영
+   - 특히 `go/stop` 경계형 개체 보호가 목적이면 여기가 자연스럽다.
+3. `CustomStagnation`
+   - 단순 outcome stagnation이 아니라 판단 품질 개선 정체도 같이 반영
+4. 필요 시 `Custom Population.run`
+   - scalar best-genome 전제에서 벗어난 수동 generation loop
+
+현재 판단:
+- 1차는 `Genome`만 건드려서 threshold/typed output을 넣는 것이 가장 싸고 효과 검증이 쉽다.
+- 2축 NEAT를 진짜로 하려면 중심은 결국 `Reproduction/Population`이다.
+- reporter 훅만으로 해결하려는 방향은 한계가 있다.
+
+## 10. 운영 체크리스트
 1. 경로는 항상 `scripts/` + `scripts/configs/` 기준으로 유지한다.
 2. 시뮬레이션/평가 테스트는 1000게임 규칙을 유지한다.
 3. 설정 변경 시 문서와 phase 래퍼 스크립트를 같이 갱신한다.

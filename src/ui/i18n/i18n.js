@@ -5,10 +5,8 @@ export const SUPPORTED_LANGUAGES = Object.freeze(["ko", "en"]);
 
 const MESSAGES = {
   ko: {
-    "model.heuristicJ1": "휴리스틱 J1",
     "model.heuristicJ2": "휴리스틱 J2",
     "model.heuristicCL": "휴리스틱 CL",
-    "model.heuristicAntiCL": "휴리스틱 AntiCL",
     "model.heuristicNEXg": "휴리스틱 NEXg",
     "model.heuristicGPT": "휴리스틱 GPT",
     "model.heuristicGemini": "휴리스틱 Gemini",
@@ -131,10 +129,8 @@ const MESSAGES = {
     "card.alt.format": "{month}월 {name}"
   },
   en: {
-    "model.heuristicJ1": "Heuristic J1",
     "model.heuristicJ2": "Heuristic J2",
     "model.heuristicCL": "Heuristic CL",
-    "model.heuristicAntiCL": "Heuristic AntiCL",
     "model.heuristicNEXg": "Heuristic NEXg",
     "model.heuristicGPT": "Heuristic GPT",
     "model.heuristicGemini": "Heuristic Gemini",

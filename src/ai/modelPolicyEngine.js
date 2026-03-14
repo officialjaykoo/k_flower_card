@@ -3,19 +3,18 @@
   scoringPiCount,
   getDeclarableShakingMonths,
   getDeclarableBombMonths,
-  declareShaking,
-  declareBomb,
-  playTurn,
   chooseGo,
-  chooseStop,
-  chooseShakingYes,
-  chooseShakingNo,
-  choosePresidentStop,
-  choosePresidentHold,
-  chooseGukjinMode,
-  chooseMatch
+  chooseStop
 } from "../engine/index.js";
 import { STARTING_GOLD } from "../engine/economy.js";
+import {
+  applyAction,
+  canonicalOptionAction,
+  legalCandidatesForDecision,
+  normalizeDecisionCandidate,
+  parsePlaySpecialCandidate,
+  selectPool
+} from "./evalCore/sharedGameHelpers.js";
 
 /* ============================================================================
  * NEAT model policy runtime
@@ -26,148 +25,22 @@ import { STARTING_GOLD } from "../engine/economy.js";
 const NEAT_MODEL_FORMAT = "neat_python_genome_v1";
 const IQN_GO_STOP_RUNTIME_FORMAT = "iqn_go_stop_runtime_v1";
 const COMPILED_NEAT_CACHE = new WeakMap();
-const PLAY_SPECIAL_SHAKE_PREFIX = "shake_start:";
-const PLAY_SPECIAL_BOMB_PREFIX = "bomb:";
 const GO_STOP_OPTION_ONE_HOT = [1, 0, 0, 0];
 const NON_BRIGHT_KWANG_ID = "L0";
 const NEAT_COMPACT_FEATURES = 16;
+const NEAT_OUT_PLAY = 0;
+const NEAT_OUT_MATCH = 1;
+const NEAT_OUT_GO = 2;
+const NEAT_OUT_STOP = 3;
+const NEAT_OUT_SHAKING_YES = 4;
+const NEAT_OUT_SHAKING_NO = 5;
+const NEAT_OUT_PRESIDENT_STOP = 6;
+const NEAT_OUT_PRESIDENT_HOLD = 7;
+const NEAT_OUT_GUKJIN_FIVE = 8;
+const NEAT_OUT_GUKJIN_JUNK = 9;
 const LEGACY_NEAT_COMPACT_FEATURES = 13;
 const IQN_GO_STOP_BASE_FEATURES = 16;
-const IQN_GO_STOP_LEGACY_BASE_FEATURES = 46;
-const IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES = 52;
 const IQN_GO_STOP_PAYLOAD_DIM = 10;
-
-/* 1) Candidate-space normalization */
-function canonicalOptionAction(action) {
-  const a = String(action || "").trim();
-  if (!a) return "";
-  const aliases = {
-    choose_go: "go",
-    choose_stop: "stop",
-    choose_shaking_yes: "shaking_yes",
-    choose_shaking_no: "shaking_no",
-    choose_president_stop: "president_stop",
-    choose_president_hold: "president_hold",
-    choose_five: "five",
-    choose_junk: "junk"
-  };
-  return aliases[a] || a;
-}
-
-function normalizeOptionCandidates(items) {
-  if (!Array.isArray(items)) return [];
-  const out = [];
-  const seen = new Set();
-  for (const raw of items) {
-    const v = canonicalOptionAction(raw);
-    if (!v || seen.has(v)) continue;
-    seen.add(v);
-    out.push(v);
-  }
-  return out;
-}
-
-function parsePlaySpecialCandidate(candidate) {
-  const raw = String(candidate || "").trim();
-  if (!raw) return null;
-  if (raw.startsWith(PLAY_SPECIAL_SHAKE_PREFIX)) {
-    const cardId = raw.slice(PLAY_SPECIAL_SHAKE_PREFIX.length).trim();
-    if (!cardId) return null;
-    return { kind: "shake_start", cardId };
-  }
-  if (raw.startsWith(PLAY_SPECIAL_BOMB_PREFIX)) {
-    const month = Number(raw.slice(PLAY_SPECIAL_BOMB_PREFIX.length).trim());
-    if (!Number.isInteger(month) || month < 1 || month > 12) return null;
-    return { kind: "bomb", month };
-  }
-  return null;
-}
-
-function buildPlayingSpecialActions(state, actor) {
-  if (state?.phase !== "playing" || state?.currentTurn !== actor) return [];
-  const out = [];
-  const shakingMonths = new Set(getDeclarableShakingMonths(state, actor));
-  if (shakingMonths.size > 0) {
-    for (const card of state?.players?.[actor]?.hand || []) {
-      const cardId = String(card?.id || "").trim();
-      if (!cardId || card?.passCard) continue;
-      const month = Number(card?.month || 0);
-      if (shakingMonths.has(month)) out.push(`${PLAY_SPECIAL_SHAKE_PREFIX}${cardId}`);
-    }
-  }
-  for (const month of getDeclarableBombMonths(state, actor)) {
-    const monthNum = Number(month || 0);
-    if (monthNum >= 1 && monthNum <= 12) out.push(`${PLAY_SPECIAL_BOMB_PREFIX}${monthNum}`);
-  }
-  return out;
-}
-
-function applyPlayCandidate(state, actor, candidate) {
-  const special = parsePlaySpecialCandidate(candidate);
-  if (!special) return playTurn(state, candidate);
-  if (special.kind === "shake_start") {
-    const selected = findCardById(state?.players?.[actor]?.hand || [], special.cardId);
-    const month = Number(selected?.month || 0);
-    if (month < 1) return state;
-    const declared = declareShaking(state, actor, month);
-    if (!declared || declared === state) return state;
-    return playTurn(declared, special.cardId) || declared;
-  }
-  if (special.kind === "bomb") return declareBomb(state, actor, special.month);
-  return state;
-}
-
-function selectPool(state, actor, options = {}) {
-  const previewPlay = !!options.previewPlay;
-  if (state.phase === "playing" && (state.currentTurn === actor || previewPlay)) {
-    return {
-      cards: (state.players?.[actor]?.hand || []).map((c) => c.id),
-      specialActions: buildPlayingSpecialActions(state, actor)
-    };
-  }
-  if (state.phase === "select-match" && state.pendingMatch?.playerKey === actor) {
-    return { boardCardIds: state.pendingMatch.boardCardIds || [] };
-  }
-  if (state.phase === "go-stop" && state.pendingGoStop === actor) {
-    return { options: ["go", "stop"] };
-  }
-  if (state.phase === "president-choice" && state.pendingPresident?.playerKey === actor) {
-    return { options: ["president_stop", "president_hold"] };
-  }
-  if (state.phase === "gukjin-choice" && state.pendingGukjinChoice?.playerKey === actor) {
-    return { options: ["five", "junk"] };
-  }
-  if (state.phase === "shaking-confirm" && state.pendingShakingConfirm?.playerKey === actor) {
-    return { options: ["shaking_yes", "shaking_no"] };
-  }
-  return {};
-}
-
-function resolveDecisionType(sp) {
-  const cards = sp.cards || null;
-  const boardCardIds = sp.boardCardIds || null;
-  const options = sp.options || null;
-  if (cards) return "play";
-  if (boardCardIds) return "match";
-  if (options) return "option";
-  return null;
-}
-
-function legalCandidatesForDecision(sp, decisionType) {
-  if (decisionType === "play") {
-    return [
-      ...(sp.cards || []).map((x) => String(x)).filter((x) => x.length > 0),
-      ...(sp.specialActions || []).map((x) => String(x)).filter((x) => x.length > 0)
-    ];
-  }
-  if (decisionType === "match") {
-    return (sp.boardCardIds || []).map((x) => String(x)).filter((x) => x.length > 0);
-  }
-  if (decisionType === "option") {
-    return normalizeOptionCandidates(sp.options || []);
-  }
-  return [];
-}
 
 /* 2) Feature extraction helpers */
 function clamp01(x) {
@@ -219,6 +92,13 @@ function optionCode(action) {
     junk: 8
   };
   return Number(map[a] || 0) / 8.0;
+}
+
+function resolveDecisionType(sp) {
+  const cards = sp?.cards || null;
+  const boardCardIds = sp?.boardCardIds || null;
+  const options = sp?.options || null;
+  return cards ? "play" : boardCardIds ? "match" : options ? "option" : null;
 }
 
 function candidateCard(state, actor, decisionType, candidate) {
@@ -407,19 +287,7 @@ function compactKwangBaseScore(kwangCards) {
 }
 
 function applyDecisionCandidate(state, actor, decisionType, candidate) {
-  if (decisionType === "play") return applyPlayCandidate(state, actor, candidate);
-  if (decisionType === "match") return chooseMatch(state, candidate);
-  if (decisionType !== "option") return state;
-
-  const action = canonicalOptionAction(candidate);
-  if (action === "go") return chooseGo(state, actor);
-  if (action === "stop") return chooseStop(state, actor);
-  if (action === "shaking_yes") return chooseShakingYes(state, actor);
-  if (action === "shaking_no") return chooseShakingNo(state, actor);
-  if (action === "president_stop") return choosePresidentStop(state, actor);
-  if (action === "president_hold") return choosePresidentHold(state, actor);
-  if (action === "five" || action === "junk") return chooseGukjinMode(state, actor, action);
-  return state;
+  return applyAction(state, actor, decisionType, candidate);
 }
 
 function maskStateForVisibleComboSimulation(state) {
@@ -541,11 +409,8 @@ function padDeletedTailFeatures(baseFeatures, inputDim) {
   const baseDim = baseFeatures.length;
   if (inputDim === baseDim) return baseFeatures;
   if (inputDim === (baseDim + 1)) return [...baseFeatures, 0.0];
-  if (inputDim === (baseDim + 6)) {
-    return [...baseFeatures, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-  }
   throw new Error(
-    `feature vector size mismatch: expected ${inputDim}, supported=${baseDim},${baseDim + 1},${baseDim + 6}`
+    `feature vector size mismatch: expected ${inputDim}, supported=${baseDim},${baseDim + 1}`
   );
 }
 
@@ -684,18 +549,8 @@ function featureVector(state, actor, decisionType, candidate, legalCount, inputD
     }
     return features;
   }
-  if (
-    inputDim === IQN_GO_STOP_LEGACY_BASE_FEATURES ||
-    inputDim === (IQN_GO_STOP_LEGACY_BASE_FEATURES + 1) ||
-    inputDim === IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES
-  ) {
-    return padDeletedTailFeatures(
-      buildLegacyFeatureVector(state, actor, decisionType, candidate, legalCount),
-      inputDim
-    );
-  }
   throw new Error(
-    `feature vector size mismatch: expected ${inputDim}, supported=${NEAT_COMPACT_FEATURES},${LEGACY_NEAT_COMPACT_FEATURES},${IQN_GO_STOP_LEGACY_BASE_FEATURES},${IQN_GO_STOP_LEGACY_BASE_FEATURES + 1},${IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES}`
+    `feature vector size mismatch: expected ${inputDim}, supported=${NEAT_COMPACT_FEATURES},${LEGACY_NEAT_COMPACT_FEATURES}`
   );
 }
 
@@ -731,19 +586,11 @@ function buildIqnGoStopPayload(state, actor) {
 
 function resolveIqnBaseFeatureDim(runtimeModel) {
   const configured = Number(runtimeModel?.feature_spec?.base_features || 0);
-  if (
-    configured === IQN_GO_STOP_BASE_FEATURES ||
-    configured === IQN_GO_STOP_LEGACY_BASE_FEATURES ||
-    configured === IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES
-  ) {
+  if (configured === IQN_GO_STOP_BASE_FEATURES) {
     return configured;
   }
   const derived = Number(runtimeModel?.input_dim || 0) - GO_STOP_OPTION_ONE_HOT.length - IQN_GO_STOP_PAYLOAD_DIM;
-  if (
-    derived === IQN_GO_STOP_BASE_FEATURES ||
-    derived === IQN_GO_STOP_LEGACY_BASE_FEATURES ||
-    derived === IQN_GO_STOP_OLDER_LEGACY_BASE_FEATURES
-  ) {
+  if (derived === IQN_GO_STOP_BASE_FEATURES) {
     return derived;
   }
   return IQN_GO_STOP_BASE_FEATURES;
@@ -876,7 +723,7 @@ export function evaluateIqnGoStopDecision(state, actor, runtimeModel) {
   if (!isIqnGoStopRuntimeModel(runtimeModel)) return null;
   if (state?.phase !== "go-stop" || state?.pendingGoStop !== actor) return null;
   const sp = selectPool(state, actor);
-  const legal = normalizeOptionCandidates(sp.options || []);
+  const legal = legalCandidatesForDecision(sp, "option");
   if (!legal.includes("go") || !legal.includes("stop")) return null;
 
   const goEval = summarizeIqnQuantiles(
@@ -927,6 +774,7 @@ function compileNeatPythonGenome(raw) {
   const inputKeys = Array.isArray(raw?.input_keys) ? raw.input_keys.map((x) => Number(x)) : [];
   const outputKeys = Array.isArray(raw?.output_keys) ? raw.output_keys.map((x) => Number(x)) : [];
   const nodesRaw = raw?.nodes && typeof raw.nodes === "object" ? raw.nodes : {};
+  const decisionParams = raw?.decision_params && typeof raw.decision_params === "object" ? raw.decision_params : {};
 
   const nodes = new Map();
   for (const [k, v] of Object.entries(nodesRaw)) {
@@ -1005,6 +853,12 @@ function compileNeatPythonGenome(raw) {
     kind: NEAT_MODEL_FORMAT,
     inputKeys,
     outputKeys,
+    decisionParams: {
+      go_stop_threshold: Number(decisionParams.go_stop_threshold || 0),
+      shaking_threshold: Number(decisionParams.shaking_threshold || 0),
+      president_threshold: Number(decisionParams.president_threshold || 0),
+      gukjin_threshold: Number(decisionParams.gukjin_threshold || 0)
+    },
     nodes,
     incoming,
     order: order.length === nonInputSet.size ? order : [...nonInputSet].sort((a, b) => a - b)
@@ -1046,9 +900,78 @@ function forward(compiled, inputVec) {
     values.set(nodeId, activation(node.activation, pre));
   }
 
-  const outKey = compiled.outputKeys.length > 0 ? Number(compiled.outputKeys[0]) : null;
-  if (outKey == null) return 0.0;
-  return Number(values.get(outKey) || 0.0);
+  return compiled.outputKeys.map((outKey) => Number(values.get(Number(outKey)) || 0.0));
+}
+
+function candidateOutputIndex(compiled, decisionType, candidate) {
+  const outputCount = Array.isArray(compiled?.outputKeys) ? compiled.outputKeys.length : 0;
+  if (outputCount <= 3) {
+    if (decisionType === "option") {
+      const action = canonicalOptionAction(candidate);
+      if (action === "go") return NEAT_OUT_GO - 1;
+      if (action === "stop") return NEAT_OUT_STOP - 1;
+    }
+    return NEAT_OUT_PLAY;
+  }
+  if (decisionType === "match") return NEAT_OUT_MATCH;
+  if (decisionType === "option") {
+    const action = canonicalOptionAction(candidate);
+    if (action === "go") return NEAT_OUT_GO;
+    if (action === "stop") return NEAT_OUT_STOP;
+    if (action === "shaking_yes") return NEAT_OUT_SHAKING_YES;
+    if (action === "shaking_no") return NEAT_OUT_SHAKING_NO;
+    if (action === "president_stop") return NEAT_OUT_PRESIDENT_STOP;
+    if (action === "president_hold") return NEAT_OUT_PRESIDENT_HOLD;
+    if (action === "five") return NEAT_OUT_GUKJIN_FIVE;
+    if (action === "junk") return NEAT_OUT_GUKJIN_JUNK;
+  }
+  return NEAT_OUT_PLAY;
+}
+
+function scoreCandidateFromOutputs(compiled, outputs, decisionType, candidate) {
+  const outputKeys = Array.isArray(compiled?.outputKeys) ? compiled.outputKeys : [];
+  if (outputKeys.length <= 1) {
+    return Number(outputs[0] || 0.0);
+  }
+  const index = candidateOutputIndex(compiled, decisionType, candidate);
+  if (index < 0 || index >= outputKeys.length) return 0.0;
+  return Number(outputs[index] || 0.0);
+}
+
+function resolveOptionThresholdKey(candidates) {
+  const set = new Set((candidates || []).map((candidate) => canonicalOptionAction(candidate)));
+  if (set.has("go") && set.has("stop")) return "go_stop_threshold";
+  if (set.has("shaking_yes") && set.has("shaking_no")) return "shaking_threshold";
+  if (set.has("president_stop") && set.has("president_hold")) return "president_threshold";
+  if (set.has("five") && set.has("junk")) return "gukjin_threshold";
+  return null;
+}
+
+function pickThresholdOptionCandidate(compiled, scored) {
+  if (!compiled || !scored || scored.decisionType !== "option") return null;
+  const key = resolveOptionThresholdKey(scored.candidates);
+  if (!key) return null;
+  const threshold = Number(compiled?.decisionParams?.[key] || 0);
+  const normalized = scored.candidates.map((candidate) => canonicalOptionAction(candidate));
+  let primary = null;
+  let secondary = null;
+  if (key === "go_stop_threshold") {
+    primary = scored.candidates[normalized.indexOf("go")];
+    secondary = scored.candidates[normalized.indexOf("stop")];
+  } else if (key === "shaking_threshold") {
+    primary = scored.candidates[normalized.indexOf("shaking_yes")];
+    secondary = scored.candidates[normalized.indexOf("shaking_no")];
+  } else if (key === "president_threshold") {
+    primary = scored.candidates[normalized.indexOf("president_stop")];
+    secondary = scored.candidates[normalized.indexOf("president_hold")];
+  } else if (key === "gukjin_threshold") {
+    primary = scored.candidates[normalized.indexOf("five")];
+    secondary = scored.candidates[normalized.indexOf("junk")];
+  }
+  if (primary == null || secondary == null) return null;
+  const primaryScore = Number(scored.scores?.[String(primary)] ?? -Infinity);
+  const secondaryScore = Number(scored.scores?.[String(secondary)] ?? -Infinity);
+  return primaryScore - secondaryScore > threshold ? primary : secondary;
 }
 
 function scoreToProbabilityMap(candidates, scoreMap, temperature = 1.0) {
@@ -1100,7 +1023,8 @@ export function getModelCandidateProbabilities(state, actor, policyModel, option
   try {
     for (const candidate of candidates) {
       const x = featureVector(state, actor, decisionType, candidate, candidates.length, inputDim);
-      const score = forward(compiled, x);
+      const outputs = forward(compiled, x);
+      const score = scoreCandidateFromOutputs(compiled, outputs, decisionType, candidate);
       scoreMap.set(candidate, score);
       scores[String(candidate)] = score;
     }
@@ -1131,7 +1055,8 @@ export function debugFeatureRows(state, actor, options = {}) {
     const features = featureVector(state, actor, decisionType, candidate, candidates.length, inputDim);
     let score = null;
     if (compiled) {
-      score = forward(compiled, features);
+      const outputs = forward(compiled, features);
+      score = scoreCandidateFromOutputs(compiled, outputs, decisionType, candidate);
     }
     rows.push({
       candidate: String(candidate),
@@ -1154,8 +1079,14 @@ export function debugFeatureRows(state, actor, options = {}) {
 }
 
 function modelPickCandidate(state, actor, policyModel) {
+  const compiled = getCompiledNeatModel(policyModel);
+  if (!compiled) return null;
   const scored = getModelCandidateProbabilities(state, actor, policyModel);
   if (!scored) return null;
+  const thresholdPicked = pickThresholdOptionCandidate(compiled, scored);
+  if (thresholdPicked != null) {
+    return { decisionType: scored.decisionType, candidate: thresholdPicked };
+  }
   const scoreMap = new Map();
   for (const c of scored.candidates) {
     scoreMap.set(c, Number(scored.scores?.[String(c)] || -Infinity));
@@ -1180,20 +1111,7 @@ export function modelPolicyPlay(state, actor, policyModel, options = {}) {
   const legal = legalCandidatesForDecision(sp, decisionType);
   if (!legal.length) return state;
 
-  let c = picked.candidate;
-  if (decisionType === "option") c = canonicalOptionAction(c);
+  let c = normalizeDecisionCandidate(decisionType, picked.candidate);
   if (!legal.includes(String(c))) c = legal[0];
-
-  if (decisionType === "play") return applyPlayCandidate(state, actor, c);
-  if (decisionType === "match") return chooseMatch(state, c);
-  if (decisionType !== "option") return state;
-
-  if (c === "go") return chooseGo(state, actor);
-  if (c === "stop") return chooseStop(state, actor);
-  if (c === "shaking_yes") return chooseShakingYes(state, actor);
-  if (c === "shaking_no") return chooseShakingNo(state, actor);
-  if (c === "president_stop") return choosePresidentStop(state, actor);
-  if (c === "president_hold") return choosePresidentHold(state, actor);
-  if (c === "five" || c === "junk") return chooseGukjinMode(state, actor, c);
-  return state;
+  return applyAction(state, actor, decisionType, c);
 }

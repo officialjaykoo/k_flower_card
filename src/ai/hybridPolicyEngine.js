@@ -77,6 +77,19 @@ function runHeuristicPolicy(state, actor, policy, heuristicParams) {
   });
 }
 
+function runFallbackPolicy(state, actor, options, heuristicParams) {
+  const fallbackModel = options?.fallbackModel || null;
+  if (fallbackModel) {
+    return runModelPolicyPlay(state, actor, fallbackModel, {
+      goStopIqnModel: options?.fallbackGoStopIqnModel || options?.goStopIqnModel || null,
+    });
+  }
+  const fallbackPolicy = normalizeBotPolicy(
+    options?.fallbackPolicy || options?.heuristicPolicy || DEFAULT_BOT_POLICY
+  );
+  return runHeuristicPolicy(state, actor, fallbackPolicy, heuristicParams);
+}
+
 export function hybridPolicyPlayDetailed(state, actor, options = {}) {
   const model = options.model || null;
   const goStopIqnModel = options.goStopIqnModel || null;
@@ -88,6 +101,7 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
   const goStopOnly = !!options.goStopOnly;
   const modelMatchPhase = !!options.modelMatchPhase;
   const goStopPolicy = normalizeBotPolicy(options.goStopPolicy || options.heuristicPolicy || DEFAULT_BOT_POLICY);
+  const hasFallbackModel = !!options.fallbackModel;
 
   if (isGoStopTurn(state, actor)) {
     if (hasGoStopIqn) {
@@ -102,12 +116,14 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
         };
       }
     }
-    const goStopNext = runHeuristicPolicy(state, actor, goStopPolicy, heuristicParams);
+    const goStopNext = hasFallbackModel
+      ? runFallbackPolicy(state, actor, options, heuristicParams)
+      : runHeuristicPolicy(state, actor, goStopPolicy, heuristicParams);
     if (isMoved(state, goStopNext)) {
       return {
         next: goStopNext,
-        actionSource: "hybrid_heuristic_go_stop",
-        route: "heuristic_go_stop",
+        actionSource: hasFallbackModel ? "hybrid_fallback_model_go_stop" : "hybrid_heuristic_go_stop",
+        route: hasFallbackModel ? "fallback_model_go_stop" : "heuristic_go_stop",
       };
     }
     if (goStopOnly) {
@@ -146,15 +162,18 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
     playFallbackPolicy,
   } = resolveHeuristicInputs(options);
   if (isGoStopTurn(state, actor)) {
-    const fallbackNext =
-      goStopPolicy === heuristicPolicy
+    const fallbackNext = hasFallbackModel
+      ? runFallbackPolicy(state, actor, options, heuristicParams)
+      : goStopPolicy === heuristicPolicy
         ? state
         : runHeuristicPolicy(state, actor, heuristicPolicy, heuristicParams);
     if (isMoved(state, fallbackNext)) {
       return {
         next: fallbackNext,
-        actionSource: "hybrid_heuristic_go_stop_fallback",
-        route: "heuristic_go_stop_fallback",
+        actionSource: hasFallbackModel
+          ? "hybrid_fallback_model_go_stop_fallback"
+          : "hybrid_heuristic_go_stop_fallback",
+        route: hasFallbackModel ? "fallback_model_go_stop_fallback" : "heuristic_go_stop_fallback",
       };
     }
   }
@@ -173,12 +192,16 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
       }
     }
 
-    const matchFallbackNext = runHeuristicPolicy(state, actor, phasePolicy, heuristicParams);
+    const matchFallbackNext = hasFallbackModel
+      ? runFallbackPolicy(state, actor, options, heuristicParams)
+      : runHeuristicPolicy(state, actor, phasePolicy, heuristicParams);
     if (isMoved(state, matchFallbackNext)) {
       return {
         next: matchFallbackNext,
-        actionSource: "hybrid_heuristic_match_fallback",
-        route: "heuristic_match_fallback",
+        actionSource: hasFallbackModel
+          ? "hybrid_fallback_model_match_fallback"
+          : "hybrid_heuristic_match_fallback",
+        route: hasFallbackModel ? "fallback_model_match_fallback" : "heuristic_match_fallback",
       };
     }
 
@@ -190,20 +213,24 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
   }
 
   if (!isPlayingTurn(state, actor)) {
-    const phaseNext = runHeuristicPolicy(state, actor, phasePolicy, heuristicParams);
+    const phaseNext = hasFallbackModel
+      ? runFallbackPolicy(state, actor, options, heuristicParams)
+      : runHeuristicPolicy(state, actor, phasePolicy, heuristicParams);
     return {
       next: phaseNext,
-      actionSource: "hybrid_heuristic_phase",
-      route: "heuristic_phase",
+      actionSource: hasFallbackModel ? "hybrid_fallback_model_phase" : "hybrid_heuristic_phase",
+      route: hasFallbackModel ? "fallback_model_phase" : "heuristic_phase",
     };
   }
 
-  const specialNext = runHeuristicPolicy(state, actor, specialPolicy, heuristicParams);
+  const specialNext = hasFallbackModel
+    ? runFallbackPolicy(state, actor, options, heuristicParams)
+    : runHeuristicPolicy(state, actor, specialPolicy, heuristicParams);
   if (isMoved(state, specialNext) && !resolvesToDirectHandPlay(state, actor, specialNext)) {
     return {
       next: specialNext,
-      actionSource: "hybrid_heuristic_special",
-      route: "heuristic_special",
+      actionSource: hasFallbackModel ? "hybrid_fallback_model_special" : "hybrid_heuristic_special",
+      route: hasFallbackModel ? "fallback_model_special" : "heuristic_special",
     };
   }
 
@@ -220,12 +247,16 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
     }
   }
 
-  const fallbackNext = runHeuristicPolicy(state, actor, playFallbackPolicy, heuristicParams);
+  const fallbackNext = hasFallbackModel
+    ? runFallbackPolicy(state, actor, options, heuristicParams)
+    : runHeuristicPolicy(state, actor, playFallbackPolicy, heuristicParams);
   if (isMoved(state, fallbackNext)) {
     return {
       next: fallbackNext,
-      actionSource: "hybrid_heuristic_play_fallback",
-      route: "heuristic_play_fallback",
+      actionSource: hasFallbackModel
+        ? "hybrid_fallback_model_play_fallback"
+        : "hybrid_heuristic_play_fallback",
+      route: hasFallbackModel ? "fallback_model_play_fallback" : "heuristic_play_fallback",
     };
   }
 

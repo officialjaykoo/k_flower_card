@@ -1,9 +1,7 @@
 ﻿param(
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed,
-  [Parameter(Mandatory = $false)][ValidateSet("classic", "pareto52")][string]$LineageProfile = "classic",
-  [Parameter(Mandatory = $false)][string]$ControlPolicyMode = "",
-  [Parameter(Mandatory = $false)][string]$ControlHeuristicPolicy = "",
+  [Parameter(Mandatory = $false)][ValidateSet("classic")][string]$LineageProfile = "classic",
   [Parameter(Mandatory = $false)][string]$ControlGoStopIqnModel = "",
   [Parameter(Mandatory = $false)][string[]]$BootstrapSeedSpec = @()
 )
@@ -125,8 +123,8 @@ function Get-OverallBestMetrics {
     generation_mean_go_fail_rate = $null
   }
 
-  $generationMetricsPathRaw = [string]$Summary.generation_metrics_log
-  $evalMetricsPathRaw = [string]$Summary.eval_metrics_log
+  $generationMetricsPathRaw = [string](Get-PropertyValue -Object $Summary -Name "generation_metrics_log")
+  $evalMetricsPathRaw = [string](Get-PropertyValue -Object $Summary -Name "eval_metrics_log")
   if ([string]::IsNullOrWhiteSpace($generationMetricsPathRaw) -or [string]::IsNullOrWhiteSpace($evalMetricsPathRaw)) {
     return $empty
   }
@@ -157,18 +155,16 @@ function Get-OverallBestMetrics {
   }
 
   if ($null -eq $generationRecord) {
-    $objectiveMode = Get-PropertyValue -Object (Get-PropertyValue -Object $Summary -Name "runtime_effective") -Name "objective_mode"
-    $bestFitnessField = if ($objectiveMode -eq "pareto_v1") { "best_scalar_fitness" } else { "best_fitness" }
     $generationRecord =
       Get-Content $generationMetricsPath |
         ForEach-Object { $_ | ConvertFrom-Json } |
-        Sort-Object { [double](Get-PropertyValue -Object $_ -Name $bestFitnessField) } -Descending |
+        Sort-Object { [double](Get-PropertyValue -Object $_ -Name "best_fitness") } -Descending |
         Select-Object -First 1
     if ($null -eq $generationRecord) {
       return $empty
     }
-    $targetGeneration = [int]$generationRecord.generation
-    $targetGenomeKey = [int]$generationRecord.best_genome_key
+    $targetGeneration = [int](Get-PropertyValue -Object $generationRecord -Name "generation")
+    $targetGenomeKey = [int](Get-PropertyValue -Object $generationRecord -Name "best_genome_key")
   }
 
   $bestEvalRecord =
@@ -185,14 +181,7 @@ function Get-OverallBestMetrics {
     available = $true
     generation = [int]$targetGeneration
     genome_key = [int]$targetGenomeKey
-    fitness = Get-OptionalDouble -Value (
-      $(if ((Get-PropertyValue -Object $bestEvalRecord -Name "objective_mode") -eq "pareto_v1") {
-          Get-PropertyValue -Object $bestEvalRecord -Name "fitness_scalar_v2"
-        } else {
-          Get-PropertyValue -Object $bestEvalRecord -Name "fitness"
-        })
-    )
-    surrogate_fitness = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "fitness")
+    fitness = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "fitness")
     win_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "win_rate")
     imitation_weighted_score = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "imitation_weighted_score")
     mean_gold_delta = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestEvalRecord -Name "mean_gold_delta")
@@ -241,6 +230,42 @@ function Get-PropertyValue {
   return $null
 }
 
+function Get-NestedPropertyValue {
+  param(
+    [Parameter(Mandatory = $false)]$Object,
+    [Parameter(Mandatory = $true)][string[]]$Path
+  )
+  $current = $Object
+  foreach ($segment in $Path) {
+    $current = Get-PropertyValue -Object $current -Name $segment
+    if ($null -eq $current) {
+      return $null
+    }
+  }
+  return $current
+}
+
+function Resolve-RunSummaryObject {
+  param([Parameter(Mandatory = $true)]$Summary)
+
+  $runSummaryPathRaw = [string](Get-PropertyValue -Object $Summary -Name "run_summary")
+  if ([string]::IsNullOrWhiteSpace($runSummaryPathRaw)) {
+    return $Summary
+  }
+
+  $runSummaryPath = [System.IO.Path]::GetFullPath($runSummaryPathRaw)
+  if (-not (Test-Path $runSummaryPath)) {
+    return $Summary
+  }
+
+  try {
+    return Read-JsonFile -Path $runSummaryPath
+  }
+  catch {
+    return $Summary
+  }
+}
+
 function Get-LineageLayout {
   param([Parameter(Mandatory = $true)][string]$Profile)
 
@@ -251,18 +276,7 @@ function Get-LineageLayout {
         token_prefix = ""
         output_prefix = "neat"
         config_feedforward = "scripts/configs/neat_feedforward.ini"
-        runtime_prefix = "runtime"
         profile_name_prefix = ""
-      }
-    }
-    "pareto52" {
-      return [ordered]@{
-        profile = "pareto52"
-        token_prefix = "pareto52_"
-        output_prefix = "neat_pareto52"
-        config_feedforward = "scripts/configs/neat_feedforward_golddanger52.ini"
-        runtime_prefix = "runtime_pareto52"
-        profile_name_prefix = "pareto52_"
       }
     }
     default {
@@ -279,15 +293,13 @@ function Resolve-BootstrapWinnerPath {
     throw "bootstrap seed spec is empty"
   }
 
-  $m = [regex]::Match($raw.Trim(), "^(?:(pareto52)_)?phase([123])_seed(\d+)$", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  $m = [regex]::Match($raw.Trim(), "^phase([123])_seed(\d+)$", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
   if (-not $m.Success) {
-    throw "invalid bootstrap seed spec: $Spec (use phase1_seed203 or pareto52_phase1_seed601)"
+    throw "invalid bootstrap seed spec: $Spec (use phase1_seed203)"
   }
-
-  $bootstrapProfile = if ([string]::IsNullOrWhiteSpace($m.Groups[1].Value)) { "classic" } else { "pareto52" }
-  $bootstrapLayout = Get-LineageLayout -Profile $bootstrapProfile
-  $bootstrapPhase = [int]$m.Groups[2].Value
-  $bootstrapSeed = [int]$m.Groups[3].Value
+  $bootstrapLayout = Get-LineageLayout -Profile "classic"
+  $bootstrapPhase = [int]$m.Groups[1].Value
+  $bootstrapSeed = [int]$m.Groups[2].Value
   $summaryPath = "logs/NEAT/$($bootstrapLayout.output_prefix)_phase${bootstrapPhase}_seed$bootstrapSeed/run_summary.json"
   $winnerPath = ""
   if (Test-Path $summaryPath) {
@@ -315,7 +327,7 @@ if (-not (Test-Path $python)) {
 
 $lineageLayout = Get-LineageLayout -Profile $LineageProfile
 $configFeedforward = [string]$lineageLayout.config_feedforward
-$runtimeConfig = "scripts/configs/$($lineageLayout.runtime_prefix)_phase$Phase.json"
+$runtimeConfig = "scripts/configs/runtime_phase1.json"
 $outputDir = "logs/NEAT/$($lineageLayout.output_prefix)_phase${Phase}_seed$Seed"
 
 if (-not (Test-Path $configFeedforward)) {
@@ -334,18 +346,6 @@ $cmd = @(
   "--seed", "$Seed",
   "--profile-name", "$($lineageLayout.profile_name_prefix)phase${Phase}_seed$Seed"
 )
-
-if (-not [string]::IsNullOrWhiteSpace($ControlPolicyMode)) {
-  $cmd += @(
-    "--control-policy-mode", $ControlPolicyMode
-  )
-}
-
-if (-not [string]::IsNullOrWhiteSpace($ControlHeuristicPolicy)) {
-  $cmd += @(
-    "--control-heuristic-policy", $ControlHeuristicPolicy
-  )
-}
 
 if (-not [string]::IsNullOrWhiteSpace($ControlGoStopIqnModel)) {
   $cmd += @(
@@ -381,14 +381,14 @@ elseif ($Phase -ne "1") {
   if ($continueFromPreviousPhase) {
     $previousPhase = [int]$Phase - 1
     $previousLabel = "phase$previousPhase"
-    $previousRuntimePath = "scripts/configs/$($lineageLayout.runtime_prefix)_phase$previousPhase.json"
+    $previousRuntimePath = $runtimeConfig
     $previousRuntime = Read-JsonFile -Path $previousRuntimePath
     $previousSummaryPath = "logs/NEAT/$($lineageLayout.output_prefix)_phase${previousPhase}_seed$Seed/run_summary.json"
     if (-not (Test-Path $previousSummaryPath)) {
       throw "$previousLabel run summary not found: $previousSummaryPath"
     }
     $previousSummary = Read-JsonFile -Path $previousSummaryPath
-    $previousAppliedOverrides = $previousSummary.applied_overrides
+    $previousAppliedOverrides = Get-PropertyValue -Object $previousSummary -Name "applied_overrides"
     $previousBaseGeneration = 0
     if ($null -ne $previousAppliedOverrides) {
       $previousBaseGeneration = To-PositiveIntOrDefault -Value (Get-PropertyValue -Object $previousAppliedOverrides -Name "base_generation") -DefaultValue 0
@@ -400,7 +400,7 @@ elseif ($Phase -ne "1") {
       $previousGenerations = $previousRuntimeGenerations
     }
     $cumulativeBaseGeneration = $previousBaseGeneration + $previousGenerations
-    $previousWinnerRaw = [string]$previousSummary.winner_pickle
+    $previousWinnerRaw = [string](Get-PropertyValue -Object $previousSummary -Name "winner_pickle")
     if ([string]::IsNullOrWhiteSpace($previousWinnerRaw)) {
       $previousWinnerRaw = "logs/NEAT/$($lineageLayout.output_prefix)_phase${previousPhase}_seed$Seed/models/winner_genome.pkl"
     }
@@ -437,8 +437,10 @@ catch {
   throw "failed to parse neat_train output as JSON"
 }
 
+$summary = Resolve-RunSummaryObject -Summary $summary
+
 $bestMetrics = Get-OverallBestMetrics -Summary $summary
-$summaryElapsedSec = Get-OptionalDouble -Value $summary.run_elapsed_sec -DefaultValue $phaseRunElapsedSec
+$summaryElapsedSec = Get-OptionalDouble -Value (Get-PropertyValue -Object $summary -Name "run_elapsed_sec") -DefaultValue $phaseRunElapsedSec
 
 Write-Host "=== Phase$Phase Summary (Seed=$Seed, Profile=$LineageProfile) ==="
 if ([bool]$bestMetrics.available) {
@@ -459,7 +461,7 @@ else {
   Write-Host "Best gen:         N/A"
   Write-Host "Best genome key:  N/A"
   Write-Host "Best win rate:    N/A"
-  Write-Host "Best fitness:     $($summary.best_fitness)"
+  Write-Host "Best fitness:     $(Get-PropertyValue -Object $summary -Name 'best_fitness')"
   Write-Host "Best gold delta:  N/A"
   Write-Host "GO opp games:     "
   Write-Host "GO opp count:     "
@@ -475,12 +477,12 @@ else {
   Write-Host "Terminal self G:  "
   Write-Host "Terminal opp G:   "
 }
-Write-Host "Current EMA win:  $($summary.gate_state.ema_win_rate)"
-Write-Host "Current EMA imit: $($summary.gate_state.ema_imitation)"
-Write-Host "Current win rate: $($summary.gate_state.latest_win_rate)"
-Write-Host "Win slope(5):     $($summary.gate_state.latest_win_rate_slope_5)"
-Write-Host "Transition ready: $($summary.gate_state.transition_ready)"
-Write-Host "Transition gen:   $($summary.gate_state.transition_generation)"
+Write-Host "Current EMA win:  $(Get-NestedPropertyValue -Object $summary -Path @('gate_state', 'ema_win_rate'))"
+Write-Host "Current EMA imit: $(Get-NestedPropertyValue -Object $summary -Path @('gate_state', 'ema_imitation'))"
+Write-Host "Current win rate: $(Get-NestedPropertyValue -Object $summary -Path @('gate_state', 'latest_win_rate'))"
+Write-Host "Win slope(5):     $(Get-NestedPropertyValue -Object $summary -Path @('gate_state', 'latest_win_rate_slope_5'))"
+Write-Host "Transition ready: $(Get-NestedPropertyValue -Object $summary -Path @('gate_state', 'transition_ready'))"
+Write-Host "Transition gen:   $(Get-NestedPropertyValue -Object $summary -Path @('gate_state', 'transition_generation'))"
 Write-Host "Elapsed time:     $summaryElapsedSec s"
 Write-Host "================================"
 
