@@ -1,8 +1,5 @@
 ﻿import {
   calculateScore,
-  scoringPiCount,
-  getDeclarableShakingMonths,
-  getDeclarableBombMonths,
   chooseGo,
   chooseStop
 } from "../engine/index.js";
@@ -26,20 +23,25 @@ const NEAT_MODEL_FORMAT = "neat_python_genome_v1";
 const IQN_GO_STOP_RUNTIME_FORMAT = "iqn_go_stop_runtime_v1";
 const COMPILED_NEAT_CACHE = new WeakMap();
 const GO_STOP_OPTION_ONE_HOT = [1, 0, 0, 0];
+const GUKJIN_CARD_ID = "I0";
 const NON_BRIGHT_KWANG_ID = "L0";
-const NEAT_COMPACT_FEATURES = 16;
-const NEAT_OUT_PLAY = 0;
-const NEAT_OUT_MATCH = 1;
-const NEAT_OUT_GO = 2;
-const NEAT_OUT_STOP = 3;
-const NEAT_OUT_SHAKING_YES = 4;
-const NEAT_OUT_SHAKING_NO = 5;
-const NEAT_OUT_PRESIDENT_STOP = 6;
-const NEAT_OUT_PRESIDENT_HOLD = 7;
-const NEAT_OUT_GUKJIN_FIVE = 8;
-const NEAT_OUT_GUKJIN_JUNK = 9;
-const LEGACY_NEAT_COMPACT_FEATURES = 13;
-const IQN_GO_STOP_BASE_FEATURES = 16;
+const TOTAL_SSANGPI_VALUE = 13;
+const COMBO_THREAT_SPECS = Object.freeze({
+  redRibbons: Object.freeze({ zone: "ribbon", tag: "redRibbons", months: Object.freeze([1, 2, 3]), reward: 3, category: "ribbon" }),
+  blueRibbons: Object.freeze({ zone: "ribbon", tag: "blueRibbons", months: Object.freeze([6, 9, 10]), reward: 3, category: "ribbon" }),
+  plainRibbons: Object.freeze({ zone: "ribbon", tag: "plainRibbons", months: Object.freeze([4, 5, 7]), reward: 3, category: "ribbon" }),
+  fiveBirds: Object.freeze({ zone: "five", tag: "fiveBirds", months: Object.freeze([2, 4, 8]), reward: 5, category: "five" }),
+  kwang: Object.freeze({ zone: "kwang", tag: null, months: Object.freeze([1, 3, 8, 11, 12]), reward: 0, category: "kwang" })
+});
+const COMBO_THREAT_KEYS = Object.freeze(Object.keys(COMBO_THREAT_SPECS));
+const LEGACY13_FEATURES = 13;
+const HAND10_FEATURES = 10;
+const MATERIAL10_STAGING_FEATURES = 10;
+const POSITION11_FEATURES = 11;
+const DEFAULT_FEATURE_PROFILE = "hand10";
+const NEAT_OUT_ACTION_SCORE = 0;
+const NEAT_OUT_OPTION_BIAS = 1;
+const IQN_GO_STOP_BASE_FEATURES = 10;
 const IQN_GO_STOP_PAYLOAD_DIM = 10;
 
 /* 2) Feature extraction helpers */
@@ -124,6 +126,78 @@ function compactCandidatePiNorm(card) {
   return clamp01((piValue + stealPi) / 4.0);
 }
 
+function ssangpiLikeValue(card) {
+  if (!card) return 0;
+  if (String(card?.id || "") === GUKJIN_CARD_ID) return 2;
+  const piValue = Math.max(0, Number(card?.piValue || 0));
+  const stealPi = Math.max(0, Number(card?.bonus?.stealPi || 0));
+  if (stealPi > 0) return piValue + stealPi;
+  if (String(card?.category || "") !== "junk") return 0;
+  return piValue >= 2 ? piValue : 0;
+}
+
+function piLikeValue(card) {
+  if (!card) return 0;
+  if (String(card?.id || "") === GUKJIN_CARD_ID) return 2;
+  const piValue = Math.max(0, Number(card?.piValue || 0));
+  const stealPi = Math.max(0, Number(card?.bonus?.stealPi || 0));
+  return Math.max(0, piValue + stealPi);
+}
+
+function sumUniqueSsangpiLikeValue(cards) {
+  if (!Array.isArray(cards)) return 0;
+  const seen = new Set();
+  let total = 0;
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    total += ssangpiLikeValue(card);
+  }
+  return total;
+}
+
+function sumUniquePiLikeValue(cards) {
+  if (!Array.isArray(cards)) return 0;
+  const seen = new Set();
+  let total = 0;
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    total += piLikeValue(card);
+  }
+  return total;
+}
+
+function collectCapturedCards(player) {
+  const captured = player?.captured || {};
+  return []
+    .concat(captured.kwang || [])
+    .concat(captured.five || [])
+    .concat(captured.ribbon || [])
+    .concat(captured.junk || []);
+}
+
+function selfSsangpiControlNorm(state, actor) {
+  const selfPlayer = state?.players?.[actor];
+  const handValue = sumUniqueSsangpiLikeValue(selfPlayer?.hand || []);
+  const capturedValue = sumUniqueSsangpiLikeValue(collectCapturedCards(selfPlayer));
+  return clamp01((handValue + capturedValue) / TOTAL_SSANGPI_VALUE);
+}
+
+function ssangpiRevealedRatioNorm(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const selfPlayer = state?.players?.[actor];
+  const oppPlayer = state?.players?.[opp];
+  const revealed =
+    sumUniqueSsangpiLikeValue(selfPlayer?.hand || []) +
+    sumUniqueSsangpiLikeValue(collectCapturedCards(selfPlayer)) +
+    sumUniqueSsangpiLikeValue(collectCapturedCards(oppPlayer)) +
+    sumUniqueSsangpiLikeValue(state?.board || []);
+  return clamp01(revealed / TOTAL_SSANGPI_VALUE);
+}
+
 function countCardsByMonth(cards, month) {
   const targetMonth = Number(month || 0);
   if (!Array.isArray(cards) || targetMonth <= 0) return 0;
@@ -152,15 +226,6 @@ function countCapturedComboTag(player, zone, tag) {
   return count;
 }
 
-function isDoublePiCard(card) {
-  if (!card) return false;
-  const id = String(card?.id || "");
-  const category = String(card?.category || "");
-  const piValue = Number(card?.piValue || 0);
-  if (id === "I0") return true;
-  return category === "junk" && piValue >= 2;
-}
-
 function resolveCandidateMonth(state, actor, decisionType, card) {
   const cardMonth = Number(card?.month || 0);
   if (cardMonth >= 1) return cardMonth;
@@ -175,11 +240,6 @@ function resolveCandidateMonth(state, actor, decisionType, card) {
     }
   }
   return 0;
-}
-
-function matchOpportunityDensity(state, month) {
-  const boardMonthCount = countCardsByMonth(state?.board || [], month);
-  return clamp01(boardMonthCount / 3.0);
 }
 
 function immediateMatchPossible(state, decisionType, month) {
@@ -274,10 +334,6 @@ function uniqueCapturedCards(player, zone) {
   return out;
 }
 
-function uniqueCapturedCardCount(player, zone) {
-  return uniqueCapturedCards(player, zone).length;
-}
-
 function compactKwangBaseScore(kwangCards) {
   const count = Array.isArray(kwangCards) ? kwangCards.length : 0;
   if (count < 3) return 0;
@@ -341,19 +397,112 @@ function candidateComboGain(state, actor, decisionType, candidate) {
   return clamp01(raw / 11.0);
 }
 
-function decisionAvailabilityFlags(state, actor) {
-  if (state?.phase === "shaking-confirm" && state?.pendingShakingConfirm?.playerKey === actor) {
-    return { hasShake: 1, hasBomb: 0 };
+function comboTargetMatchesSpec(card, spec, month = 0) {
+  if (!card || !spec) return false;
+  if (String(card?.category || "") !== String(spec.category || "")) return false;
+  if (month > 0 && Number(card?.month || 0) !== Number(month)) return false;
+  if (spec.tag && !hasComboTag(card, spec.tag)) return false;
+  return spec.months.includes(Number(card?.month || 0));
+}
+
+function capturedComboMonths(player, spec) {
+  const out = new Set();
+  for (const card of uniqueCapturedCards(player, spec.zone)) {
+    if (comboTargetMatchesSpec(card, spec)) out.add(Number(card?.month || 0));
   }
-  if (state?.phase !== "playing" || state?.currentTurn !== actor) {
-    return { hasShake: 0, hasBomb: 0 };
+  return out;
+}
+
+function cardsContainComboTarget(cards, spec, month) {
+  if (!Array.isArray(cards)) return false;
+  return cards.some((card) => comboTargetMatchesSpec(card, spec, month));
+}
+
+function resolveComboThreatTargetExposure(state, defenderKey, spec, month) {
+  const selfPlayer = state?.players?.[defenderKey];
+  if (cardsContainComboTarget(selfPlayer?.captured?.[spec.zone] || [], spec, month)) return 0.0;
+  if (cardsContainComboTarget(selfPlayer?.hand || [], spec, month)) return 0.2;
+  if (cardsContainComboTarget(getPublicKnownOpponentHandCards(state, defenderKey), spec, month)) return 1.0;
+  if (cardsContainComboTarget(state?.board || [], spec, month)) return 0.85;
+  return 0.55;
+}
+
+function kwangThreatBaseRaw(oppPlayer) {
+  const oppKwangCards = uniqueCapturedCards(oppPlayer, "kwang");
+  const oppKwangCount = oppKwangCards.length;
+  const hasNonBright = oppKwangCards.some((card) => String(card?.id || "") === NON_BRIGHT_KWANG_ID);
+  if (oppKwangCount === 2) return hasNonBright ? 2 : 3;
+  if (oppKwangCount === 3) return hasNonBright ? 2 : 1;
+  if (oppKwangCount === 4) return 11;
+  return 0;
+}
+
+function comboThreatNormByKey(state, defenderKey, comboKey) {
+  const spec = COMBO_THREAT_SPECS[comboKey];
+  const attackerKey = defenderKey === "human" ? "ai" : "human";
+  const selfPlayer = state?.players?.[defenderKey];
+  const oppPlayer = state?.players?.[attackerKey];
+  if (!selfPlayer || !oppPlayer || !spec) return 0;
+
+  let baseRaw = 0;
+  let missingMonths = [];
+  if (comboKey === "kwang") {
+    const selfKwangCount = uniqueCapturedCards(selfPlayer, "kwang").length;
+    const oppKwangCards = uniqueCapturedCards(oppPlayer, "kwang");
+    const oppKwangCount = oppKwangCards.length;
+    if (selfKwangCount >= 3 || oppKwangCount < 2 || oppKwangCount >= 5) return 0;
+    baseRaw = kwangThreatBaseRaw(oppPlayer);
+    if (baseRaw <= 0) return 0;
+    const capturedMonths = new Set(oppKwangCards.map((card) => Number(card?.month || 0)).filter((month) => month >= 1));
+    missingMonths = spec.months.filter((month) => !capturedMonths.has(month));
+  } else {
+    const oppCount = countCapturedComboTag(oppPlayer, spec.zone, spec.tag);
+    if (oppCount !== 2) return 0;
+    baseRaw = Number(spec.reward || 0);
+    const capturedMonths = capturedComboMonths(oppPlayer, spec);
+    missingMonths = spec.months.filter((month) => !capturedMonths.has(month));
   }
-  const shakingMonths = getDeclarableShakingMonths(state, actor);
-  const bombMonths = getDeclarableBombMonths(state, actor);
-  return {
-    hasShake: Array.isArray(shakingMonths) && shakingMonths.length > 0 ? 1 : 0,
-    hasBomb: Array.isArray(bombMonths) && bombMonths.length > 0 ? 1 : 0
-  };
+
+  if (missingMonths.length <= 0) return 0;
+
+  const exposures = missingMonths.map((month) => resolveComboThreatTargetExposure(state, defenderKey, spec, month));
+  const liveTargets = exposures.filter((value) => value > 0).length;
+  if (liveTargets <= 0) return 0;
+
+  const exposureFactor = Math.max(...exposures);
+  const outsFactor = Math.min(1.2, 1.0 + 0.1 * Math.max(0, liveTargets - 1));
+  return clamp01((baseRaw * exposureFactor * outsFactor) / 11.0);
+}
+
+function comboThreatBreakdown(state, defenderKey) {
+  const out = Object.create(null);
+  for (const comboKey of COMBO_THREAT_KEYS) {
+    out[comboKey] = comboThreatNormByKey(state, defenderKey, comboKey);
+  }
+  return out;
+}
+
+function oppComboThreatNorm(state, defenderKey) {
+  let maxThreat = 0;
+  const breakdown = comboThreatBreakdown(state, defenderKey);
+  for (const comboKey of COMBO_THREAT_KEYS) {
+    const value = Number(breakdown[comboKey] || 0);
+    if (value > maxThreat) maxThreat = value;
+  }
+  return maxThreat;
+}
+
+function candidateBlockGainNorm(state, actor, decisionType, candidate) {
+  const visibleState = maskStateForVisibleComboSimulation(state);
+  const before = comboThreatBreakdown(visibleState, actor);
+  const afterState = applyDecisionCandidate(visibleState, actor, decisionType, candidate);
+  if (!afterState) return 0;
+  const after = comboThreatBreakdown(afterState, actor);
+  let delta = 0;
+  for (const comboKey of COMBO_THREAT_KEYS) {
+    delta += Number(before[comboKey] || 0) - Number(after[comboKey] || 0);
+  }
+  return clampRange(delta, -1.0, 1.0);
 }
 
 function currentMultiplierNorm(state, scoreSelf) {
@@ -384,37 +533,23 @@ function compactOppStopPressureNorm(scoreTotal) {
   return 1.0;
 }
 
-function compactGoStageNorm(goCount) {
-  const g = Math.max(0, Number(goCount || 0));
-  if (g <= 0) return 0.0;
-  if (g === 1) return 0.2;
-  if (g === 2) return 0.35;
-  if (g === 3) return 0.7;
-  if (g === 4) return 0.9;
+function decisionContextCode(decisionType) {
+  if (decisionType === "play") return 0.0;
+  if (decisionType === "match") return 0.5;
   return 1.0;
 }
 
-function compactGoStopGatedFeatures(state, actor, decisionType, candidate) {
-  const isGoStopOption = decisionType === "option" && state?.phase === "go-stop";
-  const action = canonicalOptionAction(candidate);
-  const opp = actor === "human" ? "ai" : "human";
-  return [
-    !isGoStopOption ? 0.5 : action === "go" ? 1.0 : action === "stop" ? 0.0 : 0.5,
-    isGoStopOption ? compactGoStageNorm(state?.players?.[actor]?.goCount || 0) : 0.0,
-    isGoStopOption ? compactGoStageNorm(state?.players?.[opp]?.goCount || 0) : 0.0
-  ];
+function stopStatusDelta(scoreSelf, scoreOpp) {
+  const selfCanStop = Number(scoreSelf?.total || 0) >= 7 ? 1 : 0;
+  const oppCanStop = Number(scoreOpp?.total || 0) >= 7 ? 1 : 0;
+  return selfCanStop - oppCanStop;
 }
 
-function padDeletedTailFeatures(baseFeatures, inputDim) {
-  const baseDim = baseFeatures.length;
-  if (inputDim === baseDim) return baseFeatures;
-  if (inputDim === (baseDim + 1)) return [...baseFeatures, 0.0];
-  throw new Error(
-    `feature vector size mismatch: expected ${inputDim}, supported=${baseDim},${baseDim + 1}`
-  );
+function deckRemainingNorm(state) {
+  return clamp01(Number(state?.deck?.length || 0) / 30.0);
 }
 
-function buildLegacyCompactFeatureVector(state, actor, decisionType, candidate) {
+function buildLegacy13FeatureVector(state, actor, decisionType, candidate) {
   const opp = actor === "human" ? "ai" : "human";
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
   const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
@@ -438,120 +573,549 @@ function buildLegacyCompactFeatureVector(state, actor, decisionType, candidate) 
   ];
 }
 
-function buildCompactFeatureVector(state, actor, decisionType, candidate) {
+function countHandCards(cards) {
+  if (!Array.isArray(cards)) return 0;
+  return cards.length;
+}
+
+function handRatioDenominator(cards) {
+  return Math.max(1, countHandCards(cards));
+}
+
+function handCardsForActor(state, actor) {
+  return state?.players?.[actor]?.hand || [];
+}
+
+function boardCountForMonth(state, month) {
+  return countCardsByMonth(state?.board || [], month);
+}
+
+function knownCountForMonth(state, actor, month) {
+  const total = monthTotalCards(month);
+  if (total <= 0) return 0;
+  const cards = collectKnownCardsForMonthRatio(state, actor);
+  const seen = new Set();
+  let known = 0;
+  for (const card of cards) {
+    const id = String(card?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (Number(card?.month || 0) === Number(month)) known += 1;
+  }
+  return known;
+}
+
+function handMonthCountMap(cards) {
+  const out = new Map();
+  for (const card of cards || []) {
+    const month = Number(card?.month || 0);
+    if (month <= 0) continue;
+    out.set(month, Number(out.get(month) || 0) + 1);
+  }
+  return out;
+}
+
+function countCapturedMonth(player, month) {
+  return countCardsByMonth(collectCapturedCards(player), month);
+}
+
+function buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate) {
+  const visibleState = maskStateForVisibleComboSimulation(state);
+  try {
+    return applyDecisionCandidate(visibleState, actor, decisionType, candidate) || visibleState;
+  } catch {
+    return visibleState;
+  }
+}
+
+function handMatchableRatio(state, actor) {
+  const hand = handCardsForActor(state, actor);
+  const denom = handRatioDenominator(hand);
+  const boardMonths = new Set((state?.board || []).map((card) => Number(card?.month || 0)).filter((month) => month > 0));
+  let count = 0;
+  for (const card of hand) {
+    if (boardMonths.has(Number(card?.month || 0))) count += 1;
+  }
+  return clamp01(count / denom);
+}
+
+function handTripleFlagNorm(state, actor) {
+  const counts = handMonthCountMap(handCardsForActor(state, actor));
+  for (const value of counts.values()) {
+    if (value >= 3) return 1.0;
+  }
+  return 0.0;
+}
+
+function handComboReserveNorm(state, actor) {
+  const hand = handCardsForActor(state, actor);
+  const denom = handRatioDenominator(hand);
+  let count = 0;
+  for (const card of hand) {
+    const category = String(card?.category || "");
+    if (category === "kwang" || category === "five" || category === "ribbon") count += 1;
+  }
+  return clamp01(count / denom);
+}
+
+function handHighValueDensity(state, actor) {
+  const hand = handCardsForActor(state, actor);
+  const denom = handRatioDenominator(hand);
+  let count = 0;
+  for (const card of hand) {
+    if (String(card?.category || "") === "kwang" || ssangpiLikeValue(card) > 0) count += 1;
+  }
+  return clamp01(count / denom);
+}
+
+function handMonopolyIndex(state, actor) {
+  const selfPlayer = state?.players?.[actor];
+  const hand = handCardsForActor(state, actor);
+  if (!selfPlayer || hand.length <= 0) return 0;
+  const handCounts = handMonthCountMap(hand);
+  let best = 0;
+  for (const month of new Set([...handCounts.keys(), ...collectCapturedCards(selfPlayer).map((card) => Number(card?.month || 0)).filter((month) => month > 0)])) {
+    const total = monthTotalCards(month);
+    if (total <= 0) continue;
+    const held = Number(handCounts.get(month) || 0) + countCapturedMonth(selfPlayer, month);
+    best = Math.max(best, held / total);
+  }
+  return clamp01(best);
+}
+
+function isSafeDiscardMonth(state, actor, month) {
+  if (boardCountForMonth(state, month) >= 3) return true;
+  const total = monthTotalCards(month);
+  return total > 0 && knownCountForMonth(state, actor, month) >= total;
+}
+
+function handSafeDiscardRatio(state, actor) {
+  const hand = handCardsForActor(state, actor);
+  const denom = handRatioDenominator(hand);
+  let count = 0;
+  for (const card of hand) {
+    if (isSafeDiscardMonth(state, actor, Number(card?.month || 0))) count += 1;
+  }
+  return clamp01(count / denom);
+}
+
+function oppPiPressureNorm(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const oppPlayer = state?.players?.[opp];
+  const oppEffectivePi = sumUniquePiLikeValue(collectCapturedCards(oppPlayer));
+  return clamp01((oppEffectivePi - 6.0) / 4.0);
+}
+
+function collectPublicPiTargetWeightsByMonth(state) {
+  const weights = new Map();
+  const counts = new Map();
+  for (const card of state?.board || []) {
+    const value = piLikeValue(card);
+    if (value <= 0) continue;
+    const month = Number(card?.month || 0);
+    if (month <= 0) continue;
+    weights.set(month, Number(weights.get(month) || 0) + value);
+    counts.set(month, Number(counts.get(month) || 0) + 1);
+  }
+  return { weights, counts };
+}
+
+function handOppPiBlockNorm(state, actor) {
+  const pressure = oppPiPressureNorm(state, actor);
+  if (pressure <= 0) return 0;
+
+  const { weights, counts } = collectPublicPiTargetWeightsByMonth(state);
+  if (weights.size <= 0) return 0;
+
+  const handCounts = handMonthCountMap(handCardsForActor(state, actor));
+  let totalTargetValue = 0;
+  let blockedValue = 0;
+
+  for (const [month, totalWeight] of weights.entries()) {
+    const targetCount = Number(counts.get(month) || 0);
+    if (targetCount <= 0 || totalWeight <= 0) continue;
+    totalTargetValue += totalWeight;
+    const heldCount = Number(handCounts.get(month) || 0);
+    if (heldCount <= 0) continue;
+    const cappedHeld = Math.min(heldCount, targetCount);
+    blockedValue += (totalWeight / targetCount) * cappedHeld;
+  }
+
+  if (totalTargetValue <= 0) return 0;
+  return clamp01(pressure * clamp01(blockedValue / totalTargetValue));
+}
+
+function handMonthDiversity(state, actor) {
+  const hand = handCardsForActor(state, actor);
+  const denom = handRatioDenominator(hand);
+  const uniqueMonths = new Set(hand.map((card) => Number(card?.month || 0)).filter((month) => month > 0));
+  return clamp01(uniqueMonths.size / denom);
+}
+
+function handHiddenPotential(state, actor) {
+  const hand = handCardsForActor(state, actor);
+  const denom = handRatioDenominator(hand);
+  let count = 0;
+  for (const card of hand) {
+    if (knownCountForMonth(state, actor, Number(card?.month || 0)) <= 1) count += 1;
+  }
+  return clamp01(count / denom);
+}
+
+function collectOppComboTargetEntries(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const selfPlayer = state?.players?.[actor];
+  const oppPlayer = state?.players?.[opp];
+  const out = [];
+  const seen = new Set();
+  const pushTarget = (spec, month) => {
+    const key = `${spec.zone}:${spec.tag || spec.category}:${month}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ spec, month });
+  };
+
+  for (const key of COMBO_THREAT_KEYS) {
+    const spec = COMBO_THREAT_SPECS[key];
+    const oppMonths = capturedComboMonths(oppPlayer, spec);
+    if (key === "kwang") {
+      if (uniqueCapturedCards(selfPlayer, "kwang").length >= 3) continue;
+      if (oppMonths.size < 2) continue;
+    } else if (oppMonths.size < 2) {
+      continue;
+    }
+    for (const month of spec.months) {
+      if (oppMonths.has(month)) continue;
+      if (cardsContainComboTarget(selfPlayer?.captured?.[spec.zone] || [], spec, month)) continue;
+      pushTarget(spec, month);
+    }
+  }
+  return out;
+}
+
+function handOppBlockNorm(state, actor) {
+  const targets = collectOppComboTargetEntries(state, actor);
+  if (targets.length <= 0) return 0;
+  const hand = handCardsForActor(state, actor);
+  let held = 0;
+  for (const target of targets) {
+    if (cardsContainComboTarget(hand, target.spec, target.month)) held += 1;
+  }
+  return clamp01(held / targets.length);
+}
+
+function candidateDangerExposure(state, actor, decisionType, candidate) {
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  if (!card || month <= 0) return 0;
+  if (immediateMatchPossible(state, decisionType, month) > 0) return 0;
+
+  let comboRisk = 0;
+  for (const target of collectOppComboTargetEntries(state, actor)) {
+    if (!comboTargetMatchesSpec(card, target.spec, target.month)) continue;
+    const rewardNorm = target.spec?.category === "kwang" ? 1.0 : clamp01(Number(target.spec?.reward || 0) / 5.0);
+    comboRisk = Math.max(comboRisk, rewardNorm);
+  }
+
+  const piRisk = clamp01(oppPiPressureNorm(state, actor) * compactCandidatePiNorm(card));
+  return clamp01(Math.max(comboRisk, piRisk));
+}
+
+function positionalAdvantageSigned(state, actor) {
+  const selfCombo = selfComboCompletionNorm(state, actor);
+  const oppProximity = oppWinProximityNorm(state, actor);
+  const selfSafety = selfGoSafetyNorm(state, actor);
+  const oppPiThreat = oppSsangpiThreatNorm(state, actor);
+  return clampRange(Math.tanh((selfCombo - oppProximity + selfSafety - oppPiThreat) / 2.0), -1.0, 1.0);
+}
+
+function globalContextTrigger(state, actor) {
+  return clamp01(0.5 + (0.5 * positionalAdvantageSigned(state, actor)));
+}
+
+function comboCapturedCount(player, comboKey) {
+  const spec = COMBO_THREAT_SPECS[comboKey];
+  if (!player || !spec) return 0;
+  if (comboKey === "kwang") {
+    return Math.min(3, uniqueCapturedCards(player, "kwang").length);
+  }
+  return Math.min(3, countCapturedComboTag(player, spec.zone, spec.tag));
+}
+
+function comboHandCount(player, comboKey) {
+  const spec = COMBO_THREAT_SPECS[comboKey];
+  if (!player || !spec) return 0;
+  let count = 0;
+  for (const card of player?.hand || []) {
+    if (comboTargetMatchesSpec(card, spec)) count += 1;
+  }
+  return count;
+}
+
+function comboMissingMonths(player, comboKey) {
+  const spec = COMBO_THREAT_SPECS[comboKey];
+  if (!player || !spec) return [];
+  if (comboKey === "kwang") {
+    const capturedMonths = new Set(
+      uniqueCapturedCards(player, "kwang").map((card) => Number(card?.month || 0)).filter((month) => month >= 1)
+    );
+    return spec.months.filter((month) => !capturedMonths.has(month));
+  }
+  const capturedMonths = capturedComboMonths(player, spec);
+  return spec.months.filter((month) => !capturedMonths.has(month));
+}
+
+function comboProximityNormForPlayer(player, comboKey) {
+  const captured = comboCapturedCount(player, comboKey);
+  const missing = Math.max(0, 3 - captured);
+  if (missing <= 1) return 1.0;
+  if (missing === 2) return 0.5;
+  return 0.0;
+}
+
+function comboCompletionNormForPlayer(player, comboKey) {
+  return clamp01(comboCapturedCount(player, comboKey) / 3.0);
+}
+
+function comboTurnsEstimate(state, actor, comboKey) {
+  const selfPlayer = state?.players?.[actor];
+  const spec = COMBO_THREAT_SPECS[comboKey];
+  if (!selfPlayer || !spec) return 10;
+  const missingMonths = comboMissingMonths(selfPlayer, comboKey);
+  if (missingMonths.length <= 0) return 0;
+
+  let turns = 0;
+  for (const month of missingMonths) {
+    if (cardsContainComboTarget(selfPlayer?.hand || [], spec, month)) {
+      turns += 1;
+    } else if (cardsContainComboTarget(state?.board || [], spec, month)) {
+      turns += 1;
+    } else if (knownCountForMonth(state, actor, month) >= monthTotalCards(month)) {
+      turns += 4;
+    } else {
+      turns += 2;
+    }
+  }
+  return Math.min(10, turns);
+}
+
+function selfWinPathScore(state, actor) {
+  let bestTurns = 10;
+  for (const comboKey of COMBO_THREAT_KEYS) {
+    bestTurns = Math.min(bestTurns, comboTurnsEstimate(state, actor, comboKey));
+  }
+  if (bestTurns <= 1) return 1.0;
+  if (bestTurns <= 2) return 0.85;
+  if (bestTurns <= 3) return 0.65;
+  return clamp01(1.0 - (bestTurns / 10.0));
+}
+
+function selfMaterialConcentration(state, actor) {
+  const selfPlayer = state?.players?.[actor];
+  let best = 0;
+  for (const comboKey of COMBO_THREAT_KEYS) {
+    best = Math.max(best, comboCapturedCount(selfPlayer, comboKey) / 3.0);
+  }
+  return clamp01(best);
+}
+
+function selfComboCompletionNorm(state, actor) {
+  const selfPlayer = state?.players?.[actor];
+  let best = 0;
+  for (const comboKey of COMBO_THREAT_KEYS) {
+    const captured = comboCapturedCount(selfPlayer, comboKey);
+    if (captured >= 3) return 1.0;
+    const handCount = comboHandCount(selfPlayer, comboKey);
+    best = Math.max(best, (captured + handCount) / 3.0);
+  }
+  return clamp01(best);
+}
+
+function selfGoSafetyNorm(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const selfPlayer = state?.players?.[actor];
+  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
+  const capturedPi = sumUniquePiLikeValue(collectCapturedCards(selfPlayer));
+  const handSsangpi = sumUniqueSsangpiLikeValue(selfPlayer?.hand || []);
+  const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
+  const multiplier = Math.max(1.0, Number(scoreSelf?.multiplier || 1.0)) * carry;
+  return clamp01((capturedPi + handSsangpi) / (6.0 + (multiplier * 1.5)));
+}
+
+function selfTempoAdvantage(state, actor) {
+  const hand = handCardsForActor(state, actor);
+  let score = 0;
+  for (const card of hand) {
+    let weight = 0;
+    if (String(card?.category || "") === "kwang") weight = 3;
+    else if (ssangpiLikeValue(card) > 0) weight = 2;
+    else if (String(card?.category || "") === "ribbon" || String(card?.category || "") === "five") weight = 1;
+    if (weight <= 0) continue;
+    if (boardCountForMonth(state, Number(card?.month || 0)) > 0) score += weight;
+  }
+  return clamp01(score / Math.max(hand.length * 2, 1));
+}
+
+function oppWinProximityNorm(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const oppPlayer = state?.players?.[opp];
+  let comboBest = 0;
+  for (const comboKey of COMBO_THREAT_KEYS) {
+    comboBest = Math.max(comboBest, comboProximityNormForPlayer(oppPlayer, comboKey));
+  }
+  const piProx = clamp01(sumUniquePiLikeValue(collectCapturedCards(oppPlayer)) / 9.0);
+  return clamp01(Math.max(comboBest, piProx * 0.8));
+}
+
+function oppSsangpiThreatNorm(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const oppPlayer = state?.players?.[opp];
+  const oppPi = sumUniquePiLikeValue(collectCapturedCards(oppPlayer));
+  return clamp01((oppPi - 5.0) / 5.0);
+}
+
+function handCriticalBlockNorm(state, actor) {
+  const proximity = oppWinProximityNorm(state, actor);
+  if (proximity <= 0) return 0;
+  const targets = collectOppComboTargetEntries(state, actor);
+  if (targets.length <= 0) return 0;
+  let held = 0;
+  const hand = handCardsForActor(state, actor);
+  for (const target of targets) {
+    if (cardsContainComboTarget(hand, target.spec, target.month)) held += 1;
+  }
+  return clamp01(proximity * held / Math.max(targets.length, 1));
+}
+
+function oppGoThreatNorm(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const carry = Math.max(1.0, Number(state?.carryOverMultiplier || 1.0));
+  const oppMultiplier = Math.max(1.0, Number(scoreOpp?.multiplier || 1.0)) * carry;
+  const oppGoCount = Math.max(0, Number(state?.players?.[opp]?.goCount || 0));
+  return clamp01((oppGoCount * oppMultiplier) / 8.0);
+}
+
+function boardDangerRatio(state, actor) {
+  const board = state?.board || [];
+  if (!Array.isArray(board) || board.length <= 0) return 0;
+  const targets = collectOppComboTargetEntries(state, actor);
+  if (targets.length <= 0) return 0;
+  let count = 0;
+  for (const card of board) {
+    for (const target of targets) {
+      if (comboTargetMatchesSpec(card, target.spec, target.month)) {
+        count += 1;
+        break;
+      }
+    }
+  }
+  return clamp01(oppWinProximityNorm(state, actor) * count / Math.max(board.length, 4));
+}
+
+function buildPosition11FeatureVector(state, actor, decisionType, candidate) {
+  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
   return [
-    ...buildLegacyCompactFeatureVector(state, actor, decisionType, candidate),
-    ...compactGoStopGatedFeatures(state, actor, decisionType, candidate)
+    selfWinPathScore(postState, actor),
+    selfMaterialConcentration(postState, actor),
+    selfSsangpiControlNorm(postState, actor),
+    selfComboCompletionNorm(postState, actor),
+    selfGoSafetyNorm(postState, actor),
+    selfTempoAdvantage(postState, actor),
+    oppWinProximityNorm(postState, actor),
+    oppSsangpiThreatNorm(postState, actor),
+    handCriticalBlockNorm(postState, actor),
+    oppGoThreatNorm(postState, actor),
+    boardDangerRatio(postState, actor),
   ];
 }
 
-function buildLegacyFeatureVector(state, actor, decisionType, candidate, legalCount) {
+function buildHand10FeatureVector(state, actor, decisionType, candidate) {
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
+  const postPiBlock = handOppPiBlockNorm(postState, actor);
+  const postComboBlock = handOppBlockNorm(postState, actor);
+  return [
+    candidateComboGain(state, actor, decisionType, candidate),
+    compactCandidatePiNorm(card),
+    immediateMatchPossible(state, decisionType, month),
+    isSafeDiscardMonth(state, actor, month) ? 1.0 : 0.0,
+    candidateDangerExposure(state, actor, decisionType, candidate),
+    handMatchableRatio(postState, actor),
+    handTripleFlagNorm(postState, actor),
+    handHighValueDensity(postState, actor),
+    clamp01(Math.max(postPiBlock, postComboBlock)),
+    globalContextTrigger(postState, actor)
+  ];
+}
+
+function buildMaterial10StagingFeatureVector(state, actor, decisionType, candidate) {
   const opp = actor === "human" ? "ai" : "human";
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
   const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const month = resolveCandidateMonth(state, actor, decisionType, candidateCard(state, actor, decisionType, candidate));
 
-  const phase = String(state.phase || "");
-  const card = candidateCard(state, actor, decisionType, candidate);
-  const month = resolveCandidateMonth(state, actor, decisionType, card);
-  const piValue = Number(card?.piValue || 0);
-  const category = String(card?.category || "");
-  const selfGwangCount = Number(state?.players?.[actor]?.captured?.kwang?.length || 0);
-  const oppGwangCount = Number(state?.players?.[opp]?.captured?.kwang?.length || 0);
-  const selfPiCount = Number(scoringPiCount(state.players[actor]) || 0);
-  const oppPiCount = Number(scoringPiCount(state.players[opp]) || 0);
-
-  const selfGodori = countCapturedComboTag(state.players?.[actor], "five", "fiveBirds");
-  const oppGodori = countCapturedComboTag(state.players?.[opp], "five", "fiveBirds");
-  const selfCheongdan = countCapturedComboTag(state.players?.[actor], "ribbon", "blueRibbons");
-  const oppCheongdan = countCapturedComboTag(state.players?.[opp], "ribbon", "blueRibbons");
-  const selfHongdan = countCapturedComboTag(state.players?.[actor], "ribbon", "redRibbons");
-  const oppHongdan = countCapturedComboTag(state.players?.[opp], "ribbon", "redRibbons");
-  const selfChodan = countCapturedComboTag(state.players?.[actor], "ribbon", "plainRibbons");
-  const oppChodan = countCapturedComboTag(state.players?.[opp], "ribbon", "plainRibbons");
-
-  const selfCanStop = Number(scoreSelf?.total || 0) >= 7 ? 1 : 0;
-  const oppCanStop = Number(scoreOpp?.total || 0) >= 7 ? 1 : 0;
-  const { hasShake, hasBomb } = decisionAvailabilityFlags(state, actor);
-
-  const baseFeatures = [
-    phase === "playing" ? 1 : 0,
-    phase === "select-match" ? 1 : 0,
-    phase === "go-stop" ? 1 : 0,
-    phase === "president-choice" ? 1 : 0,
-    phase === "gukjin-choice" ? 1 : 0,
-    phase === "shaking-confirm" ? 1 : 0,
-
-    decisionType === "play" ? 1 : 0,
-    decisionType === "match" ? 1 : 0,
-    decisionType === "option" ? 1 : 0,
-
-    clamp01((state.deck?.length || 0) / 30.0),
-    clamp01((state.players?.[actor]?.hand?.length || 0) / 10.0),
-    clamp01((state.players?.[opp]?.hand?.length || 0) / 10.0),
-    clamp01((state.players?.[actor]?.goCount || 0) / 5.0),
-    clamp01((state.players?.[opp]?.goCount || 0) / 5.0),
-    tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0),
-    tanhNorm(scoreSelf?.total || 0, 10.0),
-    clamp01(Number(legalCount || 0) / 10.0),
-
-    clamp01(piValue / 5.0),
-    category === "kwang" ? 1 : 0,
-    category === "ribbon" ? 1 : 0,
-    category === "five" ? 1 : 0,
-    category === "junk" ? 1 : 0,
-    isDoublePiCard(card) ? 1 : 0,
-
-    matchOpportunityDensity(state, month),
+  return [
+    clamp01(currentMultiplierNorm(state, scoreSelf)),
+    candidateComboGain(state, actor, decisionType, candidate),
+    oppComboThreatNorm(state, actor),
+    candidateBlockGainNorm(state, actor, decisionType, candidate),
+    candidatePublicKnownRatio(state, actor, month),
     immediateMatchPossible(state, decisionType, month),
-    optionCode(candidate),
-
-    clamp01(selfGwangCount / 5.0),
-    clamp01(oppGwangCount / 5.0),
-    clamp01(selfPiCount / 20.0),
-    clamp01(oppPiCount / 20.0),
-
-    clamp01(selfGodori / 3.0),
-    clamp01(oppGodori / 3.0),
-    clamp01(selfCheongdan / 3.0),
-    clamp01(oppCheongdan / 3.0),
-    clamp01(selfHongdan / 3.0),
-    clamp01(oppHongdan / 3.0),
-    clamp01(selfChodan / 3.0),
-    clamp01(oppChodan / 3.0),
-
-    selfCanStop,
-    oppCanStop,
-
-    hasShake,
-    currentMultiplierNorm(state, scoreSelf),
-    hasBomb,
-
-    scoreSelf?.bak?.pi ? 1 : 0,
-    scoreSelf?.bak?.gwang ? 1 : 0,
-    scoreSelf?.bak?.mongBak ? 1 : 0
+    selfSsangpiControlNorm(state, actor),
+    ssangpiRevealedRatioNorm(state, actor),
+    compactOppStopPressureNorm(scoreOpp?.total || 0),
+    tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0)
   ];
-
-  return baseFeatures;
 }
 
-function featureVector(state, actor, decisionType, candidate, legalCount, inputDim) {
-  if (inputDim === NEAT_COMPACT_FEATURES) {
-    const features = buildCompactFeatureVector(state, actor, decisionType, candidate);
-    if (features.length !== NEAT_COMPACT_FEATURES) {
-      throw new Error(`compact feature length mismatch: expected ${NEAT_COMPACT_FEATURES}, got ${features.length}`);
+function normalizeFeatureProfile(featureSpec, inputDim) {
+  const profile = String(featureSpec?.profile || "").trim().toLowerCase();
+  if (profile === "material10") return "material10";
+  if (profile === "hand10") return "hand10";
+  if (profile === "position11") return "position11";
+  if (inputDim === LEGACY13_FEATURES) return "legacy13";
+  if (inputDim === POSITION11_FEATURES) return "position11";
+  return DEFAULT_FEATURE_PROFILE;
+}
+
+function featureVector(state, actor, decisionType, candidate, legalCount, inputDim, featureSpec = null) {
+  const profile = normalizeFeatureProfile(featureSpec, inputDim);
+  let features = null;
+  if (profile === "legacy13") {
+    if (inputDim !== LEGACY13_FEATURES) {
+      throw new Error(
+        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${POSITION11_FEATURES}(position11)`
+      );
     }
-    return features;
-  }
-  if (inputDim === LEGACY_NEAT_COMPACT_FEATURES) {
-    const features = buildLegacyCompactFeatureVector(state, actor, decisionType, candidate);
-    if (features.length !== LEGACY_NEAT_COMPACT_FEATURES) {
-      throw new Error(`legacy compact feature length mismatch: expected ${LEGACY_NEAT_COMPACT_FEATURES}, got ${features.length}`);
+    features = buildLegacy13FeatureVector(state, actor, decisionType, candidate);
+  } else if (profile === "hand10") {
+    if (inputDim !== HAND10_FEATURES) {
+      throw new Error(
+        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${POSITION11_FEATURES}(position11)`
+      );
     }
-    return features;
+    features = buildHand10FeatureVector(state, actor, decisionType, candidate);
+  } else if (profile === "position11") {
+    if (inputDim !== POSITION11_FEATURES) {
+      throw new Error(
+        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${POSITION11_FEATURES}(position11)`
+      );
+    }
+    features = buildPosition11FeatureVector(state, actor, decisionType, candidate);
+  } else {
+    if (inputDim !== MATERIAL10_STAGING_FEATURES) {
+      throw new Error(
+        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${POSITION11_FEATURES}(position11)`
+      );
+    }
+    features = buildMaterial10StagingFeatureVector(state, actor, decisionType, candidate);
   }
-  throw new Error(
-    `feature vector size mismatch: expected ${inputDim}, supported=${NEAT_COMPACT_FEATURES},${LEGACY_NEAT_COMPACT_FEATURES}`
-  );
+  if (features.length !== inputDim) {
+    throw new Error(`compact feature length mismatch: expected ${inputDim}, got ${features.length}`);
+  }
+  return features;
 }
 
 function estimateStopValueForIqn(state, actor) {
@@ -774,7 +1338,15 @@ function compileNeatPythonGenome(raw) {
   const inputKeys = Array.isArray(raw?.input_keys) ? raw.input_keys.map((x) => Number(x)) : [];
   const outputKeys = Array.isArray(raw?.output_keys) ? raw.output_keys.map((x) => Number(x)) : [];
   const nodesRaw = raw?.nodes && typeof raw.nodes === "object" ? raw.nodes : {};
-  const decisionParams = raw?.decision_params && typeof raw.decision_params === "object" ? raw.decision_params : {};
+  const decisionParamsRaw = raw?.decision_params && typeof raw.decision_params === "object"
+    ? raw.decision_params
+    : {};
+  const decisionParams = {
+    go_stop_threshold: Number(decisionParamsRaw?.go_stop_threshold || 0),
+    shaking_threshold: Number(decisionParamsRaw?.shaking_threshold || 0),
+    president_threshold: Number(decisionParamsRaw?.president_threshold || 0),
+    gukjin_threshold: Number(decisionParamsRaw?.gukjin_threshold || 0)
+  };
 
   const nodes = new Map();
   for (const [k, v] of Object.entries(nodesRaw)) {
@@ -853,12 +1425,8 @@ function compileNeatPythonGenome(raw) {
     kind: NEAT_MODEL_FORMAT,
     inputKeys,
     outputKeys,
-    decisionParams: {
-      go_stop_threshold: Number(decisionParams.go_stop_threshold || 0),
-      shaking_threshold: Number(decisionParams.shaking_threshold || 0),
-      president_threshold: Number(decisionParams.president_threshold || 0),
-      gukjin_threshold: Number(decisionParams.gukjin_threshold || 0)
-    },
+    featureSpec: raw?.feature_spec && typeof raw.feature_spec === "object" ? raw.feature_spec : null,
+    decisionParams,
     nodes,
     incoming,
     order: order.length === nonInputSet.size ? order : [...nonInputSet].sort((a, b) => a - b)
@@ -903,29 +1471,68 @@ function forward(compiled, inputVec) {
   return compiled.outputKeys.map((outKey) => Number(values.get(Number(outKey)) || 0.0));
 }
 
+function isTwoOutputThresholdModel(compiled) {
+  return Array.isArray(compiled?.outputKeys) && compiled.outputKeys.length === 2;
+}
+
+function resolvePositiveOptionAction(candidate) {
+  const action = canonicalOptionAction(candidate);
+  if (action === "go" || action === "stop") return "go";
+  if (action === "shaking_yes" || action === "shaking_no") return "shaking_yes";
+  if (action === "president_stop" || action === "president_hold") return "president_hold";
+  if (action === "five" || action === "junk") return "five";
+  return null;
+}
+
+function resolveNegativeOptionAction(positiveAction) {
+  if (positiveAction === "go") return "stop";
+  if (positiveAction === "shaking_yes") return "shaking_no";
+  if (positiveAction === "president_hold") return "president_stop";
+  if (positiveAction === "five") return "junk";
+  return null;
+}
+
+function resolveDecisionThreshold(compiled, positiveAction) {
+  const params = compiled?.decisionParams || {};
+  if (positiveAction === "go") return Number(params.go_stop_threshold || 0);
+  if (positiveAction === "shaking_yes") return Number(params.shaking_threshold || 0);
+  if (positiveAction === "president_hold") return Number(params.president_threshold || 0);
+  if (positiveAction === "five") return Number(params.gukjin_threshold || 0);
+  return 0.0;
+}
+
+function buildTwoOutputOptionScoreBundle(state, actor, compiled, candidates) {
+  const positiveAction = candidates.map((candidate) => resolvePositiveOptionAction(candidate)).find(Boolean) || null;
+  if (!positiveAction) return null;
+  const negativeAction = resolveNegativeOptionAction(positiveAction);
+  if (!negativeAction) return null;
+  const inputDim = Number(compiled?.inputKeys?.length || 0);
+  const features = featureVector(state, actor, "option", positiveAction, candidates.length, inputDim, compiled?.featureSpec);
+  const outputs = forward(compiled, features);
+  const optionBias = Number(outputs[NEAT_OUT_OPTION_BIAS] || 0.0);
+  const threshold = resolveDecisionThreshold(compiled, positiveAction);
+  const scoreMap = new Map();
+  for (const candidate of candidates) {
+    const action = canonicalOptionAction(candidate);
+    if (action === positiveAction) {
+      scoreMap.set(candidate, optionBias - threshold);
+    } else if (action === negativeAction) {
+      scoreMap.set(candidate, threshold - optionBias);
+    } else {
+      scoreMap.set(candidate, -Infinity);
+    }
+  }
+  return { scoreMap, optionBias, threshold, positiveAction, negativeAction };
+}
+
 function candidateOutputIndex(compiled, decisionType, candidate) {
   const outputCount = Array.isArray(compiled?.outputKeys) ? compiled.outputKeys.length : 0;
-  if (outputCount <= 3) {
-    if (decisionType === "option") {
-      const action = canonicalOptionAction(candidate);
-      if (action === "go") return NEAT_OUT_GO - 1;
-      if (action === "stop") return NEAT_OUT_STOP - 1;
-    }
-    return NEAT_OUT_PLAY;
+  if (outputCount === 2) {
+    if (decisionType === "option") return NEAT_OUT_OPTION_BIAS;
+    return NEAT_OUT_ACTION_SCORE;
   }
-  if (decisionType === "match") return NEAT_OUT_MATCH;
-  if (decisionType === "option") {
-    const action = canonicalOptionAction(candidate);
-    if (action === "go") return NEAT_OUT_GO;
-    if (action === "stop") return NEAT_OUT_STOP;
-    if (action === "shaking_yes") return NEAT_OUT_SHAKING_YES;
-    if (action === "shaking_no") return NEAT_OUT_SHAKING_NO;
-    if (action === "president_stop") return NEAT_OUT_PRESIDENT_STOP;
-    if (action === "president_hold") return NEAT_OUT_PRESIDENT_HOLD;
-    if (action === "five") return NEAT_OUT_GUKJIN_FIVE;
-    if (action === "junk") return NEAT_OUT_GUKJIN_JUNK;
-  }
-  return NEAT_OUT_PLAY;
+  if (outputCount === 1) return 0;
+  throw new Error(`unsupported NEAT output count: ${outputCount}`);
 }
 
 function scoreCandidateFromOutputs(compiled, outputs, decisionType, candidate) {
@@ -936,42 +1543,6 @@ function scoreCandidateFromOutputs(compiled, outputs, decisionType, candidate) {
   const index = candidateOutputIndex(compiled, decisionType, candidate);
   if (index < 0 || index >= outputKeys.length) return 0.0;
   return Number(outputs[index] || 0.0);
-}
-
-function resolveOptionThresholdKey(candidates) {
-  const set = new Set((candidates || []).map((candidate) => canonicalOptionAction(candidate)));
-  if (set.has("go") && set.has("stop")) return "go_stop_threshold";
-  if (set.has("shaking_yes") && set.has("shaking_no")) return "shaking_threshold";
-  if (set.has("president_stop") && set.has("president_hold")) return "president_threshold";
-  if (set.has("five") && set.has("junk")) return "gukjin_threshold";
-  return null;
-}
-
-function pickThresholdOptionCandidate(compiled, scored) {
-  if (!compiled || !scored || scored.decisionType !== "option") return null;
-  const key = resolveOptionThresholdKey(scored.candidates);
-  if (!key) return null;
-  const threshold = Number(compiled?.decisionParams?.[key] || 0);
-  const normalized = scored.candidates.map((candidate) => canonicalOptionAction(candidate));
-  let primary = null;
-  let secondary = null;
-  if (key === "go_stop_threshold") {
-    primary = scored.candidates[normalized.indexOf("go")];
-    secondary = scored.candidates[normalized.indexOf("stop")];
-  } else if (key === "shaking_threshold") {
-    primary = scored.candidates[normalized.indexOf("shaking_yes")];
-    secondary = scored.candidates[normalized.indexOf("shaking_no")];
-  } else if (key === "president_threshold") {
-    primary = scored.candidates[normalized.indexOf("president_stop")];
-    secondary = scored.candidates[normalized.indexOf("president_hold")];
-  } else if (key === "gukjin_threshold") {
-    primary = scored.candidates[normalized.indexOf("five")];
-    secondary = scored.candidates[normalized.indexOf("junk")];
-  }
-  if (primary == null || secondary == null) return null;
-  const primaryScore = Number(scored.scores?.[String(primary)] ?? -Infinity);
-  const secondaryScore = Number(scored.scores?.[String(secondary)] ?? -Infinity);
-  return primaryScore - secondaryScore > threshold ? primary : secondary;
 }
 
 function scoreToProbabilityMap(candidates, scoreMap, temperature = 1.0) {
@@ -1017,12 +1588,33 @@ export function getModelCandidateProbabilities(state, actor, policyModel, option
   const candidates = legalCandidatesForDecision(sp, decisionType);
   if (!candidates.length) return null;
 
-  const inputDim = Number(compiled.inputKeys.length || 0);
   const scoreMap = new Map();
   const scores = {};
   try {
+    if (decisionType === "option" && isTwoOutputThresholdModel(compiled)) {
+      const bundle = buildTwoOutputOptionScoreBundle(state, actor, compiled, candidates);
+      if (!bundle) return null;
+      for (const candidate of candidates) {
+        const score = Number(bundle.scoreMap.get(candidate) || -Infinity);
+        scoreMap.set(candidate, score);
+        scores[String(candidate)] = score;
+      }
+      const probs = scoreToProbabilityMap(candidates, scoreMap, Number(policyModel?.softmax_temp || 1.0));
+      return {
+        decisionType,
+        candidates,
+        probabilities: probs,
+        scores,
+        optionBias: bundle.optionBias,
+        optionThreshold: bundle.threshold,
+        optionPositiveAction: bundle.positiveAction,
+        optionNegativeAction: bundle.negativeAction
+      };
+    }
+
+    const inputDim = Number(compiled.inputKeys.length || 0);
     for (const candidate of candidates) {
-      const x = featureVector(state, actor, decisionType, candidate, candidates.length, inputDim);
+      const x = featureVector(state, actor, decisionType, candidate, candidates.length, inputDim, compiled?.featureSpec);
       const outputs = forward(compiled, x);
       const score = scoreCandidateFromOutputs(compiled, outputs, decisionType, candidate);
       scoreMap.set(candidate, score);
@@ -1047,16 +1639,23 @@ export function debugFeatureRows(state, actor, options = {}) {
   const compiled = options.policyModel ? getCompiledNeatModel(options.policyModel) : null;
   const inputDim = Math.max(
     1,
-    Number(options.inputDim || 0) || Number(compiled?.inputKeys?.length || 0) || NEAT_COMPACT_FEATURES
+    Number(options.inputDim || 0) || Number(compiled?.inputKeys?.length || 0) || HAND10_FEATURES
   );
+  const optionBundle = compiled && decisionType === "option" && isTwoOutputThresholdModel(compiled)
+    ? buildTwoOutputOptionScoreBundle(state, actor, compiled, candidates)
+    : null;
 
   const rows = [];
   for (const candidate of candidates) {
-    const features = featureVector(state, actor, decisionType, candidate, candidates.length, inputDim);
+    const features = featureVector(state, actor, decisionType, candidate, candidates.length, inputDim, compiled?.featureSpec);
     let score = null;
     if (compiled) {
-      const outputs = forward(compiled, features);
-      score = scoreCandidateFromOutputs(compiled, outputs, decisionType, candidate);
+      if (optionBundle) {
+        score = Number(optionBundle.scoreMap.get(candidate) || -Infinity);
+      } else {
+        const outputs = forward(compiled, features);
+        score = scoreCandidateFromOutputs(compiled, outputs, decisionType, candidate);
+      }
     }
     rows.push({
       candidate: String(candidate),
@@ -1074,19 +1673,16 @@ export function debugFeatureRows(state, actor, options = {}) {
     decisionType,
     inputDim,
     legalCount: candidates.length,
+    optionBias: optionBundle?.optionBias ?? null,
+    optionThreshold: optionBundle?.threshold ?? null,
+    optionPositiveAction: optionBundle?.positiveAction ?? null,
     rows,
   };
 }
 
 function modelPickCandidate(state, actor, policyModel) {
-  const compiled = getCompiledNeatModel(policyModel);
-  if (!compiled) return null;
   const scored = getModelCandidateProbabilities(state, actor, policyModel);
   if (!scored) return null;
-  const thresholdPicked = pickThresholdOptionCandidate(compiled, scored);
-  if (thresholdPicked != null) {
-    return { decisionType: scored.decisionType, candidate: thresholdPicked };
-  }
   const scoreMap = new Map();
   for (const c of scored.candidates) {
     scoreMap.set(c, Number(scored.scores?.[String(c)] || -Infinity));

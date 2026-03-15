@@ -26,6 +26,8 @@ Reference script: `scripts/model_duel_worker.mjs`
 - Saved when `--dataset-out <path>` or `--dataset-out auto` is used.
 - With `--dataset-out auto`, auto path is:
 `<report-folder>/<seed>_dataset.jsonl`
+- Feature profile can be forced with `--feature-profile hand10|material10|position11`.
+- If omitted, `model_duel_worker.mjs` uses `auto` and tries to infer from loaded model `feature_spec.profile`.
 
 ### 1-4. Console vs Report
 - Console (stdout): one-line compact summary JSON
@@ -107,98 +109,116 @@ File format: `JSONL` (one line = one candidate)
 - `chosen`: `0|1`
 - `chosen_candidate`: inferred selected candidate
 - `unresolved`: `0|1`
-- `features`: 16-dimensional numeric vector (`compact16`)
-- `features13`: optional legacy compact13 prefix slice for go-stop dataset rows
+- `features`: profile-dependent numeric vector
+  - `hand10` / `material10`: 10D
+  - `position11`: 11D
+  - legacy `800`-series models: auto-inferred `legacy13` 13D
 
-### 3-3. `features` (16D) Index Definition
+### 3-3. `features` Index Definition
 The order is identical to `featureVectorForCandidate()` in `model_duel_worker.mjs`.
 
-#### Decision Context
+Active default profile: `hand10`
 
-1. `is_play_decision`
+Important:
+- `hand10` features are computed on a visible post-candidate state.
+- For `play` / `match`, the worker first applies the candidate to a masked visible-state simulation, then extracts hand features from that resulting state.
+- This keeps the vector candidate-sensitive without leaking hidden deck information.
+
+#### `hand10` (10D)
+1. `candidate_combo_gain`
+Range: `0..1`
+Rule: immediate combo/completion value unlocked by the current candidate
+
+2. `candidate_pi_value`
+Range: `0..1`
+Rule: weighted pi-like value of the current candidate card
+
+3. `candidate_match_flag`
 Range: `0/1`
-Rule: `decisionType === "play" ? 1 : 0`
-Examples: `play=[1,0]`, `match=[0,1]`, `option=[0,0]`
+Rule: `1.0` if the candidate immediately matches board month context, else `0.0`
 
-2. `is_match_decision`
+4. `candidate_safe_discard`
 Range: `0/1`
-Rule: `decisionType === "match" ? 1 : 0`
-Note: `1,2` are context flags because normal play/match cards usually have `3=0.0`
+Rule: `1.0` if the candidate month is currently a safe discard month, else `0.0`
 
-3. `action_code_norm`
+5. `candidate_danger_exposure`
 Range: `0..1`
-Role: candidate action kind code
-Values: `go=0.125`, `stop=0.25`, `shaking_yes=0.375`, `shaking_no=0.5`, `president_stop=0.625`, `president_hold=0.75`, `five=0.875`, `junk=1.0`, `shake_start=0.9`, `bomb=0.95`
-Note: normal play/match card candidates usually use `0.0`
+Rule: `max(combo_risk, pi_risk)` for exposing this candidate as a live target
+Notes:
+- combo risk uses opponent combo-target matching on the candidate card
+- pi risk uses opponent pi-pressure times candidate pi-value
+- if the candidate immediately matches, exposure is treated as `0`
 
-#### Score Context
-
-4. `score_diff_tanh`
-Range: `-1..1`
-Rule: `tanh((selfScore.total - oppScore.total) / 10)`
-Meaning: positive when leading, negative when trailing, `0` when tied
-Examples: `self 6, opp 3 -> 0.291`, `self 3, opp 6 -> -0.291`, `self 7, opp 6 -> 0.100`
-
-5. `self_score_progress_norm`
+6. `post_hand_matchable_ratio`
 Range: `0..1`
-Stage 1 (`0..7`): `0.72 * (score / 7)^1.35`
-Stage 2 (`7+`): `0.72 + 0.28 * log2(1 + min(score - 7, 8)) / log2(9)`
-Examples: `1->0.05`, `5->0.46`, `7->0.72`, `10->0.90`, `15+->1.0`
+Rule: `count(post-hand cards whose month exists on board) / post_hand_count`
 
-6. `opp_stop_pressure_norm`
-Range: `0..1`
-Rule: staged by opponent score
-Values: `0->0.0`, `1->0.05`, `2->0.1`, `3->0.15`, `4->0.3`, `5->0.6`, `6->0.9`, `7+->1.0`
-Note: soft pressure only; `13` separately marks hard stop availability
-
-7. `current_multiplier_norm`
-Range: `0..1`
-Rule: `clamp01(log2(scoreSelf.multiplier * state.carryOverMultiplier) / 4)`
-Includes: go multiplier (`3go x2`, `4go x4`, `5go x8`, ...), shaking, bomb, bak, carry-over
-Excludes: additive go score (`+1` per go), president-hold post-resolution multiplier
-Examples: `x1->0`, `x2->0.25`, `x4->0.5`, `x8->0.75`, `x16+->1.0`
-
-#### Candidate Value
-
-8. `candidate_combo_gain`
-Range: `0..1`
-Rule: `clamp01((kwang_gain_delta + godori_gain + dan_gain) / 11)`
-Details: visible-state simulation only
-Examples: `2kwang->bi3kwang=+2`, `2kwang->3kwang=+3`, `3kwang->4kwang=+1/+2`, `4kwang->5kwang=+11`, `godori=+5`, `hong/cheong/cho-dan=+3`
-
-9. `candidate_pi_value_norm`
-Range: `0..1`
-Rule: `effective_pi = card.piValue + card.bonus.stealPi`; `clamp01(effective_pi / 4)`
-Examples: normal pi `1->0.25`, double pi `2->0.5`, bonus double+steal `3->0.75`, bonus triple+steal `4->1.0`
-
-10. `immediate_match_possible`
+7. `post_hand_triple_flag`
 Range: `0/1`
-Rule: `decisionType === "match" ? 1 : (month>0 && board has same-month card ? 1 : 0)`
-Meaning: just match availability, not match quality or count
+Rule: `1.0` if any month appears `>= 3` times in post-hand, else `0.0`
 
-11. `candidate_public_known_ratio`
+8. `post_hand_high_value_density`
 Range: `0..1`
-Rule: `known_month_cards / total_month_cards`
-Note: total cards are `4` for months `1..12`, `2` for bonus month `13`
-Examples: `13-month 1/2 -> 0.5`, `13-month 2/2 -> 1.0`
+Rule: `count(post-hand ∈ {kwang, ssangpi-like}) / post_hand_count`
+Notes:
+- current ssangpi-like check uses the same weighted high-value family used elsewhere in the repo
+- includes `K1=2`, `L3=2`, `I0(gukjin)=2`, `M0=3`, `M1=4`
 
-#### Thresholds
+9. `combined_post_block_norm`
+Range: `0..1`
+Rule: `max(post_pi_block, post_combo_block)`
+Meaning:
+- strongest remaining hold/block value after the candidate is applied
+- combines opponent pi blocking and opponent combo blocking on the post-candidate visible state
 
-12. `self_can_stop`
-Range: `0/1`
-Rule: `selfScore.total >= 7 ? 1 : 0`
-Meaning: hard threshold flag for my stop availability
+10. `global_context_trigger`
+Range: `0..1`
+Rule: `clamp01(0.5 + 0.5 * positional_advantage_signed)`
+Meaning:
+- signed whole-position advantage compressed into a stable `0..1` signal
+- keeps candidate evaluation aware of whether the actor is currently ahead or behind overall
 
-13. `opp_can_stop`
-Range: `0/1`
-Rule: `oppScore.total >= 7 ? 1 : 0`
-Meaning: hard threshold flag for opponent stop availability
+Important:
+- `hand10` is no longer a static hand-ratio profile.
+- It is now an `Action 5 + Post-State 5` profile:
+  - `1~5`: immediate candidate gain / safety / exposure
+  - `6~10`: remaining hand quality and whole-position context after applying the candidate
+
+#### `position11` (11D, alternate profile)
+1. `self_win_path_score`
+2. `self_material_concentration`
+3. `self_ssangpi_hoard_norm`
+4. `self_combo_completion_norm`
+5. `self_go_safety_norm`
+6. `self_tempo_advantage`
+7. `opp_win_proximity_norm`
+8. `opp_ssangpi_threat_norm`
+9. `hand_critical_block_norm`
+10. `opp_go_threat_norm`
+11. `board_danger_ratio`
 
 Notes:
-- `1,2` are not redundant with `3`. `3` mainly distinguishes option/special action kind, while `1,2` tell the model whether the current candidate is a play-card choice or a match-choice context.
-- `4,5,6,7,12,13` split score information into different roles: gap (`4`), my progress (`5`), opponent stop pressure (`6`), multiplier pressure (`7`), and hard threshold flags (`12,13`).
-- `10` is intentionally binary. Match quality/count is not encoded here; it is partially reflected elsewhere through public-known ratio (`11`) and the outcome-sensitive combo/pi features (`8,9`).
-- Features `14,15,16` were retired from the active EthoNEAT training profile. New training runs use the 13D compact profile (`1..13`). Legacy 16D models are still supported for inference and comparison.
+- `position11` is a whole-position profile built from visible post-candidate state.
+- It emphasizes self win path, opponent win threat, and GO/STOP context rather than local candidate score only.
+
+#### `material10` (10D, alternate profile)
+1. `current_multiplier_norm`
+2. `candidate_combo_gain`
+3. `opp_combo_threat_norm`
+4. `candidate_block_gain_norm`
+5. `candidate_public_known_ratio`
+6. `immediate_match_possible`
+7. `self_ssangpi_control_norm`
+8. `ssangpi_revealed_ratio_norm`
+9. `opp_stop_pressure_norm`
+10. `score_diff_tanh`
+
+Notes:
+- `material10` remains available as an alternate NEAT profile.
+- `position11` remains available as an 11-input alternate NEAT profile.
+- `self_ssangpi_control_norm` / `ssangpi_revealed_ratio_norm` use weighted ssangpi value sum normalized by total `13`, not card-count `/5`.
+- Legacy 13-input `800`-series models are auto-inferred as `legacy13`.
+- Legacy 6-output `1200`-series models are no longer supported.
 
 ### 3-4. Dataset Example
 ```json

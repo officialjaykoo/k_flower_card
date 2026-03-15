@@ -17,6 +17,7 @@ File Layout Map (top-down):
 import argparse
 import copy
 import contextlib
+import functools
 import gzip
 import hashlib
 import json
@@ -470,6 +471,9 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["seed"] = str(_required_value(cfg, "seed") or "").strip()
     if not cfg["seed"]:
         raise RuntimeError("runtime key 'seed' must be non-empty")
+    cfg["feature_profile"] = str(cfg.get("feature_profile") or "hand10").strip().lower()
+    if cfg["feature_profile"] not in ("hand10", "material10", "position11"):
+        raise RuntimeError("runtime key 'feature_profile' must be one of: hand10, material10, position11")
 
     cfg["fitness_gold_scale"] = _required_float(cfg, "fitness_gold_scale")
     cfg["fitness_gold_neutral_delta"] = _required_float(cfg, "fitness_gold_neutral_delta")
@@ -510,6 +514,18 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     )
     cfg["winner_playoff_stage2_games"] = max(
         1, _to_int(cfg.get("winner_playoff_stage2_games"), cfg["games_per_genome"])
+    )
+    cfg["winner_playoff_win_rate_tie_threshold"] = max(
+        0.0, _to_float(cfg.get("winner_playoff_win_rate_tie_threshold"), 0.01)
+    )
+    cfg["winner_playoff_mean_gold_delta_tie_threshold"] = max(
+        0.0, _to_float(cfg.get("winner_playoff_mean_gold_delta_tie_threshold"), 100.0)
+    )
+    cfg["winner_playoff_go_opp_min_count"] = max(
+        0, _to_int(cfg.get("winner_playoff_go_opp_min_count"), 100)
+    )
+    cfg["winner_playoff_go_take_rate_tie_threshold"] = max(
+        0.0, _to_float(cfg.get("winner_playoff_go_take_rate_tie_threshold"), 0.02)
     )
     if cfg["winner_playoff_finalists"] > cfg["winner_playoff_topk"]:
         cfg["winner_playoff_finalists"] = int(cfg["winner_playoff_topk"])
@@ -553,6 +569,7 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}OPPONENT_GENOME"] = str(runtime.get("opponent_genome") or "")
     os.environ[f"{ENV_PREFIX}SWITCH_SEATS"] = "1" if bool(runtime["switch_seats"]) else "0"
     os.environ[f"{ENV_PREFIX}SEED"] = str(runtime["seed"])
+    os.environ[f"{ENV_PREFIX}FEATURE_PROFILE"] = str(runtime.get("feature_profile") or "hand10")
     os.environ[f"{ENV_PREFIX}OUTPUT_DIR"] = os.path.abspath(output_dir)
     os.environ[f"{ENV_PREFIX}FITNESS_GOLD_SCALE"] = str(float(runtime["fitness_gold_scale"]))
     os.environ[f"{ENV_PREFIX}FITNESS_GOLD_NEUTRAL_DELTA"] = str(
@@ -607,6 +624,7 @@ def _runtime_from_env() -> Dict[str, object]:
         "switch_seats": os.environ.get(f"{ENV_PREFIX}SWITCH_SEATS"),
         "checkpoint_every": os.environ.get(f"{ENV_PREFIX}CHECKPOINT_EVERY"),
         "seed": os.environ.get(f"{ENV_PREFIX}SEED"),
+        "feature_profile": os.environ.get(f"{ENV_PREFIX}FEATURE_PROFILE"),
         "output_dir": os.environ.get(f"{ENV_PREFIX}OUTPUT_DIR"),
         "fitness_gold_scale": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_SCALE"),
         "fitness_gold_neutral_delta": os.environ.get(f"{ENV_PREFIX}FITNESS_GOLD_NEUTRAL_DELTA"),
@@ -653,10 +671,22 @@ def _append_eval_failure_log(output_dir: str, record: dict) -> None:
         f.write("\n")
 
 
-def _export_neat_python_genome(genome, config) -> dict:
+def _resolve_eval_output_dir(runtime: dict) -> str:
+    runtime_dir = str(runtime.get("output_dir") or "").strip()
+    if runtime_dir:
+        return os.path.abspath(runtime_dir)
+    env_dir = str((_runtime_from_env_cached().get("output_dir") if _runtime_from_env_cached() else "") or "").strip()
+    if env_dir:
+        return os.path.abspath(env_dir)
+    return os.path.abspath(os.getcwd())
+
+
+def _export_neat_python_genome(genome, config, runtime: Optional[dict] = None) -> dict:
     gcfg = config.genome_config
     input_keys = [int(x) for x in gcfg.input_keys]
     output_keys = [int(x) for x in gcfg.output_keys]
+    runtime_ctx = runtime or (_runtime_from_env_cached() if os.environ.get(f"{ENV_PREFIX}FORMAT_VERSION") else {})
+    feature_profile = str((runtime_ctx or {}).get("feature_profile") or "hand10").strip().lower()
 
     default_activation = str(getattr(gcfg, "activation_default", "tanh") or "tanh")
     default_aggregation = str(getattr(gcfg, "aggregation_default", "sum") or "sum")
@@ -685,18 +715,22 @@ def _export_neat_python_genome(genome, config) -> dict:
             }
         )
 
+    decision_params = {}
+    for name in ("go_stop_threshold", "shaking_threshold", "president_threshold", "gukjin_threshold"):
+        if hasattr(genome, name):
+            decision_params[name] = float(getattr(genome, name, 0.0) or 0.0)
+
     return {
         "format_version": "neat_python_genome_v1",
         "input_keys": input_keys,
         "output_keys": output_keys,
-        "decision_params": {
-            "go_stop_threshold": float(getattr(genome, "go_stop_threshold", 0.0) or 0.0),
-            "shaking_threshold": float(getattr(genome, "shaking_threshold", 0.0) or 0.0),
-            "president_threshold": float(getattr(genome, "president_threshold", 0.0) or 0.0),
-            "gukjin_threshold": float(getattr(genome, "gukjin_threshold", 0.0) or 0.0),
+        "feature_spec": {
+            "profile": feature_profile,
+            "base_features": len(input_keys),
         },
         "nodes": nodes,
         "connections": connections,
+        "decision_params": decision_params,
     }
 
 
@@ -829,6 +863,74 @@ def _playoff_record_sort_key(record: dict):
     )
 
 
+def _compare_desc(a: float, b: float) -> int:
+    if a > b:
+        return 1
+    if a < b:
+        return -1
+    return 0
+
+
+def _compare_asc(a: float, b: float) -> int:
+    if a < b:
+        return 1
+    if a > b:
+        return -1
+    return 0
+
+
+def _playoff_record_compare(record_a: dict, record_b: dict, runtime: dict) -> int:
+    record_a = dict(record_a or {})
+    record_b = dict(record_b or {})
+    win_tie_threshold = max(
+        0.0, _safe_float(runtime.get("winner_playoff_win_rate_tie_threshold"), 0.01)
+    )
+    gold_tie_threshold = max(
+        0.0, _safe_float(runtime.get("winner_playoff_mean_gold_delta_tie_threshold"), 100.0)
+    )
+    go_opp_min_count = max(
+        0, int(_safe_float(runtime.get("winner_playoff_go_opp_min_count"), 100.0))
+    )
+    go_take_tie_threshold = max(
+        0.0, _safe_float(runtime.get("winner_playoff_go_take_rate_tie_threshold"), 0.02)
+    )
+
+    win_a = _safe_float(record_a.get("win_rate"), -1.0)
+    win_b = _safe_float(record_b.get("win_rate"), -1.0)
+    if abs(win_a - win_b) > win_tie_threshold:
+        return _compare_desc(win_a, win_b)
+
+    gold_a = _safe_float(record_a.get("mean_gold_delta"), -1e18)
+    gold_b = _safe_float(record_b.get("mean_gold_delta"), -1e18)
+    if abs(gold_a - gold_b) > gold_tie_threshold:
+        return _compare_desc(gold_a, gold_b)
+
+    go_opp_a = max(0, int(_safe_float(record_a.get("go_opportunity_count"), 0.0)))
+    go_opp_b = max(0, int(_safe_float(record_b.get("go_opportunity_count"), 0.0)))
+    if go_opp_a >= go_opp_min_count and go_opp_b >= go_opp_min_count:
+        go_take_a = _safe_float(record_a.get("go_take_rate"), 0.0)
+        go_take_b = _safe_float(record_b.get("go_take_rate"), 0.0)
+        if abs(go_take_a - go_take_b) > go_take_tie_threshold:
+            return _compare_desc(go_take_a, go_take_b)
+
+        go_count_a = max(0, int(_safe_float(record_a.get("go_count"), 0.0)))
+        go_count_b = max(0, int(_safe_float(record_b.get("go_count"), 0.0)))
+        if go_count_a > 0 and go_count_b > 0:
+            go_fail_a = _safe_float(record_a.get("go_fail_rate"), 1.0)
+            go_fail_b = _safe_float(record_b.get("go_fail_rate"), 1.0)
+            if abs(go_fail_a - go_fail_b) > 1e-12:
+                return _compare_asc(go_fail_a, go_fail_b)
+
+    fit_a = _safe_float(record_a.get("fitness"), -1e9)
+    fit_b = _safe_float(record_b.get("fitness"), -1e9)
+    if abs(fit_a - fit_b) > 1e-12:
+        return _compare_desc(fit_a, fit_b)
+
+    key_a = int(_safe_float(record_a.get("genome_key"), -1))
+    key_b = int(_safe_float(record_b.get("genome_key"), -1))
+    return _compare_asc(key_a, key_b)
+
+
 # =============================================================================
 # Section 7. Single Genome Evaluation Worker
 # =============================================================================
@@ -846,6 +948,7 @@ def _run_eval_worker_for_genome(
 ):
     eval_script = str(runtime["eval_script"] or "")
     seed_text = str(seed_text or runtime["seed"])
+    output_dir = _resolve_eval_output_dir(runtime)
     opponent_policy = str(runtime.get("opponent_policy") or "").strip()
     opponent_policy_mix = runtime.get("opponent_policy_mix") or []
     has_opponent_policy = bool(opponent_policy)
@@ -870,13 +973,12 @@ def _run_eval_worker_for_genome(
     }
     if not eval_script or not os.path.exists(eval_script):
         _append_eval_failure_log(
-            str(runtime["output_dir"]),
+            output_dir,
             dict(failure_meta, reason="eval_script_missing", eval_script=eval_script),
         )
         return {"fitness": -1e9, "seed_used": seed_text, "eval_ok": False}
 
-    payload = _export_neat_python_genome(genome, config)
-    output_dir = str(runtime["output_dir"])
+    payload = _export_neat_python_genome(genome, config, runtime)
 
     if (not has_opponent_policy) and (not has_opponent_policy_mix):
         _append_eval_failure_log(
@@ -1618,6 +1720,281 @@ def _serialize_playoff_entry(training_record: dict, playoff_record: dict) -> dic
     }
 
 
+def _build_pooled_best_record(records: list[dict], runtime: dict) -> Optional[dict]:
+    source_records = [dict(item or {}) for item in records if isinstance(item, dict)]
+    source_records = [item for item in source_records if _safe_float(item.get("games"), 0.0) > 0.0]
+    if not source_records:
+        return None
+
+    total_games = sum(max(0, int(_safe_float(item.get("games"), 0.0))) for item in source_records)
+    if total_games <= 0:
+        return None
+
+    wins = sum(max(0, int(_safe_float(item.get("wins"), 0.0))) for item in source_records)
+    losses = sum(max(0, int(_safe_float(item.get("losses"), 0.0))) for item in source_records)
+    draws = sum(max(0, int(_safe_float(item.get("draws"), 0.0))) for item in source_records)
+    requested_games = sum(max(0, int(_safe_float(item.get("requested_games"), item.get("games")))) for item in source_records)
+
+    def _seat_block(record: dict, side: str) -> dict:
+        return dict(((record.get("seat_breakdown") or {}).get(side) or {}))
+
+    def _sum_seat_count(side: str, key: str) -> int:
+        return sum(max(0, int(_safe_float(_seat_block(item, side).get(key), 0.0))) for item in source_records)
+
+    def _seat_mean_gold_delta(side: str) -> float:
+        games = _sum_seat_count(side, "games")
+        if games <= 0:
+            return 0.0
+        total = 0.0
+        for item in source_records:
+            seat = _seat_block(item, side)
+            seat_games = max(0, int(_safe_float(seat.get("games"), 0.0)))
+            seat_mean = _safe_float(seat.get("mean_gold_delta"), 0.0)
+            total += float(seat_games) * seat_mean
+        return total / float(games)
+
+    first_games = _sum_seat_count("first", "games")
+    second_games = _sum_seat_count("second", "games")
+    first_wins = _sum_seat_count("first", "wins")
+    first_losses = _sum_seat_count("first", "losses")
+    first_draws = _sum_seat_count("first", "draws")
+    second_wins = _sum_seat_count("second", "wins")
+    second_losses = _sum_seat_count("second", "losses")
+    second_draws = _sum_seat_count("second", "draws")
+    first_mean_gold_delta = _seat_mean_gold_delta("first")
+    second_mean_gold_delta = _seat_mean_gold_delta("second")
+
+    def _rate(numerator: float, denominator: float) -> float:
+        return (float(numerator) / float(denominator)) if float(denominator) > 0.0 else 0.0
+
+    win_rate = _rate(wins, total_games)
+    loss_rate = _rate(losses, total_games)
+    draw_rate = _rate(draws, total_games)
+    mean_gold_delta = sum(
+        float(max(0, int(_safe_float(item.get("games"), 0.0)))) * _safe_float(item.get("mean_gold_delta"), 0.0)
+        for item in source_records
+    ) / float(total_games)
+
+    first_win_rate = _rate(first_wins, first_games)
+    first_loss_rate = _rate(first_losses, first_games)
+    first_draw_rate = _rate(first_draws, first_games)
+    second_win_rate = _rate(second_wins, second_games)
+    second_loss_rate = _rate(second_losses, second_games)
+    second_draw_rate = _rate(second_draws, second_games)
+
+    weighted_win_rate = (0.48 * first_win_rate) + (0.52 * second_win_rate)
+    weighted_loss_rate = (0.48 * first_loss_rate) + (0.52 * second_loss_rate)
+    weighted_draw_rate = (0.48 * first_draw_rate) + (0.52 * second_draw_rate)
+    weighted_mean_gold_delta = (0.48 * first_mean_gold_delta) + (0.52 * second_mean_gold_delta)
+
+    fitness_gold_scale = max(1e-9, _safe_float(runtime.get("fitness_gold_scale"), 1500.0))
+    fitness_gold_neutral_delta = _safe_float(runtime.get("fitness_gold_neutral_delta"), 0.0)
+    fitness_win_neutral_rate = _safe_float(runtime.get("fitness_win_neutral_rate"), 0.5)
+    fitness_win_weight_raw = _safe_float(runtime.get("fitness_win_weight"), 0.9)
+    fitness_gold_weight_raw = _safe_float(runtime.get("fitness_gold_weight"), 0.1)
+    fitness_weight_sum = max(1e-9, fitness_win_weight_raw + fitness_gold_weight_raw)
+    fitness_win_weight = fitness_win_weight_raw / fitness_weight_sum
+    fitness_gold_weight = fitness_gold_weight_raw / fitness_weight_sum
+
+    gold_norm = math.tanh((weighted_mean_gold_delta - fitness_gold_neutral_delta) / fitness_gold_scale)
+    expected_result_raw = max(0.0, min(1.0, weighted_win_rate)) + (0.5 * max(0.0, min(1.0, weighted_draw_rate))) - max(0.0, min(1.0, weighted_loss_rate))
+    expected_result = max(-1.0, min(1.0, expected_result_raw))
+    neutral_expected_result = (2.0 * fitness_win_neutral_rate) - 1.0
+    if expected_result >= neutral_expected_result:
+        result_upper_span = max(1e-9, 1.0 - neutral_expected_result)
+        result_norm = max(0.0, min(1.0, (expected_result - neutral_expected_result) / result_upper_span))
+    else:
+        result_lower_span = max(1e-9, neutral_expected_result + 1.0)
+        result_norm = -max(0.0, min(1.0, (neutral_expected_result - expected_result) / result_lower_span))
+
+    fitness = (fitness_gold_weight * gold_norm) + (fitness_win_weight * result_norm)
+
+    go_opportunity_count = sum(max(0, int(_safe_float(item.get("go_opportunity_count"), 0.0))) for item in source_records)
+    go_opportunity_games = sum(max(0, int(_safe_float(item.get("go_opportunity_games"), 0.0))) for item in source_records)
+    go_count = sum(max(0, int(_safe_float(item.get("go_count"), 0.0))) for item in source_records)
+    go_fail_count = sum(max(0, int(_safe_float(item.get("go_fail_count"), 0.0))) for item in source_records)
+    go_games = sum(max(0, int(_safe_float(item.get("go_games"), 0.0))) for item in source_records)
+
+    my_bankrupt_count = sum(
+        max(0, int(_safe_float(((item.get("bankrupt") or {}).get("my_bankrupt_count")), 0.0)))
+        for item in source_records
+    )
+    inflicted_bankrupt_count = sum(
+        max(0, int(_safe_float(((item.get("bankrupt") or {}).get("my_inflicted_bankrupt_count")), 0.0)))
+        for item in source_records
+    )
+
+    imitation_play_total = sum(max(0, int(_safe_float(item.get("imitation_play_total"), 0.0))) for item in source_records)
+    imitation_play_matches = sum(max(0, int(_safe_float(item.get("imitation_play_matches"), 0.0))) for item in source_records)
+    imitation_match_total = sum(max(0, int(_safe_float(item.get("imitation_match_total"), 0.0))) for item in source_records)
+    imitation_match_matches = sum(max(0, int(_safe_float(item.get("imitation_match_matches"), 0.0))) for item in source_records)
+    imitation_option_total = sum(max(0, int(_safe_float(item.get("imitation_option_total"), 0.0))) for item in source_records)
+    imitation_option_matches = sum(max(0, int(_safe_float(item.get("imitation_option_matches"), 0.0))) for item in source_records)
+    imitation_weight_play = _safe_float(source_records[0].get("imitation_weight_play"), 0.5)
+    imitation_weight_match = _safe_float(source_records[0].get("imitation_weight_match"), 0.3)
+    imitation_weight_option = _safe_float(source_records[0].get("imitation_weight_option"), 0.2)
+    imitation_play_ratio = _rate(imitation_play_matches, imitation_play_total)
+    imitation_match_ratio = _rate(imitation_match_matches, imitation_match_total)
+    imitation_option_ratio = _rate(imitation_option_matches, imitation_option_total)
+    imitation_weight_sum = imitation_weight_play + imitation_weight_match + imitation_weight_option
+    if imitation_weight_sum > 0.0:
+        imitation_weighted_score = (
+            (imitation_weight_play * imitation_play_ratio)
+            + (imitation_weight_match * imitation_match_ratio)
+            + (imitation_weight_option * imitation_option_ratio)
+        ) / imitation_weight_sum
+    else:
+        imitation_weighted_score = 0.0
+
+    pooled_record = {
+        "generation": source_records[0].get("generation"),
+        "genome_key": source_records[0].get("genome_key"),
+        "games": int(total_games),
+        "requested_games": int(requested_games),
+        "wins": int(wins),
+        "losses": int(losses),
+        "draws": int(draws),
+        "win_rate": win_rate,
+        "loss_rate": loss_rate,
+        "draw_rate": draw_rate,
+        "mean_gold_delta": mean_gold_delta,
+        "go_opportunity_count": int(go_opportunity_count),
+        "go_opportunity_games": int(go_opportunity_games),
+        "go_opportunity_rate": _rate(go_opportunity_games, total_games),
+        "go_count": int(go_count),
+        "go_fail_count": int(go_fail_count),
+        "go_fail_rate": _rate(go_fail_count, go_games),
+        "go_games": int(go_games),
+        "go_rate": _rate(go_count, total_games),
+        "go_take_rate": _rate(go_count, go_opportunity_count),
+        "bankrupt": {
+            "my_bankrupt_count": int(my_bankrupt_count),
+            "my_inflicted_bankrupt_count": int(inflicted_bankrupt_count),
+        },
+        "my_bankrupt_rate": _rate(my_bankrupt_count, total_games),
+        "inflicted_bankrupt_rate": _rate(inflicted_bankrupt_count, total_games),
+        "seat_breakdown": {
+            "first": {
+                "games": int(first_games),
+                "wins": int(first_wins),
+                "losses": int(first_losses),
+                "draws": int(first_draws),
+                "win_rate": first_win_rate,
+                "loss_rate": first_loss_rate,
+                "draw_rate": first_draw_rate,
+                "mean_gold_delta": first_mean_gold_delta,
+            },
+            "second": {
+                "games": int(second_games),
+                "wins": int(second_wins),
+                "losses": int(second_losses),
+                "draws": int(second_draws),
+                "win_rate": second_win_rate,
+                "loss_rate": second_loss_rate,
+                "draw_rate": second_draw_rate,
+                "mean_gold_delta": second_mean_gold_delta,
+            },
+            "weighted": {
+                "win_rate": weighted_win_rate,
+                "loss_rate": weighted_loss_rate,
+                "draw_rate": weighted_draw_rate,
+                "mean_gold_delta": weighted_mean_gold_delta,
+                "win_weights": {"first": 0.48, "second": 0.52},
+                "gold_weights": {"first": 0.48, "second": 0.52},
+            },
+        },
+        "fitness_gold_scale": fitness_gold_scale,
+        "fitness_gold_neutral_delta": fitness_gold_neutral_delta,
+        "fitness_win_neutral_rate": fitness_win_neutral_rate,
+        "fitness_win_weight": fitness_win_weight_raw,
+        "fitness_gold_weight": fitness_gold_weight_raw,
+        "imitation_play_total": int(imitation_play_total),
+        "imitation_play_matches": int(imitation_play_matches),
+        "imitation_play_ratio": imitation_play_ratio,
+        "imitation_match_total": int(imitation_match_total),
+        "imitation_match_matches": int(imitation_match_matches),
+        "imitation_match_ratio": imitation_match_ratio,
+        "imitation_go_stop_total": int(imitation_option_total),
+        "imitation_go_stop_matches": int(imitation_option_matches),
+        "imitation_go_stop_ratio": imitation_option_ratio,
+        "imitation_option_total": int(imitation_option_total),
+        "imitation_option_matches": int(imitation_option_matches),
+        "imitation_option_ratio": imitation_option_ratio,
+        "imitation_weight_play": imitation_weight_play,
+        "imitation_weight_match": imitation_weight_match,
+        "imitation_weight_option": imitation_weight_option,
+        "imitation_weighted_score": imitation_weighted_score,
+        "fitness_components": {
+            "gold_norm": gold_norm,
+            "weighted_gold_delta": weighted_mean_gold_delta,
+            "gold_neutral_delta": fitness_gold_neutral_delta,
+            "win_norm": result_norm,
+            "result_norm": result_norm,
+            "result_expected": expected_result,
+            "result_neutral": neutral_expected_result,
+            "weighted_win_rate": weighted_win_rate,
+            "weighted_draw_rate": weighted_draw_rate,
+            "weighted_loss_rate": weighted_loss_rate,
+            "win_neutral_rate": fitness_win_neutral_rate,
+            "base_fitness": fitness,
+            "bankrupt_rates": {
+                "my": _rate(my_bankrupt_count, total_games),
+                "inflicted": _rate(inflicted_bankrupt_count, total_games),
+            },
+            "bankrupt_counts": {
+                "my": int(my_bankrupt_count),
+                "inflicted": int(inflicted_bankrupt_count),
+            },
+            "weights": {
+                "win": fitness_win_weight_raw,
+                "gold": fitness_gold_weight_raw,
+            },
+        },
+        "fitness": fitness,
+        "seed_used": "pooled:" + ",".join(
+            str(item.get("seed_used") or "").strip()
+            for item in source_records
+            if str(item.get("seed_used") or "").strip()
+        ),
+        "record_mode": "pooled_training_stage1_stage2",
+        "record_sources": [
+            {
+                "games": int(_safe_float(item.get("games"), 0.0)),
+                "seed_used": item.get("seed_used"),
+            }
+            for item in source_records
+        ],
+    }
+    return pooled_record
+
+
+def _population_candidate_snapshots(population, limit: int = 5) -> list[dict]:
+    if population is None or not hasattr(population, "population"):
+        return []
+    entries = []
+    for genome_key, genome in (population.population or {}).items():
+        fitness = _safe_optional_float(getattr(genome, "fitness", None))
+        if fitness is None:
+            continue
+        num_nodes, num_enabled_connections = genome.size()
+        num_connections_total = len(getattr(genome, "connections", {}) or {})
+        entries.append(
+            {
+                "record": {
+                    "generation": int(getattr(population, "generation", -1)),
+                    "genome_key": int(genome_key),
+                    "fitness": float(fitness),
+                    "num_nodes": int(num_nodes),
+                    "num_connections": int(num_enabled_connections),
+                    "num_connections_total": int(num_connections_total),
+                },
+                "genome": copy.deepcopy(genome),
+            }
+        )
+    entries.sort(key=lambda entry: _training_candidate_sort_key(entry.get("record") or {}), reverse=True)
+    return entries[: max(1, int(limit))]
+
+
 def _run_winner_playoff(candidate_entries, config, runtime: dict) -> Optional[dict]:
     if not candidate_entries:
         return None
@@ -1657,7 +2034,7 @@ def _run_winner_playoff(candidate_entries, config, runtime: dict) -> Optional[di
         stage1_results.append(
             {
                 "training_record": training_record,
-                "playoff_record": playoff_record,
+                "stage1_record": playoff_record,
                 "genome": copy.deepcopy(genome),
             }
         )
@@ -1666,8 +2043,13 @@ def _run_winner_playoff(candidate_entries, config, runtime: dict) -> Optional[di
         return None
 
     stage1_results.sort(
-        key=lambda entry: _playoff_record_sort_key(entry.get("playoff_record") or {}),
-        reverse=True,
+        key=functools.cmp_to_key(
+            lambda a, b: -_playoff_record_compare(
+                a.get("stage1_record") or {},
+                b.get("stage1_record") or {},
+                runtime,
+            )
+        )
     )
     stage2_candidates = list(stage1_results[:stage2_topk])
     stage2_results = []
@@ -1696,7 +2078,8 @@ def _run_winner_playoff(candidate_entries, config, runtime: dict) -> Optional[di
         stage2_results.append(
             {
                 "training_record": training_record,
-                "playoff_record": playoff_record,
+                "stage1_record": dict(entry.get("stage1_record") or {}),
+                "stage2_record": playoff_record,
                 "genome": copy.deepcopy(genome),
             }
         )
@@ -1705,23 +2088,40 @@ def _run_winner_playoff(candidate_entries, config, runtime: dict) -> Optional[di
         return None
 
     stage2_results.sort(
-        key=lambda entry: _playoff_record_sort_key(entry.get("playoff_record") or {}),
-        reverse=True,
+        key=functools.cmp_to_key(
+            lambda a, b: -_playoff_record_compare(
+                a.get("stage2_record") or {},
+                b.get("stage2_record") or {},
+                runtime,
+            )
+        )
     )
     winner_entry = stage2_results[0]
     return {
         "winner_genome": copy.deepcopy(winner_entry.get("genome")),
-        "winner_record": dict(winner_entry.get("playoff_record") or {}),
+        "winner_record": dict(winner_entry.get("stage2_record") or {}),
         "winner_training_record": dict(winner_entry.get("training_record") or {}),
+        "winner_stage1_record": dict(winner_entry.get("stage1_record") or {}),
+        "winner_stage2_record": dict(winner_entry.get("stage2_record") or {}),
         "summary": {
             "mode": "topk_fresh_seed_playoff",
-            "criteria": "stage1 top-K by training fitness, then raw win_rate desc, ties by mean_gold_delta desc; repeat for stage2",
+            "criteria": "stage1 top-K by training fitness, then playoff ranking: win_rate (tie<=threshold), mean_gold_delta (tie<=threshold), go_take_rate, go_fail_rate, fitness; repeat for stage2",
+            "thresholds": {
+                "win_rate_tie_threshold": float(runtime.get("winner_playoff_win_rate_tie_threshold", 0.01)),
+                "mean_gold_delta_tie_threshold": float(
+                    runtime.get("winner_playoff_mean_gold_delta_tie_threshold", 100.0)
+                ),
+                "go_opp_min_count": int(runtime.get("winner_playoff_go_opp_min_count", 100)),
+                "go_take_rate_tie_threshold": float(
+                    runtime.get("winner_playoff_go_take_rate_tie_threshold", 0.02)
+                ),
+            },
             "stage1": {
                 "topk": int(stage1_topk),
                 "games": int(stage1_games),
                 "seed": stage1_seed,
                 "results": [
-                    _serialize_playoff_entry(entry.get("training_record") or {}, entry.get("playoff_record") or {})
+                    _serialize_playoff_entry(entry.get("training_record") or {}, entry.get("stage1_record") or {})
                     for entry in stage1_results
                 ],
             },
@@ -1730,7 +2130,7 @@ def _run_winner_playoff(candidate_entries, config, runtime: dict) -> Optional[di
                 "games": int(stage2_games),
                 "seed": stage2_seed,
                 "results": [
-                    _serialize_playoff_entry(entry.get("training_record") or {}, entry.get("playoff_record") or {})
+                    _serialize_playoff_entry(entry.get("training_record") or {}, entry.get("stage2_record") or {})
                     for entry in stage2_results
                 ],
             },
@@ -1787,6 +2187,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-timeout-sec", type=int, default=0, help="Override evaluation timeout seconds")
     parser.add_argument("--max-eval-steps", type=int, default=0, help="Override max game steps per evaluation")
     parser.add_argument("--opponent-policy", default="", help="Override opponent policy")
+    parser.add_argument(
+        "--feature-profile",
+        default="",
+        help="Override feature profile (hand10, material10, or position11)",
+    )
     parser.add_argument(
         "--opponent-genome",
         default="",
@@ -2296,6 +2701,9 @@ def main() -> None:
     if args.opponent_policy.strip():
         runtime["opponent_policy"] = args.opponent_policy.strip()
         override_keys.append("opponent_policy")
+    if str(args.feature_profile).strip():
+        runtime["feature_profile"] = str(args.feature_profile).strip().lower()
+        override_keys.append("feature_profile")
     if args.opponent_genome.strip():
         runtime["opponent_genome"] = args.opponent_genome.strip()
         override_keys.append("opponent_genome")
@@ -2357,10 +2765,11 @@ def main() -> None:
     os.makedirs(models_dir, exist_ok=True)
 
     cfg = _build_config(args.config_feedforward)
-    if len(cfg.genome_config.output_keys) != 10:
-        raise RuntimeError("num_outputs must be 10 for typed-decision candidate-scoring policy")
+    if len(cfg.genome_config.output_keys) != 2:
+        raise RuntimeError("num_outputs must be 2 for action_score + option_bias threshold policy")
 
     _set_eval_env(runtime, args.output_dir)
+    runtime["output_dir"] = os.path.abspath(args.output_dir)
 
     if args.resume:
         p = _restore_population_from_checkpoint(args.resume)
@@ -2406,7 +2815,11 @@ def main() -> None:
             with contextlib.redirect_stdout(devnull):
                 return p.run(eval_callable, int(runtime["generations"]))
 
-    if args.dry_run:
+    skip_training_run = bool(args.resume) and int(start_generation) >= int(runtime["generations"])
+    if skip_training_run:
+        winner = getattr(p, "best_genome", None)
+        mode = "resume_postprocess"
+    elif args.dry_run:
         winner = _run_population(_run_dry_eval)
         checkpointer.save_final_checkpoint(p.config, p.population, p.species, p.generation)
         mode = "dry_run"
@@ -2439,10 +2852,13 @@ def main() -> None:
 
     selection_best_record = evaluator.best_record_snapshot() if evaluator is not None else None
     winner_playoff = None
+    playoff_candidates = []
     if evaluator is not None:
         playoff_candidates = evaluator.top_candidate_snapshots(limit=int(runtime.get("winner_playoff_topk", 5)))
-        if len(playoff_candidates) > 0:
-            winner_playoff = _run_winner_playoff(playoff_candidates, p.config, runtime)
+    elif skip_training_run:
+        playoff_candidates = _population_candidate_snapshots(p, limit=int(runtime.get("winner_playoff_topk", 5)))
+    if len(playoff_candidates) > 0:
+        winner_playoff = _run_winner_playoff(playoff_candidates, p.config, runtime)
     if winner_playoff is not None and winner_playoff.get("winner_genome") is not None:
         best_winner = copy.deepcopy(winner_playoff.get("winner_genome"))
 
@@ -2462,11 +2878,22 @@ def main() -> None:
 
     winner_pkl, winner_json_path = _write_genome_exports("winner_genome", best_winner)
 
-    best_record = (
+    best_record_stage2 = (
         dict(winner_playoff.get("winner_record") or {})
         if winner_playoff is not None and isinstance(winner_playoff.get("winner_record"), dict)
         else selection_best_record
     )
+    best_record_pooled = None
+    if winner_playoff is not None:
+        best_record_pooled = _build_pooled_best_record(
+            [
+                dict(winner_playoff.get("winner_training_record") or {}),
+                dict(winner_playoff.get("winner_stage1_record") or {}),
+                dict(winner_playoff.get("winner_stage2_record") or {}),
+            ],
+            runtime,
+        )
+    best_record = best_record_pooled or best_record_stage2
     best_fitness = _safe_float((best_record or {}).get("fitness"), float("nan"))
     if best_fitness != best_fitness:
         best_fitness = float(getattr(best_winner, "fitness", float("nan")) or 0.0)
@@ -2475,11 +2902,12 @@ def main() -> None:
     champion_exports = {
         "fitness": {
             "criteria": (
-                "full_eval top-K fresh-seed playoff winner"
+                "pooled training + top-K fresh-seed playoff winner"
                 if winner_playoff is not None
                 else "full_eval, highest selection fitness"
             ),
             "record": best_record,
+            "record_stage2": best_record_stage2,
             "winner_pickle": winner_pkl,
             "winner_json": winner_json_path,
         }
@@ -2500,7 +2928,8 @@ def main() -> None:
         "best_fitness": best_fitness,
         "winner_generation": (int(winner_generation) if winner_generation is not None else None),
         "best_record": best_record,
-        "selection_best_record": selection_best_record,
+        "best_record_stage2": best_record_stage2,
+        "best_record_pooled": best_record_pooled,
         "winner_playoff": (winner_playoff.get("summary") if winner_playoff is not None else None),
         "champions": champion_exports,
         "applied_overrides": applied_overrides,
@@ -2533,6 +2962,9 @@ def main() -> None:
         "go_fail_rate": best_record_summary.get("go_fail_rate"),
         "winner_selection_mode": (
             "topk_fresh_seed_playoff" if winner_playoff is not None else "selection_fitness"
+        ),
+        "best_record_mode": (
+            "pooled_training_stage1_stage2" if winner_playoff is not None else "selection_fitness"
         ),
         "winner_json": winner_json_path,
     }

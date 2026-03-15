@@ -23,7 +23,8 @@
 - `model_duel_worker.mjs`: 휴리스틱/NEAT 모델 공용 대전 실행기 + kibo/dataset 출력
 
 ### 2-3. 설정 (`scripts/configs/`)
-- `neat_feedforward.ini`: NEAT 토폴로지/변이 설정 (`num_inputs=13`)
+- `neat_feedforward.ini`: NEAT 토폴로지/변이 설정 (`num_inputs=10`)
+- `neat_feedforward_position11.ini`: `position11`용 11입력 설정
 - `runtime_phase1.json`: 모든 phase/classic 런의 공통 runtime 기준 파일
 
 ## 3. 파이프라인 흐름
@@ -101,8 +102,15 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 - `docs/data/KIBO_DATASET_GUIDE.md` (kibo/dataset 구조, 필드 의미, unresolved 해석)
 
 ### 7-1. `neat_eval_worker.mjs`
-- active feature vector는 `compact16` 16차원이다.
-- 구형 `compact13` winner는 runtime legacy fallback으로만 호환한다.
+- active feature vector는 기본적으로 `hand10` 10차원이다.
+- 학습 시 `--feature-profile hand10|material10|position11` 으로 CLI override 가능하다.
+- `material10` alternate builder도 `10D` 기준으로 유지한다.
+- `position11` alternate builder는 `11D` 기준을 사용하며, `phase_run.ps1`이 자동으로 `neat_feedforward_position11.ini`를 선택한다.
+- winner playoff 기본 tie-break:
+  - `win_rate` 차이 `<= 1.0%p` 는 동률
+  - `mean_gold_delta` 차이 `<= 100` 은 동률
+  - `go_take_rate` 차이 `<= 2.0%p` 는 동률
+  - 동률 구간에서는 `go_take_rate`, 그다음 `go_fail_rate`, 마지막 `fitness` 순으로 비교한다.
 - `opponent_policy=heuristic_h_gpt`일 때 내부 fast tuning 파라미터를 적용해 평가 시간을 줄인다.
 - teacher dataset cache(`--teacher-dataset-cache`)가 있으면 imitation 계산 소스를 cache로 전환한다.
 

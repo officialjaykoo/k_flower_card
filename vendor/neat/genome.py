@@ -12,6 +12,13 @@ from neat.genes import DefaultConnectionGene, DefaultNodeGene
 from neat.graphs import creates_cycle
 from neat.graphs import required_for_output
 
+DECISION_THRESHOLD_NAMES = (
+    'go_stop_threshold',
+    'shaking_threshold',
+    'president_threshold',
+    'gukjin_threshold',
+)
+
 
 class DefaultGenomeConfig:
     """Sets up and holds configuration information for the DefaultGenome class."""
@@ -40,14 +47,9 @@ class DefaultGenomeConfig:
                         ConfigParameter('structural_mutation_surer', str, 'default'),
                         ConfigParameter('initial_connection', str, 'unconnected')]
 
-        self.go_stop_threshold_attr = FloatAttribute('go_stop_threshold')
-        self.shaking_threshold_attr = FloatAttribute('shaking_threshold')
-        self.president_threshold_attr = FloatAttribute('president_threshold')
-        self.gukjin_threshold_attr = FloatAttribute('gukjin_threshold')
-        self._params += self.go_stop_threshold_attr.get_config_params()
-        self._params += self.shaking_threshold_attr.get_config_params()
-        self._params += self.president_threshold_attr.get_config_params()
-        self._params += self.gukjin_threshold_attr.get_config_params()
+        self.decision_threshold_attributes = [FloatAttribute(name) for name in DECISION_THRESHOLD_NAMES]
+        for attr in self.decision_threshold_attributes:
+            self._params += attr.get_config_params()
 
         # Gather configuration data from the gene classes.
         self.node_gene_type = params['node_gene_type']
@@ -61,10 +63,8 @@ class DefaultGenomeConfig:
 
         self.node_gene_type.validate_attributes(self)
         self.connection_gene_type.validate_attributes(self)
-        self.go_stop_threshold_attr.validate(self)
-        self.shaking_threshold_attr.validate(self)
-        self.president_threshold_attr.validate(self)
-        self.gukjin_threshold_attr.validate(self)
+        for attr in self.decision_threshold_attributes:
+            attr.validate(self)
 
         # By convention, input pins have negative keys, and the output
         # pins have keys 0,1,...
@@ -217,17 +217,13 @@ class DefaultGenome:
 
         # Fitness results.
         self.fitness = None
-        self.go_stop_threshold = None
-        self.shaking_threshold = None
-        self.president_threshold = None
-        self.gukjin_threshold = None
+        for name in DECISION_THRESHOLD_NAMES:
+            setattr(self, name, 0.0)
 
     def configure_new(self, config):
         """Configure a new genome based on the given configuration."""
-        self.go_stop_threshold = config.go_stop_threshold_attr.init_value(config)
-        self.shaking_threshold = config.shaking_threshold_attr.init_value(config)
-        self.president_threshold = config.president_threshold_attr.init_value(config)
-        self.gukjin_threshold = config.gukjin_threshold_attr.init_value(config)
+        for attr in getattr(config, 'decision_threshold_attributes', []):
+            setattr(self, attr.name, float(attr.init_value(config)))
 
         # Create node genes for the output pins.
         for node_key in config.output_keys:
@@ -357,18 +353,18 @@ class DefaultGenome:
                 # Homologous gene: combine genes from both parents.
                 self.nodes[key] = ng1.crossover(ng2)
 
-        self.go_stop_threshold = self._crossover_threshold(
-            genome1, genome2, config, config.go_stop_threshold_attr, "go_stop_threshold"
-        )
-        self.shaking_threshold = self._crossover_threshold(
-            genome1, genome2, config, config.shaking_threshold_attr, "shaking_threshold"
-        )
-        self.president_threshold = self._crossover_threshold(
-            genome1, genome2, config, config.president_threshold_attr, "president_threshold"
-        )
-        self.gukjin_threshold = self._crossover_threshold(
-            genome1, genome2, config, config.gukjin_threshold_attr, "gukjin_threshold"
-        )
+        for attr in getattr(config, 'decision_threshold_attributes', []):
+            value1 = getattr(parent1, attr.name, None)
+            value2 = getattr(parent2, attr.name, None)
+            if value1 is None and value2 is None:
+                value = attr.init_value(config)
+            elif value1 is None:
+                value = value2
+            elif value2 is None:
+                value = value1
+            else:
+                value = value1 if random() < 0.5 else value2
+            setattr(self, attr.name, float(value))
 
     def mutate(self, config):
         """ Mutates this genome. """
@@ -408,19 +404,9 @@ class DefaultGenome:
         for ng in self.nodes.values():
             ng.mutate(config)
 
-        if self.go_stop_threshold is None:
-            self.go_stop_threshold = config.go_stop_threshold_attr.init_value(config)
-        if self.shaking_threshold is None:
-            self.shaking_threshold = config.shaking_threshold_attr.init_value(config)
-        if self.president_threshold is None:
-            self.president_threshold = config.president_threshold_attr.init_value(config)
-        if self.gukjin_threshold is None:
-            self.gukjin_threshold = config.gukjin_threshold_attr.init_value(config)
-
-        self.go_stop_threshold = config.go_stop_threshold_attr.mutate_value(self.go_stop_threshold, config)
-        self.shaking_threshold = config.shaking_threshold_attr.mutate_value(self.shaking_threshold, config)
-        self.president_threshold = config.president_threshold_attr.mutate_value(self.president_threshold, config)
-        self.gukjin_threshold = config.gukjin_threshold_attr.mutate_value(self.gukjin_threshold, config)
+        for attr in getattr(config, 'decision_threshold_attributes', []):
+            current_value = float(getattr(self, attr.name, attr.init_value(config)))
+            setattr(self, attr.name, float(attr.mutate_value(current_value, config)))
 
     def mutate_add_node(self, config):
         """
@@ -617,12 +603,15 @@ class DefaultGenome:
                                    (config.compatibility_disjoint_coefficient *
                                     disjoint_connections)) / max_conn
 
-        distance = node_distance + connection_distance
-        distance += abs(float(self.go_stop_threshold or 0.0) - float(other.go_stop_threshold or 0.0))
-        distance += abs(float(self.shaking_threshold or 0.0) - float(other.shaking_threshold or 0.0))
-        distance += abs(float(self.president_threshold or 0.0) - float(other.president_threshold or 0.0))
-        distance += abs(float(self.gukjin_threshold or 0.0) - float(other.gukjin_threshold or 0.0))
-        return distance
+        threshold_distance = 0.0
+        threshold_attrs = getattr(config, 'decision_threshold_attributes', [])
+        if threshold_attrs:
+            diffs = 0.0
+            for attr in threshold_attrs:
+                diffs += abs(float(getattr(self, attr.name, 0.0)) - float(getattr(other, attr.name, 0.0)))
+            threshold_distance = (config.compatibility_weight_coefficient * diffs) / len(threshold_attrs)
+
+        return node_distance + connection_distance + threshold_distance
 
     def size(self):
         """
@@ -633,11 +622,11 @@ class DefaultGenome:
         return len(self.nodes), num_enabled_connections
 
     def __str__(self):
-        s = (
-            f"Key: {self.key}\nFitness: {self.fitness}\n"
-            f"DecisionThresholds: go_stop={self.go_stop_threshold}, shaking={self.shaking_threshold}, "
-            f"president={self.president_threshold}, gukjin={self.gukjin_threshold}\nNodes:"
-        )
+        s = f"Key: {self.key}\nFitness: {self.fitness}\nNodes:"
+        if DECISION_THRESHOLD_NAMES:
+            s += "\nThresholds:"
+            for name in DECISION_THRESHOLD_NAMES:
+                s += f"\n\t{name}={getattr(self, name, 0.0)}"
         for k, ng in self.nodes.items():
             s += f"\n\t{k} {ng!s}"
         s += "\nConnections:"
@@ -783,23 +772,10 @@ class DefaultGenome:
         new_genome = DefaultGenome(None)
         new_genome.nodes = used_node_genes
         new_genome.connections = used_connection_genes
-        new_genome.go_stop_threshold = self.go_stop_threshold
-        new_genome.shaking_threshold = self.shaking_threshold
-        new_genome.president_threshold = self.president_threshold
-        new_genome.gukjin_threshold = self.gukjin_threshold
+        new_genome.fitness = self.fitness
+        for name in DECISION_THRESHOLD_NAMES:
+            setattr(new_genome, name, float(getattr(self, name, 0.0)))
         return new_genome
-
-    @staticmethod
-    def _crossover_threshold(genome1, genome2, config, attr, name):
-        parent1_value = getattr(genome1, name, None)
-        parent2_value = getattr(genome2, name, None)
-        if parent1_value is None and parent2_value is None:
-            return attr.init_value(config)
-        if parent1_value is None:
-            return parent2_value
-        if parent2_value is None:
-            return parent1_value
-        return parent1_value if random() > 0.5 else parent2_value
 
 
 def get_pruned_genes(node_genes, connection_genes, input_keys, output_keys):

@@ -2,6 +2,7 @@
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed,
   [Parameter(Mandatory = $false)][ValidateSet("classic")][string]$LineageProfile = "classic",
+  [Parameter(Mandatory = $false)][ValidateSet("hand10", "material10", "position11")][string]$FeatureProfile = "",
   [Parameter(Mandatory = $false)][string]$ControlGoStopIqnModel = "",
   [Parameter(Mandatory = $false)][string[]]$BootstrapSeedSpec = @()
 )
@@ -123,6 +124,34 @@ function Get-OverallBestMetrics {
     generation_mean_go_fail_rate = $null
   }
 
+  $bestRecord = Get-PropertyValue -Object $Summary -Name "best_record"
+  if ($null -ne $bestRecord) {
+    $bestRecordFitness = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestRecord -Name "fitness")
+    if (-not [double]::IsNaN($bestRecordFitness)) {
+      return [ordered]@{
+        available = $true
+        generation = Get-PropertyValue -Object $bestRecord -Name "generation"
+        genome_key = Get-PropertyValue -Object $bestRecord -Name "genome_key"
+        fitness = $bestRecordFitness
+        win_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestRecord -Name "win_rate")
+        imitation_weighted_score = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestRecord -Name "imitation_weighted_score")
+        mean_gold_delta = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestRecord -Name "mean_gold_delta")
+        go_opportunity_count = Get-PropertyValue -Object $bestRecord -Name "go_opportunity_count"
+        go_opportunity_games = Get-PropertyValue -Object $bestRecord -Name "go_opportunity_games"
+        go_opportunity_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestRecord -Name "go_opportunity_rate")
+        go_take_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestRecord -Name "go_take_rate")
+        go_count = Get-PropertyValue -Object $bestRecord -Name "go_count"
+        go_games = Get-PropertyValue -Object $bestRecord -Name "go_games"
+        go_fail_count = Get-PropertyValue -Object $bestRecord -Name "go_fail_count"
+        go_fail_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestRecord -Name "go_fail_rate")
+        go_rate = Get-OptionalDouble -Value (Get-PropertyValue -Object $bestRecord -Name "go_rate")
+        generation_mean_go_games = $null
+        generation_mean_go_rate = $null
+        generation_mean_go_fail_rate = $null
+      }
+    }
+  }
+
   $generationMetricsPathRaw = [string](Get-PropertyValue -Object $Summary -Name "generation_metrics_log")
   $evalMetricsPathRaw = [string](Get-PropertyValue -Object $Summary -Name "eval_metrics_log")
   if ([string]::IsNullOrWhiteSpace($generationMetricsPathRaw) -or [string]::IsNullOrWhiteSpace($evalMetricsPathRaw)) {
@@ -135,7 +164,6 @@ function Get-OverallBestMetrics {
     return $empty
   }
 
-  $bestRecord = Get-PropertyValue -Object $Summary -Name "best_record"
   $generationRecord = $null
   $targetGeneration = $null
   $targetGenomeKey = $null
@@ -327,6 +355,9 @@ if (-not (Test-Path $python)) {
 
 $lineageLayout = Get-LineageLayout -Profile $LineageProfile
 $configFeedforward = [string]$lineageLayout.config_feedforward
+if ($FeatureProfile -eq "position11") {
+  $configFeedforward = "scripts/configs/neat_feedforward_position11.ini"
+}
 $runtimeConfig = "scripts/configs/runtime_phase1.json"
 $outputDir = "logs/NEAT/$($lineageLayout.output_prefix)_phase${Phase}_seed$Seed"
 
@@ -346,6 +377,12 @@ $cmd = @(
   "--seed", "$Seed",
   "--profile-name", "$($lineageLayout.profile_name_prefix)phase${Phase}_seed$Seed"
 )
+
+if (-not [string]::IsNullOrWhiteSpace($FeatureProfile)) {
+  $cmd += @(
+    "--feature-profile", $FeatureProfile
+  )
+}
 
 if (-not [string]::IsNullOrWhiteSpace($ControlGoStopIqnModel)) {
   $cmd += @(
