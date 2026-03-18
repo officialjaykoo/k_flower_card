@@ -259,6 +259,42 @@ def _parse_early_stop_win_rate_cutoffs(raw_value: object) -> list:
     return out
 
 
+def _parse_split_head_inputs(raw_value: object) -> list[int]:
+    if raw_value is None:
+        return []
+
+    source = []
+    if isinstance(raw_value, list):
+        source = raw_value
+    else:
+        text = str(raw_value).strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            source = parsed
+        else:
+            source = [item.strip() for item in text.split(",") if str(item).strip()]
+
+    out = []
+    seen = set()
+    for idx, item in enumerate(source):
+        try:
+            value = int(item)
+        except Exception as exc:
+            raise RuntimeError(f"split head input index must be integer at position {idx}") from exc
+        if value < 0:
+            raise RuntimeError(f"split head input index must be >= 0: {value}")
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
 def _parse_early_stop_go_take_rate_cutoffs(raw_value: object) -> list:
     if raw_value is None:
         return []
@@ -471,10 +507,15 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["seed"] = str(_required_value(cfg, "seed") or "").strip()
     if not cfg["seed"]:
         raise RuntimeError("runtime key 'seed' must be non-empty")
-    cfg["feature_profile"] = str(cfg.get("feature_profile") or "hand10").strip().lower()
-    if cfg["feature_profile"] not in ("hand10", "material10", "position11"):
-        raise RuntimeError("runtime key 'feature_profile' must be one of: hand10, material10, position11")
-
+    cfg["feature_profile"] = str(cfg.get("feature_profile") or "race8").strip().lower()
+    if cfg["feature_profile"] not in ("race2", "race5", "race6", "race7", "race8", "race20", "hand7", "hand10", "material10", "race10", "oracle10", "oracle10v2"):
+        raise RuntimeError("runtime key 'feature_profile' must be one of: race2, race5, race6, race7, race8, race20, hand7, hand10, material10, race10, oracle10, oracle10v2")
+    cfg["split_head_output0_inputs"] = _parse_split_head_inputs(cfg.get("split_head_output0_inputs"))
+    cfg["split_head_output1_inputs"] = _parse_split_head_inputs(cfg.get("split_head_output1_inputs"))
+    if bool(cfg["split_head_output0_inputs"]) != bool(cfg["split_head_output1_inputs"]):
+        raise RuntimeError(
+            "runtime split head config requires both split_head_output0_inputs and split_head_output1_inputs"
+        )
     cfg["fitness_gold_scale"] = _required_float(cfg, "fitness_gold_scale")
     cfg["fitness_gold_neutral_delta"] = _required_float(cfg, "fitness_gold_neutral_delta")
     cfg["fitness_win_weight"] = _required_float(cfg, "fitness_win_weight")
@@ -506,7 +547,6 @@ def _normalize_runtime_values(cfg: dict) -> dict:
         cfg.get("early_stop_go_take_rate_cutoffs")
     )
     cfg["control_policy_mode"] = _normalize_control_policy_mode(cfg.get("control_policy_mode"))
-    cfg["control_go_stop_iqn_model"] = str(cfg.get("control_go_stop_iqn_model") or "").strip()
     cfg["winner_playoff_topk"] = max(1, _to_int(cfg.get("winner_playoff_topk"), 5))
     cfg["winner_playoff_finalists"] = max(1, _to_int(cfg.get("winner_playoff_finalists"), 2))
     cfg["winner_playoff_stage1_games"] = max(
@@ -569,7 +609,7 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}OPPONENT_GENOME"] = str(runtime.get("opponent_genome") or "")
     os.environ[f"{ENV_PREFIX}SWITCH_SEATS"] = "1" if bool(runtime["switch_seats"]) else "0"
     os.environ[f"{ENV_PREFIX}SEED"] = str(runtime["seed"])
-    os.environ[f"{ENV_PREFIX}FEATURE_PROFILE"] = str(runtime.get("feature_profile") or "hand10")
+    os.environ[f"{ENV_PREFIX}FEATURE_PROFILE"] = str(runtime.get("feature_profile") or "race8")
     os.environ[f"{ENV_PREFIX}OUTPUT_DIR"] = os.path.abspath(output_dir)
     os.environ[f"{ENV_PREFIX}FITNESS_GOLD_SCALE"] = str(float(runtime["fitness_gold_scale"]))
     os.environ[f"{ENV_PREFIX}FITNESS_GOLD_NEUTRAL_DELTA"] = str(
@@ -606,7 +646,6 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    os.environ[f"{ENV_PREFIX}CONTROL_GO_STOP_IQN_MODEL"] = str(runtime.get("control_go_stop_iqn_model") or "")
 
 
 def _runtime_from_env() -> Dict[str, object]:
@@ -645,7 +684,6 @@ def _runtime_from_env() -> Dict[str, object]:
         "failure_slope_metric": os.environ.get(f"{ENV_PREFIX}FAILURE_SLOPE_METRIC"),
         "early_stop_win_rate_cutoffs": os.environ.get(f"{ENV_PREFIX}EARLY_STOP_WIN_RATE_CUTOFFS"),
         "early_stop_go_take_rate_cutoffs": os.environ.get(f"{ENV_PREFIX}EARLY_STOP_GO_TAKE_RATE_CUTOFFS"),
-        "control_go_stop_iqn_model": os.environ.get(f"{ENV_PREFIX}CONTROL_GO_STOP_IQN_MODEL"),
     }
     return _normalize_runtime_values(raw)
 
@@ -686,7 +724,7 @@ def _export_neat_python_genome(genome, config, runtime: Optional[dict] = None) -
     input_keys = [int(x) for x in gcfg.input_keys]
     output_keys = [int(x) for x in gcfg.output_keys]
     runtime_ctx = runtime or (_runtime_from_env_cached() if os.environ.get(f"{ENV_PREFIX}FORMAT_VERSION") else {})
-    feature_profile = str((runtime_ctx or {}).get("feature_profile") or "hand10").strip().lower()
+    feature_profile = str((runtime_ctx or {}).get("feature_profile") or "race8").strip().lower()
 
     default_activation = str(getattr(gcfg, "activation_default", "tanh") or "tanh")
     default_aggregation = str(getattr(gcfg, "aggregation_default", "sum") or "sum")
@@ -720,6 +758,16 @@ def _export_neat_python_genome(genome, config, runtime: Optional[dict] = None) -
         if hasattr(genome, name):
             decision_params[name] = float(getattr(genome, name, 0.0) or 0.0)
 
+    split_head_spec = None
+    if bool(getattr(gcfg, "_codex_head_split_enabled", False)):
+        split_head_spec = {
+            "enabled": True,
+            "output_inputs": {
+                str(int(key)): [int(item) for item in list(value)]
+                for key, value in dict(getattr(gcfg, "_codex_head_input_indices_by_output", {}) or {}).items()
+            },
+        }
+
     return {
         "format_version": "neat_python_genome_v1",
         "input_keys": input_keys,
@@ -727,10 +775,15 @@ def _export_neat_python_genome(genome, config, runtime: Optional[dict] = None) -
         "feature_spec": {
             "profile": feature_profile,
             "base_features": len(input_keys),
+            "split_heads": split_head_spec,
         },
         "nodes": nodes,
         "connections": connections,
         "decision_params": decision_params,
+        "node_heads": {
+            str(int(key)): int(value)
+            for key, value in dict(getattr(genome, "node_heads", {}) or {}).items()
+        },
     }
 
 
@@ -1065,13 +1118,6 @@ def _run_eval_worker_for_genome(
                 separators=(",", ":"),
             ),
         ]
-        if str(runtime.get("control_go_stop_iqn_model") or "").strip():
-            cmd.extend(
-                [
-                    "--control-go-stop-iqn-model",
-                    str(runtime.get("control_go_stop_iqn_model") or "").strip(),
-                ]
-            )
         if has_opponent_policy:
             cmd.extend(["--opponent-policy", opponent_policy])
         elif has_opponent_policy_mix:
@@ -1510,6 +1556,21 @@ class LoggedParallelEvaluator:
             record["num_nodes"] = int(node_count)
             record["num_connections"] = int(enabled_count)
             record["num_connections_total"] = int(len(conn_genes))
+            setattr(
+                genome,
+                "_codex_eval_meta",
+                {
+                    "generation": int(display_generation),
+                    "games": int(_safe_float(record.get("games"), 0.0)),
+                    "win_rate": _safe_optional_float(record.get("win_rate")),
+                    "mean_gold_delta": _safe_optional_float(record.get("mean_gold_delta")),
+                    "go_take_rate": _safe_optional_float(record.get("go_take_rate")),
+                    "go_fail_rate": _safe_optional_float(record.get("go_fail_rate")),
+                    "full_eval_passed": (
+                        int(_safe_float(record.get("games"), 0.0)) >= int(self.full_eval_games)
+                    ),
+                },
+            )
             records.append(record)
 
         self._append_lines(self.eval_metrics_log, records)
@@ -2190,7 +2251,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--feature-profile",
         default="",
-        help="Override feature profile (hand10, material10, or position11)",
+        help="Override feature profile (race2, race5, race6, race7, race8, race20, hand7, hand10, material10, race10, oracle10, or oracle10v2)",
     )
     parser.add_argument(
         "--opponent-genome",
@@ -2228,11 +2289,6 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=float("nan"),
         help="Override neutral baseline win rate for win_norm",
-    )
-    parser.add_argument(
-        "--control-go-stop-iqn-model",
-        default="",
-        help="Override go/stop IQN runtime JSON path",
     )
     parser.add_argument(
         "--profile-name",
@@ -2326,6 +2382,50 @@ def _adapt_seed_genome_to_config(cfg, seed_genome, seed_path: str):
 
     pruned = copy.deepcopy(seed_genome)
     removed = 0
+    split_enabled = bool(getattr(cfg.genome_config, "_codex_head_split_enabled", False))
+    output_keys = {int(x) for x in getattr(cfg.genome_config, "output_keys", [])}
+    split_input_keys_by_output = {
+        int(key): {int(item) for item in value}
+        for key, value in dict(getattr(cfg.genome_config, "_codex_head_input_keys_by_output", {}) or {}).items()
+    }
+    node_heads = {
+        int(key): int(value)
+        for key, value in dict(getattr(pruned, "node_heads", {}) or {}).items()
+    }
+    if split_enabled:
+        hidden_nodes = [
+            int(node_key)
+            for node_key in getattr(pruned, "nodes", {})
+            if int(node_key) not in output_keys
+        ]
+        if hidden_nodes:
+            missing_heads = [node_key for node_key in hidden_nodes if node_key not in node_heads]
+            if missing_heads:
+                raise RuntimeError(
+                    "split-head bootstrap requires node head metadata; "
+                    f"seed genome is missing hidden node heads: {missing_heads[:8]}"
+                )
+
+    def _resolve_seed_node_head(node_key: int):
+        if node_key in output_keys:
+            return int(node_key)
+        return node_heads.get(int(node_key))
+
+    def _seed_connection_allowed(in_node: int, out_node: int) -> bool:
+        if out_node < 0:
+            return False
+        if not split_enabled:
+            return True
+        target_head = _resolve_seed_node_head(out_node)
+        if target_head is None:
+            return False
+        if in_node < 0:
+            return int(in_node) in split_input_keys_by_output.get(target_head, set())
+        if in_node in output_keys:
+            return False
+        source_head = _resolve_seed_node_head(in_node)
+        return source_head is not None and int(source_head) == int(target_head)
+
     for conn_key, conn_gene in list((getattr(pruned, "connections", {}) or {}).items()):
         try:
             in_node = int(conn_key[0])
@@ -2334,7 +2434,18 @@ def _adapt_seed_genome_to_config(cfg, seed_genome, seed_path: str):
                 in_node = int(getattr(conn_gene, "key", [0, 0])[0])
             except Exception:
                 continue
+        try:
+            out_node = int(conn_key[1])
+        except Exception:
+            try:
+                out_node = int(getattr(conn_gene, "key", [0, 0])[1])
+            except Exception:
+                continue
         if in_node < 0 and in_node not in allowed_input_keys:
+            del pruned.connections[conn_key]
+            removed += 1
+            continue
+        if not _seed_connection_allowed(in_node, out_node):
             del pruned.connections[conn_key]
             removed += 1
 
@@ -2345,6 +2456,72 @@ def _adapt_seed_genome_to_config(cfg, seed_genome, seed_path: str):
     setattr(pruned, "_codex_pruned_seed_path", os.path.abspath(seed_path))
     setattr(pruned, "_codex_pruned_connection_count", int(removed))
     return pruned
+
+
+def _seed_source_label_from_path(seed_path: str) -> str:
+    raw_path = os.path.abspath(str(seed_path or "").strip())
+    if not raw_path:
+        return ""
+    normalized = raw_path.replace("\\", "/")
+    match = re.search(r"(?:^|/)(?:neat_)?phase(\d+)_seed(\d+)(?:/|$)", normalized, re.IGNORECASE)
+    if match:
+        return f"phase{int(match.group(1))}_seed{int(match.group(2))}"
+    return os.path.splitext(os.path.basename(raw_path))[0]
+
+
+def _apply_split_head_runtime(cfg, runtime: dict) -> None:
+    if cfg is None or not hasattr(cfg, "genome_config"):
+        return
+
+    gcfg = cfg.genome_config
+    output_keys = [int(key) for key in getattr(gcfg, "output_keys", [])]
+    out0 = [int(item) for item in list(runtime.get("split_head_output0_inputs") or [])]
+    out1 = [int(item) for item in list(runtime.get("split_head_output1_inputs") or [])]
+    enabled = bool(out0 or out1)
+
+    setattr(gcfg, "_codex_head_split_enabled", enabled)
+    setattr(gcfg, "_codex_head_input_indices_by_output", {})
+    setattr(gcfg, "_codex_head_input_keys_by_output", {})
+
+    if not enabled:
+        return
+
+    if len(output_keys) != 2 or output_keys != [0, 1]:
+        raise RuntimeError("split-head mode currently requires exactly two outputs: 0 and 1")
+    if int(getattr(gcfg, "num_hidden", 0) or 0) != 0:
+        raise RuntimeError("split-head mode requires num_hidden = 0 at initialization")
+
+    input_keys = [int(key) for key in getattr(gcfg, "input_keys", [])]
+    input_dim = len(input_keys)
+    if input_dim <= 0:
+        raise RuntimeError("split-head mode requires at least one input")
+
+    def _normalize_mask(items: list[int], label: str) -> list[int]:
+        normalized = []
+        seen = set()
+        for value in items:
+            idx = int(value)
+            if idx < 0 or idx >= input_dim:
+                raise RuntimeError(
+                    f"runtime key '{label}' contains out-of-range input index {idx} for input_dim={input_dim}"
+                )
+            if idx in seen:
+                continue
+            seen.add(idx)
+            normalized.append(idx)
+        if not normalized:
+            raise RuntimeError(f"runtime key '{label}' must contain at least one input index")
+        return normalized
+
+    out0 = _normalize_mask(out0, "split_head_output0_inputs")
+    out1 = _normalize_mask(out1, "split_head_output1_inputs")
+    input_indices_by_output = {0: out0, 1: out1}
+    input_keys_by_output = {
+        int(output_key): {int(input_keys[idx]) for idx in indices}
+        for output_key, indices in input_indices_by_output.items()
+    }
+    setattr(gcfg, "_codex_head_input_indices_by_output", input_indices_by_output)
+    setattr(gcfg, "_codex_head_input_keys_by_output", input_keys_by_output)
 
 
 def _normalize_seed_specs(cfg, seed_specs_raw: list) -> list[dict]:
@@ -2368,6 +2545,7 @@ def _normalize_seed_specs(cfg, seed_specs_raw: list) -> list[dict]:
                 "path": os.path.abspath(path),
                 "count": int(count),
                 "genome": seed_genome,
+                "source_label": _seed_source_label_from_path(seed_path),
             }
         )
     if not normalized:
@@ -2405,11 +2583,13 @@ def _seed_population_from_specs(cfg, population, seed_specs: list[dict]):
 
     seeded_population = dict(population.population)
     population.reproduction.ancestors = {}
+    bootstrap_source_by_key: dict[int, str] = {}
     offset = 0
     for item in seed_specs:
         seed_genome = item["genome"]
         seed_count = max(1, int(item["count"]))
         seed_key = int(getattr(seed_genome, "key", 0) or 0)
+        source_label = str(item.get("source_label") or "").strip()
         block_keys = existing_keys[offset : offset + seed_count]
         if len(block_keys) != seed_count:
             raise RuntimeError("failed to allocate genome keys for seed expansion")
@@ -2423,6 +2603,8 @@ def _seed_population_from_specs(cfg, population, seed_specs: list[dict]):
                     genome.mutate(cfg.genome_config)
             seeded_population[int(genome_key)] = genome
             population.reproduction.ancestors[int(genome_key)] = (seed_key,)
+            if source_label:
+                bootstrap_source_by_key[int(genome_key)] = source_label
         offset += seed_count
 
     for genome_key in existing_keys[offset:population_size]:
@@ -2433,6 +2615,7 @@ def _seed_population_from_specs(cfg, population, seed_specs: list[dict]):
         population.reproduction.ancestors[int(genome_key)] = tuple()
 
     population.population = seeded_population
+    setattr(population, "_codex_bootstrap_source_by_key", dict(bootstrap_source_by_key))
     population.generation = 0
     population.best_genome = None
     population.species = cfg.species_set_type(cfg.species_set_config, population.reporters)
@@ -2522,6 +2705,153 @@ def _restore_population_from_checkpoint(filename: str, new_config=None):
         setattr(restored_pop, "best_genome_display_generation", int(restored_best_display_generation))
 
     return restored_pop
+
+
+def _coerce_lineage_parent_tuple(raw_value: object) -> tuple[int, ...]:
+    out = []
+    if isinstance(raw_value, (list, tuple)):
+        for item in raw_value:
+            try:
+                out.append(int(item))
+            except Exception:
+                continue
+    return tuple(out)
+
+
+def _load_lineage_state_from_path(path: str) -> Optional[dict]:
+    target = os.path.abspath(str(path or "").strip())
+    if not target or not os.path.exists(target):
+        return None
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    def _coerce_int_map(src: object) -> dict[int, int]:
+        out: dict[int, int] = {}
+        if not isinstance(src, dict):
+            return out
+        for key, value in src.items():
+            try:
+                out[int(key)] = int(value)
+            except Exception:
+                continue
+        return out
+
+    def _coerce_str_map(src: object) -> dict[int, str]:
+        out: dict[int, str] = {}
+        if not isinstance(src, dict):
+            return out
+        for key, value in src.items():
+            try:
+                out[int(key)] = str(value or "").strip()
+            except Exception:
+                continue
+        return out
+
+    parents_by_key: dict[int, tuple[int, ...]] = {}
+    if isinstance(raw.get("parents_by_key"), dict):
+        for key, value in raw.get("parents_by_key").items():
+            try:
+                parents_by_key[int(key)] = _coerce_lineage_parent_tuple(value)
+            except Exception:
+                continue
+
+    return {
+        "saved_at": str(raw.get("saved_at") or ""),
+        "source_path": target,
+        "birth_generation_by_key": _coerce_int_map(raw.get("birth_generation_by_key")),
+        "parents_by_key": parents_by_key,
+        "origin_by_key": _coerce_str_map(raw.get("origin_by_key")),
+        "last_seen_generation_by_key": _coerce_int_map(raw.get("last_seen_generation_by_key")),
+        "bootstrap_source_by_key": _coerce_str_map(raw.get("bootstrap_source_by_key")),
+    }
+
+
+def _load_first_lineage_state(paths: list[str]) -> Optional[dict]:
+    for path in paths or []:
+        loaded = _load_lineage_state_from_path(path)
+        if loaded is not None:
+            return loaded
+    return None
+
+
+def _lineage_state_candidates(output_dir: str, resume_path: str = "") -> list[str]:
+    candidates = [os.path.join(os.path.abspath(output_dir), "lineage_state.json")]
+    resume_raw = str(resume_path or "").strip()
+    if resume_raw:
+        resume_output_dir = os.path.dirname(os.path.dirname(os.path.abspath(resume_raw)))
+        resume_state = os.path.join(resume_output_dir, "lineage_state.json")
+        if os.path.abspath(resume_state) != os.path.abspath(candidates[0]):
+            candidates.append(resume_state)
+    return candidates
+
+
+def _build_winner_lineage_export(lineage_state: Optional[dict], winner_genome_key: int) -> Optional[dict]:
+    if winner_genome_key <= 0:
+        return None
+    state = dict(lineage_state or {})
+    birth_generation_by_key = dict(state.get("birth_generation_by_key") or {})
+    parents_by_key = dict(state.get("parents_by_key") or {})
+    origin_by_key = dict(state.get("origin_by_key") or {})
+    last_seen_generation_by_key = dict(state.get("last_seen_generation_by_key") or {})
+    bootstrap_source_by_key = dict(state.get("bootstrap_source_by_key") or {})
+
+    queue = [int(winner_genome_key)]
+    visited = set()
+    nodes = []
+    missing_parent_keys = set()
+    while queue and len(visited) < 512:
+        genome_key = int(queue.pop(0))
+        if genome_key in visited:
+            continue
+        visited.add(genome_key)
+        parent_keys = list(_coerce_lineage_parent_tuple(parents_by_key.get(genome_key)))
+        nodes.append(
+            {
+                "genome_key": int(genome_key),
+                "birth_generation": birth_generation_by_key.get(genome_key),
+                "last_seen_generation": last_seen_generation_by_key.get(genome_key),
+                "origin": origin_by_key.get(genome_key),
+                "bootstrap_source": bootstrap_source_by_key.get(genome_key) or None,
+                "parent_keys": parent_keys,
+            }
+        )
+        for parent_key in parent_keys:
+            if parent_key in visited:
+                continue
+            if (
+                parent_key not in birth_generation_by_key
+                and parent_key not in parents_by_key
+                and parent_key not in origin_by_key
+            ):
+                missing_parent_keys.add(int(parent_key))
+                continue
+            queue.append(int(parent_key))
+
+    nodes.sort(
+        key=lambda item: (
+            -int(item.get("birth_generation") if item.get("birth_generation") is not None else -1),
+            int(item.get("genome_key", -1)),
+        )
+    )
+    return {
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "winner_genome_key": int(winner_genome_key),
+        "node_count": len(nodes),
+        "missing_parent_keys": sorted(missing_parent_keys),
+        "winner_bootstrap_sources": sorted(
+            {
+                str(item.get("bootstrap_source") or "").strip()
+                for item in nodes
+                if str(item.get("bootstrap_source") or "").strip()
+            }
+        ),
+        "nodes": nodes,
+    }
 
 
 if neat is not None:
@@ -2642,6 +2972,154 @@ if neat is not None:
             )
 
 
+    class LineageReporter(neat.reporting.BaseReporter):
+        def __init__(
+            self,
+            output_dir: str,
+            generation_display_offset: int = 0,
+            state_seed: Optional[dict] = None,
+        ):
+            self.output_dir = os.path.abspath(output_dir)
+            os.makedirs(self.output_dir, exist_ok=True)
+            self.lineage_log = os.path.join(self.output_dir, "lineage.ndjson")
+            self.lineage_state_path = os.path.join(self.output_dir, "lineage_state.json")
+            self.generation_display_offset = int(generation_display_offset)
+            self.current_generation = 0
+
+            seed = dict(state_seed or {})
+            self.birth_generation_by_key = dict(seed.get("birth_generation_by_key") or {})
+            self.parents_by_key = {
+                int(key): _coerce_lineage_parent_tuple(value)
+                for key, value in dict(seed.get("parents_by_key") or {}).items()
+            }
+            self.origin_by_key = dict(seed.get("origin_by_key") or {})
+            self.last_seen_generation_by_key = dict(seed.get("last_seen_generation_by_key") or {})
+            self.bootstrap_source_by_key = dict(seed.get("bootstrap_source_by_key") or {})
+            self._write_state()
+
+        def _display_generation(self, generation: int) -> int:
+            return int(self.generation_display_offset + int(generation))
+
+        def _append_lines(self, path: str, records) -> None:
+            if not records:
+                return
+            with open(path, "a", encoding="utf-8") as f:
+                for record in records:
+                    f.write(json.dumps(record, ensure_ascii=False))
+                    f.write("\n")
+
+        def _write_state(self) -> None:
+            payload = {
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "birth_generation_by_key": {
+                    str(key): int(value) for key, value in self.birth_generation_by_key.items()
+                },
+                "parents_by_key": {
+                    str(key): [int(x) for x in value] for key, value in self.parents_by_key.items()
+                },
+                "origin_by_key": {
+                    str(key): str(value or "") for key, value in self.origin_by_key.items()
+                },
+                "last_seen_generation_by_key": {
+                    str(key): int(value) for key, value in self.last_seen_generation_by_key.items()
+                },
+                "bootstrap_source_by_key": {
+                    str(key): str(value or "") for key, value in self.bootstrap_source_by_key.items()
+                },
+            }
+            with open(self.lineage_state_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        def _species_membership(self, species_set) -> dict[int, int]:
+            out: dict[int, int] = {}
+            for species_id, species in (getattr(species_set, "species", {}) or {}).items():
+                for genome_key in (getattr(species, "members", {}) or {}).keys():
+                    try:
+                        out[int(genome_key)] = int(species_id)
+                    except Exception:
+                        continue
+            return out
+
+        def start_generation(self, generation):
+            self.current_generation = int(generation)
+
+        def post_evaluate(self, config, population, species, best_genome):
+            display_generation = self._display_generation(self.current_generation)
+            ancestors_map = getattr(config, "_codex_lineage_ancestors", {}) or {}
+            bootstrap_sources_map = getattr(config, "_codex_lineage_bootstrap_sources", {}) or {}
+            species_by_key = self._species_membership(species)
+            records = []
+            for genome_key, genome in (population or {}).items():
+                key = int(genome_key)
+                parents = _coerce_lineage_parent_tuple(ancestors_map.get(key))
+                if key not in self.parents_by_key:
+                    self.parents_by_key[key] = parents
+                elif parents and len(self.parents_by_key.get(key, tuple())) <= 0:
+                    self.parents_by_key[key] = parents
+                bootstrap_source = str(bootstrap_sources_map.get(key) or self.bootstrap_source_by_key.get(key) or "").strip()
+                if (not bootstrap_source) and parents:
+                    inherited_sources = sorted(
+                        {
+                            str(self.bootstrap_source_by_key.get(int(parent_key)) or "").strip()
+                            for parent_key in parents
+                            if str(self.bootstrap_source_by_key.get(int(parent_key)) or "").strip()
+                        }
+                    )
+                    if len(inherited_sources) == 1:
+                        bootstrap_source = inherited_sources[0]
+                    elif len(inherited_sources) >= 2:
+                        bootstrap_source = ",".join(inherited_sources)
+                if bootstrap_source:
+                    self.bootstrap_source_by_key[key] = bootstrap_source
+
+                is_first_seen = key not in self.birth_generation_by_key
+                if is_first_seen:
+                    self.birth_generation_by_key[key] = int(display_generation)
+                    if len(parents) >= 2:
+                        self.origin_by_key[key] = "offspring"
+                    elif len(parents) == 1:
+                        self.origin_by_key[key] = "bootstrap_seed"
+                    else:
+                        self.origin_by_key[key] = "init"
+                self.last_seen_generation_by_key[key] = int(display_generation)
+
+                eval_meta = dict(getattr(genome, "_codex_eval_meta", {}) or {})
+                origin = str(self.origin_by_key.get(key) or "")
+                records.append(
+                    {
+                        "saved_at": datetime.now(timezone.utc).isoformat(),
+                        "generation": int(display_generation),
+                        "genome_key": int(key),
+                        "birth_generation": int(self.birth_generation_by_key.get(key, display_generation)),
+                        "lineage_event": (origin if is_first_seen else "carryover"),
+                        "origin": origin,
+                        "bootstrap_source": (bootstrap_source or None),
+                        "parent_keys": [int(x) for x in self.parents_by_key.get(key, tuple())],
+                        "species_id": species_by_key.get(key),
+                        "fitness": _safe_float(getattr(genome, "fitness", None), -1e9),
+                        "win_rate": _safe_optional_float(eval_meta.get("win_rate")),
+                        "mean_gold_delta": _safe_optional_float(eval_meta.get("mean_gold_delta")),
+                        "games": int(_safe_float(eval_meta.get("games"), 0.0)),
+                        "full_eval_passed": bool(eval_meta.get("full_eval_passed", False)),
+                        "go_take_rate": _safe_optional_float(eval_meta.get("go_take_rate")),
+                        "go_fail_rate": _safe_optional_float(eval_meta.get("go_fail_rate")),
+                    }
+                )
+            self._append_lines(self.lineage_log, records)
+            self._write_state()
+
+        def snapshot_state(self) -> dict:
+            return {
+                "birth_generation_by_key": dict(self.birth_generation_by_key),
+                "parents_by_key": {
+                    int(key): tuple(value) for key, value in self.parents_by_key.items()
+                },
+                "origin_by_key": dict(self.origin_by_key),
+                "last_seen_generation_by_key": dict(self.last_seen_generation_by_key),
+                "bootstrap_source_by_key": dict(self.bootstrap_source_by_key),
+            }
+
+
 # =============================================================================
 # Section 10. Entrypoint
 # =============================================================================
@@ -2731,9 +3209,6 @@ def main() -> None:
     if args.fitness_win_neutral_rate == args.fitness_win_neutral_rate:
         runtime["fitness_win_neutral_rate"] = args.fitness_win_neutral_rate
         override_keys.append("fitness_win_neutral_rate")
-    if str(args.control_go_stop_iqn_model).strip():
-        runtime["control_go_stop_iqn_model"] = str(args.control_go_stop_iqn_model).strip()
-        override_keys.append("control_go_stop_iqn_model")
     runtime = _normalize_runtime_values(runtime)
     for key in override_keys:
         applied_overrides[key] = runtime.get(key)
@@ -2767,18 +3242,45 @@ def main() -> None:
     cfg = _build_config(args.config_feedforward)
     if len(cfg.genome_config.output_keys) != 2:
         raise RuntimeError("num_outputs must be 2 for action_score + option_bias threshold policy")
+    _apply_split_head_runtime(cfg, runtime)
 
     _set_eval_env(runtime, args.output_dir)
     runtime["output_dir"] = os.path.abspath(args.output_dir)
 
     if args.resume:
         p = _restore_population_from_checkpoint(args.resume)
+        _apply_split_head_runtime(p.config, runtime)
     elif seed_genome_specs:
         p = _seed_population_from_specs(cfg, neat.Population(cfg), _normalize_seed_specs(cfg, seed_genome_specs))
     elif seed_genome_path:
         p = _build_seeded_population(cfg, seed_genome_path, seed_genome_count=seed_genome_count)
     else:
         p = neat.Population(cfg)
+    lineage_state_seed = _load_first_lineage_state(_lineage_state_candidates(args.output_dir, args.resume))
+    if lineage_state_seed is not None:
+        restored_parent_map = {
+            int(key): _coerce_lineage_parent_tuple(value)
+            for key, value in dict(lineage_state_seed.get("parents_by_key") or {}).items()
+        }
+        current_parent_map = dict(getattr(p.reproduction, "ancestors", {}) or {})
+        for key, value in current_parent_map.items():
+            coerced = _coerce_lineage_parent_tuple(value)
+            if int(key) not in restored_parent_map or len(coerced) > 0:
+                restored_parent_map[int(key)] = coerced
+        p.reproduction.ancestors = restored_parent_map
+    setattr(p.config, "_codex_lineage_ancestors", p.reproduction.ancestors)
+    restored_bootstrap_sources = {
+        int(key): str(value or "").strip()
+        for key, value in dict((lineage_state_seed or {}).get("bootstrap_source_by_key") or {}).items()
+        if str(value or "").strip()
+    }
+    current_bootstrap_sources = {
+        int(key): str(value or "").strip()
+        for key, value in dict(getattr(p, "_codex_bootstrap_source_by_key", {}) or {}).items()
+        if str(value or "").strip()
+    }
+    restored_bootstrap_sources.update(current_bootstrap_sources)
+    setattr(p.config, "_codex_lineage_bootstrap_sources", restored_bootstrap_sources)
     start_generation = int(getattr(p, "generation", 0))
     base_generation = _resolve_effective_base_generation(
         resume_path=args.resume,
@@ -2793,6 +3295,12 @@ def main() -> None:
         p.add_reporter(neat.StdOutReporter(True))
     stats = neat.StatisticsReporter()
     p.add_reporter(stats)
+    lineage_reporter = LineageReporter(
+        output_dir=args.output_dir,
+        generation_display_offset=int(base_generation),
+        state_seed=lineage_state_seed,
+    )
+    p.add_reporter(lineage_reporter)
 
     prefix = os.path.join(checkpoints_dir, "neat-checkpoint-")
     checkpointer = OffsetCheckpointer(
@@ -2912,6 +3420,17 @@ def main() -> None:
             "winner_json": winner_json_path,
         }
     }
+    lineage_state_snapshot = lineage_reporter.snapshot_state()
+    winner_lineage_key = int(
+        _safe_float((best_record or {}).get("genome_key"), getattr(best_winner, "key", -1) or -1)
+    )
+    winner_lineage_path = os.path.join(args.output_dir, "winner_lineage.json")
+    winner_lineage_export = _build_winner_lineage_export(lineage_state_snapshot, winner_lineage_key)
+    if winner_lineage_export is not None:
+        with open(winner_lineage_path, "w", encoding="utf-8") as f:
+            json.dump(winner_lineage_export, f, ensure_ascii=False, indent=2)
+    else:
+        winner_lineage_path = None
 
     run_finished_wall = datetime.now(timezone.utc)
     run_elapsed_sec = max(0.0, time.perf_counter() - run_started_perf)
@@ -2937,6 +3456,9 @@ def main() -> None:
         "eval_failure_log": os.path.join(args.output_dir, "eval_failures.log"),
         "eval_metrics_log": os.path.join(args.output_dir, "eval_metrics.ndjson"),
         "generation_metrics_log": os.path.join(args.output_dir, "generation_metrics.ndjson"),
+        "lineage_log": os.path.join(args.output_dir, "lineage.ndjson"),
+        "lineage_state_path": os.path.join(args.output_dir, "lineage_state.json"),
+        "winner_lineage_path": winner_lineage_path,
         "gate_state_path": os.path.join(args.output_dir, "gate_state.json"),
         "gate_state": evaluator.snapshot() if evaluator is not None else {},
         "winner_pickle": winner_pkl,

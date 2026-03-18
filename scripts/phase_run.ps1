@@ -1,9 +1,8 @@
 ﻿param(
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed,
-  [Parameter(Mandatory = $false)][ValidateSet("classic")][string]$LineageProfile = "classic",
-  [Parameter(Mandatory = $false)][ValidateSet("hand10", "material10", "position11")][string]$FeatureProfile = "",
-  [Parameter(Mandatory = $false)][string]$ControlGoStopIqnModel = "",
+  [Parameter(Mandatory = $false)][ValidateSet("classic", "k-hyperneat")][string]$LineageProfile = "classic",
+  [Parameter(Mandatory = $false)][ValidateSet("race2", "race5", "race6", "race7", "race8", "race20", "hand7", "hand10", "material10", "race10", "oracle10", "oracle10v2")][string]$FeatureProfile = "",
   [Parameter(Mandatory = $false)][string[]]$BootstrapSeedSpec = @()
 )
 
@@ -353,21 +352,112 @@ if (-not (Test-Path $python)) {
   throw "python not found: $python"
 }
 
-$lineageLayout = Get-LineageLayout -Profile $LineageProfile
-$configFeedforward = [string]$lineageLayout.config_feedforward
-if ($FeatureProfile -eq "position11") {
-  $configFeedforward = "scripts/configs/neat_feedforward_position11.ini"
+if ($LineageProfile -eq "k-hyperneat") {
+  if ($BootstrapSeedSpec.Count -gt 0) {
+    throw "BootstrapSeedSpec is not supported for k-hyperneat"
+  }
+
+  $runtimeConfig = "experiments/k_hyperneat_matgo/configs/runtime_phase${Phase}.json"
+  if (-not (Test-Path $runtimeConfig)) {
+    $runtimeConfig = "experiments/k_hyperneat_matgo/configs/runtime_phase1.json"
+  }
+  if (-not (Test-Path $runtimeConfig)) {
+    throw "k-hyperneat runtime config not found: $runtimeConfig"
+  }
+
+  $cmd = @(
+    "experiments/k_hyperneat_matgo/train_k_hyperneat.py",
+    "--runtime", $runtimeConfig,
+    "--seed", "$Seed",
+    "--phase", "$Phase",
+    "--stdout-format", "json"
+  )
+
+  $phaseRunStartedAt = Get-Date
+  $result = & $python @cmd | Out-String
+  $phaseRunElapsedSec = [math]::Round(((Get-Date) - $phaseRunStartedAt).TotalSeconds, 3)
+  $exitCode = $LASTEXITCODE
+  if ($exitCode -ne 0) {
+    if (-not [string]::IsNullOrWhiteSpace($result)) {
+      Write-Host $result.Trim()
+    }
+    exit $exitCode
+  }
+
+  try {
+    $summary = $result | ConvertFrom-Json
+  }
+  catch {
+    if (-not [string]::IsNullOrWhiteSpace($result)) {
+      Write-Host $result.Trim()
+    }
+    throw "failed to parse k-hyperneat output as JSON"
+  }
+
+  $runSummaryPath = [string](Get-PropertyValue -Object $summary -Name "run_summary")
+  $summary = Resolve-RunSummaryObject -Summary $summary
+  $bestRecord = Get-PropertyValue -Object $summary -Name "best_record"
+  $summaryElapsedSec = Get-OptionalDouble -Value (Get-PropertyValue -Object $summary -Name "run_elapsed_sec") -DefaultValue $phaseRunElapsedSec
+
+  Write-Host "=== Phase$Phase Summary (Seed=$Seed, Profile=$LineageProfile) ==="
+  if ($null -ne $bestRecord) {
+    Write-Host "Best gen:         $(Get-PropertyValue -Object $bestRecord -Name 'generation')"
+    Write-Host "Best genome key:  $(Get-PropertyValue -Object $bestRecord -Name 'genome_key')"
+    Write-Host "Best win rate:    $(Get-PropertyValue -Object $bestRecord -Name 'win_rate')"
+    Write-Host "Best fitness:     $(Get-PropertyValue -Object $bestRecord -Name 'fitness')"
+    Write-Host "Best gold delta:  $(Get-PropertyValue -Object $bestRecord -Name 'mean_gold_delta')"
+    Write-Host "Games:            $(Get-PropertyValue -Object $bestRecord -Name 'games')"
+  }
+  else {
+    Write-Host "Best gen:         N/A"
+    Write-Host "Best genome key:  N/A"
+    Write-Host "Best win rate:    N/A"
+    Write-Host "Best fitness:     N/A"
+    Write-Host "Best gold delta:  N/A"
+    Write-Host "Games:            N/A"
+  }
+  Write-Host "Elapsed time:     $summaryElapsedSec s"
+  Write-Host "Run summary:      $runSummaryPath"
+  Write-Host "================================"
+
+  exit 0
 }
+
+$lineageLayout = Get-LineageLayout -Profile $LineageProfile
 $runtimeConfig = "scripts/configs/runtime_phase1.json"
 $outputDir = "logs/NEAT/$($lineageLayout.output_prefix)_phase${Phase}_seed$Seed"
 
-if (-not (Test-Path $configFeedforward)) {
-  throw "config not found: $configFeedforward"
-}
 if (-not (Test-Path $runtimeConfig)) {
   throw "runtime config not found: $runtimeConfig"
 }
 $phaseRuntime = Read-JsonFile -Path $runtimeConfig
+$effectiveFeatureProfile = [string]$FeatureProfile
+if ([string]::IsNullOrWhiteSpace($effectiveFeatureProfile)) {
+  $effectiveFeatureProfile = [string](Get-PropertyValue -Object $phaseRuntime -Name "feature_profile")
+}
+if ([string]::IsNullOrWhiteSpace($effectiveFeatureProfile)) {
+  $effectiveFeatureProfile = "race8"
+}
+$effectiveFeatureProfile = $effectiveFeatureProfile.Trim().ToLowerInvariant()
+
+switch ($effectiveFeatureProfile) {
+  "race2" { $configFeedforward = "scripts/configs/neat_feedforward_race2.ini" }
+  "race5" { $configFeedforward = "scripts/configs/neat_feedforward_race5.ini" }
+  "race6" { $configFeedforward = "scripts/configs/neat_feedforward_race6.ini" }
+  "race7" { $configFeedforward = "scripts/configs/neat_feedforward_race7.ini" }
+  "race8" { $configFeedforward = "scripts/configs/neat_feedforward_race8.ini" }
+  "race20" { $configFeedforward = "scripts/configs/neat_feedforward_race20.ini" }
+  "hand7" { $configFeedforward = "scripts/configs/neat_feedforward_hand7.ini" }
+  "hand10" { $configFeedforward = [string]$lineageLayout.config_feedforward }
+  "material10" { $configFeedforward = [string]$lineageLayout.config_feedforward }
+  "race10" { $configFeedforward = [string]$lineageLayout.config_feedforward }
+  "oracle10" { $configFeedforward = [string]$lineageLayout.config_feedforward }
+  "oracle10v2" { $configFeedforward = [string]$lineageLayout.config_feedforward }
+  default { throw "unsupported feature profile: $effectiveFeatureProfile" }
+}
+if (-not (Test-Path $configFeedforward)) {
+  throw "config not found: $configFeedforward"
+}
 
 $cmd = @(
   "scripts/neat_train.py",
@@ -381,12 +471,6 @@ $cmd = @(
 if (-not [string]::IsNullOrWhiteSpace($FeatureProfile)) {
   $cmd += @(
     "--feature-profile", $FeatureProfile
-  )
-}
-
-if (-not [string]::IsNullOrWhiteSpace($ControlGoStopIqnModel)) {
-  $cmd += @(
-    "--control-go-stop-iqn-model", $ControlGoStopIqnModel
   )
 }
 

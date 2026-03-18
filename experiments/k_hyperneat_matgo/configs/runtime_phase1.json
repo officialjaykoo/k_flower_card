@@ -1,0 +1,26 @@
+{
+  "format_version": "k_hyperneat_runtime_train_v1",
+  "phase": 1,
+  "generations": 10,
+  "checkpoint_every": 1,
+  "eval_workers": 6,
+  "cppn_config": "experiments/k_hyperneat_matgo/configs/k_hyperneat_cppn.ini",
+  "games_per_genome": 8,
+  "max_eval_steps": 300,
+  "first_turn_policy": "alternate",
+  "continuous_series": true,
+  "fitness_gold_scale": 1500.0,
+  "fitness_gold_neutral_delta": 0.0,
+  "fitness_win_weight": 0.95,
+  "fitness_gold_weight": 0.05,
+  "fitness_win_neutral_rate": 0.50,
+  "eval_pass_win_rate_min": 0.45,
+  "eval_pass_mean_gold_delta_min": 0.0,
+  "opponent_policy": "",
+  "opponent_policy_mix": [
+    { "policy": "hybrid_play(phase1_seed1302,H-CL)", "weight": 25 },
+    { "policy": "hybrid_play(phase1_seed1305,H-CL)", "weight": 25 },
+    { "policy": "hybrid_play(phase1_seed1306,H-CL)", "weight": 25 },
+    { "policy": "hybrid_play(phase1_seed1307,H-CL)", "weight": 25 }
+  ]
+}

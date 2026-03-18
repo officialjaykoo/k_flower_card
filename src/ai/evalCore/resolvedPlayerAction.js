@@ -2,11 +2,10 @@ import { aiPlay } from "../aiPlay.js";
 import { hybridPolicyPlayDetailed } from "../hybridPolicyEngine.js";
 
 export function buildAiPlayOptions(playerSpec) {
-  if (playerSpec?.kind === "model" && playerSpec?.model) {
+  if (playerSpec?.model) {
     return {
       source: "model",
       model: playerSpec.model,
-      goStopIqnModel: playerSpec.goStopIqnModel || null,
     };
   }
   return {
@@ -20,7 +19,6 @@ export function resolveResolvedPlayerAction(state, actor, playerSpec) {
     const traced = hybridPolicyPlayDetailed(state, actor, {
       model: playerSpec.model,
       heuristicPolicy: String(playerSpec.heuristicPolicy || ""),
-      goStopIqnModel: playerSpec.goStopIqnModel || null,
     });
     return {
       next: traced?.next || state,
@@ -29,7 +27,7 @@ export function resolveResolvedPlayerAction(state, actor, playerSpec) {
     };
   }
 
-  if (playerSpec?.kind === "model" && playerSpec?.model) {
+  if (playerSpec?.model) {
     return {
       next: aiPlay(state, actor, buildAiPlayOptions(playerSpec)),
       actionSource: "model",

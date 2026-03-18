@@ -3,7 +3,8 @@
 ## 결론
 - 현재 학습/평가 기준 파이프라인은 `scripts/neat_train.py -> scripts/neat_eval_worker.mjs -> scripts/model_duel_worker.mjs`다.
 - Phase 실행·평가는 단일 진입점(`scripts/phase_run.ps1`, `scripts/phase_eval.ps1`)으로 통합되었다.
-- 모든 런타임 설정은 `scripts/configs/runtime_phase1.json`을 단일 기준(Source of Truth)으로 사용한다.
+- classic NEAT 런타임 기준은 `scripts/configs/runtime_phase1.json`이다.
+- `K-HyperNEAT` 로컬 실험은 `experiments/k_hyperneat_matgo/configs/runtime_phase1.json`을 별도로 쓴다.
 
 빠른 참고:
 - 반복 확인하는 설정/fitness/정책 메모는 `docs/neat/QUICK_NOTES.md`
@@ -23,8 +24,13 @@
 - `model_duel_worker.mjs`: 휴리스틱/NEAT 모델 공용 대전 실행기 + kibo/dataset 출력
 
 ### 2-3. 설정 (`scripts/configs/`)
-- `neat_feedforward.ini`: NEAT 토폴로지/변이 설정 (`num_inputs=10`)
-- `neat_feedforward_position11.ini`: `position11`용 11입력 설정
+- `neat_feedforward.ini`: 10D 프로필용 NEAT 토폴로지/변이 설정 (`num_inputs=10`)
+- `neat_feedforward_race2.ini`: `race2` 전용 NEAT 토폴로지/변이 설정 (`num_inputs=2`)
+- `neat_feedforward_race5.ini`: `race5` 전용 NEAT 토폴로지/변이 설정 (`num_inputs=5`)
+- `neat_feedforward_race6.ini`: `race6` 전용 NEAT 토폴로지/변이 설정 (`num_inputs=6`)
+- `neat_feedforward_race7.ini`: `race7` 전용 NEAT 토폴로지/변이 설정 (`num_inputs=7`)
+- `neat_feedforward_race8.ini`: `race8` 전용 NEAT 토폴로지/변이 설정 (`num_inputs=8`)
+- `neat_feedforward_hand7.ini`: `hand7` 전용 NEAT 토폴로지/변이 설정 (`num_inputs=7`)
 - `runtime_phase1.json`: 모든 phase/classic 런의 공통 runtime 기준 파일
 
 ## 3. 파이프라인 흐름
@@ -67,6 +73,7 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 - `generations`, `eval_workers`, `games_per_genome`
 - `max_eval_steps`, `eval_timeout_sec`
 - `opponent_policy`, (`opponent_genome` when policy=`genome`)
+- `split_head_output0_inputs`, `split_head_output1_inputs` (둘 다 채우면 vendor/neat에서 output별 허용 입력을 강제한다)
 - `fitness_gold_scale`, `fitness_gold_neutral_delta`, `fitness_win_weight`, `fitness_gold_weight`, `fitness_win_neutral_rate`
 - `gate_mode`, `gate_ema_window`, `transition_*`, `failure_*`
 
@@ -102,10 +109,20 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 - `docs/data/KIBO_DATASET_GUIDE.md` (kibo/dataset 구조, 필드 의미, unresolved 해석)
 
 ### 7-1. `neat_eval_worker.mjs`
-- active feature vector는 기본적으로 `hand10` 10차원이다.
-- 학습 시 `--feature-profile hand10|material10|position11` 으로 CLI override 가능하다.
+- active feature vector 기본값은 `race8` 8차원이다.
+- 학습 시 `--feature-profile race2|race5|race6|race7|race8|race20|hand7|hand10|material10|race10|oracle10|oracle10v2` 으로 CLI override 가능하다.
+- `race2`는 `candidate_public_known_ratio + opp_stop_pressure_norm`만 쓰는 2D 극단 축소 프로필이다.
+- `race5`는 `material10` winner에서 강하게 살아남은 `play 3 + option 2` 신호만 모은 5D 압축 프로필이다.
+- `race6`는 `race5`에 `candidate_combo_gain`을 더한 6D 압축 프로필이다.
+- `race7`는 `material10`에서 `current_multiplier_norm`, `opp_combo_threat_norm`, `score_diff_tanh`를 제거한 7D 압축 프로필이다.
+- `race8`는 `material10`에서 `opp_combo_threat_norm`, `score_diff_tanh`만 제거하고 `current_multiplier_norm`은 마지막 보조 슬롯으로 남긴 8D 압축 프로필이다.
 - `material10` alternate builder도 `10D` 기준으로 유지한다.
-- `position11` alternate builder는 `11D` 기준을 사용하며, `phase_run.ps1`이 자동으로 `neat_feedforward_position11.ini`를 선택한다.
+- `race10`은 이제 `action 5 + option/global 5`의 split-head 혼합 10D 프로필이다.
+- `oracle10`은 원래 `play 6 + option 4`에서 출발한 10D residual 프로필이다.
+- `oracle10v2`는 그 10D 구성을 유지하되, `candidate_pi_value`/`combined_post_block_norm` 대신 `candidate_safe_discard`/`opp_stop_pressure_norm`을 넣은 개정 residual 프로필이다.
+- 현재 `oracle10`/`oracle10v2`는 이름만 유지된 residual feature profile이다.
+- 오라클 base scorer 실험 코드는 제거했고, 지금은 `play/option` 모두 `genome residual`만으로 선택한다.
+- `hand10`은 기존 10D alternate builder로 유지한다.
 - winner playoff 기본 tie-break:
   - `win_rate` 차이 `<= 1.0%p` 는 동률
   - `mean_gold_delta` 차이 `<= 100` 은 동률
@@ -119,13 +136,15 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 - 결과 report(`result.json`)는 항상 1개 저장된다.
 - 기본 출력 폴더는 `logs/model_duel/<human>_vs_<ai>_<YYYYMMDD>/` 규칙을 따른다.
 - kibo/dataset은 옵션으로만 저장된다.
-- `--human`, `--ai` 입력은 정책 키, `phase3_seed5`, `hybrid_play(...)` 형식을 지원한다.
+- `--human`, `--ai` 입력은 정책 키, `phase3_seed5`, `hybrid_play(...)`, `k_hyperneat(path.json)`, 직접 `.json` 경로를 지원한다.
 
 ### 7-3. `model_duel_worker.mjs` 옵션 상세
 - 공통 문법: `--key value` 또는 `--key=value` 둘 다 지원.
 - `--human` (필수): human 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase3_seed5`).
 - `--ai` (필수): ai 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase3_seed5`).
   - 예: `hybrid_play(phase1_seed208,H-CL)`
+  - 예: `k_hyperneat(experiments/k_hyperneat_matgo/smoke_runtime.json)`
+  - 예: `experiments/k_hyperneat_matgo/smoke_runtime.json`
 - `--games` (선택, 기본 `1000`): 양의 정수만 허용.
 - `--seed` (선택, 기본 `model-duel`): 실행 시드 문자열.
 - `--max-steps` (선택, 기본 `600`): 게임당 최대 스텝. 최소값은 `20`.
@@ -166,8 +185,17 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
   - 먼저 같은 Seed로 이전 phase 학습 결과가 생성되어야 한다.
 - `opponent-policy=genome requires opponent_genome path`
   - runtime 또는 CLI에 opponent genome 경로를 설정한다.
+- `k_hyperneat(path.json)` 또는 직접 `.json` 경로
+  - 현재는 `format_version = neat_python_genome_v1` 또는 `k_hyperneat_executor_v1` 둘 다 모델 로더에서 허용한다.
 - `feature vector size mismatch`
-  - `scripts/configs/neat_feedforward.ini`의 `num_inputs`와 worker feature 정의를 맞춘다.
+  - `race2`는 `scripts/configs/neat_feedforward_race2.ini`
+  - `race5`는 `scripts/configs/neat_feedforward_race5.ini`
+  - `race6`는 `scripts/configs/neat_feedforward_race6.ini`
+  - `race7`는 `scripts/configs/neat_feedforward_race7.ini`
+  - `race8`는 `scripts/configs/neat_feedforward_race8.ini`
+  - `hand7`은 `scripts/configs/neat_feedforward_hand7.ini`
+- `hand10/material10/race10/oracle10/oracle10v2`은 `scripts/configs/neat_feedforward.ini`
+  - 프로필과 `num_inputs`를 맞춘다.
 
 ## 9. 공식 확장 포인트 기준 현재 방향
 공식 문서 기준 핵심 링크:

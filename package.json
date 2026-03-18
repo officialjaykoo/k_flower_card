@@ -1,7 +1,7 @@
 {
   "name": "k_flower_card",
   "version": "1.0.0",
-  "description": "Matgo engine + AI research workspace (NEAT/PPO) with a browser demo.",
+  "description": "Matgo engine + AI research workspace (NEAT) with a browser demo.",
   "main": "index.js",
   "scripts": {
     "dev": "vite",
@@ -12,13 +12,7 @@
     "neat:run:gpt": "powershell -ExecutionPolicy Bypass -File neat_by_GPT/run.ps1",
     "neat:eval:gpt": "powershell -ExecutionPolicy Bypass -File neat_by_GPT/eval.ps1",
     "neat:duel:gpt": "powershell -ExecutionPolicy Bypass -File neat_by_GPT/duel.ps1",
-    "neat:duel": "node scripts/model_duel_worker.mjs",
-    "ppo:gpt:train": "powershell -ExecutionPolicy Bypass -File ppo_by_GPT/run_ppo.ps1",
-    "ppo:gpt:duel": "powershell -ExecutionPolicy Bypass -File ppo_by_GPT/run_duel_ppo.ps1",
-    "ppo:gpt:ablation": "powershell -ExecutionPolicy Bypass -File ppo_by_GPT/run_ablation_parallel.ps1",
-    "ppo:cl:train": "powershell -ExecutionPolicy Bypass -File ppo_by_CL/run_ppo.ps1",
-    "ppo:cl:duel": "powershell -ExecutionPolicy Bypass -File ppo_by_CL/run_duel_ppo.ps1",
-    "ppo:cl:ablation": "powershell -ExecutionPolicy Bypass -File ppo_by_CL/run_ablation_parallel.ps1"
+    "neat:duel": "node scripts/model_duel_worker.mjs"
   },
   "keywords": [],
   "author": "",

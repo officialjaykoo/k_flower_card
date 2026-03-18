@@ -10,8 +10,6 @@
   declareBomb,
   playTurn,
   chooseMatch,
-  chooseGo,
-  chooseStop,
   chooseShakingYes,
   chooseShakingNo,
   choosePresidentStop,
@@ -26,7 +24,6 @@ import { resolveBotPolicy } from "../src/ai/policies.js";
 import { resolvePlayerSpecCore } from "../src/ai/evalCore/playerSpecCore.js";
 import { resolveResolvedPlayerAction } from "../src/ai/evalCore/resolvedPlayerAction.js";
 import {
-  resolveGoStopIqnRuntime,
   canonicalOptionAction,
   normalizeOptionCandidates,
   parsePlaySpecialCandidate,
@@ -57,9 +54,20 @@ const COMBO_THREAT_SPECS = Object.freeze({
 });
 const COMBO_THREAT_KEYS = Object.freeze(Object.keys(COMBO_THREAT_SPECS));
 const LEGACY13_FEATURES = 13;
+const RACE2_FEATURES = 2;
+const RACE5_FEATURES = 5;
+const RACE6_FEATURES = 6;
+const RACE7_FEATURES = 7;
+const RACE8_FEATURES = 8;
+const RACE20_FEATURES = 20;
+const HAND7_FEATURES = 7;
 const HAND10_FEATURES = 10;
 const MATERIAL10_STAGING_FEATURES = 10;
-const POSITION11_FEATURES = 11;
+const RACE10_FEATURES = 10;
+const ORACLE10_FEATURES = 10;
+const DEFAULT_FEATURE_PROFILE = "race8";
+const NEAT_MODEL_FORMAT = "neat_python_genome_v1";
+const K_HYPERNEAT_MODEL_FORMAT = "k_hyperneat_executor_v1";
 
 // Pipeline Stage: 3/3 (neat_train.py -> neat_eval_worker.mjs -> model_duel_worker.mjs)
 // Execution Flow Map:
@@ -83,8 +91,6 @@ function parseArgs(argv) {
   const out = {
     humanSpecRaw: "",
     aiSpecRaw: "",
-    humanGoStopIqnPath: "",
-    aiGoStopIqnPath: "",
     games: 1000,
     seed: "model-duel",
     maxSteps: 600,
@@ -119,12 +125,6 @@ function parseArgs(argv) {
 
     if (key === "--human") out.humanSpecRaw = String(value || "").trim();
     else if (key === "--ai") out.aiSpecRaw = String(value || "").trim();
-    else if (key === "--human-go-stop-iqn" || key === "--human-go-stop-iqn-model") {
-      out.humanGoStopIqnPath = String(value || "").trim();
-    }
-    else if (key === "--ai-go-stop-iqn" || key === "--ai-go-stop-iqn-model") {
-      out.aiGoStopIqnPath = String(value || "").trim();
-    }
     else if (key === "--policy-a" || key === "--policy-b") {
       throw new Error(`deprecated option: ${key} (use --human and --ai)`);
     }
@@ -168,11 +168,20 @@ function parseArgs(argv) {
   }
   if (
     out.featureProfile !== "auto" &&
+    out.featureProfile !== "race2" &&
+    out.featureProfile !== "race5" &&
+    out.featureProfile !== "race6" &&
+    out.featureProfile !== "race7" &&
+    out.featureProfile !== "race8" &&
+    out.featureProfile !== "race20" &&
+    out.featureProfile !== "hand7" &&
     out.featureProfile !== "hand10" &&
     out.featureProfile !== "material10" &&
-    out.featureProfile !== "position11"
+    out.featureProfile !== "race10" &&
+    out.featureProfile !== "oracle10" &&
+    out.featureProfile !== "oracle10v2"
   ) {
-    throw new Error(`invalid --feature-profile: ${out.featureProfile} (allowed: auto, hand10, material10, position11)`);
+    throw new Error(`invalid --feature-profile: ${out.featureProfile} (allowed: auto, race2, race5, race6, race7, race8, race20, hand7, hand10, material10, race10, oracle10, oracle10v2)`);
   }
   out.datasetDecisionTypes = parseDatasetDecisionTypes(out.datasetDecisionTypesRaw);
   out.datasetOptionCandidates = parseDatasetOptionCandidates(out.datasetOptionCandidatesRaw);
@@ -274,30 +283,77 @@ function resolvePlayerSpec(rawSpec, sideLabel) {
   return resolvePlayerSpecCore(rawSpec, {
     label: `${sideLabel} spec`,
     resolveHeuristic: (token) => resolveBotPolicy(token),
-    resolveModel: (token, modelLabel) => resolvePhaseModelSpec(token, modelLabel),
+    resolveModel: (token, modelLabel) => resolveModelSpec(token, modelLabel),
   });
 }
 
 function parsePhaseModelToken(rawToken) {
   const m = String(rawToken || "")
     .trim()
-    .match(/^phase([0-3])_seed(\d+)(?::(winner_genome))?$/i);
+    .match(/^(phase([0-3])_seed(\d+))(?:\:(winner_genome|winner_play_genome|winner_option_genome))?$/i);
   if (!m) return null;
-  const phase = Number(m[1]);
-  const seed = Number(m[2]);
-  const modelName = String(m[3] || "winner_genome").trim().toLowerCase();
+  const phase = Number(m[2]);
+  const seed = Number(m[3]);
+  const defaultModelName = "winner_genome";
+  const modelName = String(m[4] || defaultModelName).trim().toLowerCase();
   const outputPrefix = "neat";
   const baseTokenKey = `phase${phase}_seed${seed}`;
-  const tokenKey = modelName === "winner_genome" ? baseTokenKey : `${baseTokenKey}:${modelName}`;
+  const tokenKey = modelName === defaultModelName ? baseTokenKey : `${baseTokenKey}:${modelName}`;
   return { phase, seed, outputPrefix, tokenKey, modelName };
+}
+
+function parseKHyperneatModelToken(rawToken) {
+  const m = String(rawToken || "")
+    .trim()
+    .match(/^k_hyperneat\(\s*(.+?)\s*\)$/i);
+  if (!m) return null;
+  const modelPathToken = String(m[1] || "").trim();
+  if (!modelPathToken) return null;
+  return {
+    tokenKey: `k_hyperneat(${modelPathToken})`,
+    modelPathToken,
+  };
+}
+
+function looksLikeJsonModelPath(rawToken) {
+  return /\.json$/i.test(String(rawToken || "").trim());
+}
+
+function loadSupportedModelJson(modelPath, token, sideLabel) {
+  const resolvedPath = resolve(String(modelPath || "").trim());
+  if (!existsSync(resolvedPath)) {
+    throw new Error(`model not found for ${token}: ${resolvedPath}`);
+  }
+
+  let model = null;
+  try {
+    const raw = String(readFileSync(resolvedPath, "utf8") || "").replace(/^\uFEFF/, "");
+    model = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`failed to parse model JSON (${token}): ${resolvedPath} (${String(err)})`);
+  }
+
+  const formatVersion = String(model?.format_version || "").trim();
+  if (formatVersion !== NEAT_MODEL_FORMAT && formatVersion !== K_HYPERNEAT_MODEL_FORMAT) {
+    throw new Error(
+      `invalid model format for ${token}: expected ${NEAT_MODEL_FORMAT} or ${K_HYPERNEAT_MODEL_FORMAT}`
+    );
+  }
+
+  return {
+    input: token,
+    kind: "model",
+    key: token,
+    label: token,
+    model,
+    modelPath: resolvedPath,
+  };
 }
 
 function resolvePhaseModelSpec(token, sideLabel) {
   const parsedToken = parsePhaseModelToken(token);
   if (!parsedToken) {
-    throw new Error(
-      `invalid ${sideLabel} spec: ${token} (use policy key, phase0_seed9, or hybrid_play(phase1_seed202,H-CL))`
-    );
+    return null;
   }
   const { phase, seed, outputPrefix, tokenKey, modelName } = parsedToken;
   const summaryPath = resolve(`logs/NEAT/${outputPrefix}_phase${phase}_seed${seed}/run_summary.json`);
@@ -328,8 +384,11 @@ function resolvePhaseModelSpec(token, sideLabel) {
   } catch (err) {
     throw new Error(`failed to parse model JSON (${token}): ${modelPath} (${String(err)})`);
   }
-  if (String(model?.format_version || "").trim() !== "neat_python_genome_v1") {
-    throw new Error(`invalid model format for ${token}: expected neat_python_genome_v1`);
+  const formatVersion = String(model?.format_version || "").trim();
+  if (formatVersion !== NEAT_MODEL_FORMAT && formatVersion !== K_HYPERNEAT_MODEL_FORMAT) {
+    throw new Error(
+      `invalid model format for ${token}: expected ${NEAT_MODEL_FORMAT} or ${K_HYPERNEAT_MODEL_FORMAT}`
+    );
   }
 
   return {
@@ -344,18 +403,50 @@ function resolvePhaseModelSpec(token, sideLabel) {
   };
 }
 
+function resolveKHyperneatModelSpec(token, sideLabel) {
+  const parsed = parseKHyperneatModelToken(token);
+  if (!parsed) return null;
+  return loadSupportedModelJson(parsed.modelPathToken, parsed.tokenKey, sideLabel);
+}
+
+function resolveDirectJsonModelSpec(token, sideLabel) {
+  if (!looksLikeJsonModelPath(token)) return null;
+  return loadSupportedModelJson(token, token, sideLabel);
+}
+
+function resolveModelSpec(token, sideLabel) {
+  const phaseSpec = resolvePhaseModelSpec(token, sideLabel);
+  if (phaseSpec) return phaseSpec;
+  const kHyperneatSpec = resolveKHyperneatModelSpec(token, sideLabel);
+  if (kHyperneatSpec) return kHyperneatSpec;
+  const directJsonSpec = resolveDirectJsonModelSpec(token, sideLabel);
+  if (directJsonSpec) return directJsonSpec;
+  throw new Error(
+    `invalid ${sideLabel} spec: ${token} (use policy key, phase0_seed9, k_hyperneat(path.json), direct .json path, or hybrid_play(phase1_seed202,H-CL))`
+  );
+}
+
 function modelFeatureProfile(spec) {
   const profile = String(spec?.model?.feature_spec?.profile || "").trim().toLowerCase();
-  if (profile === "hand10" || profile === "material10" || profile === "position11") return profile;
+  if (profile === "race2" || profile === "race5" || profile === "race6" || profile === "race7" || profile === "race8" || profile === "race20" || profile === "hand7" || profile === "hand10" || profile === "material10" || profile === "race10" || profile === "oracle10" || profile === "oracle10v2") return profile;
   const inputDim = Array.isArray(spec?.model?.input_keys) ? spec.model.input_keys.length : 0;
+  if (inputDim === RACE2_FEATURES) return "race2";
+  if (inputDim === RACE5_FEATURES) return "race5";
+  if (inputDim === RACE6_FEATURES) return "race6";
+  if (inputDim === RACE7_FEATURES) return "race7";
+  if (inputDim === RACE8_FEATURES) return "race8";
+  if (inputDim === RACE20_FEATURES) return "race20";
+  if (inputDim === HAND7_FEATURES) return "hand7";
   if (inputDim === LEGACY13_FEATURES) return "legacy13";
-  if (inputDim === POSITION11_FEATURES) return "position11";
   return "";
 }
 
-function resolveDatasetFeatureProfile(featureProfileOpt, humanPlayer, aiPlayer) {
+function resolveDatasetFeatureProfile(featureProfileOpt, humanPlayer, aiPlayer, strictAutoMode = false) {
   const explicit = String(featureProfileOpt || "auto").trim().toLowerCase();
-  if (explicit === "hand10" || explicit === "material10" || explicit === "position11") return explicit;
+  if (explicit === "race2" || explicit === "race5" || explicit === "race6" || explicit === "race7" || explicit === "race8" || explicit === "race20" || explicit === "hand7" || explicit === "hand10" || explicit === "material10" || explicit === "race10" || explicit === "oracle10" || explicit === "oracle10v2") return explicit;
+  if (!strictAutoMode) {
+    return DEFAULT_FEATURE_PROFILE;
+  }
 
   const profiles = new Set();
   for (const spec of [humanPlayer, aiPlayer]) {
@@ -370,18 +461,7 @@ function resolveDatasetFeatureProfile(featureProfileOpt, humanPlayer, aiPlayer) 
   if (profiles.size === 1) {
     return Array.from(profiles)[0];
   }
-  return "hand10";
-}
-
-function attachGoStopIqnRuntime(playerSpec, runtimePath, sideLabel) {
-  const rawPath = String(runtimePath || "").trim();
-  if (!rawPath) return playerSpec;
-  const loaded = resolveGoStopIqnRuntime(rawPath, sideLabel);
-  return {
-    ...playerSpec,
-    goStopIqnModel: loaded.model,
-    goStopIqnPath: loaded.modelPath,
-  };
+  return DEFAULT_FEATURE_PROFILE;
 }
 
 function buildAutoOutputDir(humanLabel, aiLabel) {
@@ -412,8 +492,8 @@ function setToReportList(setLike) {
 // =============================================================================
 // Section 2. Engine Action Helpers + Feature Helpers
 // =============================================================================
-let ACTIVE_FEATURE_PROFILE = "hand10";
-let ACTIVE_COMPACT_FEATURES = HAND10_FEATURES;
+let ACTIVE_FEATURE_PROFILE = DEFAULT_FEATURE_PROFILE;
+let ACTIVE_COMPACT_FEATURES = RACE8_FEATURES;
 
 function isGoStopOpportunityDecision(decision) {
   if (!decision || decision.decisionType !== "option") return false;
@@ -642,6 +722,16 @@ function immediateMatchPossible(state, decisionType, month) {
   if (decisionType === "match") return 1;
   if (month <= 0) return 0;
   return countCardsByMonth(state?.board || [], month) > 0 ? 1 : 0;
+}
+
+function matchCertaintyNorm(state, decisionType, month) {
+  if (decisionType === "match") return 1;
+  if (month <= 0) return 0;
+  const boardCount = countCardsByMonth(state?.board || [], month);
+  if (boardCount >= 3) return 1;
+  if (boardCount === 2) return 0.8;
+  if (boardCount === 1) return 0.5;
+  return 0;
 }
 
 function monthTotalCards(month) {
@@ -932,6 +1022,11 @@ function deckRemainingNorm(state) {
   return clamp01(Number(state?.deck?.length || 0) / 30.0);
 }
 
+function gameProgressNorm(state) {
+  const deckLen = Number(state?.deck?.length || 0);
+  return clamp01(1.0 - (deckLen / 20.0));
+}
+
 function buildLegacy13FeatureVectorForCandidate(state, actor, decisionType, candidate) {
   const opp = actor === "human" ? "ai" : "human";
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
@@ -1007,25 +1102,6 @@ function buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candi
   }
 }
 
-function handMatchableRatio(state, actor) {
-  const hand = handCardsForActor(state, actor);
-  const denom = handRatioDenominator(hand);
-  const boardMonths = new Set((state?.board || []).map((card) => Number(card?.month || 0)).filter((month) => month > 0));
-  let count = 0;
-  for (const card of hand) {
-    if (boardMonths.has(Number(card?.month || 0))) count += 1;
-  }
-  return clamp01(count / denom);
-}
-
-function handTripleFlagNorm(state, actor) {
-  const counts = handMonthCountMap(handCardsForActor(state, actor));
-  for (const value of counts.values()) {
-    if (value >= 3) return 1.0;
-  }
-  return 0.0;
-}
-
 function handComboReserveNorm(state, actor) {
   const hand = handCardsForActor(state, actor);
   const denom = handRatioDenominator(hand);
@@ -1068,14 +1144,15 @@ function isSafeDiscardMonth(state, actor, month) {
   return total > 0 && knownCountForMonth(state, actor, month) >= total;
 }
 
-function handSafeDiscardRatio(state, actor) {
-  const hand = handCardsForActor(state, actor);
-  const denom = handRatioDenominator(hand);
-  let count = 0;
-  for (const card of hand) {
-    if (isSafeDiscardMonth(state, actor, Number(card?.month || 0))) count += 1;
-  }
-  return clamp01(count / denom);
+function candidateSafeDiscardNorm(state, actor, decisionType, month) {
+  if (month <= 0) return 0;
+  if (immediateMatchPossible(state, decisionType, month) > 0) return 1.0;
+  const total = monthTotalCards(month);
+  if (total <= 0) return 0;
+  const boardSupport = clamp01(countCardsByMonth(state?.board || [], month) / 3.0);
+  const known = knownCountForMonth(state, actor, month);
+  const saturation = clamp01((known - 1.0) / Math.max(total - 1.0, 1.0));
+  return clamp01(Math.max(boardSupport, saturation));
 }
 
 function oppPiPressureNorm(state, actor) {
@@ -1183,7 +1260,7 @@ function handOppBlockNorm(state, actor) {
   return clamp01(held / targets.length);
 }
 
-function candidateDangerExposure(state, actor, decisionType, candidate) {
+function candidateComboFeedRisk(state, actor, decisionType, candidate) {
   const card = candidateCard(state, actor, decisionType, candidate);
   const month = resolveCandidateMonth(state, actor, decisionType, card);
   if (!card || month <= 0) return 0;
@@ -1195,9 +1272,24 @@ function candidateDangerExposure(state, actor, decisionType, candidate) {
     const rewardNorm = target.spec?.category === "kwang" ? 1.0 : clamp01(Number(target.spec?.reward || 0) / 5.0);
     comboRisk = Math.max(comboRisk, rewardNorm);
   }
+  return clamp01(comboRisk);
+}
 
-  const piRisk = clamp01(oppPiPressureNorm(state, actor) * compactCandidatePiNorm(card));
-  return clamp01(Math.max(comboRisk, piRisk));
+function candidatePiFeedRisk(state, actor, decisionType, candidate) {
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  if (!card || month <= 0) return 0;
+  if (immediateMatchPossible(state, decisionType, month) > 0) return 0;
+  return clamp01(oppPiPressureNorm(state, actor) * compactCandidatePiNorm(card));
+}
+
+function candidateDangerExposure(state, actor, decisionType, candidate) {
+  return clamp01(
+    Math.max(
+      candidateComboFeedRisk(state, actor, decisionType, candidate),
+      candidatePiFeedRisk(state, actor, decisionType, candidate)
+    )
+  );
 }
 
 function positionalAdvantageSigned(state, actor) {
@@ -1278,11 +1370,16 @@ function comboTurnsEstimate(state, actor, comboKey) {
   return Math.min(10, turns);
 }
 
-function selfWinPathScore(state, actor) {
-  let bestTurns = 10;
+function bestComboTurnsForActor(state, actor) {
+  let best = 10;
   for (const comboKey of COMBO_THREAT_KEYS) {
-    bestTurns = Math.min(bestTurns, comboTurnsEstimate(state, actor, comboKey));
+    best = Math.min(best, comboTurnsEstimate(state, actor, comboKey));
   }
+  return best;
+}
+
+function selfWinPathScore(state, actor) {
+  const bestTurns = bestComboTurnsForActor(state, actor);
   if (bestTurns <= 1) return 1.0;
   if (bestTurns <= 2) return 0.85;
   if (bestTurns <= 3) return 0.65;
@@ -1392,23 +1489,6 @@ function boardDangerRatio(state, actor) {
   return clamp01(oppWinProximityNorm(state, actor) * count / Math.max(board.length, 4));
 }
 
-function buildPosition11FeatureVectorForCandidate(state, actor, decisionType, candidate) {
-  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
-  return [
-    selfWinPathScore(postState, actor),
-    selfMaterialConcentration(postState, actor),
-    selfSsangpiControlNorm(postState, actor),
-    selfComboCompletionNorm(postState, actor),
-    selfGoSafetyNorm(postState, actor),
-    selfTempoAdvantage(postState, actor),
-    oppWinProximityNorm(postState, actor),
-    oppSsangpiThreatNorm(postState, actor),
-    handCriticalBlockNorm(postState, actor),
-    oppGoThreatNorm(postState, actor),
-    boardDangerRatio(postState, actor),
-  ];
-}
-
 function buildHand10FeatureVectorForCandidate(state, actor, decisionType, candidate) {
   const card = candidateCard(state, actor, decisionType, candidate);
   const month = resolveCandidateMonth(state, actor, decisionType, card);
@@ -1419,13 +1499,208 @@ function buildHand10FeatureVectorForCandidate(state, actor, decisionType, candid
     candidateComboGain(state, actor, decisionType, candidate),
     compactCandidatePiNorm(card),
     immediateMatchPossible(state, decisionType, month),
-    isSafeDiscardMonth(state, actor, month) ? 1.0 : 0.0,
-    candidateDangerExposure(state, actor, decisionType, candidate),
-    handMatchableRatio(postState, actor),
-    handTripleFlagNorm(postState, actor),
+    candidateSafeDiscardNorm(state, actor, decisionType, month),
+    candidateComboFeedRisk(state, actor, decisionType, candidate),
+    candidatePiFeedRisk(state, actor, decisionType, candidate),
+    handComboReserveNorm(postState, actor),
     handHighValueDensity(postState, actor),
     clamp01(Math.max(postPiBlock, postComboBlock)),
     globalContextTrigger(postState, actor),
+  ];
+}
+
+function buildHand7FeatureVectorForCandidate(state, actor, decisionType, candidate) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
+  const postPiBlock = handOppPiBlockNorm(postState, actor);
+  const postComboBlock = handOppBlockNorm(postState, actor);
+  return [
+    matchCertaintyNorm(state, decisionType, month),
+    candidateSafeDiscardNorm(state, actor, decisionType, month),
+    candidateComboGain(state, actor, decisionType, candidate),
+    clamp01(Math.max(postPiBlock, postComboBlock)),
+    candidatePublicKnownRatio(state, actor, month),
+    globalContextTrigger(postState, actor),
+    compactOppStopPressureNorm(scoreOpp?.total || 0),
+  ];
+}
+
+function buildRace2FeatureVectorForCandidate(state, actor, decisionType, candidate) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  return [
+    candidatePublicKnownRatio(state, actor, month),
+    compactOppStopPressureNorm(scoreOpp?.total || 0),
+  ];
+}
+
+function buildRace5FeatureVectorForCandidate(state, actor, decisionType, candidate) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  return [
+    candidatePublicKnownRatio(state, actor, month),
+    immediateMatchPossible(state, decisionType, month),
+    ssangpiRevealedRatioNorm(state, actor),
+    compactOppStopPressureNorm(scoreOpp?.total || 0),
+    candidateBlockGainNorm(state, actor, decisionType, candidate),
+  ];
+}
+
+function buildRace6FeatureVectorForCandidate(state, actor, decisionType, candidate) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  return [
+    candidatePublicKnownRatio(state, actor, month),
+    immediateMatchPossible(state, decisionType, month),
+    ssangpiRevealedRatioNorm(state, actor),
+    compactOppStopPressureNorm(scoreOpp?.total || 0),
+    candidateBlockGainNorm(state, actor, decisionType, candidate),
+    candidateComboGain(state, actor, decisionType, candidate),
+  ];
+}
+
+function buildRace7FeatureVectorForCandidate(state, actor, decisionType, candidate) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const month = resolveCandidateMonth(state, actor, decisionType, candidateCard(state, actor, decisionType, candidate));
+  return [
+    candidateComboGain(state, actor, decisionType, candidate),
+    candidateBlockGainNorm(state, actor, decisionType, candidate),
+    candidatePublicKnownRatio(state, actor, month),
+    immediateMatchPossible(state, decisionType, month),
+    selfSsangpiControlNorm(state, actor),
+    ssangpiRevealedRatioNorm(state, actor),
+    compactOppStopPressureNorm(scoreOpp?.total || 0),
+  ];
+}
+
+function buildRace8FeatureVectorForCandidate(state, actor, decisionType, candidate) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const month = resolveCandidateMonth(state, actor, decisionType, candidateCard(state, actor, decisionType, candidate));
+  return [
+    compactOppStopPressureNorm(scoreOpp?.total || 0),
+    candidatePublicKnownRatio(state, actor, month),
+    ssangpiRevealedRatioNorm(state, actor),
+    candidateBlockGainNorm(state, actor, decisionType, candidate),
+    candidateComboGain(state, actor, decisionType, candidate),
+    immediateMatchPossible(state, decisionType, month),
+    selfSsangpiControlNorm(state, actor),
+    clamp01(currentMultiplierNorm(state, scoreSelf)),
+  ];
+}
+
+function buildRace10FeatureVectorForCandidate(state, actor, decisionType, candidate) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
+  const postPiBlock = handOppPiBlockNorm(postState, actor);
+  const postComboBlock = handOppBlockNorm(postState, actor);
+  return [
+    matchCertaintyNorm(state, decisionType, month),
+    candidateSafeDiscardNorm(state, actor, decisionType, month),
+    candidateComboGain(state, actor, decisionType, candidate),
+    clamp01(Math.max(postPiBlock, postComboBlock)),
+    candidatePublicKnownRatio(state, actor, month),
+    compactOppStopPressureNorm(scoreOpp?.total || 0),
+    clamp01(currentMultiplierNorm(state, scoreSelf)),
+    selfSsangpiControlNorm(state, actor),
+    ssangpiRevealedRatioNorm(state, actor),
+    globalContextTrigger(state, actor),
+  ];
+}
+
+function buildOracle10FeatureVectorForCandidate(state, actor, decisionType, candidate) {
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
+  const postPiBlock = handOppPiBlockNorm(postState, actor);
+  const postComboBlock = handOppBlockNorm(postState, actor);
+  const combinedPostBlock = clamp01(Math.max(postPiBlock, postComboBlock));
+  return [
+    candidatePublicKnownRatio(state, actor, month),
+    matchCertaintyNorm(state, decisionType, month),
+    candidateComboGain(state, actor, decisionType, candidate),
+    compactCandidatePiNorm(card),
+    candidatePiFeedRisk(state, actor, decisionType, candidate),
+    combinedPostBlock,
+    handHighValueDensity(postState, actor),
+    combinedPostBlock,
+    globalContextTrigger(postState, actor),
+    handComboReserveNorm(postState, actor),
+  ];
+}
+
+function buildOracle10V2FeatureVectorForCandidate(state, actor, decisionType, candidate) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
+  const postPiBlock = handOppPiBlockNorm(postState, actor);
+  const postComboBlock = handOppBlockNorm(postState, actor);
+  const combinedPostBlock = clamp01(Math.max(postPiBlock, postComboBlock));
+  return [
+    candidatePublicKnownRatio(state, actor, month),
+    matchCertaintyNorm(state, decisionType, month),
+    candidateComboGain(state, actor, decisionType, candidate),
+    candidatePiFeedRisk(state, actor, decisionType, candidate),
+    combinedPostBlock,
+    candidateSafeDiscardNorm(state, actor, decisionType, month),
+    handHighValueDensity(postState, actor),
+    handComboReserveNorm(postState, actor),
+    globalContextTrigger(postState, actor),
+    compactOppStopPressureNorm(scoreOpp?.total || 0),
+  ];
+}
+
+function buildRace20FeatureVectorForCandidate(state, actor, decisionType, candidate) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
+  const postPiBlock = handOppPiBlockNorm(postState, actor);
+  const postComboBlock = handOppBlockNorm(postState, actor);
+  const scoreSelfTotal = scoreSelf?.total || 0;
+  const scoreOppTotal = scoreOpp?.total || 0;
+  return [
+    // Action/play head candidate pool.
+    matchCertaintyNorm(state, decisionType, month),
+    immediateMatchPossible(state, decisionType, month),
+    candidateSafeDiscardNorm(state, actor, decisionType, month),
+    candidateComboGain(state, actor, decisionType, candidate),
+    compactCandidatePiNorm(card),
+    candidatePublicKnownRatio(state, actor, month),
+    clamp01(Math.max(postPiBlock, postComboBlock)),
+    candidateBlockGainNorm(state, actor, decisionType, candidate),
+    candidateComboFeedRisk(state, actor, decisionType, candidate),
+    candidatePiFeedRisk(state, actor, decisionType, candidate),
+    // Option/go-stop head candidate pool.
+    compactOppStopPressureNorm(scoreOppTotal),
+    clamp01(currentMultiplierNorm(state, scoreSelf)),
+    tanhNorm(scoreSelfTotal - scoreOppTotal, 10.0),
+    selfSsangpiControlNorm(state, actor),
+    ssangpiRevealedRatioNorm(state, actor),
+    oppComboThreatNorm(state, actor),
+    globalContextTrigger(postState, actor),
+    handComboReserveNorm(postState, actor),
+    handHighValueDensity(postState, actor),
+    clamp01(Math.max(postPiBlock, postComboBlock)),
   ];
 }
 
@@ -1452,10 +1727,28 @@ function featureVectorForCandidate(state, actor, decisionType, candidate) {
   const features =
     ACTIVE_FEATURE_PROFILE === "legacy13"
       ? buildLegacy13FeatureVectorForCandidate(state, actor, decisionType, candidate)
+      : ACTIVE_FEATURE_PROFILE === "race2"
+        ? buildRace2FeatureVectorForCandidate(state, actor, decisionType, candidate)
+      : ACTIVE_FEATURE_PROFILE === "race5"
+        ? buildRace5FeatureVectorForCandidate(state, actor, decisionType, candidate)
+      : ACTIVE_FEATURE_PROFILE === "race6"
+        ? buildRace6FeatureVectorForCandidate(state, actor, decisionType, candidate)
+      : ACTIVE_FEATURE_PROFILE === "race7"
+        ? buildRace7FeatureVectorForCandidate(state, actor, decisionType, candidate)
+      : ACTIVE_FEATURE_PROFILE === "race8"
+        ? buildRace8FeatureVectorForCandidate(state, actor, decisionType, candidate)
+      : ACTIVE_FEATURE_PROFILE === "race20"
+        ? buildRace20FeatureVectorForCandidate(state, actor, decisionType, candidate)
+      : ACTIVE_FEATURE_PROFILE === "hand7"
+        ? buildHand7FeatureVectorForCandidate(state, actor, decisionType, candidate)
       : ACTIVE_FEATURE_PROFILE === "material10"
         ? buildMaterial10StagingFeatureVectorForCandidate(state, actor, decisionType, candidate)
-        : ACTIVE_FEATURE_PROFILE === "position11"
-          ? buildPosition11FeatureVectorForCandidate(state, actor, decisionType, candidate)
+        : ACTIVE_FEATURE_PROFILE === "race10"
+          ? buildRace10FeatureVectorForCandidate(state, actor, decisionType, candidate)
+          : ACTIVE_FEATURE_PROFILE === "oracle10"
+            ? buildOracle10FeatureVectorForCandidate(state, actor, decisionType, candidate)
+          : ACTIVE_FEATURE_PROFILE === "oracle10v2"
+            ? buildOracle10V2FeatureVectorForCandidate(state, actor, decisionType, candidate)
           : buildHand10FeatureVectorForCandidate(state, actor, decisionType, candidate);
   if (features.length !== ACTIVE_COMPACT_FEATURES) {
     throw new Error(`compact feature length mismatch: expected ${ACTIVE_COMPACT_FEATURES}, got ${features.length}`);
@@ -2398,24 +2691,37 @@ function formatConsoleSummaryText(summary) {
 export function runModelDuelCli(argv = process.argv.slice(2)) {
   const evalStartMs = Date.now();
   const opts = parseArgs(argv);
-  const humanPlayer = attachGoStopIqnRuntime(
-    resolvePlayerSpec(opts.humanSpecRaw, "human"),
-    opts.humanGoStopIqnPath,
-    "human"
+  const humanPlayer = resolvePlayerSpec(opts.humanSpecRaw, "human");
+  const aiPlayer = resolvePlayerSpec(opts.aiSpecRaw, "ai");
+  ACTIVE_FEATURE_PROFILE = resolveDatasetFeatureProfile(
+    opts.featureProfile,
+    humanPlayer,
+    aiPlayer,
+    !!opts.datasetOut
   );
-  const aiPlayer = attachGoStopIqnRuntime(
-    resolvePlayerSpec(opts.aiSpecRaw, "ai"),
-    opts.aiGoStopIqnPath,
-    "ai"
-  );
-  ACTIVE_FEATURE_PROFILE = resolveDatasetFeatureProfile(opts.featureProfile, humanPlayer, aiPlayer);
   ACTIVE_COMPACT_FEATURES =
-    ACTIVE_FEATURE_PROFILE === "legacy13"
-      ? LEGACY13_FEATURES
+      ACTIVE_FEATURE_PROFILE === "legacy13"
+        ? LEGACY13_FEATURES
+      : ACTIVE_FEATURE_PROFILE === "race2"
+        ? RACE2_FEATURES
+      : ACTIVE_FEATURE_PROFILE === "race5"
+        ? RACE5_FEATURES
+      : ACTIVE_FEATURE_PROFILE === "race6"
+        ? RACE6_FEATURES
+      : ACTIVE_FEATURE_PROFILE === "race7"
+        ? RACE7_FEATURES
+      : ACTIVE_FEATURE_PROFILE === "race8"
+        ? RACE8_FEATURES
+      : ACTIVE_FEATURE_PROFILE === "race20"
+        ? RACE20_FEATURES
+      : ACTIVE_FEATURE_PROFILE === "hand7"
+        ? HAND7_FEATURES
       : ACTIVE_FEATURE_PROFILE === "material10"
         ? MATERIAL10_STAGING_FEATURES
-        : ACTIVE_FEATURE_PROFILE === "position11"
-          ? POSITION11_FEATURES
+      : ACTIVE_FEATURE_PROFILE === "race10"
+          ? RACE10_FEATURES
+      : ACTIVE_FEATURE_PROFILE === "oracle10" || ACTIVE_FEATURE_PROFILE === "oracle10v2"
+          ? ORACLE10_FEATURES
           : HAND10_FEATURES;
   let autoOutputDir = "";
   const ensureAutoOutputDir = () => {
@@ -2769,14 +3075,12 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
       kind: humanPlayer.kind,
       key: humanPlayer.key,
       model_path: humanPlayer.modelPath,
-      go_stop_iqn_path: humanPlayer.goStopIqnPath || null,
     },
     player_ai: {
       input: aiPlayer.input,
       kind: aiPlayer.kind,
       key: aiPlayer.key,
       model_path: aiPlayer.modelPath,
-      go_stop_iqn_path: aiPlayer.goStopIqnPath || null,
     },
     first_turn_policy: opts.firstTurnPolicy,
     fixed_first_turn: opts.firstTurnPolicy === "fixed" ? opts.fixedFirstTurn : null,

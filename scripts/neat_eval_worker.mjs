@@ -7,7 +7,6 @@ import { resolveBotPolicy } from "../src/ai/policies.js";
 import { resolvePlayerSpecCore } from "../src/ai/evalCore/playerSpecCore.js";
 import { resolveResolvedPlayerAction } from "../src/ai/evalCore/resolvedPlayerAction.js";
 import {
-  resolveGoStopIqnRuntime,
   canonicalOptionAction,
   normalizeOptionCandidates,
   parsePlaySpecialCandidate,
@@ -46,15 +45,35 @@ function normalizeControlPolicyMode(mode) {
 }
 
 const OPPONENT_SPEC_CACHE = new Map();
-
+const NEAT_MODEL_FORMAT = "neat_python_genome_v1";
+const K_HYPERNEAT_MODEL_FORMAT = "k_hyperneat_executor_v1";
 function loadGenomeModel(genomePath, label) {
   const full = path.resolve(String(genomePath || "").trim());
   if (!fs.existsSync(full)) {
     throw new Error(`${label} not found: ${genomePath}`);
   }
   const parsed = JSON.parse(fs.readFileSync(full, "utf8"));
-  if (String(parsed?.format_version || "").trim() !== "neat_python_genome_v1") {
-    throw new Error(`invalid ${label} format: expected neat_python_genome_v1`);
+  const formatVersion = String(parsed?.format_version || "").trim();
+  if (formatVersion !== NEAT_MODEL_FORMAT) {
+    throw new Error(`invalid ${label} format: expected ${NEAT_MODEL_FORMAT}`);
+  }
+  return {
+    model: parsed,
+    modelPath: full,
+  };
+}
+
+function loadSupportedPolicyModel(modelPath, label) {
+  const full = path.resolve(String(modelPath || "").trim());
+  if (!fs.existsSync(full)) {
+    throw new Error(`${label} not found: ${modelPath}`);
+  }
+  const parsed = JSON.parse(fs.readFileSync(full, "utf8"));
+  const formatVersion = String(parsed?.format_version || "").trim();
+  if (formatVersion !== NEAT_MODEL_FORMAT && formatVersion !== K_HYPERNEAT_MODEL_FORMAT) {
+    throw new Error(
+      `invalid ${label} format: expected ${NEAT_MODEL_FORMAT} or ${K_HYPERNEAT_MODEL_FORMAT}`
+    );
   }
   return {
     model: parsed,
@@ -63,23 +82,45 @@ function loadGenomeModel(genomePath, label) {
 }
 
 function parsePhaseModelToken(rawToken) {
-  const m = String(rawToken || "").trim().match(/^phase([0-3])_seed(\d+)$/i);
+  const m = String(rawToken || "")
+    .trim()
+    .match(/^(phase([0-3])_seed(\d+))(?:\:(winner_genome|winner_play_genome|winner_option_genome))?$/i);
   if (!m) return null;
-  const phase = Number(m[1]);
-  const seed = Number(m[2]);
+  const phase = Number(m[2]);
+  const seed = Number(m[3]);
+  const defaultModelName = "winner_genome";
+  const modelName = String(m[4] || defaultModelName).trim().toLowerCase();
   const outputPrefix = "neat";
-  const tokenKey = `phase${phase}_seed${seed}`;
-  return { phase, seed, outputPrefix, tokenKey };
+  const baseTokenKey = `phase${phase}_seed${seed}`;
+  const tokenKey = modelName === defaultModelName ? baseTokenKey : `${baseTokenKey}:${modelName}`;
+  return { phase, seed, outputPrefix, tokenKey, modelName };
+}
+
+function parseKHyperneatModelToken(rawToken) {
+  const m = String(rawToken || "")
+    .trim()
+    .match(/^k_hyperneat\(\s*(.+?)\s*\)$/i);
+  if (!m) return null;
+  const modelPathToken = String(m[1] || "").trim();
+  if (!modelPathToken) return null;
+  return {
+    tokenKey: `k_hyperneat(${modelPathToken})`,
+    modelPathToken,
+  };
+}
+
+function looksLikeJsonModelPath(rawToken) {
+  return /\.json$/i.test(String(rawToken || "").trim());
 }
 
 function resolvePhaseModelToken(token, label) {
   const parsedToken = parsePhaseModelToken(token);
   if (!parsedToken) {
-    throw new Error(`invalid ${label}: ${token}`);
+    return null;
   }
-  const { phase, seed, outputPrefix, tokenKey } = parsedToken;
+  const { phase, seed, outputPrefix, tokenKey, modelName } = parsedToken;
   const summaryPath = path.resolve(`logs/NEAT/${outputPrefix}_phase${phase}_seed${seed}/run_summary.json`);
-  if (fs.existsSync(summaryPath)) {
+  if (modelName === "winner_genome" && fs.existsSync(summaryPath)) {
     try {
       const summaryRaw = String(fs.readFileSync(summaryPath, "utf8") || "").replace(/^\uFEFF/, "");
       const summary = JSON.parse(summaryRaw);
@@ -94,8 +135,8 @@ function resolvePhaseModelToken(token, label) {
       }
     }
   }
-  const modelPath = path.resolve(`logs/NEAT/${outputPrefix}_phase${phase}_seed${seed}/models/winner_genome.json`);
-  const loaded = loadGenomeModel(modelPath, label);
+  const modelPath = path.resolve(`logs/NEAT/${outputPrefix}_phase${phase}_seed${seed}/models/${modelName}.json`);
+  const loaded = loadSupportedPolicyModel(modelPath, label);
   return {
     key: tokenKey,
     label: tokenKey,
@@ -104,6 +145,39 @@ function resolvePhaseModelToken(token, label) {
     model: loaded.model,
     modelPath: loaded.modelPath,
   };
+}
+
+function resolveKHyperneatModelToken(token, label) {
+  const parsedToken = parseKHyperneatModelToken(token);
+  if (!parsedToken) return null;
+  const loaded = loadSupportedPolicyModel(parsedToken.modelPathToken, label);
+  return {
+    key: parsedToken.tokenKey,
+    label: parsedToken.tokenKey,
+    model: loaded.model,
+    modelPath: loaded.modelPath,
+  };
+}
+
+function resolveDirectJsonModelToken(token, label) {
+  if (!looksLikeJsonModelPath(token)) return null;
+  const loaded = loadSupportedPolicyModel(token, label);
+  return {
+    key: token,
+    label: token,
+    model: loaded.model,
+    modelPath: loaded.modelPath,
+  };
+}
+
+function resolveAnyModelToken(token, label) {
+  const phaseModel = resolvePhaseModelToken(token, label);
+  if (phaseModel) return phaseModel;
+  const kHyperneatModel = resolveKHyperneatModelToken(token, label);
+  if (kHyperneatModel) return kHyperneatModel;
+  const directJsonModel = resolveDirectJsonModelToken(token, label);
+  if (directJsonModel) return directJsonModel;
+  throw new Error(`invalid ${label}: ${token}`);
 }
 
 function resolveOpponentSpec(policyToken, opponentGenomePath) {
@@ -115,7 +189,7 @@ function resolveOpponentSpec(policyToken, opponentGenomePath) {
 
   let resolved = null;
   if (normalizePolicyName(raw) === "genome") {
-    const loaded = loadGenomeModel(opponentGenomePath, "opponent genome");
+    const loaded = loadSupportedPolicyModel(opponentGenomePath, "opponent genome");
     resolved = {
       kind: "model",
       key: "genome",
@@ -127,7 +201,7 @@ function resolveOpponentSpec(policyToken, opponentGenomePath) {
     resolved = resolvePlayerSpecCore(raw, {
       label: "opponent policy",
       resolveHeuristic: (token) => resolveBotPolicy(token),
-      resolveModel: (token, modelLabel) => resolvePhaseModelToken(token, modelLabel),
+      resolveModel: (token, modelLabel) => resolveAnyModelToken(token, modelLabel),
     });
   }
 
@@ -274,7 +348,6 @@ function parseArgs(argv) {
     earlyStopWinRateCutoffs: [],
     earlyStopGoTakeRateCutoffs: [],
     controlPolicyMode: "pure_model",
-    controlGoStopIqnModel: "",
   };
 
   while (args.length > 0) {
@@ -354,9 +427,6 @@ function parseArgs(argv) {
     }
     else if (key === "--control-play-match-model") {
       throw new Error(`deprecated option: ${key} (hybrid option control mode was removed)`);
-    }
-    else if (key === "--control-go-stop-iqn-model" || key === "--control-go-stop-iqn") {
-      out.controlGoStopIqnModel = String(value || "").trim();
     }
     else throw new Error(`Unknown argument: ${key}`);
   }
@@ -570,7 +640,6 @@ function runEvalRound(
   let state = initialState;
   const opponentSpec = resolveOpponentSpec(opponentPolicy, opponentGenomePath);
   const controlPolicyMode = normalizeControlPolicyMode(controlOptions.controlPolicyMode || "pure_model");
-  const controlGoStopIqnModel = controlOptions.controlGoStopIqnModel || null;
   const imitation = {
     totals: { play: 0, match: 0, option: 0 },
     matches: { play: 0, match: 0, option: 0 },
@@ -617,7 +686,6 @@ function runEvalRound(
         resolveResolvedPlayerAction(state, actor, {
           kind: "model",
           model: controlModel,
-          goStopIqnModel: controlGoStopIqnModel,
         })?.next || state
       );
       controlDecisionOwnedByModel = true;
@@ -751,15 +819,15 @@ function main() {
   if (!fs.existsSync(full)) throw new Error(`genome not found: ${opts.genomePath}`);
 
   const controlModel = JSON.parse(fs.readFileSync(full, "utf8"));
-  if (String(controlModel?.format_version || "").trim() !== "neat_python_genome_v1") {
-    throw new Error("invalid --genome format: expected neat_python_genome_v1");
+  {
+    const formatVersion = String(controlModel?.format_version || "").trim();
+    if (formatVersion !== NEAT_MODEL_FORMAT) {
+      throw new Error(`invalid --genome format: expected ${NEAT_MODEL_FORMAT}`);
+    }
   }
   if (String(opts.opponentPolicy || "").trim()) {
     resolveOpponentSpec(opts.opponentPolicy, opts.opponentGenomePath);
   }
-  const controlGoStopIqnSpec = String(opts.controlGoStopIqnModel || "").trim()
-    ? resolveGoStopIqnRuntime(opts.controlGoStopIqnModel, "control go/stop IQN runtime")
-    : null;
   for (const item of opts.opponentPolicyMix || []) {
     resolveOpponentSpec(item?.policy, opts.opponentGenomePath);
   }
@@ -836,7 +904,6 @@ function main() {
         opts.opponentGenomePath,
         {
           controlPolicyMode: opts.controlPolicyMode,
-          controlGoStopIqnModel: controlGoStopIqnSpec?.model || null,
         }
       );
       const endState = gameResult?.endState || gameResult;
@@ -1062,7 +1129,6 @@ function main() {
     early_stop_observed_go_take_rate: earlyStop?.observedGoTakeRate ?? null,
     early_stop_observed_go_opportunity_count: earlyStop?.observedGoOpportunityCount ?? null,
     control_policy_mode: opts.controlPolicyMode,
-    control_go_stop_iqn_model: controlGoStopIqnSpec?.modelPath || null,
     opponent_eval_tuning: {
       fast_path: false,
       imitation_reference_enabled: true,

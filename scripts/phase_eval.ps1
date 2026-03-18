@@ -1,7 +1,7 @@
 ﻿param(
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed,
-  [Parameter(Mandatory = $false)][ValidateSet("classic")][string]$LineageProfile = "classic"
+  [Parameter(Mandatory = $false)][ValidateSet("classic", "k-hyperneat")][string]$LineageProfile = "classic"
 )
 
 Set-StrictMode -Version Latest
@@ -29,6 +29,13 @@ function Get-OptionalDouble {
   catch {
     return $DefaultValue
   }
+}
+
+function Clamp01 {
+  param([Parameter(Mandatory = $true)][double]$Value)
+  if ($Value -le 0.0) { return 0.0 }
+  if ($Value -ge 1.0) { return 1.0 }
+  return [double]$Value
 }
 
 function Get-PropertyValue {
@@ -101,11 +108,105 @@ function Resolve-EvalGateRule {
   }
 }
 
+function Compute-EvalFitness {
+  param(
+    [Parameter(Mandatory = $true)]$Summary,
+    [Parameter(Mandatory = $true)]$Runtime
+  )
+
+  $weightedWinRate = Get-RequiredDouble -Object $Summary -Key "win_rate_a"
+  $weightedDrawRate = Get-RequiredDouble -Object $Summary -Key "draw_rate"
+  $weightedLossRate = Get-RequiredDouble -Object $Summary -Key "win_rate_b"
+  $weightedMeanGoldDelta = Get-RequiredDouble -Object $Summary -Key "mean_gold_delta_a"
+
+  $fitnessGoldScale = Get-RequiredDouble -Object $Runtime -Key "fitness_gold_scale"
+  $fitnessGoldNeutralDelta = Get-RequiredDouble -Object $Runtime -Key "fitness_gold_neutral_delta"
+  $fitnessWinWeight = Get-RequiredDouble -Object $Runtime -Key "fitness_win_weight"
+  $fitnessGoldWeight = Get-RequiredDouble -Object $Runtime -Key "fitness_gold_weight"
+  $fitnessWinNeutralRate = Get-RequiredDouble -Object $Runtime -Key "fitness_win_neutral_rate"
+
+  $goldNorm = [Math]::Tanh(($weightedMeanGoldDelta - $fitnessGoldNeutralDelta) / [Math]::Max(1e-9, $fitnessGoldScale))
+  $expectedResultRaw = (Clamp01 $weightedWinRate) + (0.5 * (Clamp01 $weightedDrawRate)) - (Clamp01 $weightedLossRate)
+  $expectedResult = [Math]::Max(-1.0, [Math]::Min(1.0, $expectedResultRaw))
+  $neutralExpectedResult = (2.0 * $fitnessWinNeutralRate) - 1.0
+
+  if ($expectedResult -ge $neutralExpectedResult) {
+    $resultUpperSpan = [Math]::Max(1e-9, 1.0 - $neutralExpectedResult)
+    $resultNorm = Clamp01 (($expectedResult - $neutralExpectedResult) / $resultUpperSpan)
+  }
+  else {
+    $resultLowerSpan = [Math]::Max(1e-9, $neutralExpectedResult + 1.0)
+    $resultNorm = -(Clamp01 (($neutralExpectedResult - $expectedResult) / $resultLowerSpan))
+  }
+
+  return ($fitnessGoldWeight * $goldNorm) + ($fitnessWinWeight * $resultNorm)
+}
+
 function ConvertTo-NativeJsonArg {
   param([Parameter(Mandatory = $true)][string]$JsonText)
   # PowerShell native command invocation can strip raw double-quotes from JSON.
   # Escape quotes before passing to Node so JSON.parse receives valid text.
   return $JsonText.Replace('"', '\"')
+}
+
+function Allocate-GamesByWeight {
+  param(
+    [Parameter(Mandatory = $true)][int]$TotalGames,
+    [Parameter(Mandatory = $true)]$Entries
+  )
+
+  $safeTotalGames = [Math]::Max(1, [int]$TotalGames)
+  if ($null -eq $Entries -or $Entries.Count -eq 0) {
+    return @()
+  }
+
+  $weights = @()
+  foreach ($entry in $Entries) {
+    $weights += [double](Get-PropertyValue -Object $entry -Name "weight")
+  }
+  $totalWeight = 0.0
+  foreach ($weight in $weights) {
+    $totalWeight += $weight
+  }
+  if ($totalWeight -le 0.0) {
+    throw "opponent_policy_mix weights must be positive"
+  }
+
+  $raw = @()
+  $counts = @()
+  foreach ($weight in $weights) {
+    $value = $weight * $safeTotalGames / $totalWeight
+    $raw += $value
+    $counts += [Math]::Max(1, [int][Math]::Floor($value))
+  }
+
+  while (($counts | Measure-Object -Sum).Sum -gt $safeTotalGames) {
+    $maxIndex = 0
+    for ($i = 1; $i -lt $counts.Count; $i++) {
+      if ($counts[$i] -gt $counts[$maxIndex]) {
+        $maxIndex = $i
+      }
+    }
+    if ($counts[$maxIndex] -le 1) {
+      break
+    }
+    $counts[$maxIndex] -= 1
+  }
+
+  while (($counts | Measure-Object -Sum).Sum -lt $safeTotalGames) {
+    $maxIndex = 0
+    $maxGap = ($raw[0] - $counts[0])
+    for ($i = 1; $i -lt $counts.Count; $i++) {
+      $gap = $raw[$i] - $counts[$i]
+      if ($gap -gt $maxGap) {
+        $maxGap = $gap
+        $maxIndex = $i
+      }
+    }
+    $counts[$maxIndex] += 1
+  }
+
+  return ,$counts
 }
 
 function Get-LineageLayout {
@@ -117,6 +218,11 @@ function Get-LineageLayout {
         output_prefix = "neat"
       }
     }
+    "k-hyperneat" {
+      return [ordered]@{
+        output_prefix = "k_hyperneat"
+      }
+    }
     default {
       throw "unsupported lineage profile: $Profile"
     }
@@ -124,6 +230,236 @@ function Get-LineageLayout {
 }
 
 $lineageLayout = Get-LineageLayout -Profile $LineageProfile
+
+if ($LineageProfile -eq "k-hyperneat") {
+  $runtimeConfigPath = "experiments/k_hyperneat_matgo/configs/runtime_phase${Phase}.json"
+  if (-not (Test-Path $runtimeConfigPath)) {
+    $runtimeConfigPath = "experiments/k_hyperneat_matgo/configs/runtime_phase1.json"
+  }
+  $outputDir = "logs/K-HyperNEAT/k_hyperneat_phase${Phase}_seed$Seed"
+  $runSummaryPath = Join-Path $outputDir "run_summary.json"
+
+  if (-not (Test-Path $runtimeConfigPath)) {
+    throw "runtime config not found: $runtimeConfigPath"
+  }
+  if (-not (Test-Path $runSummaryPath)) {
+    throw "run summary not found: $runSummaryPath"
+  }
+
+  $runtime = Read-JsonFile -Path $runtimeConfigPath
+  $runSummary = Read-JsonFile -Path $runSummaryPath
+  $passRule = Resolve-EvalGateRule -Runtime $runtime
+  Assert-RequiredRuntimeKeys -Runtime $runtime -Keys @(
+    "max_eval_steps",
+    "fitness_gold_scale",
+    "fitness_gold_neutral_delta",
+    "fitness_win_weight",
+    "fitness_gold_weight",
+    "fitness_win_neutral_rate"
+  )
+
+  $winnerRuntimePath = [string](Get-NestedPropertyValue -Object $runSummary -Path @("models", "winner_runtime"))
+  if ([string]::IsNullOrWhiteSpace($winnerRuntimePath)) {
+    $winnerRuntimePath = Join-Path $outputDir "models/winner_runtime.json"
+  }
+  if (-not (Test-Path $winnerRuntimePath)) {
+    throw "winner runtime not found: $winnerRuntimePath"
+  }
+
+  $games = 1000
+  $seedTag = "phase${Phase}_eval_$Seed"
+  $policyValue = ""
+  if ($runtime.PSObject.Properties.Name -contains "opponent_policy") {
+    $policyValue = [string](Get-PropertyValue -Object $runtime -Name "opponent_policy")
+  }
+  $hasPolicy = -not [string]::IsNullOrWhiteSpace($policyValue)
+  $hasPolicyMix = $false
+  $mixValue = $null
+  if ($runtime.PSObject.Properties.Name -contains "opponent_policy_mix") {
+    $mixValue = Get-PropertyValue -Object $runtime -Name "opponent_policy_mix"
+    $hasPolicyMix = ($null -ne $mixValue) -and ($mixValue.Count -gt 0)
+  }
+  if (-not $hasPolicy -and -not $hasPolicyMix) {
+    throw "runtime must contain opponent_policy or opponent_policy_mix"
+  }
+
+  $savePath = Join-Path $outputDir "phase${Phase}_eval_1000.json"
+  $firstTurnPolicy = [string](Get-PropertyValue -Object $runtime -Name "first_turn_policy")
+  if ([string]::IsNullOrWhiteSpace($firstTurnPolicy)) {
+    $firstTurnPolicy = "alternate"
+  }
+  $continuousSeries = $true
+  if ($runtime.PSObject.Properties.Name -contains "continuous_series") {
+    $continuousSeries = [bool](Get-PropertyValue -Object $runtime -Name "continuous_series")
+  }
+  if ($hasPolicy) {
+    $singleResultPath = $savePath
+    $cmd = @(
+      "scripts/model_duel_worker.mjs",
+      "--human", $winnerRuntimePath,
+      "--ai", "$policyValue",
+      "--games", "$games",
+      "--seed", $seedTag,
+      "--max-steps", "$(Get-PropertyValue -Object $runtime -Name 'max_eval_steps')",
+      "--first-turn-policy", $firstTurnPolicy,
+      "--continuous-series", "$(if ($continuousSeries) { '1' } else { '2' })",
+      "--stdout-format", "json",
+      "--result-out", $singleResultPath
+    )
+    $resultLines = & node @cmd
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+      exit $exitCode
+    }
+    $resultJson = $resultLines | Select-Object -Last 1
+    if ([string]::IsNullOrWhiteSpace($resultJson)) {
+      throw "empty eval output"
+    }
+    $r = $resultJson | ConvertFrom-Json
+  }
+  else {
+    $counts = Allocate-GamesByWeight -TotalGames $games -Entries $mixValue
+    $aggregateGames = 0.0
+    $aggregateWinsA = 0.0
+    $aggregateWinsB = 0.0
+    $aggregateDraws = 0.0
+    $aggregateGoldSumA = 0.0
+    $aggregateGoCountA = 0.0
+    $aggregateGoGamesA = 0.0
+    $aggregateGoFailCountA = 0.0
+    $aggregateGoOpportunityCountA = 0.0
+
+    for ($i = 0; $i -lt $mixValue.Count; $i++) {
+      $entry = $mixValue[$i]
+      $policy = [string](Get-PropertyValue -Object $entry -Name "policy")
+      $gamesForPolicy = [int]$counts[$i]
+      $resultPathPart = Join-Path $outputDir ("phase{0}_eval_1000_part{1}.json" -f $Phase, $i)
+      $cmd = @(
+        "scripts/model_duel_worker.mjs",
+        "--human", $winnerRuntimePath,
+        "--ai", "$policy",
+        "--games", "$gamesForPolicy",
+        "--seed", "${seedTag}_$i",
+        "--max-steps", "$(Get-PropertyValue -Object $runtime -Name 'max_eval_steps')",
+        "--first-turn-policy", $firstTurnPolicy,
+        "--continuous-series", "$(if ($continuousSeries) { '1' } else { '2' })",
+        "--stdout-format", "json",
+        "--result-out", $resultPathPart
+      )
+      $resultLines = & node @cmd
+      $exitCode = $LASTEXITCODE
+      if ($exitCode -ne 0) {
+        exit $exitCode
+      }
+      $resultJson = $resultLines | Select-Object -Last 1
+      if ([string]::IsNullOrWhiteSpace($resultJson)) {
+        throw "empty eval output"
+      }
+      $part = $resultJson | ConvertFrom-Json
+      try {
+        [System.IO.File]::Delete([System.IO.Path]::GetFullPath($resultPathPart))
+      }
+      catch {
+      }
+      $partGames = [double](Get-PropertyValue -Object $part -Name "games")
+      $aggregateGames += $partGames
+      $aggregateWinsA += [double](Get-PropertyValue -Object $part -Name "wins_a")
+      $aggregateWinsB += [double](Get-PropertyValue -Object $part -Name "wins_b")
+      $aggregateDraws += [double](Get-PropertyValue -Object $part -Name "draws")
+      $aggregateGoldSumA += ([double](Get-PropertyValue -Object $part -Name "mean_gold_delta_a")) * $partGames
+      $aggregateGoCountA += [double](Get-PropertyValue -Object $part -Name "go_count_a")
+      $aggregateGoGamesA += [double](Get-PropertyValue -Object $part -Name "go_games_a")
+      $aggregateGoFailCountA += [double](Get-PropertyValue -Object $part -Name "go_fail_count_a")
+      $aggregateGoOpportunityCountA += [double](Get-PropertyValue -Object $part -Name "go_opportunity_count_a")
+    }
+
+    $gamesTotal = [Math]::Max(1.0, $aggregateGames)
+    $goTakeRateA = if ($aggregateGoOpportunityCountA -gt 0.0) { $aggregateGoCountA / $aggregateGoOpportunityCountA } else { 0.0 }
+    $goFailRateA = if ($aggregateGoCountA -gt 0.0) { $aggregateGoFailCountA / $aggregateGoCountA } else { 0.0 }
+    $r = [pscustomobject]@{
+      games = [int]$aggregateGames
+      wins_a = $aggregateWinsA
+      wins_b = $aggregateWinsB
+      draws = $aggregateDraws
+      win_rate_a = $aggregateWinsA / $gamesTotal
+      win_rate_b = $aggregateWinsB / $gamesTotal
+      draw_rate = $aggregateDraws / $gamesTotal
+      mean_gold_delta_a = $aggregateGoldSumA / $gamesTotal
+      go_count_a = [int]$aggregateGoCountA
+      go_games_a = [int]$aggregateGoGamesA
+      go_fail_count_a = [int]$aggregateGoFailCountA
+      go_fail_rate_a = $goFailRateA
+      go_opportunity_count_a = [int]$aggregateGoOpportunityCountA
+      go_take_rate_a = $goTakeRateA
+      result_out = $savePath
+    }
+    $enc = New-Object System.Text.UTF8Encoding($true)
+    [System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($savePath), ($r | ConvertTo-Json -Depth 8), $enc)
+  }
+
+  $fitness = Compute-EvalFitness -Summary $r -Runtime $runtime
+  $goCount = [int](Get-OptionalDouble -Value (Get-PropertyValue -Object $r -Name "go_count_a") -DefaultValue 0.0)
+  $goGames = [int](Get-OptionalDouble -Value (Get-PropertyValue -Object $r -Name "go_games_a") -DefaultValue 0.0)
+  $goFailCount = [int](Get-OptionalDouble -Value (Get-PropertyValue -Object $r -Name "go_fail_count_a") -DefaultValue 0.0)
+  $goFailRate = [double](Get-OptionalDouble -Value (Get-PropertyValue -Object $r -Name "go_fail_rate_a") -DefaultValue 0.0)
+  $goRate = [double](Get-OptionalDouble -Value (Get-PropertyValue -Object $r -Name "go_take_rate_a") -DefaultValue 0.0)
+
+  Write-Host ""
+  Write-Host "=== Phase$Phase Evaluation (Seed=$Seed, Profile=$LineageProfile) ==="
+  Write-Host "Win rate:        $(Get-PropertyValue -Object $r -Name 'win_rate_a')"
+  Write-Host "Mean gold delta: $(Get-PropertyValue -Object $r -Name 'mean_gold_delta_a')"
+  Write-Host "Fitness:         $fitness"
+  Write-Host "GO count:        $goCount"
+  Write-Host "GO games:        $goGames"
+  Write-Host "GO fail count:   $goFailCount"
+  Write-Host "GO fail rate:    $goFailRate"
+  Write-Host "GO rate:         $goRate"
+  Write-Host "================================"
+
+  $passMeanGold = ([double](Get-PropertyValue -Object $r -Name "mean_gold_delta_a") -ge [double]$passRule.mean_gold_delta_min)
+  $passWinRate = ([double](Get-PropertyValue -Object $r -Name "win_rate_a") -ge [double]$passRule.win_rate_min)
+  $passed = $passMeanGold -and $passWinRate
+
+  $failReasons = @()
+  if (-not $passMeanGold) { $failReasons += "mean_gold_delta" }
+  if (-not $passWinRate) { $failReasons += "win_rate" }
+  $reasonText = if ($passed) { "eval_gate_passed" } else { "eval_gate_not_passed:" + ($failReasons -join ",") }
+  $passState = [ordered]@{
+    passed = $passed
+    reason = $reasonText
+    seed = "$Seed"
+    phase = "phase$Phase"
+    pass_rule = [ordered]@{
+      mean_gold_delta_min = [double]$passRule.mean_gold_delta_min
+      win_rate_min = [double]$passRule.win_rate_min
+    }
+    win_rate = [double](Get-PropertyValue -Object $r -Name "win_rate_a")
+    mean_gold_delta = [double](Get-PropertyValue -Object $r -Name "mean_gold_delta_a")
+    fitness = [double]$fitness
+    go_count = $goCount
+    go_games = $goGames
+    go_fail_count = $goFailCount
+    go_fail_rate = $goFailRate
+    go_rate = $goRate
+    eval_result_path = $savePath
+    run_summary_path = $runSummaryPath
+    transition_ready = $null
+    transition_generation = $null
+  }
+
+  $passStatePath = Join-Path $outputDir "phase${Phase}_pass_state.json"
+  $passStateJson = $passState | ConvertTo-Json -Depth 8
+  $enc = New-Object System.Text.UTF8Encoding($true)
+  [System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($passStatePath), $passStateJson, $enc)
+  Write-Output $passStateJson
+
+  if ($passed) {
+    exit 0
+  }
+
+  exit 2
+}
+
 $runtimeConfigPath = "scripts/configs/runtime_phase1.json"
 $outputDir = "logs/NEAT/$($lineageLayout.output_prefix)_phase${Phase}_seed$Seed"
 $gateStatePath = Join-Path $outputDir "gate_state.json"

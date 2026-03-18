@@ -16,9 +16,7 @@ export function aiPlay(state, actor, options = {}) {
   const source = normalizeSource(options.source);
   const heuristicPolicy = resolveHeuristicPolicy(options);
   if (source === "model") {
-    const next = runModelPolicyPlay(state, actor, options.model || null, {
-      goStopIqnModel: options.goStopIqnModel || null
-    });
+    const next = runModelPolicyPlay(state, actor, options.model || null);
     if (next !== state) return next;
   }
   return botPlay(state, actor, {

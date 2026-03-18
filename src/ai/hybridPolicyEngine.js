@@ -1,7 +1,7 @@
 import { playTurn } from "../engine/index.js";
 import { DEFAULT_BOT_POLICY, normalizeBotPolicy } from "./policies.js";
 import { botPlay } from "./heuristicPolicyEngine.js";
-import { isIqnGoStopRuntimeModel, modelPolicyPlay as runModelPolicyPlay } from "./modelPolicyEngine.js";
+import { modelPolicyPlay as runModelPolicyPlay } from "./modelPolicyEngine.js";
 
 function transitionKey(state) {
   if (!state) return "null";
@@ -80,9 +80,7 @@ function runHeuristicPolicy(state, actor, policy, heuristicParams) {
 function runFallbackPolicy(state, actor, options, heuristicParams) {
   const fallbackModel = options?.fallbackModel || null;
   if (fallbackModel) {
-    return runModelPolicyPlay(state, actor, fallbackModel, {
-      goStopIqnModel: options?.fallbackGoStopIqnModel || options?.goStopIqnModel || null,
-    });
+    return runModelPolicyPlay(state, actor, fallbackModel);
   }
   const fallbackPolicy = normalizeBotPolicy(
     options?.fallbackPolicy || options?.heuristicPolicy || DEFAULT_BOT_POLICY
@@ -92,8 +90,6 @@ function runFallbackPolicy(state, actor, options, heuristicParams) {
 
 export function hybridPolicyPlayDetailed(state, actor, options = {}) {
   const model = options.model || null;
-  const goStopIqnModel = options.goStopIqnModel || null;
-  const hasGoStopIqn = isIqnGoStopRuntimeModel(goStopIqnModel);
   const heuristicParams =
     options.heuristicParams && typeof options.heuristicParams === "object"
       ? options.heuristicParams
@@ -104,18 +100,6 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
   const hasFallbackModel = !!options.fallbackModel;
 
   if (isGoStopTurn(state, actor)) {
-    if (hasGoStopIqn) {
-      const iqnNext = runModelPolicyPlay(state, actor, model, {
-        goStopIqnModel,
-      });
-      if (isMoved(state, iqnNext)) {
-        return {
-          next: iqnNext,
-          actionSource: "hybrid_model_go_stop_iqn",
-          route: "model_go_stop_iqn",
-        };
-      }
-    }
     const goStopNext = hasFallbackModel
       ? runFallbackPolicy(state, actor, options, heuristicParams)
       : runHeuristicPolicy(state, actor, goStopPolicy, heuristicParams);
@@ -137,9 +121,7 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
 
   if (goStopOnly) {
     if (model) {
-      const modelNext = runModelPolicyPlay(state, actor, model, {
-        goStopIqnModel,
-      });
+      const modelNext = runModelPolicyPlay(state, actor, model);
       if (isMoved(state, modelNext)) {
         return {
           next: modelNext,
@@ -180,9 +162,7 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
 
   if (modelMatchPhase && isMatchTurn(state, actor)) {
     if (model) {
-      const modelNext = runModelPolicyPlay(state, actor, model, {
-        goStopIqnModel,
-      });
+      const modelNext = runModelPolicyPlay(state, actor, model);
       if (isMoved(state, modelNext)) {
         return {
           next: modelNext,
@@ -235,9 +215,7 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
   }
 
   if (model) {
-    const modelNext = runModelPolicyPlay(state, actor, model, {
-      goStopIqnModel,
-    });
+    const modelNext = runModelPolicyPlay(state, actor, model);
     if (isMoved(state, modelNext)) {
       return {
         next: modelNext,

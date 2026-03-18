@@ -1,5 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import {
   initSimulationGame,
   startSimulationGame,
@@ -43,26 +41,6 @@ export function parseHybridPlaySpec(token) {
   return {
     modelToken: String(m[1] || "").trim(),
     fallbackToken: String(m[2] || "").trim(),
-  };
-}
-
-export function resolveGoStopIqnRuntime(rawPath, label) {
-  const fullPath = resolve(String(rawPath || "").trim());
-  if (!existsSync(fullPath)) {
-    throw new Error(`${label} not found: ${fullPath}`);
-  }
-  let parsed = null;
-  try {
-    parsed = JSON.parse(String(readFileSync(fullPath, "utf8") || "").replace(/^\uFEFF/, ""));
-  } catch (err) {
-    throw new Error(`failed to parse ${label}: ${fullPath} (${String(err)})`);
-  }
-  if (String(parsed?.format_version || "").trim() !== "iqn_go_stop_runtime_v1") {
-    throw new Error(`invalid ${label} format: expected iqn_go_stop_runtime_v1`);
-  }
-  return {
-    model: parsed,
-    modelPath: fullPath,
   };
 }
 
