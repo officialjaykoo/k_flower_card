@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from deshyperneat.coordinates import Point2D
-from deshyperneat.substrate import DevelopmentEdge, SubstrateRef, SubstrateSpec, SubstrateTopology
+from deshyperneat.substrate import DevelopmentEdge, Point2D, SubstrateRef, SubstrateSpec, SubstrateTopology
 
 
 CARD_INPUT_FEATURES = (

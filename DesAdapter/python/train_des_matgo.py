@@ -33,8 +33,7 @@ if str(FORK_ROOT) not in sys.path:
 if str(EXPERIMENT_ROOT) not in sys.path:
     sys.path.insert(0, str(EXPERIMENT_ROOT))
 
-from deshyperneat import Config, SearchConfig
-from deshyperneat.mod import Deshyperneat
+from deshyperneat import Config, Deshyperneat, SearchConfig
 from deshyperneat.developer import Developer
 from deshyperneat.executor import compile_executor
 from deshyperneat.evolution import (

@@ -7,7 +7,6 @@ from deshyperneat.environment import EnvironmentDescription
 from deshyperneat.substrate import SubstrateTopology
 from deshyperneat.topology_graph import TopologyGraph
 
-from .controls import MatgoTopologyControl
 from deshyperneat.conf import ControlSnapshot
 from deshyperneat.genome import Genome
 from deshyperneat.conf import GenomeConfig
@@ -30,25 +29,14 @@ def build_control_snapshot(
     topology: SubstrateTopology,
     des_runtime: dict[str, object],
 ) -> ControlSnapshot:
-    topology_control = MatgoTopologyControl.from_runtime(topology, dict(des_runtime or {}))
+    _ = topology
+    runtime = dict(des_runtime or {})
     return ControlSnapshot(
-        static_substrate_depth=int(topology_control.static_substrate_depth),
-        max_input_substrate_depth=int(topology_control.max_input_substrate_depth),
-        max_hidden_substrate_depth=int(topology_control.max_hidden_substrate_depth),
-        max_output_substrate_depth=int(topology_control.max_output_substrate_depth),
-        node_depths={
-            str(kind): int(control.depth)
-            for kind, control in sorted(topology_control.node_controls.items())
-        },
-        edge_outer_weights={
-            str(key): float(control.outer_weight)
-            for key, control in sorted(topology_control.edge_controls.items())
-        },
-        identity_mapping_edges={
-            str(key)
-            for key, control in sorted(topology_control.edge_controls.items())
-            if bool(control.allow_identity_mapping)
-        },
+        enable_identity_mapping=bool(runtime.get("enable_identity_mapping", True)),
+        static_substrate_depth=int(runtime.get("static_substrate_depth", -1) or -1),
+        max_input_substrate_depth=max(0, int(runtime.get("max_input_substrate_depth", 0) or 0)),
+        max_hidden_substrate_depth=max(0, int(runtime.get("max_hidden_substrate_depth", 5) or 5)),
+        max_output_substrate_depth=max(0, int(runtime.get("max_output_substrate_depth", 0) or 0)),
     )
 
 
