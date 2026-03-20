@@ -3,10 +3,12 @@ const K_HYPERNEAT_EXECUTOR_FORMAT = "k_hyperneat_executor_v1";
 function activation(name, x) {
   const n = String(name || "identity").trim().toLowerCase();
   const v = Number(x || 0);
-  if (n === "identity" || n === "linear" || n === "none") return v;
+  if (n === "identity" || n === "none") return v;
+  if (n === "linear") return Math.min(1.0, Math.max(-1.0, v));
   if (n === "sigmoid") return 1.0 / (1.0 + Math.exp(-v));
   if (n === "relu") return Math.max(0, v);
   if (n === "step") return v > 0 ? 1.0 : 0.0;
+  if (n === "softmax") return Math.exp(v);
   if (n === "gaussian") return Math.exp(-((2.5 * v) ** 2));
   if (n === "offsetgaussian") return 2.0 * Math.exp(-((2.5 * v) ** 2)) - 1.0;
   if (n === "sine") return Math.sin(2.0 * v);
