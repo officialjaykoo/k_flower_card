@@ -23,7 +23,7 @@ const FOCUS_FEATURE_PATTERN = /^input_focus_(month|kwang|five|ribbon|junk|pi|bon
 const SEMANTIC_BIN_PATTERN = /^input_(board|captured_self|captured_opp)_(month|type|combo)_bin$/;
 const NON_BRIGHT_KWANG_ID = "L0";
 const BONUS_MONTH = 13;
-const TYPE_BIN_KEYS = Object.freeze(["kwang", "five", "ribbon", "junk", "pi", "bonus"]);
+const TYPE_BIN_KEYS = Object.freeze(["kwang", "five", "ribbon", "pi_value"]);
 const COMBO_BIN_KEYS = Object.freeze(["red_ribbons", "blue_ribbons", "plain_ribbons", "five_birds", "kwang_combo"]);
 const RULE_SCORE_FEATURES = Object.freeze([
   "self_go_bonus",
@@ -124,9 +124,7 @@ const TYPE_BIN_SCALES = Object.freeze({
   kwang: Math.max(1, CANONICAL_DECK.filter((card) => String(card?.category || "") === "kwang").length),
   five: Math.max(1, CANONICAL_DECK.filter((card) => String(card?.category || "") === "five").length),
   ribbon: Math.max(1, CANONICAL_DECK.filter((card) => String(card?.category || "") === "ribbon").length),
-  junk: Math.max(1, CANONICAL_DECK.filter((card) => String(card?.category || "") === "junk").length),
-  pi: Math.max(1, CANONICAL_DECK.reduce((sum, card) => sum + Number(card?.piValue || 0), 0)),
-  bonus: Math.max(1, CANONICAL_DECK.filter((card) => Number(card?.bonus?.stealPi || 0) > 0).length),
+  pi_value: Math.max(1, CANONICAL_DECK.reduce((sum, card) => sum + Number(card?.piValue || 0), 0)),
 });
 const COMBO_BIN_SCALES = Object.freeze({
   red_ribbons: Math.max(1, CANONICAL_DECK.filter((card) => (card?.comboTags || []).includes("redRibbons")).length),
@@ -299,19 +297,14 @@ function encodeTypeBins(cards, slotCount) {
     kwang: 0.0,
     five: 0.0,
     ribbon: 0.0,
-    junk: 0.0,
-    pi: 0.0,
-    bonus: 0.0,
+    pi_value: 0.0,
   };
   for (const card of cards || []) {
     const meta = getCardMeta(card);
     if (meta.category in counts) {
       counts[meta.category] += 1.0;
     }
-    counts.pi += Number(meta.piValue || 0);
-    if (Number(meta.bonusStealPi || 0) > 0) {
-      counts.bonus += 1.0;
-    }
+    counts.pi_value += Number(meta.piValue || 0);
   }
   return TYPE_BIN_KEYS
     .map((key) => clamp01(Number(counts[key] || 0) / Number(TYPE_BIN_SCALES[key] || 1)))
@@ -803,24 +796,34 @@ export function getMatgoKHyperneatOutputBindings(state, actor, runtime) {
   }
 
   const bindings = {
-    actionIndex: null,
+    playIndex: null,
+    matchIndex: null,
     optionPairs: [],
   };
 
   let cursor = 0;
   for (const spec of runtime.adapter.outputs || []) {
     const kind = String(spec?.kind || "").trim().toLowerCase();
+    const specIndex = Math.max(0, Number(spec?.index || 0));
     const slotCount = Math.max(0, Number(spec?.slot_count || 0));
     if (kind === "output_play") {
       if (slotCount > 0) {
-        bindings.actionIndex = cursor;
+        bindings.playIndex = cursor;
+      }
+    } else if (kind === "output_match") {
+      if (slotCount > 0) {
+        bindings.matchIndex = cursor;
       }
     } else if (kind === "output_option") {
-      for (let offset = 0; offset < slotCount && offset < OPTION_SLOT_BINDINGS.length; offset += 1) {
+      for (
+        let offset = 0;
+        offset < slotCount && (specIndex + offset) < OPTION_SLOT_BINDINGS.length;
+        offset += 1
+      ) {
         bindings.optionPairs.push({
           outputIndex: cursor + offset,
-          positive: OPTION_SLOT_BINDINGS[offset].positive,
-          negative: OPTION_SLOT_BINDINGS[offset].negative,
+          positive: OPTION_SLOT_BINDINGS[specIndex + offset].positive,
+          negative: OPTION_SLOT_BINDINGS[specIndex + offset].negative,
         });
       }
     }

@@ -1662,7 +1662,9 @@ function scoreCandidateWithOracle(state, actor, compiled, outputs, decisionType,
 
 function buildKHyperneatActionScoreBundle(state, actor, compiled, bindings, decisionType, candidates) {
   const scoreMap = new Map();
-  const actionIndex = Number(bindings?.actionIndex ?? -1);
+  const actionIndex = decisionType === "match"
+    ? Number(bindings?.matchIndex ?? -1)
+    : Number(bindings?.playIndex ?? -1);
   let firstInputs = null;
   let firstOutputs = null;
   for (const candidate of candidates) {
@@ -1735,16 +1737,21 @@ function scoreToProbabilityMap(candidates, scoreMap, temperature = 1.0) {
 }
 
 function pickBestByScore(candidates, scoreMap) {
-  let best = null;
   let bestScore = -Infinity;
+  const bestCandidates = [];
   for (const c of candidates) {
     const s = Number(scoreMap.get(c) || -Infinity);
     if (s > bestScore) {
       bestScore = s;
-      best = c;
+      bestCandidates.length = 0;
+      bestCandidates.push(c);
+    } else if (s === bestScore) {
+      bestCandidates.push(c);
     }
   }
-  return best;
+  if (!bestCandidates.length) return null;
+  if (bestCandidates.length === 1) return bestCandidates[0];
+  return bestCandidates[Math.floor(Math.random() * bestCandidates.length)];
 }
 
 /* 6) Public APIs */

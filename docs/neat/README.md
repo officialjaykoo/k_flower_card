@@ -4,7 +4,6 @@
 - 현재 학습/평가 기준 파이프라인은 `scripts/neat_train.py -> scripts/neat_eval_worker.mjs -> scripts/model_duel_worker.mjs`다.
 - Phase 실행·평가는 단일 진입점(`scripts/phase_run.ps1`, `scripts/phase_eval.ps1`)으로 통합되었다.
 - classic NEAT 런타임 기준은 `scripts/configs/runtime_phase1.json`이다.
-- `K-HyperNEAT` 로컬 실험은 `experiments/k_hyperneat_matgo/configs/runtime_phase1.json`을 별도로 쓴다.
 
 빠른 참고:
 - 반복 확인하는 설정/fitness/정책 메모는 `docs/neat/QUICK_NOTES.md`
@@ -142,8 +141,6 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 - `--human` (필수): human 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase3_seed5`).
 - `--ai` (필수): ai 슬롯 모델 지정 (`src/ai/policies.js` 정책 키 또는 `phase3_seed5`).
   - 예: `hybrid_play(phase1_seed208,H-CL)`
-  - 예: `k_hyperneat(experiments/k_hyperneat_matgo/smoke_runtime.json)`
-  - 예: `experiments/k_hyperneat_matgo/smoke_runtime.json`
 - `--games` (선택, 기본 `1000`): 양의 정수만 허용.
 - `--seed` (선택, 기본 `model-duel`): 실행 시드 문자열.
 - `--max-steps` (선택, 기본 `600`): 게임당 최대 스텝. 최소값은 `20`.

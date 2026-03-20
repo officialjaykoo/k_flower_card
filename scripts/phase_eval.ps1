@@ -1,7 +1,7 @@
 ﻿param(
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed,
-  [Parameter(Mandatory = $false)][ValidateSet("classic", "k-hyperneat")][string]$LineageProfile = "classic"
+  [Parameter(Mandatory = $false)][ValidateSet("classic")][string]$LineageProfile = "classic"
 )
 
 Set-StrictMode -Version Latest
@@ -218,11 +218,6 @@ function Get-LineageLayout {
         output_prefix = "neat"
       }
     }
-    "k-hyperneat" {
-      return [ordered]@{
-        output_prefix = "k_hyperneat"
-      }
-    }
     default {
       throw "unsupported lineage profile: $Profile"
     }
@@ -230,58 +225,7 @@ function Get-LineageLayout {
 }
 
 $lineageLayout = Get-LineageLayout -Profile $LineageProfile
-
-if ($LineageProfile -eq "k-hyperneat") {
-  $runtimeConfigPath = "experiments/k_hyperneat_matgo/configs/runtime_phase${Phase}.json"
-  if (-not (Test-Path $runtimeConfigPath)) {
-    $runtimeConfigPath = "experiments/k_hyperneat_matgo/configs/runtime_phase1.json"
-  }
-  $outputDir = "logs/K-HyperNEAT/k_hyperneat_phase${Phase}_seed$Seed"
-  $runSummaryPath = Join-Path $outputDir "run_summary.json"
-
-  if (-not (Test-Path $runtimeConfigPath)) {
-    throw "runtime config not found: $runtimeConfigPath"
-  }
-  if (-not (Test-Path $runSummaryPath)) {
-    throw "run summary not found: $runSummaryPath"
-  }
-
-  $runtime = Read-JsonFile -Path $runtimeConfigPath
-  $runSummary = Read-JsonFile -Path $runSummaryPath
-  $passRule = Resolve-EvalGateRule -Runtime $runtime
-  Assert-RequiredRuntimeKeys -Runtime $runtime -Keys @(
-    "max_eval_steps",
-    "fitness_gold_scale",
-    "fitness_gold_neutral_delta",
-    "fitness_win_weight",
-    "fitness_gold_weight",
-    "fitness_win_neutral_rate"
-  )
-
-  $winnerRuntimePath = [string](Get-NestedPropertyValue -Object $runSummary -Path @("models", "winner_runtime"))
-  if ([string]::IsNullOrWhiteSpace($winnerRuntimePath)) {
-    $winnerRuntimePath = Join-Path $outputDir "models/winner_runtime.json"
-  }
-  if (-not (Test-Path $winnerRuntimePath)) {
-    throw "winner runtime not found: $winnerRuntimePath"
-  }
-
-  $games = 1000
-  $seedTag = "phase${Phase}_eval_$Seed"
-  $policyValue = ""
-  if ($runtime.PSObject.Properties.Name -contains "opponent_policy") {
-    $policyValue = [string](Get-PropertyValue -Object $runtime -Name "opponent_policy")
-  }
-  $hasPolicy = -not [string]::IsNullOrWhiteSpace($policyValue)
-  $hasPolicyMix = $false
-  $mixValue = $null
-  if ($runtime.PSObject.Properties.Name -contains "opponent_policy_mix") {
-    $mixValue = Get-PropertyValue -Object $runtime -Name "opponent_policy_mix"
-    $hasPolicyMix = ($null -ne $mixValue) -and ($mixValue.Count -gt 0)
-  }
-  if (-not $hasPolicy -and -not $hasPolicyMix) {
-    throw "runtime must contain opponent_policy or opponent_policy_mix"
-  }
+<#
 
   $savePath = Join-Path $outputDir "phase${Phase}_eval_1000.json"
   $firstTurnPolicy = [string](Get-PropertyValue -Object $runtime -Name "first_turn_policy")
@@ -452,13 +396,7 @@ if ($LineageProfile -eq "k-hyperneat") {
   $enc = New-Object System.Text.UTF8Encoding($true)
   [System.IO.File]::WriteAllText([System.IO.Path]::GetFullPath($passStatePath), $passStateJson, $enc)
   Write-Output $passStateJson
-
-  if ($passed) {
-    exit 0
-  }
-
-  exit 2
-}
+#>
 
 $runtimeConfigPath = "scripts/configs/runtime_phase1.json"
 $outputDir = "logs/NEAT/$($lineageLayout.output_prefix)_phase${Phase}_seed$Seed"

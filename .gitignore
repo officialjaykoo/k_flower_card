@@ -8,6 +8,6 @@ models/*
 __pycache__/
 *.pyc
 Des-HyperNEAT-Python/
-experiments/k_hyperneat_matgo/
 archive/
 vendor/
+DesAdapter/artifacts/
