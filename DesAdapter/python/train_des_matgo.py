@@ -34,12 +34,15 @@ if str(EXPERIMENT_ROOT) not in sys.path:
     sys.path.insert(0, str(EXPERIMENT_ROOT))
 
 from deshyperneat import Config, SearchConfig
-from deshyperneat.mod import Deshyperneat, Developer, compile_executor
+from deshyperneat.mod import Deshyperneat
+from deshyperneat.developer import Developer
+from deshyperneat.executor import compile_executor
 from deshyperneat.evolution import (
     BaseReporter,
     Checkpointer,
     StatisticsReporter,
     StdOutReporter,
+    prepare_algorithm,
 )
 from local.matgo.topology import build_minimal_matgo_topology
 from local.matgo.ini import (
@@ -1602,8 +1605,9 @@ def main() -> None:
         topology=topology,
         des_runtime=dict(runtime.get("des_hyperneat") or {}),
     )
-    setup = Deshyperneat.prepare(
+    setup = prepare_algorithm(
         ini_path=runtime["cppn_config"],
+        algorithm=Deshyperneat,
         description=environment_description,
         genome_config=genome_config,
         resume=(str(resolve_path(args.resume)) if args.resume else None),
