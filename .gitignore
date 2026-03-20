@@ -1,4 +1,4 @@
-﻿node_modules/
+node_modules/
 dist/
 logs/
 *.zip
@@ -7,3 +7,7 @@ models/*
 !models/*.json
 __pycache__/
 *.pyc
+Des-HyperNEAT-Python/
+experiments/k_hyperneat_matgo/
+archive/
+vendor/
