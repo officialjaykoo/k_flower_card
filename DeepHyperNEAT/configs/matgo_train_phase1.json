@@ -4,10 +4,15 @@
   "games_per_genome": 500,
   "generations": 5,
   "population_size": 72,
-  "elitism": 2,
+  "elitism": 3,
   "checkpoint_every": 1,
   "goal_fitness": 0.55,
-  "sheet_width": 26,
+  "sheet_width": 96,
+  "hidden_distribution": {
+    "play": 80,
+    "match": 10,
+    "option": 6
+  },
   "species_threshold": 3.5,
   "species_reproduction_threshold": 0.5,
   "candidate_pool_size": 20,
@@ -31,10 +36,10 @@
     "winner_playoff_go_opp_min_count": 100,
     "winner_playoff_go_take_rate_tie_threshold": 0.02,
     "early_stop_win_rate_cutoffs": [
-      { "games": 150, "max_win_rate": 0.38 },
-      { "games": 250, "max_win_rate": 0.40 },
-      { "games": 350, "max_win_rate": 0.42 },
-      { "games": 450, "max_win_rate": 0.44 }
+      { "games": 150, "max_win_rate": 0.35 },
+      { "games": 250, "max_win_rate": 0.35 },
+      { "games": 350, "max_win_rate": 0.35 },
+      { "games": 450, "max_win_rate": 0.35 }
     ],
     "early_stop_go_take_rate_cutoffs": [],
     "fitness_gold_scale": 1500.0,

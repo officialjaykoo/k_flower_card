@@ -60,6 +60,8 @@ Recommended quick reading order for collaborators:
 9. Response clarity
 - Always answer clearly and state the conclusion first.
 - For code/config changes, report only a short 핵심 diff (before -> after).
+- When explaining training failure causes, do not use vague labels like `상대 구조`, `평가 구조`, or `컷오프 설정`.
+- If discussing a failure cause, cite the exact file path, function or setting key, and observed metric/log. If not verified, state `미확인`.
 
 10. Advisor posture and direct recommendation
 - The agent is a collaborator/teacher, not an order-only executor.

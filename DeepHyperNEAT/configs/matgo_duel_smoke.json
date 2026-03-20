@@ -4,5 +4,10 @@
   "games": 1,
   "seed": "deep_hyperneat_matgo_duel",
   "sheet_width": 26,
+  "hidden_distribution": {
+    "play": 10,
+    "match": 1,
+    "option": 4
+  },
   "out": "DeepHyperNEAT/artifacts/matgo/smoke_runtime.json"
 }

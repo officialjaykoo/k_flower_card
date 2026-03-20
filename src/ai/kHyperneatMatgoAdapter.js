@@ -1,5 +1,6 @@
 import { buildDeck } from "../cards.js";
 import { calculateBaseScore, calculateScore, isGukjinCard, ruleSets } from "../engine/index.js";
+import { parsePlaySpecialCandidate } from "./evalCore/sharedGameHelpers.js";
 
 const CANONICAL_DECK = buildDeck("original");
 const CARD_INDEX = new Map(CANONICAL_DECK.map((card, index) => [String(card?.id || ""), index]));
@@ -18,6 +19,7 @@ const CARD_META = new Map(
 );
 const CARD_SCALE = Math.max(1, CANONICAL_DECK.length);
 const HAND_FEATURE_PATTERN = /^input_hand_(month|kwang|five|ribbon|junk|pi|bonus|red_ribbons|blue_ribbons|plain_ribbons|five_birds)$/;
+const FOCUS_FEATURE_PATTERN = /^input_focus_(month|kwang|five|ribbon|junk|pi|bonus|red_ribbons|blue_ribbons|plain_ribbons|five_birds)$/;
 const SEMANTIC_BIN_PATTERN = /^input_(board|captured_self|captured_opp)_(month|type|combo)_bin$/;
 const NON_BRIGHT_KWANG_ID = "L0";
 const BONUS_MONTH = 13;
@@ -113,15 +115,6 @@ const OPTION_SLOT_BINDINGS = Object.freeze([
   Object.freeze({ positive: "president_hold", negative: "president_stop" }),
   Object.freeze({ positive: "five", negative: "junk" }),
 ]);
-const PHASE_CODE = Object.freeze({
-  playing: 0.1,
-  "select-match": 0.25,
-  "shaking-confirm": 0.4,
-  "go-stop": 0.6,
-  "president-choice": 0.8,
-  "gukjin-choice": 1.0,
-});
-
 const MONTH_BIN_SCALES = Object.freeze(
   Array.from({ length: BONUS_MONTH }, (_, index) =>
     Math.max(1, CANONICAL_DECK.filter((card) => Number(card?.month || 0) === index + 1).length),
@@ -269,6 +262,26 @@ function encodeCardFeatureSlots(cards, slotCount, featureName) {
   return values;
 }
 
+function encodeSingleCardFeatureSlot(card, featureName) {
+  const values = encodeCardFeatureSlots(card ? [card] : [], 1, featureName);
+  return values.length > 0 ? values : [0.0];
+}
+
+function encodeDecisionTypeSlots(decisionType, slotCount) {
+  const values = new Array(Math.max(0, Number(slotCount || 0))).fill(0.0);
+  const kind = String(decisionType || "").trim().toLowerCase();
+  if (values.length > 0 && kind === "play") values[0] = 1.0;
+  if (values.length > 1 && kind === "match") values[1] = 1.0;
+  if (values.length > 2 && kind === "option") values[2] = 1.0;
+  return values;
+}
+
+function findCardById(cards, cardId) {
+  const id = String(cardId || "");
+  if (!Array.isArray(cards)) return null;
+  return cards.find((card) => String(card?.id || "") === id) || null;
+}
+
 function encodeMonthBins(cards, slotCount) {
   const counts = new Array(BONUS_MONTH).fill(0.0);
   for (const card of cards || []) {
@@ -346,42 +359,6 @@ function encodePendingMatchCardIds(state, slotCount) {
   }
   const candidateCards = (state?.board || []).filter((card) => candidateIds.has(String(card?.id || "")));
   return encodeCardIds(candidateCards, slotCount);
-}
-
-function scoreTotalNorm(state, actor) {
-  const selfKey = String(actor || "");
-  const oppKey = opponentOf(selfKey);
-  const selfPlayer = state?.players?.[selfKey];
-  const oppPlayer = state?.players?.[oppKey];
-  if (!selfPlayer || !oppPlayer) return 0.0;
-  const score = calculateScore(selfPlayer, oppPlayer, state?.ruleKey);
-  return normalizeGlobalScore(Number(score?.total || 0));
-}
-
-function buildPublicSlots(state, actor, slotCount) {
-  const currentTurn = String(state?.currentTurn || "");
-  const phaseValue = Number(PHASE_CODE[String(state?.phase || "")] || 0.0);
-  const isMyTurn = currentTurn === String(actor || "") ? 1.0 : 0.0;
-  const turnPhase = clamp01((phaseValue * 0.5) + (isMyTurn * 0.5));
-  let optionWindow = 0.0;
-  const phase = String(state?.phase || "");
-  if (phase === "shaking-confirm") optionWindow = 0.25;
-  else if (phase === "go-stop") optionWindow = 0.5;
-  else if (phase === "president-choice") optionWindow = 0.75;
-  else if (phase === "gukjin-choice") optionWindow = 1.0;
-  const values = [
-    turnPhase,
-    clamp01(Number(state?.deck?.length || 0) / 30.0),
-    clamp01(Number(state?.board?.length || 0) / BONUS_MONTH),
-    scoreTotalNorm(state, actor),
-    scoreTotalNorm(state, opponentOf(actor)),
-    optionWindow,
-  ];
-  const out = new Array(Math.max(0, Number(slotCount || 0))).fill(0.0);
-  for (let index = 0; index < out.length && index < values.length; index += 1) {
-    out[index] = values[index];
-  }
-  return out;
 }
 
 function comboCount(cards, tag) {
@@ -740,14 +717,14 @@ function cardsForZone(state, actor, zoneName) {
   return [];
 }
 
-function encodeInputSpec(state, actor, spec) {
+function encodeInputSpec(state, actor, spec, inputContext = null) {
   const kind = String(spec?.kind || "").trim().toLowerCase();
   const slotCount = Number(spec?.slot_count || 0);
-  if (kind === "input_public") {
-    return buildPublicSlots(state, actor, slotCount);
-  }
   if (kind === "input_rule_score") {
     return buildRuleScoreSlots(state, actor, slotCount);
+  }
+  if (kind === "input_decision_type") {
+    return encodeDecisionTypeSlots(inputContext?.decisionType || "", slotCount);
   }
   if (kind === "input_hand") {
     return encodeCardSlots(state?.players?.[actor]?.hand || [], slotCount);
@@ -772,6 +749,11 @@ function encodeInputSpec(state, actor, spec) {
     const featureName = String(match[1] || "");
     return encodeCardFeatureSlots(state?.players?.[actor]?.hand || [], slotCount, featureName);
   }
+  const focusMatch = kind.match(FOCUS_FEATURE_PATTERN);
+  if (focusMatch) {
+    const featureName = String(focusMatch[1] || "");
+    return encodeSingleCardFeatureSlot(inputContext?.candidateCard || null, featureName);
+  }
   return new Array(slotCount).fill(0.0);
 }
 
@@ -779,15 +761,40 @@ export function isMatgoMinimalAdapter(runtime) {
   return String(runtime?.adapter?.kind || "").trim() === "matgo_minimal_v1";
 }
 
-export function encodeMatgoStateToKHyperneatInputs(state, actor, runtime) {
+export function encodeMatgoStateToKHyperneatInputs(state, actor, runtime, inputContext = null) {
   if (!isMatgoMinimalAdapter(runtime)) {
     throw new Error("K-HyperNEAT runtime is missing matgo_minimal_v1 adapter metadata");
   }
   const values = [];
   for (const spec of runtime.adapter.inputs || []) {
-    values.push(...encodeInputSpec(state, actor, spec));
+    values.push(...encodeInputSpec(state, actor, spec, inputContext));
   }
   return values;
+}
+
+export function resolveMatgoCandidateCard(state, actor, decisionType, candidate) {
+  if (decisionType === "play") {
+    const special = parsePlaySpecialCandidate(candidate);
+    if (special?.kind === "shake_start") {
+      return findCardById(state?.players?.[actor]?.hand || [], special.cardId);
+    }
+    if (special?.kind === "bomb") {
+      return { id: String(candidate || ""), month: special.month, category: "junk", piValue: 0 };
+    }
+    return findCardById(state?.players?.[actor]?.hand || [], candidate);
+  }
+  if (decisionType === "match") {
+    return findCardById(state?.board || [], candidate);
+  }
+  return null;
+}
+
+export function encodeMatgoFocusedCandidateInputs(state, actor, runtime, decisionType, candidate) {
+  return encodeMatgoStateToKHyperneatInputs(state, actor, runtime, {
+    decisionType,
+    candidate,
+    candidateCard: resolveMatgoCandidateCard(state, actor, decisionType, candidate),
+  });
 }
 
 export function getMatgoKHyperneatOutputBindings(state, actor, runtime) {
@@ -796,8 +803,7 @@ export function getMatgoKHyperneatOutputBindings(state, actor, runtime) {
   }
 
   const bindings = {
-    playSlots: [],
-    matchSlots: [],
+    actionIndex: null,
     optionPairs: [],
   };
 
@@ -806,17 +812,9 @@ export function getMatgoKHyperneatOutputBindings(state, actor, runtime) {
     const kind = String(spec?.kind || "").trim().toLowerCase();
     const slotCount = Math.max(0, Number(spec?.slot_count || 0));
     if (kind === "output_play") {
-      const ids = encodeCardIds(state?.players?.[actor]?.hand || [], slotCount);
-      bindings.playSlots.push(...ids.map((cardId, offset) => ({
-        cardId,
-        outputIndex: cursor + offset,
-      })));
-    } else if (kind === "output_match") {
-      const ids = encodePendingMatchCardIds(state, slotCount);
-      bindings.matchSlots.push(...ids.map((cardId, offset) => ({
-        cardId,
-        outputIndex: cursor + offset,
-      })));
+      if (slotCount > 0) {
+        bindings.actionIndex = cursor;
+      }
     } else if (kind === "output_option") {
       for (let offset = 0; offset < slotCount && offset < OPTION_SLOT_BINDINGS.length; offset += 1) {
         bindings.optionPairs.push({

@@ -21,9 +21,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from deep_hyperneat import genome as genome_module
+from deep_hyperneat.decode import decode
 from deep_hyperneat.matgo_runtime import (
+    MATGO_INPUT_COUNT,
     MATGO_OUTPUT_COUNT,
-    decode_matgo_substrate,
     evaluate_substrate,
     load_runtime_settings,
     merge_runtime_settings,
@@ -528,10 +529,11 @@ def _evaluate_genome(
     sub_input_dims: list[int],
     sub_hidden_dims: list[int],
     sub_output_dims: int,
+    hidden_distribution: dict[str, int],
 ):
     cppn = CPPN.create(genome)
-    hidden_node_count = max(1, int(sub_hidden_dims[1] if len(sub_hidden_dims) > 1 else sub_hidden_dims[0]))
-    substrate = decode_matgo_substrate(cppn, hidden_node_count=hidden_node_count)
+    _ = hidden_distribution
+    substrate = decode(cppn, sub_input_dims, sub_output_dims, sub_hidden_dims)
     return evaluate_substrate(
         substrate,
         REPO_ROOT,
@@ -592,6 +594,7 @@ def _evaluate_candidate_entry(
     sub_input_dims: list[int],
     sub_hidden_dims: list[int],
     sub_output_dims: int,
+    hidden_distribution: dict[str, int],
 ) -> dict[str, object] | None:
     genome = entry.get("genome")
     if genome is None:
@@ -605,6 +608,7 @@ def _evaluate_candidate_entry(
         sub_input_dims=sub_input_dims,
         sub_hidden_dims=sub_hidden_dims,
         sub_output_dims=sub_output_dims,
+        hidden_distribution=hidden_distribution,
     )
     record = _build_eval_record(
         int(_safe_float(training_record.get("generation"), -1)),
@@ -632,6 +636,7 @@ def _run_winner_playoff(
     sub_input_dims: list[int],
     sub_hidden_dims: list[int],
     sub_output_dims: int,
+    hidden_distribution: dict[str, int],
 ) -> dict[str, object] | None:
     if not candidate_entries:
         return None
@@ -659,6 +664,7 @@ def _run_winner_playoff(
             sub_input_dims=sub_input_dims,
             sub_hidden_dims=sub_hidden_dims,
             sub_output_dims=sub_output_dims,
+            hidden_distribution=hidden_distribution,
         )
         if result is not None:
             stage1_results.append(result)
@@ -689,6 +695,7 @@ def _run_winner_playoff(
             sub_input_dims=sub_input_dims,
             sub_hidden_dims=sub_hidden_dims,
             sub_output_dims=sub_output_dims,
+            hidden_distribution=hidden_distribution,
         )
         if result is None:
             continue
@@ -770,6 +777,14 @@ def load_train_config(path_value: str | Path) -> dict[str, object]:
     runtime_override = dict(payload.get("runtime_override") or {})
     runtime_override["opponent_policy"] = str(payload.get("opponent_policy") or "").strip()
     runtime_override["opponent_policy_mix"] = list(payload.get("opponent_policy_mix") or [])
+    hidden_distribution_payload = dict(payload.get("hidden_distribution") or {})
+    hidden_distribution = {
+        "play": max(0, int(hidden_distribution_payload.get("play", 10) or 0)),
+        "match": max(0, int(hidden_distribution_payload.get("match", 1) or 0)),
+        "option": max(0, int(hidden_distribution_payload.get("option", 4) or 0)),
+    }
+    if sum(int(hidden_distribution[key]) for key in ("play", "match", "option")) <= 0:
+        hidden_distribution = {"play": 10, "match": 1, "option": 4}
     return {
         "config_path": config_path,
         "runtime": runtime_path,
@@ -780,6 +795,7 @@ def load_train_config(path_value: str | Path) -> dict[str, object]:
         "checkpoint_every": max(1, int(payload.get("checkpoint_every", 1) or 1)),
         "goal_fitness": float(payload.get("goal_fitness", 0.55) or 0.55),
         "sheet_width": max(1, int(payload.get("sheet_width", 26) or 26)),
+        "hidden_distribution": hidden_distribution,
         "species_threshold": float(payload.get("species_threshold", 3.5) or 3.5),
         "species_reproduction_threshold": float(payload.get("species_reproduction_threshold", 0.2) or 0.2),
         "candidate_pool_size": max(1, int(payload.get("candidate_pool_size", 20) or 20)),
@@ -824,18 +840,30 @@ def bootstrap_train_run(
     suffix = base_out.suffix or ".json"
     train_config["seed_tag"] = seed_label
     train_config["run_dir"] = run_dir
-    train_config["out"] = run_dir / f"{base_name}{suffix}"
-    train_config["winner_genome_out"] = run_dir / "winner_genome.pkl"
-    train_config["winner_eval_out"] = run_dir / "winner_eval.json"
-    train_config["winner_playoff_out"] = run_dir / "winner_playoff.json"
+    train_config["best_genome_dir"] = run_dir / "best_genome"
+    Path(train_config["best_genome_dir"]).mkdir(parents=True, exist_ok=True)
+    train_config["out"] = Path(train_config["best_genome_dir"]) / f"{base_name}{suffix}"
+    train_config["winner_genome_out"] = Path(train_config["best_genome_dir"]) / "winner_genome.pkl"
+    train_config["winner_eval_out"] = Path(train_config["best_genome_dir"]) / "winner_eval.json"
+    train_config["winner_playoff_out"] = Path(train_config["best_genome_dir"]) / "winner_playoff.json"
     train_config["run_summary_out"] = run_dir / "run_summary.json"
     train_config["eval_metrics_out"] = run_dir / "eval_metrics.ndjson"
     train_config["generation_metrics_out"] = run_dir / "generation_metrics.ndjson"
     train_config["lineage_out"] = run_dir / "lineage.ndjson"
     train_config["lineage_state_out"] = run_dir / "lineage_state.json"
-    train_config["winner_lineage_out"] = run_dir / "winner_lineage.json"
+    train_config["winner_lineage_out"] = Path(train_config["best_genome_dir"]) / "winner_lineage.json"
     train_config["checkpoints_dir"] = run_dir / "checkpoints"
     Path(train_config["checkpoints_dir"]).mkdir(parents=True, exist_ok=True)
+    for stale_path in (
+        train_config["out"],
+        train_config["winner_genome_out"],
+        train_config["winner_eval_out"],
+        train_config["winner_playoff_out"],
+        train_config["winner_lineage_out"],
+    ):
+        stale_target = Path(stale_path)
+        if stale_target.exists():
+            stale_target.unlink()
 
     effective_config = {
         "format_version": TRAIN_CONFIG_FORMAT,
@@ -848,6 +876,7 @@ def bootstrap_train_run(
         "checkpoint_every": int(train_config["checkpoint_every"]),
         "goal_fitness": float(train_config["goal_fitness"]),
         "sheet_width": int(train_config["sheet_width"]),
+        "hidden_distribution": dict(train_config["hidden_distribution"]),
         "species_threshold": float(train_config["species_threshold"]),
         "species_reproduction_threshold": float(train_config["species_reproduction_threshold"]),
         "candidate_pool_size": int(train_config["candidate_pool_size"]),
@@ -857,6 +886,7 @@ def bootstrap_train_run(
         "runtime_override": dict(train_config["runtime_override"]),
         "runtime_settings": dict(runtime_settings),
         "seed_tag": str(train_config["seed_tag"]),
+        "best_genome_dir": str(Path(train_config["best_genome_dir"]).resolve()),
         "out": str(Path(train_config["out"]).resolve()),
         "bootstrap_seed_genome": (
             str(Path(bootstrap_seed_genome).resolve())
@@ -908,7 +938,9 @@ def main() -> None:
     lineage_path = Path(train_config["lineage_out"])
     lineage_state_path = Path(train_config["lineage_state_out"])
     checkpoints_dir = Path(train_config["checkpoints_dir"])
+    hidden_distribution = dict(train_config["hidden_distribution"])
 
+    sub_input_dims = [1, MATGO_INPUT_COUNT]
     sub_hidden_dims = [1, int(train_config["sheet_width"])]
     sub_output_dims = MATGO_OUTPUT_COUNT
 
@@ -969,9 +1001,10 @@ def main() -> None:
                 runtime_settings,
                 games=int(train_config["games_per_genome"]),
                 seed=eval_seed,
-                sub_input_dims=[],
+                sub_input_dims=sub_input_dims,
                 sub_hidden_dims=sub_hidden_dims,
                 sub_output_dims=sub_output_dims,
+                hidden_distribution=hidden_distribution,
             )
             genome.fitness = float(fitness)
             record = _build_eval_record(
@@ -1067,7 +1100,6 @@ def main() -> None:
         "population_size": int(train_config["population_size"]),
         "checkpoint_every": int(train_config["checkpoint_every"]),
     }
-    start_summary.update(_runtime_opponent_summary(runtime_settings))
     if resume_path is not None:
         start_summary["resume_path"] = str(Path(resume_path).resolve())
     print(json.dumps(start_summary, ensure_ascii=False))
@@ -1093,61 +1125,78 @@ def main() -> None:
         reverse=True,
     )
 
-    winner_playoff = _run_winner_playoff(
-        candidate_entries,
-        playoff_runtime_settings,
-        seed_tag=str(train_config["seed_tag"]),
-        sub_input_dims=[],
-        sub_hidden_dims=sub_hidden_dims,
-        sub_output_dims=sub_output_dims,
-    )
+    winner_playoff = None
+    selected_winner = None
+    final_eval_games = None
+    winner_fitness = None
+    winner_summary: dict[str, object] = {}
+    winner_meta: dict[str, object] = {}
+    winner_selection_mode = "no_full_eval_candidate"
+    winner_seed_used = None
 
-    selected_winner = winner_genome
-    if winner_playoff is not None and winner_playoff.get("winner_genome") is not None:
-        selected_winner = winner_playoff["winner_genome"]
-    elif candidate_entries:
-        selected_winner = candidate_entries[0]["genome"]
-
-    final_eval_games = int(train_config["games_per_genome"])
-    if winner_playoff is not None:
-        final_eval_games = max(
-            final_eval_games,
-            int(playoff_runtime_settings.get("winner_playoff_stage2_games", final_eval_games) or final_eval_games),
+    if candidate_entries:
+        winner_playoff = _run_winner_playoff(
+            candidate_entries,
+            playoff_runtime_settings,
+            seed_tag=str(train_config["seed_tag"]),
+            sub_input_dims=sub_input_dims,
+            sub_hidden_dims=sub_hidden_dims,
+            sub_output_dims=sub_output_dims,
+            hidden_distribution=hidden_distribution,
         )
 
-    winner_fitness, winner_summary, winner_meta = _evaluate_genome(
-        selected_winner,
-        playoff_runtime_settings,
-        games=final_eval_games,
-        seed=f"{train_config['seed_tag']}|winner",
-        sub_input_dims=[],
-        sub_hidden_dims=sub_hidden_dims,
-        sub_output_dims=sub_output_dims,
-    )
+        selected_winner = winner_genome
+        if winner_playoff is not None and winner_playoff.get("winner_genome") is not None:
+            selected_winner = winner_playoff["winner_genome"]
+            winner_selection_mode = "topk_fresh_seed_playoff"
+        else:
+            selected_winner = candidate_entries[0]["genome"]
+            winner_selection_mode = "selection_fitness"
 
-    save_runtime_model(winner_meta["runtime_model"], train_config["out"])
-    with Path(train_config["winner_genome_out"]).open("wb") as handle:
-        pickle.dump(selected_winner, handle)
-    Path(train_config["winner_eval_out"]).write_text(
-        json.dumps(
-            {
-                "fitness": float(winner_fitness),
-                "summary": winner_summary,
-                "seed_used": f"{train_config['seed_tag']}|winner",
-                "games": int(final_eval_games),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    if winner_playoff is not None:
-        Path(train_config["winner_playoff_out"]).write_text(
-            json.dumps(winner_playoff["summary"], indent=2),
+        final_eval_games = int(train_config["games_per_genome"])
+        if winner_playoff is not None:
+            final_eval_games = max(
+                final_eval_games,
+                int(playoff_runtime_settings.get("winner_playoff_stage2_games", final_eval_games) or final_eval_games),
+            )
+
+        winner_seed_used = f"{train_config['seed_tag']}|winner"
+        winner_fitness, winner_summary, winner_meta = _evaluate_genome(
+            selected_winner,
+            playoff_runtime_settings,
+            games=final_eval_games,
+            seed=winner_seed_used,
+            sub_input_dims=sub_input_dims,
+            sub_hidden_dims=sub_hidden_dims,
+            sub_output_dims=sub_output_dims,
+            hidden_distribution=hidden_distribution,
+        )
+
+        save_runtime_model(winner_meta["runtime_model"], train_config["out"])
+        with Path(train_config["winner_genome_out"]).open("wb") as handle:
+            pickle.dump(selected_winner, handle)
+        Path(train_config["winner_eval_out"]).write_text(
+            json.dumps(
+                {
+                    "fitness": float(winner_fitness),
+                    "summary": winner_summary,
+                    "seed_used": winner_seed_used,
+                    "games": int(final_eval_games),
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
+        if winner_playoff is not None:
+            Path(train_config["winner_playoff_out"]).write_text(
+                json.dumps(winner_playoff["summary"], indent=2),
+                encoding="utf-8",
+            )
 
     lineage_state = _write_lineage_state(lineage_state_path, population)
-    winner_lineage = _build_winner_lineage_export(lineage_state, int(getattr(selected_winner, "key", -1)))
+    winner_lineage = None
+    if selected_winner is not None:
+        winner_lineage = _build_winner_lineage_export(lineage_state, int(getattr(selected_winner, "key", -1)))
     if winner_lineage is not None:
         Path(train_config["winner_lineage_out"]).write_text(
             json.dumps(winner_lineage, ensure_ascii=False, indent=2),
@@ -1162,7 +1211,7 @@ def main() -> None:
     if winner_generation is None:
         for entry in candidate_entries:
             record = dict(entry.get("record") or {})
-            if int(_safe_float(record.get("genome_key"), -1)) == int(getattr(selected_winner, "key", -1)):
+            if selected_winner is not None and int(_safe_float(record.get("genome_key"), -1)) == int(getattr(selected_winner, "key", -1)):
                 winner_generation = record.get("generation")
                 break
 
@@ -1171,12 +1220,13 @@ def main() -> None:
         "seed": str(args.seed),
         "config_path": str(Path(train_config["config_path"]).resolve()),
         "run_dir": str(run_dir.resolve()),
-        "runtime_model_path": str(Path(train_config["out"]).resolve()),
-        "winner_genome_path": str(Path(train_config["winner_genome_out"]).resolve()),
-        "winner_eval_path": str(Path(train_config["winner_eval_out"]).resolve()),
+        "best_genome_dir": str(Path(train_config["best_genome_dir"]).resolve()),
+        "runtime_model_path": (str(Path(train_config["out"]).resolve()) if selected_winner is not None else None),
+        "winner_genome_path": (str(Path(train_config["winner_genome_out"]).resolve()) if selected_winner is not None else None),
+        "winner_eval_path": (str(Path(train_config["winner_eval_out"]).resolve()) if selected_winner is not None else None),
         "winner_playoff_path": (
             str(Path(train_config["winner_playoff_out"]).resolve())
-            if winner_playoff is not None
+            if winner_playoff is not None and selected_winner is not None
             else None
         ),
         "eval_metrics_path": str(eval_metrics_path.resolve()),
@@ -1202,11 +1252,15 @@ def main() -> None:
             else None
         ),
         "bootstrap_seed_genome_count": int(bootstrap_seed_genome_count),
-        "winner_fitness": float(winner_fitness),
-        "winner_win_rate": _safe_float(winner_summary.get("win_rate_a"), 0.0),
-        "winner_mean_gold_delta": _safe_float(winner_summary.get("mean_gold_delta_a"), 0.0),
-        "winner_games": int(_safe_float(winner_summary.get("games"), 0.0)),
+        "winner_fitness": (float(winner_fitness) if winner_fitness is not None else None),
+        "winner_win_rate": (_safe_float(winner_summary.get("win_rate_a"), 0.0) if selected_winner is not None else None),
+        "winner_mean_gold_delta": (
+            _safe_float(winner_summary.get("mean_gold_delta_a"), 0.0) if selected_winner is not None else None
+        ),
+        "winner_games": (int(_safe_float(winner_summary.get("games"), 0.0)) if selected_winner is not None else None),
         "winner_playoff": (winner_playoff["summary"] if winner_playoff is not None else None),
+        "winner_selection_mode": winner_selection_mode,
+        "full_eval_candidate_count": len(candidate_entries),
         "runtime_effective": runtime_settings,
     }
     Path(train_config["run_summary_out"]).write_text(
@@ -1218,16 +1272,16 @@ def main() -> None:
         "run_dir": str(run_dir.resolve()),
         "run_summary": str(Path(train_config["run_summary_out"]).resolve()),
         "winner_generation": (int(winner_generation) if winner_generation is not None else None),
-        "best_fitness": float(winner_fitness),
-        "win_rate": _safe_float(winner_summary.get("win_rate_a"), 0.0),
-        "mean_gold_delta": _safe_float(winner_summary.get("mean_gold_delta_a"), 0.0),
-        "go_take_rate": _safe_optional_float(winner_summary.get("go_take_rate_a")),
-        "go_fail_rate": _safe_optional_float(winner_summary.get("go_fail_rate_a")),
-        "winner_selection_mode": (
-            "topk_fresh_seed_playoff" if winner_playoff is not None else "selection_fitness"
+        "best_fitness": (float(winner_fitness) if winner_fitness is not None else None),
+        "win_rate": (_safe_float(winner_summary.get("win_rate_a"), 0.0) if selected_winner is not None else None),
+        "mean_gold_delta": (
+            _safe_float(winner_summary.get("mean_gold_delta_a"), 0.0) if selected_winner is not None else None
         ),
-        "winner_runtime": str(Path(train_config["out"]).resolve()),
-        "winner_genome": str(Path(train_config["winner_genome_out"]).resolve()),
+        "go_take_rate": (_safe_optional_float(winner_summary.get("go_take_rate_a")) if selected_winner is not None else None),
+        "go_fail_rate": (_safe_optional_float(winner_summary.get("go_fail_rate_a")) if selected_winner is not None else None),
+        "winner_selection_mode": winner_selection_mode,
+        "winner_runtime": (str(Path(train_config["out"]).resolve()) if selected_winner is not None else None),
+        "winner_genome": (str(Path(train_config["winner_genome_out"]).resolve()) if selected_winner is not None else None),
     }
     print(json.dumps(console_summary, ensure_ascii=False))
 

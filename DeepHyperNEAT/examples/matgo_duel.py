@@ -12,9 +12,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from deep_hyperneat.genome import Genome
+from deep_hyperneat.decode import decode
 from deep_hyperneat.matgo_runtime import (
+    MATGO_INPUT_COUNT,
     MATGO_OUTPUT_COUNT,
-    decode_matgo_substrate,
     evaluate_substrate,
     load_runtime_settings,
     save_runtime_model,
@@ -56,7 +57,6 @@ def load_duel_config(path_value: str | Path) -> dict[str, object]:
     config_dir = config_path.parent
     runtime_path = _resolve_path(str(payload.get("runtime") or ""), config_dir=config_dir)
     out_path = _resolve_path(str(payload.get("out") or ""), config_dir=config_dir)
-
     return {
         "config_path": config_path,
         "runtime": runtime_path,
@@ -74,7 +74,7 @@ def main() -> None:
 
     genome = Genome(0)
     cppn = CPPN.create(genome)
-    substrate = decode_matgo_substrate(cppn, hidden_node_count=int(duel_config["sheet_width"]))
+    substrate = decode(cppn, [1, MATGO_INPUT_COUNT], MATGO_OUTPUT_COUNT, [1, int(duel_config["sheet_width"])])
 
     fitness, summary, meta = evaluate_substrate(
         substrate,

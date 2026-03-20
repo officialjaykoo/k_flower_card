@@ -16,6 +16,7 @@ import {
 } from "./kHyperneatExecutor.js";
 import {
   encodeMatgoStateToKHyperneatInputs,
+  encodeMatgoFocusedCandidateInputs,
   getMatgoKHyperneatOutputBindings,
 } from "./kHyperneatMatgoAdapter.js";
 
@@ -1659,55 +1660,26 @@ function scoreCandidateWithOracle(state, actor, compiled, outputs, decisionType,
   };
 }
 
-function cardMonthById(state, actor, cardId) {
-  const targetId = String(cardId || "");
-  for (const card of state?.players?.[actor]?.hand || []) {
-    if (String(card?.id || "") === targetId) return Number(card?.month || 0);
-  }
-  return 0;
-}
-
-function buildKHyperneatPlayScoreMap(state, actor, bindings, outputs, candidates) {
+function buildKHyperneatActionScoreBundle(state, actor, compiled, bindings, decisionType, candidates) {
   const scoreMap = new Map();
-  const playByCardId = new Map();
-  for (const entry of bindings.playSlots || []) {
-    if (!entry?.cardId) continue;
-    playByCardId.set(String(entry.cardId), Number(outputs[entry.outputIndex] || -Infinity));
-  }
-
+  const actionIndex = Number(bindings?.actionIndex ?? -1);
+  let firstInputs = null;
+  let firstOutputs = null;
   for (const candidate of candidates) {
-    const special = parsePlaySpecialCandidate(candidate);
-    if (special?.kind === "shake_start") {
-      scoreMap.set(candidate, Number(playByCardId.get(String(special.cardId || "")) || -Infinity));
-      continue;
+    const inputs = encodeMatgoFocusedCandidateInputs(state, actor, compiled, decisionType, candidate);
+    const outputs = runKHyperneatExecutor(compiled, inputs);
+    if (!firstInputs) {
+      firstInputs = inputs;
+      firstOutputs = outputs;
     }
-    if (special?.kind === "bomb") {
-      let best = -Infinity;
-      for (const [cardId, score] of playByCardId.entries()) {
-        if (cardMonthById(state, actor, cardId) === Number(special.month || 0)) {
-          best = Math.max(best, Number(score || -Infinity));
-        }
-      }
-      scoreMap.set(candidate, best);
-      continue;
-    }
-    scoreMap.set(candidate, Number(playByCardId.get(String(candidate || "")) || -Infinity));
+    const score = actionIndex >= 0 ? Number(outputs[actionIndex] || -Infinity) : -Infinity;
+    scoreMap.set(candidate, score);
   }
-
-  return scoreMap;
-}
-
-function buildKHyperneatMatchScoreMap(bindings, outputs, candidates) {
-  const scoreMap = new Map();
-  const matchByCardId = new Map();
-  for (const entry of bindings.matchSlots || []) {
-    if (!entry?.cardId) continue;
-    matchByCardId.set(String(entry.cardId), Number(outputs[entry.outputIndex] || -Infinity));
-  }
-  for (const candidate of candidates) {
-    scoreMap.set(candidate, Number(matchByCardId.get(String(candidate || "")) || -Infinity));
-  }
-  return scoreMap;
+  return {
+    inputs: firstInputs || [],
+    outputs: firstOutputs || [],
+    scoreMap,
+  };
 }
 
 function buildKHyperneatOptionScoreMap(bindings, outputs, candidates) {
@@ -1726,24 +1698,15 @@ function buildKHyperneatOptionScoreMap(bindings, outputs, candidates) {
 }
 
 function buildKHyperneatCandidateScoreBundle(state, actor, compiled, decisionType, candidates) {
-  const inputs = encodeMatgoStateToKHyperneatInputs(state, actor, compiled);
-  const outputs = runKHyperneatExecutor(compiled, inputs);
   const bindings = getMatgoKHyperneatOutputBindings(state, actor, compiled);
-  if (decisionType === "play") {
-    return {
-      inputs,
-      outputs,
-      scoreMap: buildKHyperneatPlayScoreMap(state, actor, bindings, outputs, candidates),
-    };
-  }
-  if (decisionType === "match") {
-    return {
-      inputs,
-      outputs,
-      scoreMap: buildKHyperneatMatchScoreMap(bindings, outputs, candidates),
-    };
+  if (decisionType === "play" || decisionType === "match") {
+    return buildKHyperneatActionScoreBundle(state, actor, compiled, bindings, decisionType, candidates);
   }
   if (decisionType === "option") {
+    const inputs = encodeMatgoStateToKHyperneatInputs(state, actor, compiled, {
+      decisionType,
+    });
+    const outputs = runKHyperneatExecutor(compiled, inputs);
     return {
       inputs,
       outputs,

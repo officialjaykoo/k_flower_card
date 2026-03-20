@@ -124,18 +124,24 @@ MONTH_SLOT_COUNT = 13
 MONTH_XS = tuple(-1.0 + (2.0 * index / float(MONTH_SLOT_COUNT - 1)) for index in range(MONTH_SLOT_COUNT))
 TYPE_XS = (-0.85, -0.5, -0.15, 0.15, 0.5, 0.85)
 COMBO_XS = (-0.8, -0.4, 0.0, 0.4, 0.8)
-PUBLIC_XS = (-0.9, -0.54, -0.18, 0.18, 0.54, 0.9)
 RULE_GROUP_XS = (-0.9, -0.64, -0.38, -0.12, 0.12, 0.38, 0.64, 0.9)
 OPTION_XS = (-0.54, -0.18, 0.18, 0.54)
+MATCH_XS = (0.0,)
 
 HAND_SLOT_COUNT = 10
 BOARD_SLOT_COUNT = MONTH_SLOT_COUNT
 CAPTURED_SLOT_COUNT = MONTH_SLOT_COUNT
+DEFAULT_HIDDEN_DISTRIBUTION = {
+    "play": 10,
+    "match": 1,
+    "option": 4,
+}
 
 MATGO_INPUT_SPECS = (
-    {"kind": "input_public", "index": 0, "slot_count": 6},
     {"kind": "input_rule_score", "index": 0, "slot_count": len(RULE_SCORE_FEATURES)},
+    {"kind": "input_decision_type", "index": 0, "slot_count": 3},
     *tuple({"kind": f"input_hand_{feature}", "index": 0, "slot_count": HAND_SLOT_COUNT} for feature in CARD_INPUT_FEATURES),
+    *tuple({"kind": f"input_focus_{feature}", "index": 0, "slot_count": 1} for feature in CARD_INPUT_FEATURES),
     {"kind": "input_board_month_bin", "index": 0, "slot_count": BOARD_SLOT_COUNT},
     {"kind": "input_board_type_bin", "index": 0, "slot_count": 6},
     {"kind": "input_board_combo_bin", "index": 0, "slot_count": 5},
@@ -148,8 +154,7 @@ MATGO_INPUT_SPECS = (
 )
 
 MATGO_OUTPUT_SPECS = (
-    {"kind": "output_play", "index": 0, "slot_count": 10},
-    {"kind": "output_match", "index": 0, "slot_count": BOARD_SLOT_COUNT},
+    {"kind": "output_play", "index": 0, "slot_count": 1},
     {"kind": "output_option", "index": 0, "slot_count": 4},
 )
 
@@ -225,10 +230,10 @@ def _rule_score_points(y: float) -> list[tuple[float, float]]:
 def _input_points_for_spec(spec: dict[str, Any]) -> list[tuple[float, float]]:
     kind = str(spec.get("kind") or "")
     slot_count = max(0, int(spec.get("slot_count", 0) or 0))
-    if kind == "input_public":
-        return [(float(x), 1.0) for x in PUBLIC_XS[:slot_count]]
     if kind == "input_rule_score":
         return _rule_score_points(0.88)[:slot_count]
+    if kind == "input_decision_type":
+        return _row_points(slot_count, 0.82, x_start=-0.2, x_end=0.2)
     if kind.startswith("input_hand_"):
         feature_name = kind[len("input_hand_") :]
         feature_index = CARD_INPUT_FEATURES.index(feature_name)
@@ -238,6 +243,15 @@ def _input_points_for_spec(spec: dict[str, Any]) -> list[tuple[float, float]]:
             step = (0.76 - 0.56) / float(len(CARD_INPUT_FEATURES) - 1)
             y = 0.76 - (step * feature_index)
         return _row_points(slot_count, y)
+    if kind.startswith("input_focus_"):
+        feature_name = kind[len("input_focus_") :]
+        feature_index = CARD_INPUT_FEATURES.index(feature_name)
+        if len(CARD_INPUT_FEATURES) <= 1:
+            y = 0.52
+        else:
+            step = (0.52 - 0.32) / float(len(CARD_INPUT_FEATURES) - 1)
+            y = 0.52 - (step * feature_index)
+        return _row_points(slot_count, y, x_start=0.0, x_end=0.0)
     if kind == "input_board_month_bin":
         return [(float(x), 0.46) for x in MONTH_XS[:slot_count]]
     if kind == "input_board_type_bin":
@@ -264,8 +278,6 @@ def _output_points_for_spec(spec: dict[str, Any]) -> list[tuple[float, float]]:
     slot_count = max(0, int(spec.get("slot_count", 0) or 0))
     if kind == "output_play":
         return _row_points(slot_count, -0.84)
-    if kind == "output_match":
-        return [(float(x), -0.92) for x in MONTH_XS[:slot_count]]
     if kind == "output_option":
         return [(float(x), -1.00) for x in OPTION_XS[:slot_count]]
     return _row_points(slot_count, -0.90)
@@ -287,16 +299,32 @@ def _distribute_counts(total: int, ratios: tuple[int, ...]) -> list[int]:
     return counts
 
 
-def _build_hidden_points(total_hidden_nodes: int) -> list[tuple[float, float]]:
-    play_count, match_count, option_count = _distribute_counts(int(total_hidden_nodes), (10, 12, 4))
+def _normalize_hidden_distribution(raw: Any) -> tuple[int, int, int]:
+    source = dict(raw or {}) if isinstance(raw, dict) else {}
+    play = max(0, int(source.get("play", DEFAULT_HIDDEN_DISTRIBUTION["play"]) or 0))
+    match = max(0, int(source.get("match", DEFAULT_HIDDEN_DISTRIBUTION["match"]) or 0))
+    option = max(0, int(source.get("option", DEFAULT_HIDDEN_DISTRIBUTION["option"]) or 0))
+    if (play + match + option) <= 0:
+        play = int(DEFAULT_HIDDEN_DISTRIBUTION["play"])
+        match = int(DEFAULT_HIDDEN_DISTRIBUTION["match"])
+        option = int(DEFAULT_HIDDEN_DISTRIBUTION["option"])
+    return play, match, option
+
+
+def _build_hidden_points(total_hidden_nodes: int, hidden_distribution: Any = None) -> list[tuple[float, float]]:
+    play_weight, match_weight, option_weight = _normalize_hidden_distribution(hidden_distribution)
+    play_count, match_count, option_count = _distribute_counts(
+        int(total_hidden_nodes),
+        (play_weight, match_weight, option_weight),
+    )
     return (
         _row_points(play_count, -0.42)
-        + _row_points(match_count, -0.56)
+        + _row_points(match_count, -0.56, x_start=-0.35, x_end=0.35)
         + _row_points(option_count, -0.70, x_start=-0.7, x_end=0.7)
     )
 
 
-def decode_matgo_substrate(cppn: Any, hidden_node_count: int = 26) -> Any:
+def decode_matgo_substrate(cppn: Any, hidden_node_count: int = 26, hidden_distribution: Any = None) -> Any:
     input_layer: list[tuple[float, float]] = []
     for spec in MATGO_INPUT_SPECS:
         input_layer.extend(_input_points_for_spec(spec))
@@ -310,7 +338,10 @@ def decode_matgo_substrate(cppn: Any, hidden_node_count: int = 26) -> Any:
     if len(output_layer) != MATGO_OUTPUT_COUNT:
         raise RuntimeError(f"matgo grouped decode expected {MATGO_OUTPUT_COUNT} output points, got {len(output_layer)}")
 
-    hidden_points = _build_hidden_points(max(1, int(hidden_node_count)))
+    hidden_points = _build_hidden_points(
+        max(1, int(hidden_node_count)),
+        hidden_distribution=hidden_distribution,
+    )
 
     connection_mappings = [cppn.nodes[x].cppn_tuple for x in cppn.output_nodes if cppn.nodes[x].cppn_tuple[0] != (1, 1)]
     hidden_sheets = {cppn.nodes[node].cppn_tuple[0] for node in cppn.output_nodes}
