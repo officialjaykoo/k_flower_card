@@ -2,14 +2,14 @@ from pathlib import Path
 import sys
 
 EXPERIMENT_ROOT = Path(__file__).resolve().parent
-CORE_ROOT = EXPERIMENT_ROOT.parent / "k_hyperneat_py"
-if str(CORE_ROOT) not in sys.path:
-    sys.path.insert(0, str(CORE_ROOT))
+FORK_ROOT = EXPERIMENT_ROOT.parents[1] / "Des-HyperNEAT-Python"
+if str(FORK_ROOT) not in sys.path:
+    sys.path.insert(0, str(FORK_ROOT))
 if str(EXPERIMENT_ROOT) not in sys.path:
     sys.path.insert(0, str(EXPERIMENT_ROOT))
 
-from k_hyperneat import DesDeveloper, DesHyperneatConfig
-from local.matgo_topology import build_minimal_matgo_topology
+from deshyperneat import Config, Developer
+from local.matgo.topology import build_minimal_matgo_topology
 
 
 class GradientCppn:
@@ -44,9 +44,19 @@ class StaticGenome:
         _ = substrate
         return 0
 
+    def get_link_outer_weight(self, source, target):
+        _ = source
+        _ = target
+        return 1.0
+
+    def get_link_identity_mapping(self, source, target):
+        _ = source
+        _ = target
+        return False
+
 
 def main():
-    graph = DesDeveloper(DesHyperneatConfig()).develop(StaticGenome())
+    graph = Developer(Config()).develop(StaticGenome())
     print({"nodes": len(graph.nodes), "edges": len(graph.edges)})
 
 

@@ -12,9 +12,6 @@ npm run dev
 ## Run by Goal
 - NEAT train: `npm run neat:run -- -Phase 1 -Seed 9`
 - NEAT eval: `npm run neat:eval -- -Phase 1 -Seed 9`
-- NEAT train (GPT variant): `npm run neat:run:gpt -- -Seed 9`
-- NEAT eval (GPT variant): `npm run neat:eval:gpt -- -Seed 9`
-- NEAT duel (GPT variant): `npm run neat:duel:gpt -- -Human H-CL -Ai runtime_focus_cl_v1_seed9`
 
 ## Environment
 - OS: Windows (PowerShell scripts are first-class entry points)
@@ -33,8 +30,6 @@ pip install neat-python optuna
 
 ## Outputs
 - NEAT outputs: `logs/NEAT/neat_phase{1|2|3}_seed{N}/` (`checkpoints/`, `run_summary.json`, `gate_state.json`, `phase*_eval_1000.json`)
-- NEAT GPT outputs: `logs/NEAT_GPT/*` (`models/winner_genome.json`, `run_summary.json`, `eval_*.json`, `eval_*_pass.json`)
-- NEAT GPT duel outputs: `logs/NEAT_GPT/duels/*`
 - Duel outputs: `logs/model_duel/*`
 
 ## Troubleshooting
@@ -48,13 +43,11 @@ pip install neat-python optuna
 - `scripts/`: base/shared NEAT orchestration/evaluation scripts
 - `scripts/configs/`: base NEAT runtime/config files
 - `heuristic_tuning/`: heuristic tuning tools (`optuna_cl.py`, `optuna_gemini.py`, `optuna_nexg.py`, `optuna_gpt.py`, `optimizer_gpt.mjs`, `analyze_anticl_results_gpt.mjs`, `tune_anticl_go_gpt.mjs`)
-- `neat_by_GPT/`: self-contained GPT-specific NEAT pipeline (`run.ps1`, `eval.ps1`, `scripts/`, `configs/`)
 - `logs/`: training and evaluation outputs
 
 ## Document SoT
 - Agent behavior and guardrails: `AGENT_RULES.md`
 - Game rules source: `docs/rules/GAME_RULES.md`
 - NEAT source-of-truth runbook: `docs/neat/README.md`
-- GPT NEAT self-contained runbook: `neat_by_GPT/README.md`
 
 

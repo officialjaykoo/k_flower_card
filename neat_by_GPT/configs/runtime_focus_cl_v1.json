@@ -1,5 +1,0 @@
-{
-  "extends": "./runtime_base_v1.json",
-  "format_version": "neat_gpt_runtime_focus_cl_v1",
-  "fitness_profile": "focus"
-}

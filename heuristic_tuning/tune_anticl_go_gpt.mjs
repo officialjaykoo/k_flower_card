@@ -233,7 +233,7 @@ async function runTrial(cfg, candidate, trialIndex, totalTrials, outDir) {
   const baseEnv = { ...process.env, HEURISTIC_ANTICL_PARAMS: paramsEnv };
 
   const duelAArgs = [
-    resolve("neat_by_GPT/scripts/model_duel_worker.mjs"),
+    resolve("scripts/model_duel_worker.mjs"),
     "--human", "H-AntiCL",
     "--ai", cfg.opponent,
     "--games", String(cfg.games),
@@ -245,7 +245,7 @@ async function runTrial(cfg, candidate, trialIndex, totalTrials, outDir) {
   ];
 
   const duelBArgs = [
-    resolve("neat_by_GPT/scripts/model_duel_worker.mjs"),
+    resolve("scripts/model_duel_worker.mjs"),
     "--human", cfg.opponent,
     "--ai", "H-AntiCL",
     "--games", String(cfg.games),

@@ -353,10 +353,6 @@ if (-not (Test-Path $python)) {
 }
 
 if ($LineageProfile -eq "k-hyperneat") {
-  if ($BootstrapSeedSpec.Count -gt 0) {
-    throw "BootstrapSeedSpec is not supported for k-hyperneat"
-  }
-
   $runtimeConfig = "experiments/k_hyperneat_matgo/configs/runtime_phase${Phase}.json"
   if (-not (Test-Path $runtimeConfig)) {
     $runtimeConfig = "experiments/k_hyperneat_matgo/configs/runtime_phase1.json"
@@ -373,6 +369,13 @@ if ($LineageProfile -eq "k-hyperneat") {
     "--stdout-format", "json"
   )
 
+  if ($BootstrapSeedSpec.Count -gt 0) {
+    $bootstrapSpecs = @($BootstrapSeedSpec | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($bootstrapSpecs.Count -gt 0) {
+      throw "k-hyperneat topology_des backend no longer supports bootstrap seed specs"
+    }
+  }
+
   $phaseRunStartedAt = Get-Date
   $result = & $python @cmd | Out-String
   $phaseRunElapsedSec = [math]::Round(((Get-Date) - $phaseRunStartedAt).TotalSeconds, 3)
@@ -388,10 +391,25 @@ if ($LineageProfile -eq "k-hyperneat") {
     $summary = $result | ConvertFrom-Json
   }
   catch {
+    $jsonLine = $null
     if (-not [string]::IsNullOrWhiteSpace($result)) {
-      Write-Host $result.Trim()
+      $jsonLine = $result.Trim().Split([Environment]::NewLine, [System.StringSplitOptions]::RemoveEmptyEntries) |
+        Select-Object -Last 1
     }
-    throw "failed to parse k-hyperneat output as JSON"
+    try {
+      if (-not [string]::IsNullOrWhiteSpace($jsonLine)) {
+        $summary = $jsonLine | ConvertFrom-Json
+      }
+      else {
+        throw
+      }
+    }
+    catch {
+      if (-not [string]::IsNullOrWhiteSpace($result)) {
+        Write-Host $result.Trim()
+      }
+      throw "failed to parse k-hyperneat output as JSON"
+    }
   }
 
   $runSummaryPath = [string](Get-PropertyValue -Object $summary -Name "run_summary")

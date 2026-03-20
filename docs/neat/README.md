@@ -73,7 +73,6 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 - `generations`, `eval_workers`, `games_per_genome`
 - `max_eval_steps`, `eval_timeout_sec`
 - `opponent_policy`, (`opponent_genome` when policy=`genome`)
-- `split_head_output0_inputs`, `split_head_output1_inputs` (둘 다 채우면 vendor/neat에서 output별 허용 입력을 강제한다)
 - `fitness_gold_scale`, `fitness_gold_neutral_delta`, `fitness_win_weight`, `fitness_gold_weight`, `fitness_win_neutral_rate`
 - `gate_mode`, `gate_ema_window`, `transition_*`, `failure_*`
 
@@ -212,31 +211,19 @@ node scripts/model_duel_worker.mjs --human heuristic_h_cl --ai phase3_seed5 --ga
 - 다만 라이브러리 기본 루프는 여전히 scalar `fitness` 중심이므로, 진짜 2축 selection은 `Reproduction`만이 아니라 `Population.run` 또는 수동 generation loop까지 손볼 가능성이 있다.
 
 현재 repo 기준 1차 방향:
-- `stock neat-python 2.0` 위에 genome-level decision parameter만 얹는다.
-- 현재 반영된 파라미터:
-  - `go_stop_threshold`
-  - `shaking_threshold`
-  - `president_threshold`
-  - `gukjin_threshold`
-- 이 4개는 `vendor/neat/genome.py`의 per-genome scalar attribute로 추가되어 있고, export 시 `decision_params`에 저장된다.
-- 런타임은 `src/ai/modelPolicyEngine.js`에서 typed decision pair를 해석할 때 threshold를 사용한다.
+- `stock neat-python 2.0.0`을 그대로 사용한다.
+- 별도 `vendor/neat` 포크나 genome-level decision threshold는 더 이상 쓰지 않는다.
+- 런타임은 `src/ai/modelPolicyEngine.js`에서 모델 출력 2개(`action_score`, `option_bias`)를 읽고, threshold가 없으면 기본값 `0`으로 처리한다.
 
 현재 output head 기준:
 - `play`
 - `match`
-- `go`
-- `stop`
-- `shaking_yes`
-- `shaking_no`
-- `president_stop`
-- `president_hold`
-- `gukjin_five`
-- `gukjin_junk`
+- `option_bias`
 
 의미:
 - `play`와 `match`는 일반 candidate scoring head다.
-- `go/stop`, `shaking yes/no`, `president stop/hold`, `gukjin five/junk`는 각각 대응하는 threshold gene으로 최종 선택 경계를 조정한다.
-- 즉 지금 단계는 `CustomGenome + typed output heads`까지 반영된 상태다.
+- option 계열은 별도 threshold gene 없이 `option_bias` 부호와 후처리 규칙으로 해석한다.
+- 하이브리드 경로에서는 `H-CL`이 option phase를 주도하므로, 모델 쪽 threshold margin이 없어도 동작한다.
 
 다음 확장 우선순위:
 1. `CustomReproduction`

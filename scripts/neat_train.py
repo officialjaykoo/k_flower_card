@@ -36,9 +36,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VENDOR_DIR = os.path.join(REPO_ROOT, "vendor")
-if os.path.isdir(os.path.join(VENDOR_DIR, "neat")) and VENDOR_DIR not in sys.path:
-    sys.path.insert(0, VENDOR_DIR)
 
 try:
     import neat  # type: ignore
@@ -259,42 +256,6 @@ def _parse_early_stop_win_rate_cutoffs(raw_value: object) -> list:
     return out
 
 
-def _parse_split_head_inputs(raw_value: object) -> list[int]:
-    if raw_value is None:
-        return []
-
-    source = []
-    if isinstance(raw_value, list):
-        source = raw_value
-    else:
-        text = str(raw_value).strip()
-        if not text:
-            return []
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, list):
-            source = parsed
-        else:
-            source = [item.strip() for item in text.split(",") if str(item).strip()]
-
-    out = []
-    seen = set()
-    for idx, item in enumerate(source):
-        try:
-            value = int(item)
-        except Exception as exc:
-            raise RuntimeError(f"split head input index must be integer at position {idx}") from exc
-        if value < 0:
-            raise RuntimeError(f"split head input index must be >= 0: {value}")
-        if value in seen:
-            continue
-        seen.add(value)
-        out.append(value)
-    return out
-
-
 def _parse_early_stop_go_take_rate_cutoffs(raw_value: object) -> list:
     if raw_value is None:
         return []
@@ -510,12 +471,6 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["feature_profile"] = str(cfg.get("feature_profile") or "race8").strip().lower()
     if cfg["feature_profile"] not in ("race2", "race5", "race6", "race7", "race8", "race20", "hand7", "hand10", "material10", "race10", "oracle10", "oracle10v2"):
         raise RuntimeError("runtime key 'feature_profile' must be one of: race2, race5, race6, race7, race8, race20, hand7, hand10, material10, race10, oracle10, oracle10v2")
-    cfg["split_head_output0_inputs"] = _parse_split_head_inputs(cfg.get("split_head_output0_inputs"))
-    cfg["split_head_output1_inputs"] = _parse_split_head_inputs(cfg.get("split_head_output1_inputs"))
-    if bool(cfg["split_head_output0_inputs"]) != bool(cfg["split_head_output1_inputs"]):
-        raise RuntimeError(
-            "runtime split head config requires both split_head_output0_inputs and split_head_output1_inputs"
-        )
     cfg["fitness_gold_scale"] = _required_float(cfg, "fitness_gold_scale")
     cfg["fitness_gold_neutral_delta"] = _required_float(cfg, "fitness_gold_neutral_delta")
     cfg["fitness_win_weight"] = _required_float(cfg, "fitness_win_weight")
@@ -753,21 +708,6 @@ def _export_neat_python_genome(genome, config, runtime: Optional[dict] = None) -
             }
         )
 
-    decision_params = {}
-    for name in ("go_stop_threshold", "shaking_threshold", "president_threshold", "gukjin_threshold"):
-        if hasattr(genome, name):
-            decision_params[name] = float(getattr(genome, name, 0.0) or 0.0)
-
-    split_head_spec = None
-    if bool(getattr(gcfg, "_codex_head_split_enabled", False)):
-        split_head_spec = {
-            "enabled": True,
-            "output_inputs": {
-                str(int(key)): [int(item) for item in list(value)]
-                for key, value in dict(getattr(gcfg, "_codex_head_input_indices_by_output", {}) or {}).items()
-            },
-        }
-
     return {
         "format_version": "neat_python_genome_v1",
         "input_keys": input_keys,
@@ -775,15 +715,9 @@ def _export_neat_python_genome(genome, config, runtime: Optional[dict] = None) -
         "feature_spec": {
             "profile": feature_profile,
             "base_features": len(input_keys),
-            "split_heads": split_head_spec,
         },
         "nodes": nodes,
         "connections": connections,
-        "decision_params": decision_params,
-        "node_heads": {
-            str(int(key)): int(value)
-            for key, value in dict(getattr(genome, "node_heads", {}) or {}).items()
-        },
     }
 
 
@@ -2382,49 +2316,6 @@ def _adapt_seed_genome_to_config(cfg, seed_genome, seed_path: str):
 
     pruned = copy.deepcopy(seed_genome)
     removed = 0
-    split_enabled = bool(getattr(cfg.genome_config, "_codex_head_split_enabled", False))
-    output_keys = {int(x) for x in getattr(cfg.genome_config, "output_keys", [])}
-    split_input_keys_by_output = {
-        int(key): {int(item) for item in value}
-        for key, value in dict(getattr(cfg.genome_config, "_codex_head_input_keys_by_output", {}) or {}).items()
-    }
-    node_heads = {
-        int(key): int(value)
-        for key, value in dict(getattr(pruned, "node_heads", {}) or {}).items()
-    }
-    if split_enabled:
-        hidden_nodes = [
-            int(node_key)
-            for node_key in getattr(pruned, "nodes", {})
-            if int(node_key) not in output_keys
-        ]
-        if hidden_nodes:
-            missing_heads = [node_key for node_key in hidden_nodes if node_key not in node_heads]
-            if missing_heads:
-                raise RuntimeError(
-                    "split-head bootstrap requires node head metadata; "
-                    f"seed genome is missing hidden node heads: {missing_heads[:8]}"
-                )
-
-    def _resolve_seed_node_head(node_key: int):
-        if node_key in output_keys:
-            return int(node_key)
-        return node_heads.get(int(node_key))
-
-    def _seed_connection_allowed(in_node: int, out_node: int) -> bool:
-        if out_node < 0:
-            return False
-        if not split_enabled:
-            return True
-        target_head = _resolve_seed_node_head(out_node)
-        if target_head is None:
-            return False
-        if in_node < 0:
-            return int(in_node) in split_input_keys_by_output.get(target_head, set())
-        if in_node in output_keys:
-            return False
-        source_head = _resolve_seed_node_head(in_node)
-        return source_head is not None and int(source_head) == int(target_head)
 
     for conn_key, conn_gene in list((getattr(pruned, "connections", {}) or {}).items()):
         try:
@@ -2445,7 +2336,7 @@ def _adapt_seed_genome_to_config(cfg, seed_genome, seed_path: str):
             del pruned.connections[conn_key]
             removed += 1
             continue
-        if not _seed_connection_allowed(in_node, out_node):
+        if out_node < 0:
             del pruned.connections[conn_key]
             removed += 1
 
@@ -2467,61 +2358,6 @@ def _seed_source_label_from_path(seed_path: str) -> str:
     if match:
         return f"phase{int(match.group(1))}_seed{int(match.group(2))}"
     return os.path.splitext(os.path.basename(raw_path))[0]
-
-
-def _apply_split_head_runtime(cfg, runtime: dict) -> None:
-    if cfg is None or not hasattr(cfg, "genome_config"):
-        return
-
-    gcfg = cfg.genome_config
-    output_keys = [int(key) for key in getattr(gcfg, "output_keys", [])]
-    out0 = [int(item) for item in list(runtime.get("split_head_output0_inputs") or [])]
-    out1 = [int(item) for item in list(runtime.get("split_head_output1_inputs") or [])]
-    enabled = bool(out0 or out1)
-
-    setattr(gcfg, "_codex_head_split_enabled", enabled)
-    setattr(gcfg, "_codex_head_input_indices_by_output", {})
-    setattr(gcfg, "_codex_head_input_keys_by_output", {})
-
-    if not enabled:
-        return
-
-    if len(output_keys) != 2 or output_keys != [0, 1]:
-        raise RuntimeError("split-head mode currently requires exactly two outputs: 0 and 1")
-    if int(getattr(gcfg, "num_hidden", 0) or 0) != 0:
-        raise RuntimeError("split-head mode requires num_hidden = 0 at initialization")
-
-    input_keys = [int(key) for key in getattr(gcfg, "input_keys", [])]
-    input_dim = len(input_keys)
-    if input_dim <= 0:
-        raise RuntimeError("split-head mode requires at least one input")
-
-    def _normalize_mask(items: list[int], label: str) -> list[int]:
-        normalized = []
-        seen = set()
-        for value in items:
-            idx = int(value)
-            if idx < 0 or idx >= input_dim:
-                raise RuntimeError(
-                    f"runtime key '{label}' contains out-of-range input index {idx} for input_dim={input_dim}"
-                )
-            if idx in seen:
-                continue
-            seen.add(idx)
-            normalized.append(idx)
-        if not normalized:
-            raise RuntimeError(f"runtime key '{label}' must contain at least one input index")
-        return normalized
-
-    out0 = _normalize_mask(out0, "split_head_output0_inputs")
-    out1 = _normalize_mask(out1, "split_head_output1_inputs")
-    input_indices_by_output = {0: out0, 1: out1}
-    input_keys_by_output = {
-        int(output_key): {int(input_keys[idx]) for idx in indices}
-        for output_key, indices in input_indices_by_output.items()
-    }
-    setattr(gcfg, "_codex_head_input_indices_by_output", input_indices_by_output)
-    setattr(gcfg, "_codex_head_input_keys_by_output", input_keys_by_output)
 
 
 def _normalize_seed_specs(cfg, seed_specs_raw: list) -> list[dict]:
@@ -3242,14 +3078,12 @@ def main() -> None:
     cfg = _build_config(args.config_feedforward)
     if len(cfg.genome_config.output_keys) != 2:
         raise RuntimeError("num_outputs must be 2 for action_score + option_bias threshold policy")
-    _apply_split_head_runtime(cfg, runtime)
 
     _set_eval_env(runtime, args.output_dir)
     runtime["output_dir"] = os.path.abspath(args.output_dir)
 
     if args.resume:
         p = _restore_population_from_checkpoint(args.resume)
-        _apply_split_head_runtime(p.config, runtime)
     elif seed_genome_specs:
         p = _seed_population_from_specs(cfg, neat.Population(cfg), _normalize_seed_specs(cfg, seed_genome_specs))
     elif seed_genome_path:

@@ -37,9 +37,7 @@ Recommended quick reading order for collaborators:
 
 5. Path and structure lock
 - Keep base/shared NEAT runtime/config files under `scripts/configs/`.
-- Keep GPT-specific NEAT runtime/config/entry files under `neat_by_GPT/`.
 - Keep PPO runtime/config files under `ppo_by_GPT/configs/` or `ppo_by_CL/configs/`.
-- Base/shared orchestration may live under `scripts/`, but GPT-specific entry scripts must live under `neat_by_GPT/`.
 - Prefer a single entry script with explicit required arguments over per-phase wrapper scripts when logic is shared.
 - Do not create or reference root-level `configs/` paths.
 - Use repository-relative paths consistently in scripts.
@@ -69,4 +67,53 @@ Recommended quick reading order for collaborators:
 - For routine low-risk tasks, provide the recommendation and execute directly.
 - For high-risk tasks, warn clearly, provide 1-2 safer alternatives, and wait for explicit user override.
 - Do not hide behind neutral/middle-ground wording when evidence supports a strong recommendation.
+
+11. PowerShell invocation and argument passing
+- When the user is already inside PowerShell, prefer direct script invocation with `& .\scripts\some_script.ps1 ...`.
+- Do not wrap a PowerShell script call in another `powershell -File ...` unless there is a specific reason.
+- For PowerShell scripts in this repo, prefer named arguments plus hashtable splatting over long one-line positional or mixed-style invocations.
+- When a parameter is conceptually a string array, build the array in a variable first and pass the variable. Do not rely on inline expansion if the values may contain commas, parentheses, or spaces.
+- Never pass comma-containing spec strings through CSV-style parameters unless the script explicitly requires CSV and the values are guaranteed not to contain commas.
+- If a script supports a true array parameter and the values contain commas internally, always use the array parameter instead of CSV text.
+- For `scripts/heuristic_full_league_1000.ps1`, never pass `hybrid_play(...)`, `hybrid_play_go(...)`, or similar policy specs through `-Policies`.
+- Those policy strings contain commas and will be split incorrectly by CSV parsing.
+- Always pass those specs through `-PolicyList` as a string array.
+- In PowerShell, prefer hashtable splatting for these calls:
+
+```powershell
+$policyList = @(
+  "hybrid_play(phase1_seed1302,H-CL)",
+  "hybrid_play(phase1_seed1305,H-CL)"
+)
+
+$params = @{
+  ResumeFrom = 'C:\k_flower_card\logs\full_league\full_league_20260312_hybrid_play'
+  PolicyList = $policyList
+}
+
+& .\scripts\heuristic_full_league_1000.ps1 @params
+```
+
+- Apply the same pattern to other scripts whenever arguments are arrays or may contain commas/parentheses. Default safe pattern:
+
+```powershell
+$items = @(
+  "value(with,comma)",
+  "another value"
+)
+
+$params = @{
+  SomeList = $items
+}
+
+& .\scripts\some_script.ps1 @params
+```
+
+12. NEAT-first modeling policy
+- For this repo, complete gameplay modeling inside the NEAT path first.
+- Treat NEAT feature design, action-selection logic, evaluator shaping, gate logic, curriculum, lineage/champion analysis, and related runtime tuning as the primary solution space.
+- Do not redirect to IQN, PPO, or other separate policy/modeling tracks just because NEAT is difficult.
+- IQN is a much later option, not a default alternative.
+- Only propose or implement IQN-first / IQN-replacement directions when the user explicitly asks for them or after the NEAT path has been clearly exhausted and stated as such.
+- When discussing go/stop problems, prefer NEAT-side fixes first: feature changes, selection logic changes, fitness/gate shaping, curriculum, or other in-repo NEAT-layer modifications.
 

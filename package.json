@@ -9,9 +9,6 @@
     "preview": "vite preview",
     "neat:run": "powershell -ExecutionPolicy Bypass -File scripts/phase_run.ps1",
     "neat:eval": "powershell -ExecutionPolicy Bypass -File scripts/phase_eval.ps1",
-    "neat:run:gpt": "powershell -ExecutionPolicy Bypass -File neat_by_GPT/run.ps1",
-    "neat:eval:gpt": "powershell -ExecutionPolicy Bypass -File neat_by_GPT/eval.ps1",
-    "neat:duel:gpt": "powershell -ExecutionPolicy Bypass -File neat_by_GPT/duel.ps1",
     "neat:duel": "node scripts/model_duel_worker.mjs"
   },
   "keywords": [],

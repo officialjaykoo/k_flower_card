@@ -20,117 +20,8 @@ DECISION_THRESHOLD_NAMES = (
 )
 
 
-def _split_head_enabled(config):
-    return bool(getattr(config, '_codex_head_split_enabled', False))
-
-
-def _split_head_input_keys_by_output(config):
-    return getattr(config, '_codex_head_input_keys_by_output', {}) or {}
-
-
-def _input_gate_enabled(config):
-    return bool(getattr(config, '_codex_input_gate_enabled', False))
-
-
-def _allowed_input_keys_by_output(config):
-    mapping = _split_head_input_keys_by_output(config)
-    if mapping:
-        return {
-            int(output_key): {int(item) for item in values}
-            for output_key, values in mapping.items()
-        }
-    input_keys = {int(key) for key in getattr(config, 'input_keys', [])}
-    return {
-        int(output_key): set(input_keys)
-        for output_key in getattr(config, 'output_keys', [])
-    }
-
-
-def _sanitize_input_gate_sets(gate_sets, config):
-    allowed_map = _allowed_input_keys_by_output(config)
-    min_map = getattr(config, '_codex_input_gate_min_active_by_output', {}) or {}
-    normalized = {}
-    for output_key, allowed in allowed_map.items():
-        current = {
-            int(item)
-            for item in set((gate_sets or {}).get(int(output_key), set()) or set())
-            if int(item) in allowed
-        }
-        minimum = max(0, int(min_map.get(int(output_key), 0) or 0))
-        if minimum > len(allowed):
-            minimum = len(allowed)
-        if len(current) < minimum:
-            missing = list(allowed - current)
-            shuffle(missing)
-            current.update(missing[:max(0, minimum - len(current))])
-        normalized[int(output_key)] = current
-    return normalized
-
-
-def _ensure_input_gate_sets(genome, config):
-    if not _input_gate_enabled(config):
-        setattr(genome, 'input_gate_keys_by_output', {})
-        return {}
-    normalized = _sanitize_input_gate_sets(getattr(genome, 'input_gate_keys_by_output', {}) or {}, config)
-    setattr(genome, 'input_gate_keys_by_output', normalized)
-    return normalized
-
-
-def _initialize_input_gate_sets(genome, config):
-    if not _input_gate_enabled(config):
-        setattr(genome, 'input_gate_keys_by_output', {})
-        return {}
-    allowed_map = _allowed_input_keys_by_output(config)
-    initial_map = getattr(config, '_codex_input_gate_initial_active_by_output', {}) or {}
-    gate_sets = {}
-    for output_key, allowed in allowed_map.items():
-        target = int(initial_map.get(int(output_key), len(allowed)) or 0)
-        if target <= 0 or target >= len(allowed):
-            gate_sets[int(output_key)] = set(allowed)
-            continue
-        pool = list(allowed)
-        shuffle(pool)
-        gate_sets[int(output_key)] = set(pool[:target])
-    normalized = _sanitize_input_gate_sets(gate_sets, config)
-    setattr(genome, 'input_gate_keys_by_output', normalized)
-    return normalized
-
-
-def _resolve_node_head(genome, config, node_key):
-    key = int(node_key)
-    if key in getattr(config, 'output_keys', []):
-        mapping = _split_head_input_keys_by_output(config)
-        return key if key in mapping else None
-    node_heads = getattr(genome, 'node_heads', {}) or {}
-    head = node_heads.get(key)
-    if head is None:
-        return None
-    return int(head)
-
-
 def _connection_allowed(genome, config, input_key, output_key):
-    if int(output_key) < 0:
-        return False
-    if not _split_head_enabled(config):
-        return True
-
-    output_head = _resolve_node_head(genome, config, output_key)
-    if output_head is None:
-        return False
-
-    input_key = int(input_key)
-    if input_key in getattr(config, 'input_keys', []):
-        if input_key not in _split_head_input_keys_by_output(config).get(int(output_head), set()):
-            return False
-        if _input_gate_enabled(config):
-            return input_key in _ensure_input_gate_sets(genome, config).get(int(output_head), set())
-        return True
-
-    if input_key in getattr(config, 'output_keys', []):
-        return False
-
-    input_head = _resolve_node_head(genome, config, input_key)
-    return input_head is not None and int(input_head) == int(output_head)
+    return int(output_key) >= 0
 
 
 class DefaultGenomeConfig:
@@ -327,8 +218,6 @@ class DefaultGenome:
         # (gene_key, gene) pairs for gene sets.
         self.connections = {}
         self.nodes = {}
-        self.node_heads = {}
-        self.input_gate_keys_by_output = {}
 
         # Fitness results.
         self.fitness = None
@@ -337,8 +226,6 @@ class DefaultGenome:
 
     def configure_new(self, config):
         """Configure a new genome based on the given configuration."""
-        self.node_heads = {}
-        self.input_gate_keys_by_output = {}
         for attr in getattr(config, 'decision_threshold_attributes', []):
             setattr(self, attr.name, float(attr.init_value(config)))
 
@@ -346,12 +233,8 @@ class DefaultGenome:
         for node_key in config.output_keys:
             self.nodes[node_key] = self.create_node(config, node_key)
 
-        _initialize_input_gate_sets(self, config)
-
         # Add hidden nodes if requested.
         if config.num_hidden > 0:
-            if _split_head_enabled(config):
-                raise RuntimeError("split-head mode requires num_hidden = 0 at initialization")
             for i in range(config.num_hidden):
                 node_key = config.get_new_node_key(self.nodes)
                 assert node_key not in self.nodes
@@ -414,33 +297,6 @@ class DefaultGenome:
             parent1, parent2 = genome1, genome2
         else:
             parent1, parent2 = genome2, genome1
-        self.node_heads = {}
-        self.input_gate_keys_by_output = {}
-
-        if _input_gate_enabled(config):
-            allowed_map = _allowed_input_keys_by_output(config)
-            parent1_gates = _sanitize_input_gate_sets(
-                getattr(parent1, 'input_gate_keys_by_output', {}) or {int(k): set(v) for k, v in allowed_map.items()},
-                config,
-            )
-            parent2_gates = _sanitize_input_gate_sets(
-                getattr(parent2, 'input_gate_keys_by_output', {}) or {int(k): set(v) for k, v in allowed_map.items()},
-                config,
-            )
-            crossed_gates = {}
-            for output_key, allowed in allowed_map.items():
-                current = set()
-                for input_key in allowed:
-                    in_parent1 = int(input_key) in parent1_gates.get(int(output_key), set())
-                    in_parent2 = int(input_key) in parent2_gates.get(int(output_key), set())
-                    if in_parent1 and in_parent2:
-                        current.add(int(input_key))
-                    elif in_parent1 and random() < 0.75:
-                        current.add(int(input_key))
-                    elif in_parent2 and random() < 0.25:
-                        current.add(int(input_key))
-                crossed_gates[int(output_key)] = current
-            self.input_gate_keys_by_output = _sanitize_input_gate_sets(crossed_gates, config)
 
         # Inherit connection genes by innovation number
         # Build innovation number mappings for both parents
@@ -514,35 +370,6 @@ class DefaultGenome:
                 value = value1 if random() < 0.5 else value2
             setattr(self, attr.name, float(value))
 
-        if _split_head_enabled(config):
-            parent1_heads = getattr(parent1, 'node_heads', {}) or {}
-            parent2_heads = getattr(parent2, 'node_heads', {}) or {}
-            for key in self.nodes:
-                if key in config.output_keys:
-                    continue
-                head1 = parent1_heads.get(key)
-                head2 = parent2_heads.get(key)
-                if head1 is None and head2 is None:
-                    continue
-                if head1 is None:
-                    self.node_heads[int(key)] = int(head2)
-                elif head2 is None:
-                    self.node_heads[int(key)] = int(head1)
-                else:
-                    self.node_heads[int(key)] = int(head1 if random() < 0.5 else head2)
-            self._prune_invalid_split_connections(config)
-
-    def _prune_invalid_split_connections(self, config):
-        if not _split_head_enabled(config):
-            return
-        invalid_keys = []
-        for key in list(self.connections):
-            in_node, out_node = key
-            if not _connection_allowed(self, config, in_node, out_node):
-                invalid_keys.append(key)
-        for key in invalid_keys:
-            del self.connections[key]
-
     def _valid_new_connection_candidates(self, config):
         possible_outputs = list(self.nodes)
         possible_inputs = list((set(self.nodes) - set(config.output_keys)) | set(config.input_keys))
@@ -564,35 +391,6 @@ class DefaultGenome:
 
     def mutate(self, config):
         """ Mutates this genome. """
-
-        if _input_gate_enabled(config):
-            gate_sets = _ensure_input_gate_sets(self, config)
-            enable_prob = float(getattr(config, '_codex_input_gate_enable_prob', 0.0) or 0.0)
-            disable_prob = float(getattr(config, '_codex_input_gate_disable_prob', 0.0) or 0.0)
-            min_map = getattr(config, '_codex_input_gate_min_active_by_output', {}) or {}
-            for output_key, allowed in _allowed_input_keys_by_output(config).items():
-                enabled_inputs = set(gate_sets.get(int(output_key), set()))
-                ordered_allowed = list(allowed)
-                shuffle(ordered_allowed)
-                minimum = max(0, int(min_map.get(int(output_key), 0) or 0))
-                for input_key in ordered_allowed:
-                    if int(input_key) in enabled_inputs:
-                        if len(enabled_inputs) > minimum and random() < disable_prob:
-                            enabled_inputs.remove(int(input_key))
-                    else:
-                        if random() < enable_prob:
-                            enabled_inputs.add(int(input_key))
-                if len(enabled_inputs) < minimum:
-                    missing = list(set(allowed) - enabled_inputs)
-                    shuffle(missing)
-                    enabled_inputs.update(missing[:max(0, minimum - len(enabled_inputs))])
-                gate_sets[int(output_key)] = enabled_inputs
-            self.input_gate_keys_by_output = _sanitize_input_gate_sets(gate_sets, config)
-            for conn_key in list(self.connections):
-                in_node = int(conn_key[0])
-                out_node = int(conn_key[1])
-                if in_node < 0 and not _connection_allowed(self, config, in_node, out_node):
-                    self.connections.pop(conn_key, None)
 
         if config.single_structural_mutation:
             div = max(1, (config.node_add_prob + config.node_delete_prob +
@@ -670,14 +468,7 @@ class DefaultGenome:
         conn_to_split.enabled = False
 
         i, o = conn_to_split.key
-        new_node_head = _resolve_node_head(self, config, o) if _split_head_enabled(config) else None
-        if _split_head_enabled(config) and new_node_head is None:
-            conn_to_split.enabled = True
-            del self.nodes[new_node_id]
-            return
-        if new_node_head is not None:
-            self.node_heads[int(new_node_id)] = int(new_node_head)
-        
+
         # Get innovation numbers for the two new connections
         # These are keyed by the connection being split, so multiple genomes splitting
         # the same connection get matching innovation numbers
@@ -693,7 +484,6 @@ class DefaultGenome:
         out_connection = self.add_connection(config, new_node_id, o, conn_to_split.weight, True, innovation=out_innovation)
         if in_connection is None or out_connection is None:
             conn_to_split.enabled = True
-            self.node_heads.pop(int(new_node_id), None)
             del self.nodes[new_node_id]
             if in_connection is not None:
                 self.connections.pop(in_connection.key, None)
@@ -770,7 +560,6 @@ class DefaultGenome:
             del self.connections[key]
 
         del self.nodes[del_key]
-        self.node_heads.pop(int(del_key), None)
 
         return del_key
 
@@ -834,23 +623,8 @@ class DefaultGenome:
             for attr in threshold_attrs:
                 diffs += abs(float(getattr(self, attr.name, 0.0)) - float(getattr(other, attr.name, 0.0)))
             threshold_distance = (config.compatibility_weight_coefficient * diffs) / len(threshold_attrs)
-        gate_distance = 0.0
-        if _input_gate_enabled(config):
-            self_gates = _ensure_input_gate_sets(self, config)
-            other_gates = _ensure_input_gate_sets(other, config)
-            diffs = 0.0
-            total = 0
-            for output_key, allowed in _allowed_input_keys_by_output(config).items():
-                for input_key in allowed:
-                    total += 1
-                    if (int(input_key) in self_gates.get(int(output_key), set())) != (
-                        int(input_key) in other_gates.get(int(output_key), set())
-                    ):
-                        diffs += 1.0
-            if total > 0:
-                gate_distance = (config.compatibility_weight_coefficient * diffs) / total
 
-        return node_distance + connection_distance + threshold_distance + gate_distance
+        return node_distance + connection_distance + threshold_distance
 
     def size(self):
         """
@@ -896,13 +670,7 @@ class DefaultGenome:
         """
         assert config.innovation_tracker is not None, "Innovation tracker must be set"
         for output_id in config.output_keys:
-            if _split_head_enabled(config):
-                allowed_inputs = list(_split_head_input_keys_by_output(config).get(int(output_id), set()))
-                if not allowed_inputs:
-                    continue
-                input_id = choice(allowed_inputs)
-            else:
-                input_id = choice(config.input_keys)
+            input_id = choice(config.input_keys)
             if not _connection_allowed(self, config, input_id, output_id):
                 continue
             innovation = config.innovation_tracker.get_innovation_number(
@@ -919,14 +687,7 @@ class DefaultGenome:
         assert config.innovation_tracker is not None, "Innovation tracker must be set"
         others = [i for i in self.nodes if i not in config.input_keys]
         for output_id in others:
-            if _split_head_enabled(config):
-                target_head = _resolve_node_head(self, config, output_id)
-                allowed_inputs = list(_split_head_input_keys_by_output(config).get(int(target_head), set())) if target_head is not None else []
-                if not allowed_inputs:
-                    continue
-                input_id = choice(allowed_inputs)
-            else:
-                input_id = choice(config.input_keys)
+            input_id = choice(config.input_keys)
             if not _connection_allowed(self, config, input_id, output_id):
                 continue
             innovation = config.innovation_tracker.get_innovation_number(
@@ -1032,15 +793,6 @@ class DefaultGenome:
         new_genome = DefaultGenome(None)
         new_genome.nodes = used_node_genes
         new_genome.connections = used_connection_genes
-        new_genome.node_heads = {
-            int(key): int(value)
-            for key, value in dict(getattr(self, 'node_heads', {}) or {}).items()
-            if int(key) in used_node_genes
-        }
-        new_genome.input_gate_keys_by_output = {
-            int(key): {int(item) for item in value}
-            for key, value in dict(getattr(self, 'input_gate_keys_by_output', {}) or {}).items()
-        }
         new_genome.fitness = self.fitness
         for name in DECISION_THRESHOLD_NAMES:
             setattr(new_genome, name, float(getattr(self, name, 0.0)))

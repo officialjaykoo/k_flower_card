@@ -19,6 +19,7 @@
 import { STARTING_GOLD } from "../src/engine/economy.js";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { getActionPlayerKey } from "../src/engine/runner.js";
 import { resolveBotPolicy } from "../src/ai/policies.js";
 import { resolvePlayerSpecCore } from "../src/ai/evalCore/playerSpecCore.js";
@@ -2688,8 +2689,10 @@ function formatConsoleSummaryText(summary) {
 // =============================================================================
 // Section 5. Entrypoint
 // =============================================================================
-export function runModelDuelCli(argv = process.argv.slice(2)) {
+export function runModelDuelCli(argv = process.argv.slice(2), runtimeOptions = {}) {
   const evalStartMs = Date.now();
+  const writeStdout = runtimeOptions.writeStdout !== false;
+  const writeResultFile = runtimeOptions.writeResultFile !== false;
   const opts = parseArgs(argv);
   const humanPlayer = resolvePlayerSpec(opts.humanSpecRaw, "human");
   const aiPlayer = resolvePlayerSpec(opts.aiSpecRaw, "ai");
@@ -3220,19 +3223,27 @@ export function runModelDuelCli(argv = process.argv.slice(2)) {
 
   const reportLine = `${JSON.stringify(summary)}\n`;
   const consoleSummary = buildConsoleSummary(summary);
-  mkdirSync(dirname(opts.resultOut), { recursive: true });
-  writeFileSync(opts.resultOut, reportLine, { encoding: "utf8" });
-  if (opts.stdoutFormat === "json") {
-    process.stdout.write(reportLine);
-  } else {
-    process.stdout.write(formatConsoleSummaryText(consoleSummary));
+  if (writeResultFile) {
+    mkdirSync(dirname(opts.resultOut), { recursive: true });
+    writeFileSync(opts.resultOut, reportLine, { encoding: "utf8" });
   }
+  if (writeStdout) {
+    if (opts.stdoutFormat === "json") {
+      process.stdout.write(reportLine);
+    } else {
+      process.stdout.write(formatConsoleSummaryText(consoleSummary));
+    }
+  }
+  return summary;
 }
 
-try {
-  runModelDuelCli(process.argv.slice(2));
-} catch (err) {
-  const msg = err && err.stack ? err.stack : String(err);
-  process.stderr.write(`${msg}\n`);
-  process.exit(1);
+const executedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : "";
+if (import.meta.url === executedPath) {
+  try {
+    runModelDuelCli(process.argv.slice(2));
+  } catch (err) {
+    const msg = err && err.stack ? err.stack : String(err);
+    process.stderr.write(`${msg}\n`);
+    process.exit(1);
+  }
 }
