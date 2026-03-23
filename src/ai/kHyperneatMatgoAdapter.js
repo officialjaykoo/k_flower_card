@@ -19,7 +19,7 @@ const CARD_META = new Map(
 );
 const CARD_SCALE = Math.max(1, CANONICAL_DECK.length);
 const HAND_FEATURE_PATTERN = /^input_hand_(month|kwang|five|ribbon|junk|pi|bonus|red_ribbons|blue_ribbons|plain_ribbons|five_birds)$/;
-const FOCUS_FEATURE_PATTERN = /^input_focus_(month|kwang|five|ribbon|junk|pi|bonus|red_ribbons|blue_ribbons|plain_ribbons|five_birds)$/;
+const FOCUS_FEATURE_PATTERN = /^input_focus_(month|kwang|five|ribbon|junk|pi|bonus|red_ribbons|blue_ribbons|plain_ribbons|five_birds|board_match_count|board_capture_value|board_single_match|board_multi_match)$/;
 const SEMANTIC_BIN_PATTERN = /^input_(board|captured_self|captured_opp)_(month|type|combo)_bin$/;
 const NON_BRIGHT_KWANG_ID = "L0";
 const BONUS_MONTH = 13;
@@ -206,38 +206,6 @@ function sortCards(cards) {
   });
 }
 
-function encodeHandFocusMask(cards, slotCount, inputContext = null) {
-  const ordered = sortCards(cards);
-  const values = new Array(Math.max(0, Number(slotCount || 0))).fill(0.0);
-  const decisionType = String(inputContext?.decisionType || "").trim().toLowerCase();
-  if (decisionType !== "play") {
-    return values;
-  }
-
-  const special = parsePlaySpecialCandidate(inputContext?.candidate);
-  if (special?.kind === "bomb") {
-    const month = Number(special.month || 0);
-    for (let index = 0; index < values.length && index < ordered.length; index += 1) {
-      if (Number(ordered[index]?.month || 0) === month) {
-        values[index] = 1.0;
-      }
-    }
-    return values;
-  }
-
-  const candidateId = String(inputContext?.candidateCard?.id || inputContext?.candidate || "");
-  if (!candidateId) {
-    return values;
-  }
-  for (let index = 0; index < values.length && index < ordered.length; index += 1) {
-    if (String(ordered[index]?.id || "") === candidateId) {
-      values[index] = 1.0;
-      break;
-    }
-  }
-  return values;
-}
-
 function hasComboTag(meta, tag) {
   return Array.isArray(meta?.comboTags) && meta.comboTags.includes(tag);
 }
@@ -286,6 +254,62 @@ function encodeCardFeatureSlots(cards, slotCount, featureName) {
 function encodeSingleCardFeatureSlot(card, featureName) {
   const values = encodeCardFeatureSlots(card ? [card] : [], 1, featureName);
   return values.length > 0 ? values : [0.0];
+}
+
+function candidateMonth(state, inputContext) {
+  const special = parsePlaySpecialCandidate(inputContext?.candidate);
+  if (special?.kind === "bomb") {
+    return Number(special.month || 0);
+  }
+  return Number(getCardMeta(inputContext?.candidateCard).month || 0);
+}
+
+function boardCardsForCandidate(state, inputContext) {
+  const month = candidateMonth(state, inputContext);
+  if (month <= 0) {
+    return [];
+  }
+  return (state?.board || []).filter((card) => Number(getCardMeta(card).month || 0) === month);
+}
+
+function boardCardValue(card) {
+  const meta = getCardMeta(card);
+  let value = 0.0;
+  if (meta.category === "kwang") value += 1.20;
+  if (meta.category === "five") value += 0.95;
+  if (meta.category === "ribbon") value += 0.70;
+  if (meta.category === "junk") value += 0.20;
+  value += clamp01(Number(meta.piValue || 0) / 3.0) * 0.30;
+  if (Number(meta.bonusStealPi || 0) > 0) value += 0.25;
+  if (hasComboTag(meta, "redRibbons")) value += 0.15;
+  if (hasComboTag(meta, "blueRibbons")) value += 0.15;
+  if (hasComboTag(meta, "plainRibbons")) value += 0.15;
+  if (hasComboTag(meta, "fiveBirds")) value += 0.20;
+  return value;
+}
+
+function encodeFocusFeatureSlot(state, featureName, inputContext) {
+  const candidateCard = inputContext?.candidateCard || null;
+  if (
+    featureName === "board_match_count"
+    || featureName === "board_capture_value"
+    || featureName === "board_single_match"
+    || featureName === "board_multi_match"
+  ) {
+    const matched = boardCardsForCandidate(state, inputContext);
+    if (featureName === "board_match_count") {
+      return [clamp01(matched.length / 4.0)];
+    }
+    if (featureName === "board_single_match") {
+      return [matched.length === 1 ? 1.0 : 0.0];
+    }
+    if (featureName === "board_multi_match") {
+      return [matched.length >= 2 ? 1.0 : 0.0];
+    }
+    const totalValue = matched.reduce((sum, card) => sum + boardCardValue(card), 0.0);
+    return [clamp01(totalValue / 3.0)];
+  }
+  return encodeSingleCardFeatureSlot(candidateCard, featureName);
 }
 
 function encodeDecisionTypeSlots(decisionType, slotCount) {
@@ -742,9 +766,6 @@ function encodeInputSpec(state, actor, spec, inputContext = null) {
   if (kind === "input_decision_type") {
     return encodeDecisionTypeSlots(inputContext?.decisionType || "", slotCount);
   }
-  if (kind === "input_hand_focus_mask") {
-    return encodeHandFocusMask(state?.players?.[actor]?.hand || [], slotCount, inputContext);
-  }
   const semanticMatch = kind.match(SEMANTIC_BIN_PATTERN);
   if (semanticMatch) {
     const zoneName = String(semanticMatch[1] || "");
@@ -768,7 +789,7 @@ function encodeInputSpec(state, actor, spec, inputContext = null) {
   const focusMatch = kind.match(FOCUS_FEATURE_PATTERN);
   if (focusMatch) {
     const featureName = String(focusMatch[1] || "");
-    return encodeSingleCardFeatureSlot(inputContext?.candidateCard || null, featureName);
+    return encodeFocusFeatureSlot(state, featureName, inputContext);
   }
   return new Array(slotCount).fill(0.0);
 }

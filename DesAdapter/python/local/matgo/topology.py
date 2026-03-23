@@ -19,6 +19,15 @@ CARD_INPUT_FEATURES = (
     "five_birds",
 )
 
+FOCUS_RULE_FEATURES = (
+    "board_match_count",
+    "board_capture_value",
+    "board_single_match",
+    "board_multi_match",
+)
+
+FOCUS_INPUT_FEATURES = CARD_INPUT_FEATURES + FOCUS_RULE_FEATURES
+
 RULE_SCORE_FEATURES = (
     "self_go_bonus",
     "self_go_multiplier",
@@ -180,18 +189,16 @@ def _points_from_xs(xs: tuple[float, ...] | list[float], y: float) -> list[Point
     return [Point2D(float(x), float(y)) for x in xs]
 
 
-def _feature_specs(zone: str, slot_count: int, y_top: float, y_bottom: float) -> list[SubstrateSpec]:
-    if slot_count <= 0:
-        return []
-    if len(CARD_INPUT_FEATURES) <= 1:
-        return [SubstrateSpec(SubstrateRef(f"input_{zone}_{CARD_INPUT_FEATURES[0]}", 0), seed_points=_row(slot_count, y=y_top))]
-    step = (y_top - y_bottom) / float(len(CARD_INPUT_FEATURES) - 1)
+def _focus_specs(y_top: float, y_bottom: float) -> list[SubstrateSpec]:
+    if len(FOCUS_INPUT_FEATURES) <= 1:
+        return [SubstrateSpec(SubstrateRef(f"input_focus_{FOCUS_INPUT_FEATURES[0]}", 0), seed_points=_row(1, y=y_top))]
+    step = (y_top - y_bottom) / float(len(FOCUS_INPUT_FEATURES) - 1)
     specs: list[SubstrateSpec] = []
-    for index, feature in enumerate(CARD_INPUT_FEATURES):
+    for index, feature in enumerate(FOCUS_INPUT_FEATURES):
         specs.append(
             SubstrateSpec(
-                SubstrateRef(f"input_{zone}_{feature}", 0),
-                seed_points=_row(slot_count, y=(y_top - (step * index))),
+                SubstrateRef(f"input_focus_{feature}", 0),
+                seed_points=_row(1, y=(y_top - (step * index))),
             )
         )
     return specs
@@ -296,7 +303,6 @@ def _zone_group_specs(zone: str, *, month_y: float, type_y: float, combo_y: floa
 def _group_specs(cfg: MatgoLayoutConfig) -> list[SubstrateSpec]:
     del cfg
     return [
-        *_zone_group_specs("hand", month_y=-0.14, type_y=-0.18, combo_y=-0.22),
         SubstrateSpec(
             SubstrateRef("hidden_group_board_month", 0),
             seed_points=[],
@@ -320,28 +326,38 @@ def _group_specs(cfg: MatgoLayoutConfig) -> list[SubstrateSpec]:
 def _hidden_specs(cfg: MatgoLayoutConfig) -> list[SubstrateSpec]:
     return [
         SubstrateSpec(
-            SubstrateRef("hidden_hand_focus_context", 0),
-            seed_points=_row(cfg.hand_slots, y=0.62),
+            SubstrateRef("hidden_play_match_context", 0),
+            seed_points=_points_from_xs(MONTH_XS, 0.56),
             depth=1,
         ),
         SubstrateSpec(
-            SubstrateRef("hidden_play_candidate", 0),
-            seed_points=_row(cfg.hand_slots, y=0.54),
+            SubstrateRef("hidden_play_value_context", 0),
+            seed_points=_points_from_xs(TYPE_XS, 0.42),
+            depth=1,
+        ),
+        SubstrateSpec(
+            SubstrateRef("hidden_play_risk_context", 0),
+            seed_points=_points_from_xs((-0.75, -0.25, 0.25, 0.75), 0.28),
+            depth=1,
+        ),
+        SubstrateSpec(
+            SubstrateRef("hidden_rule_go_stop_context", 0),
+            seed_points=_points_from_xs((-0.54, -0.18, 0.18, 0.54), 0.12),
             depth=1,
         ),
         SubstrateSpec(
             SubstrateRef("hidden_play_context", 0),
-            seed_points=_points_from_xs((-0.5, 0.0, 0.5), 0.40),
+            seed_points=_points_from_xs((-0.66, -0.22, 0.22, 0.66), -0.02),
             depth=1,
         ),
         SubstrateSpec(
             SubstrateRef("hidden_match_context", 0),
-            seed_points=[],
+            seed_points=_points_from_xs((-0.5, 0.0, 0.5), -0.18),
             depth=1,
         ),
         SubstrateSpec(
             SubstrateRef("hidden_option_context", 0),
-            seed_points=[],
+            seed_points=_points_from_xs(OPTION_XS[: cfg.option_slots], -0.32),
             depth=1,
         ),
     ]
@@ -380,62 +396,99 @@ def _group_targets_for_input(input_kind: str) -> list[SubstrateRef]:
 
 def _hidden_targets_for_input(input_kind: str) -> list[SubstrateRef]:
     kind = str(input_kind or "")
-    if kind == "input_hand_focus_mask":
+    if kind == "input_board_month_bin":
         return [
-            SubstrateRef("hidden_hand_focus_context", 0),
-            SubstrateRef("hidden_play_candidate", 0),
+            SubstrateRef("hidden_play_match_context", 0),
         ]
-    if kind.startswith("input_focus_"):
+    if kind == "input_focus_month":
         return [
-            SubstrateRef("hidden_play_candidate", 0),
+            SubstrateRef("hidden_play_match_context", 0),
             SubstrateRef("hidden_match_context", 0),
         ]
+    if kind in (
+        "input_focus_board_match_count",
+        "input_focus_board_single_match",
+        "input_focus_board_multi_match",
+    ):
+        return [
+            SubstrateRef("hidden_play_match_context", 0),
+            SubstrateRef("hidden_match_context", 0),
+        ]
+    if kind == "input_focus_board_capture_value":
+        return [
+            SubstrateRef("hidden_play_value_context", 0),
+            SubstrateRef("hidden_play_match_context", 0),
+        ]
+    if kind.startswith("input_focus_"):
+        targets = [SubstrateRef("hidden_play_value_context", 0)]
+        risk_features = {
+            "input_focus_junk",
+            "input_focus_pi",
+            "input_focus_bonus",
+            "input_focus_red_ribbons",
+            "input_focus_blue_ribbons",
+            "input_focus_plain_ribbons",
+            "input_focus_five_birds",
+        }
+        if kind in risk_features:
+            targets.append(SubstrateRef("hidden_play_risk_context", 0))
+        return targets
     return []
 
 
 def _direct_output_targets_for_input(input_kind: str) -> list[SubstrateRef]:
     kind = str(input_kind or "")
-    if kind == "input_hand_focus_mask":
+    if kind == "input_focus_month":
         return [
-            SubstrateRef("output_play", 0),
-        ]
-    if kind.startswith("input_focus_"):
-        return [
-            SubstrateRef("output_play", 0),
             SubstrateRef("output_match", 0),
+        ]
+    if kind in (
+        "input_focus_board_match_count",
+        "input_focus_board_capture_value",
+    ):
+        return [
+            SubstrateRef("output_play", 0),
         ]
     return []
 
 
 def _hidden_targets_for_group(group_kind: str) -> list[SubstrateRef]:
     kind = str(group_kind or "")
-    play_candidate = SubstrateRef("hidden_play_candidate", 0)
+    play_match = SubstrateRef("hidden_play_match_context", 0)
+    play_value = SubstrateRef("hidden_play_value_context", 0)
+    play_risk = SubstrateRef("hidden_play_risk_context", 0)
+    rule_go_stop = SubstrateRef("hidden_rule_go_stop_context", 0)
     play_hidden = SubstrateRef("hidden_play_context", 0)
     match_hidden = SubstrateRef("hidden_match_context", 0)
     option_hidden = SubstrateRef("hidden_option_context", 0)
 
-    if kind == "hidden_group_hand_month" or kind == "hidden_group_hand_type":
-        return [option_hidden]
-    if kind == "hidden_group_hand_combo":
-        return [option_hidden]
     if kind == "hidden_group_board_month":
-        return [play_hidden, match_hidden, option_hidden]
+        return [play_match, match_hidden, option_hidden]
     if (
         kind == "hidden_group_captured_self_month"
-        or kind == "hidden_group_captured_opp_month"
         or kind == "hidden_group_captured_self_type"
-        or kind == "hidden_group_captured_opp_type"
         or kind == "hidden_group_captured_self_combo"
+    ):
+        return [play_value, match_hidden, option_hidden]
+    if (
+        kind == "hidden_group_captured_opp_month"
+        or kind == "hidden_group_captured_opp_type"
         or kind == "hidden_group_captured_opp_combo"
     ):
-        return [play_hidden, match_hidden, option_hidden]
+        return [play_risk, match_hidden, option_hidden]
     if kind == "hidden_group_rule_context":
-        return [match_hidden, option_hidden]
+        return [rule_go_stop, match_hidden, option_hidden]
     if kind == "hidden_group_ownership_context":
-        return [play_hidden, match_hidden, option_hidden]
-    if kind == "hidden_play_candidate":
+        return [play_risk, match_hidden, option_hidden]
+    if kind == "hidden_play_match_context":
         return [play_hidden, match_hidden]
-    return [play_candidate, play_hidden, match_hidden, option_hidden]
+    if kind == "hidden_play_value_context":
+        return [play_hidden]
+    if kind == "hidden_play_risk_context":
+        return [play_hidden]
+    if kind == "hidden_rule_go_stop_context":
+        return [option_hidden]
+    return [play_hidden, match_hidden, option_hidden]
 
 
 def _input_to_group_weight(source_kind: str, target_kind: str) -> float:
@@ -454,72 +507,92 @@ def _input_to_group_weight(source_kind: str, target_kind: str) -> float:
 
 def _group_to_hidden_weight(source_kind: str, target_kind: str) -> float:
     if source_kind == "hidden_group_rule_context":
+        if target_kind == "hidden_rule_go_stop_context":
+            return 1.55
         if target_kind == "hidden_option_context":
             return 1.30
-        if target_kind == "hidden_play_context":
-            return 0.85
         return 0.75
     if source_kind == "hidden_group_ownership_context":
+        if target_kind == "hidden_play_risk_context":
+            return 0.85
         return 0.45
-    if source_kind.startswith("hidden_group_hand_"):
-        if target_kind == "hidden_play_context":
-            return 1.15
-        if target_kind == "hidden_option_context":
-            return 1.00
-        return 0.60
     if source_kind.startswith("hidden_group_board_"):
+        if target_kind == "hidden_play_match_context":
+            return 1.35
         if target_kind == "hidden_match_context":
             return 1.15
-        if target_kind == "hidden_play_context":
-            return 0.95
         return 0.85
-    if source_kind.startswith("hidden_group_captured_self_") or source_kind.startswith("hidden_group_captured_opp_"):
+    if source_kind.startswith("hidden_group_captured_self_"):
+        if target_kind == "hidden_play_value_context":
+            return 1.10
         if target_kind == "hidden_match_context":
             return 1.00
-        if target_kind == "hidden_play_context":
-            return 0.95
+        return 0.80
+    if source_kind.startswith("hidden_group_captured_opp_"):
+        if target_kind == "hidden_play_risk_context":
+            return 1.10
+        if target_kind == "hidden_match_context":
+            return 1.00
         return 0.80
     return 1.0
 
 
 def _hidden_to_output_weight(source_kind: str, target_kind: str) -> float:
-    if source_kind == "hidden_hand_focus_context" and target_kind == "output_play":
-        return 1.40
-    if source_kind == "hidden_play_candidate" and target_kind == "output_play":
-        return 2.10
-    if source_kind == "hidden_play_context" and target_kind == "output_play":
+    if source_kind == "hidden_play_match_context" and target_kind == "output_play":
+        return 1.55
+    if source_kind == "hidden_play_value_context" and target_kind == "output_play":
         return 1.45
-    if source_kind == "hidden_match_context" and target_kind == "output_play":
-        return 1.10
+    if source_kind == "hidden_play_risk_context" and target_kind == "output_play":
+        return 1.30
+    if source_kind == "hidden_play_context" and target_kind == "output_play":
+        return 1.60
+    if source_kind == "hidden_play_match_context" and target_kind == "output_match":
+        return 1.30
     if source_kind == "hidden_match_context" and target_kind == "output_match":
-        return 1.10
+        return 1.20
+    if source_kind == "hidden_rule_go_stop_context" and target_kind == "output_option":
+        return 1.40
     if source_kind == "hidden_option_context" and target_kind == "output_option":
         return 1.20
     return 1.0
 
 
 def _allow_identity_mapping(source_kind: str, target_kind: str) -> bool:
-    if source_kind == "input_hand_focus_mask" and target_kind == "output_play":
+    if source_kind == "input_focus_month" and target_kind == "hidden_play_match_context":
         return True
-    if source_kind == "input_hand_focus_mask" and target_kind == "hidden_hand_focus_context":
+    if source_kind in (
+        "input_focus_board_match_count",
+        "input_focus_board_capture_value",
+        "input_focus_board_single_match",
+        "input_focus_board_multi_match",
+    ) and target_kind in (
+        "hidden_play_match_context",
+        "hidden_play_value_context",
+        "output_play",
+        "output_match",
+    ):
         return True
-    if source_kind == "input_hand_focus_mask" and target_kind == "hidden_play_candidate":
+    if source_kind.startswith("input_focus_") and target_kind == "hidden_play_value_context":
         return True
-    if source_kind == "hidden_hand_focus_context" and target_kind == "hidden_play_candidate":
+    if source_kind.startswith("input_focus_") and target_kind == "hidden_play_risk_context":
         return True
-    if source_kind.startswith("input_focus_") and target_kind == "hidden_play_candidate":
+    if source_kind == "input_focus_month" and target_kind == "output_match":
         return True
-    if source_kind.startswith("input_focus_") and target_kind == "output_play":
+    if source_kind == "input_board_month_bin" and target_kind == "hidden_play_match_context":
         return True
-    if source_kind.startswith("input_focus_") and target_kind == "output_match":
+    if source_kind == "hidden_play_match_context" and target_kind == "output_play":
         return True
-    if source_kind == "hidden_play_candidate" and target_kind == "output_play":
+    if source_kind == "hidden_play_value_context" and target_kind == "output_play":
+        return True
+    if source_kind == "hidden_play_risk_context" and target_kind == "output_play":
+        return True
+    if source_kind == "hidden_play_match_context" and target_kind == "output_match":
         return True
     if source_kind == "hidden_play_context" and target_kind == "output_play":
         return True
-    if source_kind == "hidden_match_context" and target_kind == "output_play":
-        return True
     if source_kind == "hidden_match_context" and target_kind == "output_match":
+        return True
+    if source_kind == "hidden_rule_go_stop_context" and target_kind == "output_option":
         return True
     if source_kind == "hidden_option_context" and target_kind == "output_option":
         return True
@@ -535,30 +608,40 @@ def _allow_identity_mapping(source_kind: str, target_kind: str) -> bool:
 def _edge_weight(source_kind: str, target_kind: str) -> float:
     if source_kind.startswith("input_") and target_kind.startswith("hidden_group_"):
         return _input_to_group_weight(source_kind, target_kind)
-    if source_kind == "input_hand_focus_mask" and target_kind == "hidden_hand_focus_context":
-        return 1.80
-    if source_kind == "input_hand_focus_mask" and target_kind == "hidden_play_candidate":
-        return 2.00
-    if source_kind == "input_hand_focus_mask" and target_kind == "output_play":
-        return 1.85
-    if source_kind.startswith("input_focus_") and target_kind == "hidden_play_candidate":
-        return 1.85
+    if source_kind == "input_board_month_bin" and target_kind == "hidden_play_match_context":
+        return 1.65
+    if source_kind == "input_focus_month" and target_kind == "hidden_play_match_context":
+        return 2.10
+    if source_kind == "input_focus_board_match_count" and target_kind == "hidden_play_match_context":
+        return 2.35
+    if source_kind == "input_focus_board_capture_value" and target_kind == "hidden_play_value_context":
+        return 2.20
+    if source_kind in ("input_focus_board_single_match", "input_focus_board_multi_match") and target_kind == "hidden_play_match_context":
+        return 1.90
+    if source_kind == "input_focus_board_match_count" and target_kind == "output_play":
+        return 1.75
+    if source_kind == "input_focus_board_capture_value" and target_kind == "output_play":
+        return 1.55
+    if source_kind.startswith("input_focus_") and target_kind == "hidden_play_value_context":
+        return 1.75
+    if source_kind.startswith("input_focus_") and target_kind == "hidden_play_risk_context":
+        return 1.45
     if source_kind.startswith("input_focus_") and target_kind == "hidden_match_context":
         return 1.25
-    if source_kind.startswith("input_focus_") and target_kind == "output_play":
-        return 1.75
-    if source_kind.startswith("input_focus_") and target_kind == "output_match":
+    if source_kind == "input_focus_month" and target_kind == "output_match":
         return 1.30
     if source_kind.startswith("hidden_group_") and target_kind.startswith("hidden_"):
         return _group_to_hidden_weight(source_kind, target_kind)
-    if source_kind == "hidden_hand_focus_context" and target_kind == "hidden_play_context":
-        return 0.85
-    if source_kind == "hidden_hand_focus_context" and target_kind == "hidden_play_candidate":
-        return 1.55
-    if source_kind == "hidden_play_candidate" and target_kind == "hidden_play_context":
-        return 1.60
-    if source_kind == "hidden_play_candidate" and target_kind == "hidden_match_context":
-        return 1.05
+    if source_kind == "hidden_play_match_context" and target_kind == "hidden_play_context":
+        return 1.30
+    if source_kind == "hidden_play_match_context" and target_kind == "hidden_match_context":
+        return 1.30
+    if source_kind == "hidden_play_value_context" and target_kind == "hidden_play_context":
+        return 1.25
+    if source_kind == "hidden_play_risk_context" and target_kind == "hidden_play_context":
+        return 1.15
+    if source_kind == "hidden_rule_go_stop_context" and target_kind == "hidden_option_context":
+        return 1.40
     if source_kind.startswith("hidden_") and target_kind.startswith("output_"):
         return _hidden_to_output_weight(source_kind, target_kind)
     return 1.0
@@ -577,8 +660,10 @@ def build_minimal_matgo_topology(config: MatgoLayoutConfig | None = None) -> Sub
     cfg = config or MatgoLayoutConfig()
 
     group_specs = _group_specs(cfg)
-    hand_focus_hidden_ref = SubstrateRef("hidden_hand_focus_context", 0)
-    play_candidate_ref = SubstrateRef("hidden_play_candidate", 0)
+    play_match_ref = SubstrateRef("hidden_play_match_context", 0)
+    play_value_ref = SubstrateRef("hidden_play_value_context", 0)
+    play_risk_ref = SubstrateRef("hidden_play_risk_context", 0)
+    rule_go_stop_ref = SubstrateRef("hidden_rule_go_stop_context", 0)
     play_hidden_ref = SubstrateRef("hidden_play_context", 0)
     match_hidden_ref = SubstrateRef("hidden_match_context", 0)
     option_hidden_ref = SubstrateRef("hidden_option_context", 0)
@@ -587,10 +672,9 @@ def build_minimal_matgo_topology(config: MatgoLayoutConfig | None = None) -> Sub
     option_ref = SubstrateRef("output_option", 0)
 
     inputs = [
-        SubstrateSpec(SubstrateRef("input_hand_focus_mask", 0), seed_points=_row(cfg.hand_slots, y=0.70)),
     ]
     inputs.extend(_rule_score_specs(y=0.88, x_start=-0.95, x_end=0.95))
-    inputs.extend(_feature_specs("focus", 1, y_top=0.68, y_bottom=0.48))
+    inputs.extend(_focus_specs(y_top=0.68, y_bottom=0.32))
     inputs.append(
         SubstrateSpec(
             SubstrateRef("input_board_month_bin", 0),
@@ -621,14 +705,18 @@ def build_minimal_matgo_topology(config: MatgoLayoutConfig | None = None) -> Sub
 
     links.extend(
         [
-            _weighted_edge(hand_focus_hidden_ref, play_candidate_ref),
-            _weighted_edge(play_candidate_ref, play_hidden_ref),
-            _weighted_edge(play_candidate_ref, play_ref),
-            _weighted_edge(play_candidate_ref, match_hidden_ref),
-            _weighted_edge(hand_focus_hidden_ref, play_hidden_ref),
+            _weighted_edge(play_match_ref, play_hidden_ref),
+            _weighted_edge(play_value_ref, play_hidden_ref),
+            _weighted_edge(play_risk_ref, play_hidden_ref),
+            _weighted_edge(play_match_ref, play_ref),
+            _weighted_edge(play_value_ref, play_ref),
+            _weighted_edge(play_risk_ref, play_ref),
             _weighted_edge(play_hidden_ref, play_ref),
-            _weighted_edge(match_hidden_ref, play_ref),
+            _weighted_edge(play_match_ref, match_hidden_ref),
+            _weighted_edge(play_match_ref, match_ref),
             _weighted_edge(match_hidden_ref, match_ref),
+            _weighted_edge(rule_go_stop_ref, option_hidden_ref),
+            _weighted_edge(rule_go_stop_ref, option_ref),
             _weighted_edge(option_hidden_ref, option_ref),
         ]
     )
