@@ -43,8 +43,6 @@ from deshyperneat import (
     SearchConfig,
     StatisticsReporter,
     StdOutReporter,
-    compile_executor,
-    mutate_population,
     prepare_algorithm,
 )
 from local.matgo.upstream_core import (
@@ -52,28 +50,11 @@ from local.matgo.upstream_core import (
     build_upstream_core_genome_init_config,
     build_upstream_core_io_topology,
 )
-from local.matgo.ini import (
-    load_genome_config as load_des_genome_config,
-)
+from local.matgo.ini import load_genome_config as load_des_genome_config
 
 
 RUNTIME_FORMAT = "k_hyperneat_runtime_train_v1"
 K_HYPERNEAT_MODEL_FORMAT = "k_hyperneat_executor_v1"
-_CORE_CONFIGURE_NEW = Genome.configure_new
-
-
-def _configure_new_only(self, config: Any, state: Any | None = None, init_config: Any | None = None):
-    payload = dict(init_config or {})
-    _CORE_CONFIGURE_NEW(
-        self,
-        config,
-        state,
-        inputs=int(payload.get("inputs", 0) or 0),
-        outputs=int(payload.get("outputs", 0) or 0),
-    )
-
-
-Genome.configure_new = _configure_new_only
 
 
 def utc_now_iso() -> str:
@@ -1646,8 +1627,6 @@ def main() -> None:
     )
     config = setup.config
     population = setup.population
-    if not args.resume:
-        mutate_population(population, int(runtime.get("upstream_initial_mutations", 0) or 0))
     if not args.resume:
         if seed_genome_specs:
             population = _seed_population_from_specs(population, config, _normalize_seed_specs(seed_genome_specs))

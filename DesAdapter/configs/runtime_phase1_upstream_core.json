@@ -3,7 +3,6 @@
   "phase": 1,
   "genome_backend": "deshyperneat",
   "adapter_mode": "upstream_core",
-  "upstream_initial_mutations": 128,
   "generations": 10,
   "checkpoint_every": 1,
   "eval_workers": 6,
