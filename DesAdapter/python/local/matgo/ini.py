@@ -3,13 +3,7 @@ from __future__ import annotations
 import configparser
 from pathlib import Path
 
-from deshyperneat.environment import EnvironmentDescription
-from deshyperneat.substrate import SubstrateTopology
-from deshyperneat.topology_graph import TopologyGraph
-
-from deshyperneat.conf import ControlSnapshot
-from deshyperneat.genome import Genome
-from deshyperneat.conf import GenomeConfig
+from deshyperneat import ControlSnapshot, EnvironmentDescription, Genome, GenomeConfig, SubstrateTopology, TopologyGraph
 
 
 def build_environment_description(

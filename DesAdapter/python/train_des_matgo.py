@@ -33,14 +33,16 @@ if str(FORK_ROOT) not in sys.path:
 if str(EXPERIMENT_ROOT) not in sys.path:
     sys.path.insert(0, str(EXPERIMENT_ROOT))
 
-from deshyperneat import Config, Deshyperneat, SearchConfig
-from deshyperneat.developer import Developer
-from deshyperneat.executor import compile_executor
-from deshyperneat.evolution import (
+from deshyperneat import (
     BaseReporter,
     Checkpointer,
+    Config,
+    Deshyperneat,
+    Developer,
+    SearchConfig,
     StatisticsReporter,
     StdOutReporter,
+    compile_executor,
     prepare_algorithm,
 )
 from local.matgo.topology import build_minimal_matgo_topology

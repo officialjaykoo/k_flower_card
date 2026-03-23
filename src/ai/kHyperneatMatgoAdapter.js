@@ -206,11 +206,34 @@ function sortCards(cards) {
   });
 }
 
-function encodeCardSlots(cards, slotCount) {
-  const sorted = sortCards(cards);
+function encodeHandFocusMask(cards, slotCount, inputContext = null) {
+  const ordered = sortCards(cards);
   const values = new Array(Math.max(0, Number(slotCount || 0))).fill(0.0);
-  for (let index = 0; index < values.length && index < sorted.length; index += 1) {
-    values[index] = cardScalar(sorted[index]);
+  const decisionType = String(inputContext?.decisionType || "").trim().toLowerCase();
+  if (decisionType !== "play") {
+    return values;
+  }
+
+  const special = parsePlaySpecialCandidate(inputContext?.candidate);
+  if (special?.kind === "bomb") {
+    const month = Number(special.month || 0);
+    for (let index = 0; index < values.length && index < ordered.length; index += 1) {
+      if (Number(ordered[index]?.month || 0) === month) {
+        values[index] = 1.0;
+      }
+    }
+    return values;
+  }
+
+  const candidateId = String(inputContext?.candidateCard?.id || inputContext?.candidate || "");
+  if (!candidateId) {
+    return values;
+  }
+  for (let index = 0; index < values.length && index < ordered.length; index += 1) {
+    if (String(ordered[index]?.id || "") === candidateId) {
+      values[index] = 1.0;
+      break;
+    }
   }
   return values;
 }
@@ -719,8 +742,8 @@ function encodeInputSpec(state, actor, spec, inputContext = null) {
   if (kind === "input_decision_type") {
     return encodeDecisionTypeSlots(inputContext?.decisionType || "", slotCount);
   }
-  if (kind === "input_hand") {
-    return encodeCardSlots(state?.players?.[actor]?.hand || [], slotCount);
+  if (kind === "input_hand_focus_mask") {
+    return encodeHandFocusMask(state?.players?.[actor]?.hand || [], slotCount, inputContext);
   }
   const semanticMatch = kind.match(SEMANTIC_BIN_PATTERN);
   if (semanticMatch) {

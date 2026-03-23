@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from deshyperneat.substrate import SubstrateRef, SubstrateTopology
-from deshyperneat.link import edge_key
+from deshyperneat import SubstrateRef, SubstrateTopology
+from deshyperneat.upstream_core.link import edge_key
 
 
 @dataclass(frozen=True)
