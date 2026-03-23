@@ -1,0 +1,99 @@
+{
+  "format_version": "k_hyperneat_runtime_train_v1",
+  "phase": 1,
+  "genome_backend": "deshyperneat",
+  "adapter_mode": "upstream_core",
+  "upstream_initial_mutations": 128,
+  "generations": 10,
+  "checkpoint_every": 1,
+  "eval_workers": 6,
+  "des_hyperneat": {
+    "output_activation": "tanh",
+    "hidden_activation": "tanh",
+    "debug_prune_log": false,
+    "static_substrate_depth": -1,
+    "max_input_substrate_depth": 0,
+    "max_hidden_substrate_depth": 5,
+    "max_output_substrate_depth": 0,
+    "depth_overrides": {},
+    "edge_outer_weights": {},
+    "identity_mapping_edges": [],
+    "search": {
+      "initial_resolution": 2,
+      "max_resolution": 4,
+      "iteration_level": 1,
+      "division_threshold": 0.3,
+      "variance_threshold": 0.03,
+      "band_threshold": 0.2,
+      "max_weight": 2.0,
+      "weight_threshold": 0.05,
+      "leo_enabled": true,
+      "leo_threshold": 0.0,
+      "max_discoveries": 256,
+      "max_outgoing": 6,
+      "only_leaf_variance": false,
+      "median_variance": false,
+      "relative_variance": false,
+      "max_variance": false
+    }
+  },
+  "cppn_config": "C:\\k_flower_card\\Des-HyperNEAT-Python\\configs\\deshyperneat_cppn.ini",
+  "games_per_genome": 200,
+  "winner_playoff_topk": 5,
+  "winner_playoff_finalists": 2,
+  "winner_playoff_stage1_games": 100,
+  "winner_playoff_stage2_games": 100,
+  "winner_playoff_win_rate_tie_threshold": 0.01,
+  "winner_playoff_mean_gold_delta_tie_threshold": 100.0,
+  "winner_playoff_go_opp_min_count": 100,
+  "winner_playoff_go_take_rate_tie_threshold": 0.02,
+  "early_stop_win_rate_cutoffs": [
+    {
+      "games": 150,
+      "max_win_rate": 0.4
+    },
+    {
+      "games": 250,
+      "max_win_rate": 0.4
+    },
+    {
+      "games": 350,
+      "max_win_rate": 0.42
+    },
+    {
+      "games": 450,
+      "max_win_rate": 0.44
+    }
+  ],
+  "max_eval_steps": 300,
+  "first_turn_policy": "alternate",
+  "continuous_series": true,
+  "fitness_gold_scale": 1500.0,
+  "fitness_gold_neutral_delta": 0.0,
+  "fitness_win_weight": 0.85,
+  "fitness_gold_weight": 0.15,
+  "fitness_win_neutral_rate": 0.5,
+  "eval_pass_win_rate_min": 0.45,
+  "eval_pass_mean_gold_delta_min": 0.0,
+  "opponent_policy": "",
+  "opponent_policy_mix": [
+    {
+      "policy": "hybrid_play(phase1_seed1302,H-CL)",
+      "weight": 25.0
+    },
+    {
+      "policy": "hybrid_play(phase1_seed1305,H-CL)",
+      "weight": 25.0
+    },
+    {
+      "policy": "hybrid_play(phase1_seed1306,H-CL)",
+      "weight": 25.0
+    },
+    {
+      "policy": "hybrid_play(phase1_seed1307,H-CL)",
+      "weight": 25.0
+    }
+  ],
+  "persistent_node_worker": true,
+  "early_stop_go_take_rate_cutoffs": []
+}

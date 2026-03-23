@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -39,22 +39,41 @@ from deshyperneat import (
     Config,
     Deshyperneat,
     Developer,
+    Genome,
     SearchConfig,
     StatisticsReporter,
     StdOutReporter,
     compile_executor,
+    mutate_population,
     prepare_algorithm,
 )
-from local.matgo.topology import build_minimal_matgo_topology
+from local.matgo.upstream_core import (
+    build_upstream_core_environment_description,
+    build_upstream_core_genome_init_config,
+    build_upstream_core_io_topology,
+)
 from local.matgo.ini import (
-    build_environment_description,
-    build_matgo_genome_init_config,
     load_genome_config as load_des_genome_config,
 )
 
 
 RUNTIME_FORMAT = "k_hyperneat_runtime_train_v1"
 K_HYPERNEAT_MODEL_FORMAT = "k_hyperneat_executor_v1"
+_CORE_CONFIGURE_NEW = Genome.configure_new
+
+
+def _configure_new_only(self, config: Any, state: Any | None = None, init_config: Any | None = None):
+    payload = dict(init_config or {})
+    _CORE_CONFIGURE_NEW(
+        self,
+        config,
+        state,
+        inputs=int(payload.get("inputs", 0) or 0),
+        outputs=int(payload.get("outputs", 0) or 0),
+    )
+
+
+Genome.configure_new = _configure_new_only
 
 
 def utc_now_iso() -> str:
@@ -959,7 +978,7 @@ class KHyperneatTrainer:
         self.runtime_path = out_dir / "runtime_config.json"
         self.runtime_path.write_text(json.dumps(runtime, indent=2), encoding="utf-8")
         self.des_config = build_des_hyperneat_config(runtime)
-        self.topology = build_minimal_matgo_topology()
+        self.topology = build_upstream_core_io_topology()
         self.genome_backend = str(self.runtime.get("genome_backend", "deshyperneat") or "deshyperneat").strip().lower()
         self.generation_state: dict[str, Any] = {"generation": 0}
         self.current_generation_records: list[EvalRecord] = []
@@ -1136,7 +1155,13 @@ class KHyperneatTrainer:
         if cached is not None:
             return cached
 
-        developer = Developer(self.des_config)
+        developer = Developer.from_environment_description(
+            build_upstream_core_environment_description(
+                topology=self.topology,
+                des_runtime=dict(self.runtime.get("des_hyperneat") or {}),
+            ),
+            config=self.des_config,
+        )
         executor, stats = developer.develop(genome)
         runtime_model = executor.to_runtime_dict(self.topology, adapter_kind="matgo_minimal_v1")
         assert runtime_model["format_version"] == K_HYPERNEAT_MODEL_FORMAT
@@ -1535,7 +1560,7 @@ class KHyperneatTrainer:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--runtime", default="DesAdapter/configs/runtime_phase1.json")
+    parser.add_argument("--runtime", default="DesAdapter/configs/runtime_phase1_upstream_core.json")
     parser.add_argument("--seed", required=True)
     parser.add_argument("--phase", type=int, default=0)
     parser.add_argument("--resume", default="")
@@ -1597,17 +1622,17 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     random.seed(str(runtime["seed"]))
-    topology = build_minimal_matgo_topology()
+    topology = build_upstream_core_io_topology()
     genome_config = load_des_genome_config(
         runtime["cppn_config"],
         topology=topology,
         des_runtime=dict(runtime.get("des_hyperneat") or {}),
     )
-    genome_init_config = build_matgo_genome_init_config(
+    genome_init_config = build_upstream_core_genome_init_config(
         topology=topology,
         des_runtime=dict(runtime.get("des_hyperneat") or {}),
     )
-    environment_description = build_environment_description(
+    environment_description = build_upstream_core_environment_description(
         topology=topology,
         des_runtime=dict(runtime.get("des_hyperneat") or {}),
     )
@@ -1621,6 +1646,8 @@ def main() -> None:
     )
     config = setup.config
     population = setup.population
+    if not args.resume:
+        mutate_population(population, int(runtime.get("upstream_initial_mutations", 0) or 0))
     if not args.resume:
         if seed_genome_specs:
             population = _seed_population_from_specs(population, config, _normalize_seed_specs(seed_genome_specs))

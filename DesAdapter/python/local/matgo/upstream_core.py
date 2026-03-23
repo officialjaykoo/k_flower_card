@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from deshyperneat import DevelopmentEdge, Point2D, SubstrateRef, SubstrateSpec, SubstrateTopology
+from deshyperneat import DevelopmentEdge, EnvironmentDescription, Point2D, SubstrateRef, SubstrateSpec, SubstrateTopology
+from deshyperneat.upstream_core.developer import topology_init_config
 
 
 CARD_INPUT_FEATURES = (
@@ -727,3 +728,57 @@ def build_minimal_matgo_topology(config: MatgoLayoutConfig | None = None) -> Sub
         hidden=hidden,
         links=links,
     )
+
+
+UPSTREAM_CORE_ADAPTER_MODE = "upstream_core"
+UPSTREAM_CORE_INPUT_COUNT = 20
+UPSTREAM_CORE_OUTPUT_COUNT = 6
+
+
+def is_upstream_core_adapter_mode(runtime: dict[str, object] | None = None) -> bool:
+    mode = ""
+    if isinstance(runtime, dict):
+        mode = str(runtime.get("adapter_mode", "") or "").strip().lower()
+    return mode == UPSTREAM_CORE_ADAPTER_MODE
+
+
+def build_upstream_core_io_topology() -> SubstrateTopology:
+    return SubstrateTopology(
+        inputs=[
+            SubstrateSpec(SubstrateRef.input(0), seed_points=_row(UPSTREAM_CORE_INPUT_COUNT, y=1.0), depth=0)
+        ],
+        outputs=[
+            SubstrateSpec(SubstrateRef.output(0), seed_points=_row(UPSTREAM_CORE_OUTPUT_COUNT, y=-1.0), depth=0)
+        ],
+        hidden=[],
+        links=[],
+    )
+
+
+def build_upstream_core_topology() -> SubstrateTopology:
+    return build_upstream_core_io_topology()
+
+
+def build_upstream_core_environment_description(
+    *,
+    topology: SubstrateTopology,
+    des_runtime: dict[str, object],
+) -> EnvironmentDescription:
+    del des_runtime
+    return EnvironmentDescription(
+        inputs=sum(len(spec.seed_points) for spec in list(topology.inputs or [])),
+        outputs=sum(len(spec.seed_points) for spec in list(topology.outputs or [])),
+    )
+
+
+def build_upstream_core_genome_init_config(
+    *,
+    topology: SubstrateTopology,
+    des_runtime: dict[str, object],
+) -> dict[str, int]:
+    description = build_upstream_core_environment_description(topology=topology, des_runtime=des_runtime)
+    resolved = topology_init_config(description)
+    return {
+        "inputs": int(resolved.get("inputs", 0) or 0),
+        "outputs": int(resolved.get("outputs", 0) or 0),
+    }

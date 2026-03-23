@@ -133,6 +133,28 @@ const COMBO_BIN_SCALES = Object.freeze({
   five_birds: Math.max(1, CANONICAL_DECK.filter((card) => (card?.comboTags || []).includes("fiveBirds")).length),
   kwang_combo: Math.max(1, CANONICAL_DECK.filter((card) => String(card?.category || "") === "kwang").length),
 });
+const UPSTREAM_CORE_INPUT_FEATURES = Object.freeze([
+  "focus_month",
+  "focus_five",
+  "focus_ribbon",
+  "focus_junk",
+  "focus_board_match_count",
+  "focus_board_capture_value",
+  "focus_board_single_match",
+  "focus_board_multi_match",
+  "board_month_bin_0",
+  "board_month_bin_1",
+  "board_month_bin_2",
+  "board_month_bin_3",
+  "board_month_bin_4",
+  "board_month_bin_5",
+  "board_month_bin_6",
+  "board_month_bin_7",
+  "board_month_bin_8",
+  "board_month_bin_9",
+  "board_month_bin_10",
+  "board_month_bin_11",
+]);
 
 function clamp01(x) {
   const value = Number(x || 0);
@@ -760,6 +782,54 @@ function cardsForZone(state, actor, zoneName) {
 function encodeInputSpec(state, actor, spec, inputContext = null) {
   const kind = String(spec?.kind || "").trim().toLowerCase();
   const slotCount = Number(spec?.slot_count || 0);
+  const specIndex = Math.max(0, Number(spec?.index || 0));
+  if (kind === "input") {
+    if (specIndex === 0 && slotCount >= UPSTREAM_CORE_INPUT_FEATURES.length) {
+      const bins = encodeMonthBins(state?.board || [], 12);
+      return [
+        ...encodeFocusFeatureSlot(state, "month", inputContext).slice(0, 1),
+        ...encodeFocusFeatureSlot(state, "five", inputContext).slice(0, 1),
+        ...encodeFocusFeatureSlot(state, "ribbon", inputContext).slice(0, 1),
+        ...encodeFocusFeatureSlot(state, "junk", inputContext).slice(0, 1),
+        ...encodeFocusFeatureSlot(state, "board_match_count", inputContext).slice(0, 1),
+        ...encodeFocusFeatureSlot(state, "board_capture_value", inputContext).slice(0, 1),
+        ...encodeFocusFeatureSlot(state, "board_single_match", inputContext).slice(0, 1),
+        ...encodeFocusFeatureSlot(state, "board_multi_match", inputContext).slice(0, 1),
+        ...bins,
+      ].slice(0, Math.max(0, slotCount));
+    }
+    const feature = String(UPSTREAM_CORE_INPUT_FEATURES[specIndex] || "");
+    if (feature === "focus_month") {
+      return encodeFocusFeatureSlot(state, "month", inputContext).slice(0, Math.max(0, slotCount));
+    }
+    if (feature === "focus_five") {
+      return encodeFocusFeatureSlot(state, "five", inputContext).slice(0, Math.max(0, slotCount));
+    }
+    if (feature === "focus_ribbon") {
+      return encodeFocusFeatureSlot(state, "ribbon", inputContext).slice(0, Math.max(0, slotCount));
+    }
+    if (feature === "focus_junk") {
+      return encodeFocusFeatureSlot(state, "junk", inputContext).slice(0, Math.max(0, slotCount));
+    }
+    if (feature === "focus_board_match_count") {
+      return encodeFocusFeatureSlot(state, "board_match_count", inputContext).slice(0, Math.max(0, slotCount));
+    }
+    if (feature === "focus_board_capture_value") {
+      return encodeFocusFeatureSlot(state, "board_capture_value", inputContext).slice(0, Math.max(0, slotCount));
+    }
+    if (feature === "focus_board_single_match") {
+      return encodeFocusFeatureSlot(state, "board_single_match", inputContext).slice(0, Math.max(0, slotCount));
+    }
+    if (feature === "focus_board_multi_match") {
+      return encodeFocusFeatureSlot(state, "board_multi_match", inputContext).slice(0, Math.max(0, slotCount));
+    }
+    if (feature.startsWith("board_month_bin_")) {
+      const offset = Math.max(0, Number(feature.slice("board_month_bin_".length) || 0));
+      const bins = encodeMonthBins(state?.board || [], 12);
+      return [Number(bins[offset] || 0.0)].slice(0, Math.max(0, slotCount));
+    }
+    return new Array(Math.max(0, slotCount)).fill(0.0);
+  }
   if (kind === "input_rule_score") {
     return buildRuleScoreSlots(state, actor, slotCount);
   }
@@ -850,7 +920,21 @@ export function getMatgoKHyperneatOutputBindings(state, actor, runtime) {
     const kind = String(spec?.kind || "").trim().toLowerCase();
     const specIndex = Math.max(0, Number(spec?.index || 0));
     const slotCount = Math.max(0, Number(spec?.slot_count || 0));
-    if (kind === "output_play") {
+    if (kind === "output") {
+      if (specIndex === 0 && slotCount >= 6) {
+        bindings.playIndex = cursor;
+        bindings.matchIndex = cursor + 1;
+        for (let offset = 0; offset < 4; offset += 1) {
+          bindings.optionPairs.push({
+            outputIndex: cursor + 2 + offset,
+            positive: OPTION_SLOT_BINDINGS[offset].positive,
+            negative: OPTION_SLOT_BINDINGS[offset].negative,
+          });
+        }
+      } else if (specIndex === 0 && slotCount > 0) {
+        bindings.playIndex = cursor;
+      }
+    } else if (kind === "output_play") {
       if (slotCount > 0) {
         bindings.playIndex = cursor;
       }
