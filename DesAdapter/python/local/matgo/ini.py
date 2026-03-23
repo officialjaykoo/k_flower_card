@@ -3,7 +3,15 @@ from __future__ import annotations
 import configparser
 from pathlib import Path
 
-from deshyperneat import ControlSnapshot, EnvironmentDescription, Genome, GenomeConfig, SubstrateTopology, TopologyGraph
+from deshyperneat import (
+    ControlSnapshot,
+    EnvironmentDescription,
+    Genome,
+    GenomeConfig,
+    SeededGenomeInitConfig,
+    SubstrateTopology,
+    TopologyGraph,
+)
 
 
 def build_environment_description(
@@ -45,11 +53,11 @@ def build_matgo_genome_init_config(
     *,
     topology: SubstrateTopology,
     des_runtime: dict[str, object],
-) -> dict[str, object]:
-    return {
-        "seed_graph": build_seed_graph(topology=topology),
-        "control_snapshot": build_control_snapshot(topology=topology, des_runtime=des_runtime),
-    }
+) -> SeededGenomeInitConfig:
+    return SeededGenomeInitConfig(
+        seed_graph=build_seed_graph(topology=topology),
+        control_snapshot=build_control_snapshot(topology=topology, des_runtime=des_runtime),
+    )
 
 
 def load_genome_config(
@@ -67,11 +75,4 @@ def load_genome_config(
     param_dict = {}
     param_dict.update({str(key): value for key, value in parser.items("TopologyGenome")})
     param_dict.update({str(key): value for key, value in parser.items("CppnGenome")})
-    config = Genome.parse_config(param_dict)
-    init_config = build_matgo_genome_init_config(
-        topology=topology,
-        des_runtime=des_runtime,
-    )
-    config.seed_graph = init_config["seed_graph"]
-    config.control_snapshot = init_config["control_snapshot"]
-    return config
+    return Genome.parse_config(param_dict)

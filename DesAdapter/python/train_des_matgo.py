@@ -48,6 +48,7 @@ from deshyperneat import (
 from local.matgo.topology import build_minimal_matgo_topology
 from local.matgo.ini import (
     build_environment_description,
+    build_matgo_genome_init_config,
     load_genome_config as load_des_genome_config,
 )
 
@@ -1602,6 +1603,10 @@ def main() -> None:
         topology=topology,
         des_runtime=dict(runtime.get("des_hyperneat") or {}),
     )
+    genome_init_config = build_matgo_genome_init_config(
+        topology=topology,
+        des_runtime=dict(runtime.get("des_hyperneat") or {}),
+    )
     environment_description = build_environment_description(
         topology=topology,
         des_runtime=dict(runtime.get("des_hyperneat") or {}),
@@ -1611,6 +1616,7 @@ def main() -> None:
         algorithm=Deshyperneat,
         description=environment_description,
         genome_config=genome_config,
+        genome_init_config=genome_init_config,
         resume=(str(resolve_path(args.resume)) if args.resume else None),
     )
     config = setup.config
