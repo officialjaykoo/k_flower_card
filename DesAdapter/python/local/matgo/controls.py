@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from deshyperneat import SubstrateRef, SubstrateTopology
-from deshyperneat.upstream_core.link import edge_key
+from src.deshyperneat.link import edge_key
 
 
 @dataclass(frozen=True)

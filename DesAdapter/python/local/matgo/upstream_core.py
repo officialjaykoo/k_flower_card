@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from deshyperneat import EnvironmentDescription, Point2D, SubstrateRef, SubstrateSpec, SubstrateTopology
-from deshyperneat.upstream_core.developer import topology_init_config
+from src.cppn.developer import topology_init_config
 
 
 UPSTREAM_CORE_ADAPTER_MODE = "upstream_core"
