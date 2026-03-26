@@ -2,7 +2,7 @@
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed,
   [Parameter(Mandatory = $false)][ValidateSet("classic")][string]$LineageProfile = "classic",
-  [Parameter(Mandatory = $false)][ValidateSet("race2", "race5", "race6", "race7", "race8", "race20", "hand7", "hand10", "material10", "race10", "oracle10", "oracle10v2")][string]$FeatureProfile = "",
+  [Parameter(Mandatory = $false)][ValidateSet("hand7", "hand10", "material10")][string]$FeatureProfile = "",
   [Parameter(Mandatory = $false)][string[]]$BootstrapSeedSpec = @()
 )
 
@@ -365,23 +365,14 @@ if ([string]::IsNullOrWhiteSpace($effectiveFeatureProfile)) {
   $effectiveFeatureProfile = [string](Get-PropertyValue -Object $phaseRuntime -Name "feature_profile")
 }
 if ([string]::IsNullOrWhiteSpace($effectiveFeatureProfile)) {
-  $effectiveFeatureProfile = "race8"
+  $effectiveFeatureProfile = "material10"
 }
 $effectiveFeatureProfile = $effectiveFeatureProfile.Trim().ToLowerInvariant()
 
 switch ($effectiveFeatureProfile) {
-  "race2" { $configFeedforward = "scripts/configs/neat_feedforward_race2.ini" }
-  "race5" { $configFeedforward = "scripts/configs/neat_feedforward_race5.ini" }
-  "race6" { $configFeedforward = "scripts/configs/neat_feedforward_race6.ini" }
-  "race7" { $configFeedforward = "scripts/configs/neat_feedforward_race7.ini" }
-  "race8" { $configFeedforward = "scripts/configs/neat_feedforward_race8.ini" }
-  "race20" { $configFeedforward = "scripts/configs/neat_feedforward_race20.ini" }
   "hand7" { $configFeedforward = "scripts/configs/neat_feedforward_hand7.ini" }
   "hand10" { $configFeedforward = [string]$lineageLayout.config_feedforward }
   "material10" { $configFeedforward = [string]$lineageLayout.config_feedforward }
-  "race10" { $configFeedforward = [string]$lineageLayout.config_feedforward }
-  "oracle10" { $configFeedforward = [string]$lineageLayout.config_feedforward }
-  "oracle10v2" { $configFeedforward = [string]$lineageLayout.config_feedforward }
   default { throw "unsupported feature profile: $effectiveFeatureProfile" }
 }
 if (-not (Test-Path $configFeedforward)) {

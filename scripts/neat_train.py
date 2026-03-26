@@ -468,9 +468,9 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["seed"] = str(_required_value(cfg, "seed") or "").strip()
     if not cfg["seed"]:
         raise RuntimeError("runtime key 'seed' must be non-empty")
-    cfg["feature_profile"] = str(cfg.get("feature_profile") or "race8").strip().lower()
-    if cfg["feature_profile"] not in ("race2", "race5", "race6", "race7", "race8", "race20", "hand7", "hand10", "material10", "race10", "oracle10", "oracle10v2"):
-        raise RuntimeError("runtime key 'feature_profile' must be one of: race2, race5, race6, race7, race8, race20, hand7, hand10, material10, race10, oracle10, oracle10v2")
+    cfg["feature_profile"] = str(cfg.get("feature_profile") or "material10").strip().lower()
+    if cfg["feature_profile"] not in ("hand7", "hand10", "material10"):
+        raise RuntimeError("runtime key 'feature_profile' must be one of: hand7, hand10, material10")
     cfg["fitness_gold_scale"] = _required_float(cfg, "fitness_gold_scale")
     cfg["fitness_gold_neutral_delta"] = _required_float(cfg, "fitness_gold_neutral_delta")
     cfg["fitness_win_weight"] = _required_float(cfg, "fitness_win_weight")
@@ -564,7 +564,7 @@ def _set_eval_env(runtime: dict, output_dir: str) -> None:
     os.environ[f"{ENV_PREFIX}OPPONENT_GENOME"] = str(runtime.get("opponent_genome") or "")
     os.environ[f"{ENV_PREFIX}SWITCH_SEATS"] = "1" if bool(runtime["switch_seats"]) else "0"
     os.environ[f"{ENV_PREFIX}SEED"] = str(runtime["seed"])
-    os.environ[f"{ENV_PREFIX}FEATURE_PROFILE"] = str(runtime.get("feature_profile") or "race8")
+    os.environ[f"{ENV_PREFIX}FEATURE_PROFILE"] = str(runtime.get("feature_profile") or "material10")
     os.environ[f"{ENV_PREFIX}OUTPUT_DIR"] = os.path.abspath(output_dir)
     os.environ[f"{ENV_PREFIX}FITNESS_GOLD_SCALE"] = str(float(runtime["fitness_gold_scale"]))
     os.environ[f"{ENV_PREFIX}FITNESS_GOLD_NEUTRAL_DELTA"] = str(
@@ -679,7 +679,7 @@ def _export_neat_python_genome(genome, config, runtime: Optional[dict] = None) -
     input_keys = [int(x) for x in gcfg.input_keys]
     output_keys = [int(x) for x in gcfg.output_keys]
     runtime_ctx = runtime or (_runtime_from_env_cached() if os.environ.get(f"{ENV_PREFIX}FORMAT_VERSION") else {})
-    feature_profile = str((runtime_ctx or {}).get("feature_profile") or "race8").strip().lower()
+    feature_profile = str((runtime_ctx or {}).get("feature_profile") or "material10").strip().lower()
 
     default_activation = str(getattr(gcfg, "activation_default", "tanh") or "tanh")
     default_aggregation = str(getattr(gcfg, "aggregation_default", "sum") or "sum")
@@ -2185,7 +2185,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--feature-profile",
         default="",
-        help="Override feature profile (race2, race5, race6, race7, race8, race20, hand7, hand10, material10, race10, oracle10, or oracle10v2)",
+        help="Override feature profile (hand7, hand10, material10)",
     )
     parser.add_argument(
         "--opponent-genome",
@@ -2761,7 +2761,7 @@ if neat is not None:
             self._last_saved_display_generation = int(display_generation)
 
         def save_checkpoint(self, config, population, species_set, generation):
-            display_generation = self._display_from_generation(int(generation))
+            display_generation = self._display_from_generation(max(0, int(generation) - 1))
             self._save_checkpoint_with_display(
                 config=config,
                 population=population,
@@ -2794,7 +2794,7 @@ if neat is not None:
 
         def save_final_checkpoint(self, config, population, species_set, state_generation: int) -> None:
             state_generation = int(state_generation)
-            display_generation = self._display_from_generation(state_generation)
+            display_generation = self._display_from_generation(max(0, state_generation - 1))
 
             if self._last_saved_display_generation == int(display_generation):
                 return

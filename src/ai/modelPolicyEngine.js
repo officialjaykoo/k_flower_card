@@ -40,19 +40,10 @@ const COMBO_THREAT_SPECS = Object.freeze({
   kwang: Object.freeze({ zone: "kwang", tag: null, months: Object.freeze([1, 3, 8, 11, 12]), reward: 0, category: "kwang" })
 });
 const COMBO_THREAT_KEYS = Object.freeze(Object.keys(COMBO_THREAT_SPECS));
-const LEGACY13_FEATURES = 13;
-const RACE2_FEATURES = 2;
-const RACE5_FEATURES = 5;
-const RACE6_FEATURES = 6;
-const RACE7_FEATURES = 7;
-const RACE8_FEATURES = 8;
-const RACE20_FEATURES = 20;
 const HAND7_FEATURES = 7;
 const HAND10_FEATURES = 10;
 const MATERIAL10_STAGING_FEATURES = 10;
-const RACE10_FEATURES = 10;
-const ORACLE10_FEATURES = 10;
-const DEFAULT_FEATURE_PROFILE = "race8";
+const DEFAULT_FEATURE_PROFILE = "material10";
 const NEAT_OUT_ACTION_SCORE = 0;
 const NEAT_OUT_OPTION_BIAS = 1;
 
@@ -570,30 +561,6 @@ function gameProgressNorm(state) {
   return clamp01(1.0 - (deckLen / 20.0));
 }
 
-function buildLegacy13FeatureVector(state, actor, decisionType, candidate) {
-  const opp = actor === "human" ? "ai" : "human";
-  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
-  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-  const card = candidateCard(state, actor, decisionType, candidate);
-  const month = resolveCandidateMonth(state, actor, decisionType, card);
-
-  return [
-    decisionType === "play" ? 1 : 0,
-    decisionType === "match" ? 1 : 0,
-    optionCode(candidate),
-    tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0),
-    compactSelfScoreProgressNorm(scoreSelf?.total || 0),
-    compactOppStopPressureNorm(scoreOpp?.total || 0),
-    clamp01(currentMultiplierNorm(state, scoreSelf)),
-    candidateComboGain(state, actor, decisionType, candidate),
-    compactCandidatePiNorm(card),
-    immediateMatchPossible(state, decisionType, month),
-    candidatePublicKnownRatio(state, actor, month),
-    Number(scoreSelf?.total || 0) >= 7 ? 1 : 0,
-    Number(scoreOpp?.total || 0) >= 7 ? 1 : 0
-  ];
-}
-
 function countHandCards(cards) {
   if (!Array.isArray(cards)) return 0;
   return cards.length;
@@ -1075,180 +1042,6 @@ function buildHand7FeatureVector(state, actor, decisionType, candidate) {
   ];
 }
 
-function buildRace2FeatureVector(state, actor, decisionType, candidate) {
-  const opp = actor === "human" ? "ai" : "human";
-  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-  const card = candidateCard(state, actor, decisionType, candidate);
-  const month = resolveCandidateMonth(state, actor, decisionType, card);
-  return [
-    candidatePublicKnownRatio(state, actor, month),
-    compactOppStopPressureNorm(scoreOpp?.total || 0)
-  ];
-}
-
-function buildRace5FeatureVector(state, actor, decisionType, candidate) {
-  const opp = actor === "human" ? "ai" : "human";
-  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-  const card = candidateCard(state, actor, decisionType, candidate);
-  const month = resolveCandidateMonth(state, actor, decisionType, card);
-  return [
-    candidatePublicKnownRatio(state, actor, month),
-    immediateMatchPossible(state, decisionType, month),
-    ssangpiRevealedRatioNorm(state, actor),
-    compactOppStopPressureNorm(scoreOpp?.total || 0),
-    candidateBlockGainNorm(state, actor, decisionType, candidate),
-  ];
-}
-
-function buildRace6FeatureVector(state, actor, decisionType, candidate) {
-  const opp = actor === "human" ? "ai" : "human";
-  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-  const card = candidateCard(state, actor, decisionType, candidate);
-  const month = resolveCandidateMonth(state, actor, decisionType, card);
-  return [
-    candidatePublicKnownRatio(state, actor, month),
-    immediateMatchPossible(state, decisionType, month),
-    ssangpiRevealedRatioNorm(state, actor),
-    compactOppStopPressureNorm(scoreOpp?.total || 0),
-    candidateBlockGainNorm(state, actor, decisionType, candidate),
-    candidateComboGain(state, actor, decisionType, candidate),
-  ];
-}
-
-function buildRace7FeatureVector(state, actor, decisionType, candidate) {
-  const opp = actor === "human" ? "ai" : "human";
-  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-  const month = resolveCandidateMonth(state, actor, decisionType, candidateCard(state, actor, decisionType, candidate));
-  return [
-    candidateComboGain(state, actor, decisionType, candidate),
-    candidateBlockGainNorm(state, actor, decisionType, candidate),
-    candidatePublicKnownRatio(state, actor, month),
-    immediateMatchPossible(state, decisionType, month),
-    selfSsangpiControlNorm(state, actor),
-    ssangpiRevealedRatioNorm(state, actor),
-    compactOppStopPressureNorm(scoreOpp?.total || 0),
-  ];
-}
-
-function buildRace8FeatureVector(state, actor, decisionType, candidate) {
-  const opp = actor === "human" ? "ai" : "human";
-  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
-  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-  const month = resolveCandidateMonth(state, actor, decisionType, candidateCard(state, actor, decisionType, candidate));
-  return [
-    compactOppStopPressureNorm(scoreOpp?.total || 0),
-    candidatePublicKnownRatio(state, actor, month),
-    ssangpiRevealedRatioNorm(state, actor),
-    candidateBlockGainNorm(state, actor, decisionType, candidate),
-    candidateComboGain(state, actor, decisionType, candidate),
-    immediateMatchPossible(state, decisionType, month),
-    selfSsangpiControlNorm(state, actor),
-    clamp01(currentMultiplierNorm(state, scoreSelf)),
-  ];
-}
-
-function buildRace10FeatureVector(state, actor, decisionType, candidate) {
-  const opp = actor === "human" ? "ai" : "human";
-  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
-  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-  const card = candidateCard(state, actor, decisionType, candidate);
-  const month = resolveCandidateMonth(state, actor, decisionType, card);
-  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
-  const postPiBlock = handOppPiBlockNorm(postState, actor);
-  const postComboBlock = handOppBlockNorm(postState, actor);
-  return [
-    matchCertaintyNorm(state, decisionType, month),
-    candidateSafeDiscardNorm(state, actor, decisionType, month),
-    candidateComboGain(state, actor, decisionType, candidate),
-    clamp01(Math.max(postPiBlock, postComboBlock)),
-    candidatePublicKnownRatio(state, actor, month),
-    compactOppStopPressureNorm(scoreOpp?.total || 0),
-    clamp01(currentMultiplierNorm(state, scoreSelf)),
-    selfSsangpiControlNorm(state, actor),
-    ssangpiRevealedRatioNorm(state, actor),
-    globalContextTrigger(state, actor)
-  ];
-}
-
-function buildOracle10FeatureVector(state, actor, decisionType, candidate) {
-  const card = candidateCard(state, actor, decisionType, candidate);
-  const month = resolveCandidateMonth(state, actor, decisionType, card);
-  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
-  const postPiBlock = handOppPiBlockNorm(postState, actor);
-  const postComboBlock = handOppBlockNorm(postState, actor);
-  const combinedPostBlock = clamp01(Math.max(postPiBlock, postComboBlock));
-  return [
-    candidatePublicKnownRatio(state, actor, month),
-    matchCertaintyNorm(state, decisionType, month),
-    candidateComboGain(state, actor, decisionType, candidate),
-    compactCandidatePiNorm(card),
-    candidatePiFeedRisk(state, actor, decisionType, candidate),
-    combinedPostBlock,
-    handHighValueDensity(postState, actor),
-    combinedPostBlock,
-    globalContextTrigger(postState, actor),
-    handComboReserveNorm(postState, actor),
-  ];
-}
-
-function buildOracle10V2FeatureVector(state, actor, decisionType, candidate) {
-  const opp = actor === "human" ? "ai" : "human";
-  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-  const card = candidateCard(state, actor, decisionType, candidate);
-  const month = resolveCandidateMonth(state, actor, decisionType, card);
-  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
-  const postPiBlock = handOppPiBlockNorm(postState, actor);
-  const postComboBlock = handOppBlockNorm(postState, actor);
-  const combinedPostBlock = clamp01(Math.max(postPiBlock, postComboBlock));
-  return [
-    candidatePublicKnownRatio(state, actor, month),
-    matchCertaintyNorm(state, decisionType, month),
-    candidateComboGain(state, actor, decisionType, candidate),
-    candidatePiFeedRisk(state, actor, decisionType, candidate),
-    combinedPostBlock,
-    candidateSafeDiscardNorm(state, actor, decisionType, month),
-    handHighValueDensity(postState, actor),
-    handComboReserveNorm(postState, actor),
-    globalContextTrigger(postState, actor),
-    compactOppStopPressureNorm(scoreOpp?.total || 0),
-  ];
-}
-
-function buildRace20FeatureVector(state, actor, decisionType, candidate) {
-  const opp = actor === "human" ? "ai" : "human";
-  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
-  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
-  const card = candidateCard(state, actor, decisionType, candidate);
-  const month = resolveCandidateMonth(state, actor, decisionType, card);
-  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
-  const postPiBlock = handOppPiBlockNorm(postState, actor);
-  const postComboBlock = handOppBlockNorm(postState, actor);
-  return [
-    // Action/play head candidate pool.
-    matchCertaintyNorm(state, decisionType, month),
-    immediateMatchPossible(state, decisionType, month),
-    candidateSafeDiscardNorm(state, actor, decisionType, month),
-    candidateComboGain(state, actor, decisionType, candidate),
-    compactCandidatePiNorm(card),
-    candidatePublicKnownRatio(state, actor, month),
-    clamp01(Math.max(postPiBlock, postComboBlock)),
-    candidateBlockGainNorm(state, actor, decisionType, candidate),
-    candidateComboFeedRisk(state, actor, decisionType, candidate),
-    candidatePiFeedRisk(state, actor, decisionType, candidate),
-    // Option/go-stop head candidate pool.
-    compactOppStopPressureNorm(scoreOpp?.total || 0),
-    clamp01(currentMultiplierNorm(state, scoreSelf)),
-    tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0),
-    selfSsangpiControlNorm(state, actor),
-    ssangpiRevealedRatioNorm(state, actor),
-    oppComboThreatNorm(state, actor),
-    globalContextTrigger(postState, actor),
-    handComboReserveNorm(postState, actor),
-    handHighValueDensity(postState, actor),
-    clamp01(Math.max(postPiBlock, postComboBlock))
-  ];
-}
-
 function buildMaterial10StagingFeatureVector(state, actor, decisionType, candidate) {
   const opp = actor === "human" ? "ai" : "human";
   const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
@@ -1271,120 +1064,35 @@ function buildMaterial10StagingFeatureVector(state, actor, decisionType, candida
 
 function normalizeFeatureProfile(featureSpec, inputDim) {
   const profile = String(featureSpec?.profile || "").trim().toLowerCase();
-  if (profile === "race2") return "race2";
-  if (profile === "race5") return "race5";
-  if (profile === "race6") return "race6";
-  if (profile === "race7") return "race7";
-  if (profile === "race8") return "race8";
-  if (profile === "race20") return "race20";
   if (profile === "material10") return "material10";
   if (profile === "hand7") return "hand7";
   if (profile === "hand10") return "hand10";
-  if (profile === "race10") return "race10";
-  if (profile === "oracle10") return "oracle10";
-  if (profile === "oracle10v2") return "oracle10v2";
-  if (inputDim === RACE2_FEATURES) return "race2";
-  if (inputDim === RACE5_FEATURES) return "race5";
-  if (inputDim === RACE6_FEATURES) return "race6";
-  if (inputDim === RACE7_FEATURES) return "race7";
-  if (inputDim === RACE8_FEATURES) return "race8";
-  if (inputDim === RACE20_FEATURES) return "race20";
   if (inputDim === HAND7_FEATURES) return "hand7";
-  if (inputDim === LEGACY13_FEATURES) return "legacy13";
+  if (inputDim === HAND10_FEATURES) return "hand10";
   return DEFAULT_FEATURE_PROFILE;
 }
 
 function featureVector(state, actor, decisionType, candidate, legalCount, inputDim, featureSpec = null) {
   const profile = normalizeFeatureProfile(featureSpec, inputDim);
   let features = null;
-  if (profile === "legacy13") {
-    if (inputDim !== LEGACY13_FEATURES) {
-      throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10)`
-      );
-    }
-    features = buildLegacy13FeatureVector(state, actor, decisionType, candidate);
-  } else if (profile === "race2") {
-    if (inputDim !== RACE2_FEATURES) {
-      throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10)`
-      );
-    }
-    features = buildRace2FeatureVector(state, actor, decisionType, candidate);
-  } else if (profile === "race5") {
-    if (inputDim !== RACE5_FEATURES) {
-      throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10)`
-      );
-    }
-    features = buildRace5FeatureVector(state, actor, decisionType, candidate);
-  } else if (profile === "race6") {
-    if (inputDim !== RACE6_FEATURES) {
-      throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10)`
-      );
-    }
-    features = buildRace6FeatureVector(state, actor, decisionType, candidate);
-  } else if (profile === "race7") {
-    if (inputDim !== RACE7_FEATURES) {
-      throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10)`
-      );
-    }
-    features = buildRace7FeatureVector(state, actor, decisionType, candidate);
-  } else if (profile === "race8") {
-    if (inputDim !== RACE8_FEATURES) {
-      throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10)`
-      );
-    }
-    features = buildRace8FeatureVector(state, actor, decisionType, candidate);
-  } else if (profile === "race20") {
-    if (inputDim !== RACE20_FEATURES) {
-      throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10)`
-      );
-    }
-    features = buildRace20FeatureVector(state, actor, decisionType, candidate);
-  } else if (profile === "hand7") {
+  if (profile === "hand7") {
     if (inputDim !== HAND7_FEATURES) {
       throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10)`
+        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10)`
       );
     }
     features = buildHand7FeatureVector(state, actor, decisionType, candidate);
   } else if (profile === "hand10") {
     if (inputDim !== HAND10_FEATURES) {
       throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10)`
+        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10)`
       );
     }
     features = buildHand10FeatureVector(state, actor, decisionType, candidate);
-  } else if (profile === "race10") {
-    if (inputDim !== RACE10_FEATURES) {
-      throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10)`
-      );
-    }
-    features = buildRace10FeatureVector(state, actor, decisionType, candidate);
-  } else if (profile === "oracle10") {
-    if (inputDim !== ORACLE10_FEATURES) {
-      throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10),${ORACLE10_FEATURES}(oracle10)`
-      );
-    }
-    features = buildOracle10FeatureVector(state, actor, decisionType, candidate);
-  } else if (profile === "oracle10v2") {
-    if (inputDim !== ORACLE10_FEATURES) {
-      throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10),${ORACLE10_FEATURES}(oracle10),${ORACLE10_FEATURES}(oracle10v2)`
-      );
-    }
-    features = buildOracle10V2FeatureVector(state, actor, decisionType, candidate);
   } else {
     if (inputDim !== MATERIAL10_STAGING_FEATURES) {
       throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${LEGACY13_FEATURES}(legacy13),${RACE2_FEATURES}(race2),${RACE5_FEATURES}(race5),${RACE6_FEATURES}(race6),${RACE7_FEATURES}(race7),${RACE8_FEATURES}(race8),${RACE20_FEATURES}(race20),${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${RACE10_FEATURES}(race10)`
+        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10)`
       );
     }
     features = buildMaterial10StagingFeatureVector(state, actor, decisionType, candidate);
@@ -1840,7 +1548,7 @@ export function debugFeatureRows(state, actor, options = {}) {
   const compiled = compiledRuntime ? selectCompiledModelForDecision(compiledRuntime, decisionType) : null;
   const inputDim = Math.max(
     1,
-    Number(options.inputDim || 0) || Number(compiled?.inputKeys?.length || 0) || RACE8_FEATURES
+    Number(options.inputDim || 0) || Number(compiled?.inputKeys?.length || 0) || MATERIAL10_STAGING_FEATURES
   );
   const kHyperBundle = compiled && isCompiledKHyperneatRuntime(compiled)
     ? buildKHyperneatCandidateScoreBundle(state, actor, compiled, decisionType, candidates)

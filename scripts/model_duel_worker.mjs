@@ -54,21 +54,11 @@ const COMBO_THREAT_SPECS = Object.freeze({
   kwang: Object.freeze({ zone: "kwang", tag: null, months: Object.freeze([1, 3, 8, 11, 12]), reward: 0, category: "kwang" }),
 });
 const COMBO_THREAT_KEYS = Object.freeze(Object.keys(COMBO_THREAT_SPECS));
-const LEGACY13_FEATURES = 13;
-const RACE2_FEATURES = 2;
-const RACE5_FEATURES = 5;
-const RACE6_FEATURES = 6;
-const RACE7_FEATURES = 7;
-const RACE8_FEATURES = 8;
-const RACE20_FEATURES = 20;
 const HAND7_FEATURES = 7;
 const HAND10_FEATURES = 10;
 const MATERIAL10_STAGING_FEATURES = 10;
-const RACE10_FEATURES = 10;
-const ORACLE10_FEATURES = 10;
-const DEFAULT_FEATURE_PROFILE = "race8";
+const DEFAULT_FEATURE_PROFILE = "material10";
 const NEAT_MODEL_FORMAT = "neat_python_genome_v1";
-const K_HYPERNEAT_MODEL_FORMAT = "k_hyperneat_executor_v1";
 
 // Pipeline Stage: 3/3 (neat_train.py -> neat_eval_worker.mjs -> model_duel_worker.mjs)
 // Execution Flow Map:
@@ -169,20 +159,11 @@ function parseArgs(argv) {
   }
   if (
     out.featureProfile !== "auto" &&
-    out.featureProfile !== "race2" &&
-    out.featureProfile !== "race5" &&
-    out.featureProfile !== "race6" &&
-    out.featureProfile !== "race7" &&
-    out.featureProfile !== "race8" &&
-    out.featureProfile !== "race20" &&
     out.featureProfile !== "hand7" &&
     out.featureProfile !== "hand10" &&
-    out.featureProfile !== "material10" &&
-    out.featureProfile !== "race10" &&
-    out.featureProfile !== "oracle10" &&
-    out.featureProfile !== "oracle10v2"
+    out.featureProfile !== "material10"
   ) {
-    throw new Error(`invalid --feature-profile: ${out.featureProfile} (allowed: auto, race2, race5, race6, race7, race8, race20, hand7, hand10, material10, race10, oracle10, oracle10v2)`);
+    throw new Error(`invalid --feature-profile: ${out.featureProfile} (allowed: auto, hand7, hand10, material10)`);
   }
   out.datasetDecisionTypes = parseDatasetDecisionTypes(out.datasetDecisionTypesRaw);
   out.datasetOptionCandidates = parseDatasetOptionCandidates(out.datasetOptionCandidatesRaw);
@@ -335,9 +316,9 @@ function loadSupportedModelJson(modelPath, token, sideLabel) {
   }
 
   const formatVersion = String(model?.format_version || "").trim();
-  if (formatVersion !== NEAT_MODEL_FORMAT && formatVersion !== K_HYPERNEAT_MODEL_FORMAT) {
+  if (formatVersion !== NEAT_MODEL_FORMAT && formatVersion !== "k_hyperneat_executor_v1") {
     throw new Error(
-      `invalid model format for ${token}: expected ${NEAT_MODEL_FORMAT} or ${K_HYPERNEAT_MODEL_FORMAT}`
+      `invalid model format for ${token}: expected ${NEAT_MODEL_FORMAT} or k_hyperneat_executor_v1`
     );
   }
 
@@ -386,9 +367,9 @@ function resolvePhaseModelSpec(token, sideLabel) {
     throw new Error(`failed to parse model JSON (${token}): ${modelPath} (${String(err)})`);
   }
   const formatVersion = String(model?.format_version || "").trim();
-  if (formatVersion !== NEAT_MODEL_FORMAT && formatVersion !== K_HYPERNEAT_MODEL_FORMAT) {
+  if (formatVersion !== NEAT_MODEL_FORMAT && formatVersion !== "k_hyperneat_executor_v1") {
     throw new Error(
-      `invalid model format for ${token}: expected ${NEAT_MODEL_FORMAT} or ${K_HYPERNEAT_MODEL_FORMAT}`
+      `invalid model format for ${token}: expected ${NEAT_MODEL_FORMAT} or k_hyperneat_executor_v1`
     );
   }
 
@@ -429,22 +410,16 @@ function resolveModelSpec(token, sideLabel) {
 
 function modelFeatureProfile(spec) {
   const profile = String(spec?.model?.feature_spec?.profile || "").trim().toLowerCase();
-  if (profile === "race2" || profile === "race5" || profile === "race6" || profile === "race7" || profile === "race8" || profile === "race20" || profile === "hand7" || profile === "hand10" || profile === "material10" || profile === "race10" || profile === "oracle10" || profile === "oracle10v2") return profile;
+  if (profile === "hand7" || profile === "hand10" || profile === "material10") return profile;
   const inputDim = Array.isArray(spec?.model?.input_keys) ? spec.model.input_keys.length : 0;
-  if (inputDim === RACE2_FEATURES) return "race2";
-  if (inputDim === RACE5_FEATURES) return "race5";
-  if (inputDim === RACE6_FEATURES) return "race6";
-  if (inputDim === RACE7_FEATURES) return "race7";
-  if (inputDim === RACE8_FEATURES) return "race8";
-  if (inputDim === RACE20_FEATURES) return "race20";
   if (inputDim === HAND7_FEATURES) return "hand7";
-  if (inputDim === LEGACY13_FEATURES) return "legacy13";
+  if (inputDim === HAND10_FEATURES) return DEFAULT_FEATURE_PROFILE;
   return "";
 }
 
 function resolveDatasetFeatureProfile(featureProfileOpt, humanPlayer, aiPlayer, strictAutoMode = false) {
   const explicit = String(featureProfileOpt || "auto").trim().toLowerCase();
-  if (explicit === "race2" || explicit === "race5" || explicit === "race6" || explicit === "race7" || explicit === "race8" || explicit === "race20" || explicit === "hand7" || explicit === "hand10" || explicit === "material10" || explicit === "race10" || explicit === "oracle10" || explicit === "oracle10v2") return explicit;
+  if (explicit === "hand7" || explicit === "hand10" || explicit === "material10") return explicit;
   if (!strictAutoMode) {
     return DEFAULT_FEATURE_PROFILE;
   }
@@ -494,7 +469,7 @@ function setToReportList(setLike) {
 // Section 2. Engine Action Helpers + Feature Helpers
 // =============================================================================
 let ACTIVE_FEATURE_PROFILE = DEFAULT_FEATURE_PROFILE;
-let ACTIVE_COMPACT_FEATURES = RACE8_FEATURES;
+let ACTIVE_COMPACT_FEATURES = 8;
 
 function isGoStopOpportunityDecision(decision) {
   if (!decision || decision.decisionType !== "option") return false;
@@ -1726,31 +1701,11 @@ function buildMaterial10StagingFeatureVectorForCandidate(state, actor, decisionT
 
 function featureVectorForCandidate(state, actor, decisionType, candidate) {
   const features =
-    ACTIVE_FEATURE_PROFILE === "legacy13"
-      ? buildLegacy13FeatureVectorForCandidate(state, actor, decisionType, candidate)
-      : ACTIVE_FEATURE_PROFILE === "race2"
-        ? buildRace2FeatureVectorForCandidate(state, actor, decisionType, candidate)
-      : ACTIVE_FEATURE_PROFILE === "race5"
-        ? buildRace5FeatureVectorForCandidate(state, actor, decisionType, candidate)
-      : ACTIVE_FEATURE_PROFILE === "race6"
-        ? buildRace6FeatureVectorForCandidate(state, actor, decisionType, candidate)
-      : ACTIVE_FEATURE_PROFILE === "race7"
-        ? buildRace7FeatureVectorForCandidate(state, actor, decisionType, candidate)
-      : ACTIVE_FEATURE_PROFILE === "race8"
-        ? buildRace8FeatureVectorForCandidate(state, actor, decisionType, candidate)
-      : ACTIVE_FEATURE_PROFILE === "race20"
-        ? buildRace20FeatureVectorForCandidate(state, actor, decisionType, candidate)
-      : ACTIVE_FEATURE_PROFILE === "hand7"
-        ? buildHand7FeatureVectorForCandidate(state, actor, decisionType, candidate)
+    ACTIVE_FEATURE_PROFILE === "hand7"
+      ? buildHand7FeatureVectorForCandidate(state, actor, decisionType, candidate)
       : ACTIVE_FEATURE_PROFILE === "material10"
         ? buildMaterial10StagingFeatureVectorForCandidate(state, actor, decisionType, candidate)
-        : ACTIVE_FEATURE_PROFILE === "race10"
-          ? buildRace10FeatureVectorForCandidate(state, actor, decisionType, candidate)
-          : ACTIVE_FEATURE_PROFILE === "oracle10"
-            ? buildOracle10FeatureVectorForCandidate(state, actor, decisionType, candidate)
-          : ACTIVE_FEATURE_PROFILE === "oracle10v2"
-            ? buildOracle10V2FeatureVectorForCandidate(state, actor, decisionType, candidate)
-          : buildHand10FeatureVectorForCandidate(state, actor, decisionType, candidate);
+        : buildHand10FeatureVectorForCandidate(state, actor, decisionType, candidate);
   if (features.length !== ACTIVE_COMPACT_FEATURES) {
     throw new Error(`compact feature length mismatch: expected ${ACTIVE_COMPACT_FEATURES}, got ${features.length}`);
   }
@@ -2703,29 +2658,11 @@ export function runModelDuelCli(argv = process.argv.slice(2), runtimeOptions = {
     !!opts.datasetOut
   );
   ACTIVE_COMPACT_FEATURES =
-      ACTIVE_FEATURE_PROFILE === "legacy13"
-        ? LEGACY13_FEATURES
-      : ACTIVE_FEATURE_PROFILE === "race2"
-        ? RACE2_FEATURES
-      : ACTIVE_FEATURE_PROFILE === "race5"
-        ? RACE5_FEATURES
-      : ACTIVE_FEATURE_PROFILE === "race6"
-        ? RACE6_FEATURES
-      : ACTIVE_FEATURE_PROFILE === "race7"
-        ? RACE7_FEATURES
-      : ACTIVE_FEATURE_PROFILE === "race8"
-        ? RACE8_FEATURES
-      : ACTIVE_FEATURE_PROFILE === "race20"
-        ? RACE20_FEATURES
-      : ACTIVE_FEATURE_PROFILE === "hand7"
+      ACTIVE_FEATURE_PROFILE === "hand7"
         ? HAND7_FEATURES
       : ACTIVE_FEATURE_PROFILE === "material10"
         ? MATERIAL10_STAGING_FEATURES
-      : ACTIVE_FEATURE_PROFILE === "race10"
-          ? RACE10_FEATURES
-      : ACTIVE_FEATURE_PROFILE === "oracle10" || ACTIVE_FEATURE_PROFILE === "oracle10v2"
-          ? ORACLE10_FEATURES
-          : HAND10_FEATURES;
+        : HAND10_FEATURES;
   let autoOutputDir = "";
   const ensureAutoOutputDir = () => {
     if (!autoOutputDir) {
