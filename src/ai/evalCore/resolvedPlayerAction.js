@@ -6,6 +6,9 @@ export function buildAiPlayOptions(playerSpec) {
     return {
       source: "model",
       model: playerSpec.model,
+      runtimeCtx: playerSpec.runtimeCtx || null,
+      opponentModel: playerSpec.opponentModel || null,
+      opponentRuntimeCtx: playerSpec.opponentRuntimeCtx || null,
     };
   }
   return {
@@ -19,6 +22,9 @@ export function resolveResolvedPlayerAction(state, actor, playerSpec) {
     const traced = hybridPolicyPlayDetailed(state, actor, {
       model: playerSpec.model,
       heuristicPolicy: String(playerSpec.heuristicPolicy || ""),
+      runtimeCtx: playerSpec.runtimeCtx || null,
+      opponentModel: playerSpec.opponentModel || null,
+      opponentRuntimeCtx: playerSpec.opponentRuntimeCtx || null,
     });
     return {
       next: traced?.next || state,

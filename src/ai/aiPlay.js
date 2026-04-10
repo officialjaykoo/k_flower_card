@@ -1,6 +1,7 @@
 ﻿import { DEFAULT_BOT_POLICY, normalizeBotPolicy } from "./policies.js";
 import { botPlay, getHeuristicCardProbabilities } from "./heuristicPolicyEngine.js";
 import {
+  cloneModelRuntimeContext,
   getModelCandidateProbabilities,
   modelPolicyPlay as runModelPolicyPlay
 } from "./modelPolicyEngine.js";
@@ -16,7 +17,7 @@ export function aiPlay(state, actor, options = {}) {
   const source = normalizeSource(options.source);
   const heuristicPolicy = resolveHeuristicPolicy(options);
   if (source === "model") {
-    const next = runModelPolicyPlay(state, actor, options.model || null);
+    const next = runModelPolicyPlay(state, actor, options.model || null, options);
     if (next !== state) return next;
   }
   return botPlay(state, actor, {
@@ -33,7 +34,11 @@ export function getAiPlayProbabilities(state, actor, options = {}) {
   const heuristicPolicy = resolveHeuristicPolicy(options);
   if (source === "model") {
     if (options.model) {
+      const runtimeCtx = options.previewPlay
+        ? cloneModelRuntimeContext(options.runtimeCtx || null)
+        : (options.runtimeCtx || null);
       const scored = getModelCandidateProbabilities(state, actor, options.model, {
+        runtimeCtx,
         previewPlay: !!options.previewPlay
       });
       if (scored && scored.decisionType === "play") {

@@ -1,0 +1,12 @@
+{
+  "extends": "runtime_phase1.json",
+  "format_version": "neat_runtime_phase1_smoke_v4",
+  "generations": 1,
+  "eval_workers": 1,
+  "games_per_genome": 5,
+  "checkpoint_every": 1,
+  "winner_playoff_topk": 1,
+  "winner_playoff_games": 20,
+  "early_stop_win_rate_cutoffs": [],
+  "early_stop_go_take_rate_cutoffs": []
+}

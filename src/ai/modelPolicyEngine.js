@@ -41,11 +41,17 @@ const COMBO_THREAT_SPECS = Object.freeze({
 });
 const COMBO_THREAT_KEYS = Object.freeze(Object.keys(COMBO_THREAT_SPECS));
 const HAND7_FEATURES = 7;
+const MEMORY8_FEATURES = 8;
+const HAND11_V4_FEATURES = 11;
 const HAND10_FEATURES = 10;
 const MATERIAL10_STAGING_FEATURES = 10;
+const MATERIAL10_V4_FEATURES = 10;
 const DEFAULT_FEATURE_PROFILE = "material10";
 const NEAT_OUT_ACTION_SCORE = 0;
 const NEAT_OUT_OPTION_BIAS = 1;
+const DEFAULT_RUNTIME_MEMORY_PROFILE = "recent_play_v4";
+const DEFAULT_RUNTIME_DEBUG_HISTORY_LIMIT = 64;
+const V4_RECENT_PLAY_SLOTS = 3;
 
 /* 2) Feature extraction helpers */
 function clamp01(x) {
@@ -350,7 +356,13 @@ function compactKwangBaseScore(kwangCards) {
 }
 
 function applyDecisionCandidate(state, actor, decisionType, candidate) {
-  return applyAction(state, actor, decisionType, candidate);
+  const simulationState = state ? structuredClone(state) : state;
+  return applyAction(simulationState, actor, decisionType, candidate);
+}
+
+function simulateAction(state, actor, decisionType, candidate) {
+  const simulationState = state ? structuredClone(state) : state;
+  return applyAction(simulationState, actor, decisionType, candidate);
 }
 
 function maskStateForVisibleComboSimulation(state) {
@@ -1062,37 +1074,200 @@ function buildMaterial10StagingFeatureVector(state, actor, decisionType, candida
   ];
 }
 
+function recentPlayOutcomeValue(entry) {
+  return clampRange(
+    Number(entry?.outcomeScore ?? entry?.settledScore ?? entry?.immediateScore ?? 0.0),
+    -1.0,
+    1.0
+  );
+}
+
+function recentPlayDecisionKindCode(decisionType) {
+  if (decisionType === "play") return 0.0;
+  if (decisionType === "match") return 0.5;
+  if (decisionType === "option") return 1.0;
+  return 0.0;
+}
+
+function monthToNorm(month) {
+  const m = Number(month || 0);
+  if (m <= 0) return 0.0;
+  return clamp01(m / 12.0);
+}
+
+function buildRecentPlayFeatureVector(state, actor, decisionType, candidate, recentPlayMemory = null) {
+  const recent = Array.isArray(recentPlayMemory?.recentPlays) ? recentPlayMemory.recentPlays : [];
+  const outcomes = [0.0, 0.0, 0.0];
+  for (let i = 0; i < Math.min(V4_RECENT_PLAY_SLOTS, recent.length); i += 1) {
+    outcomes[i] = recentPlayOutcomeValue(recent[i]);
+  }
+
+  const currentMonth = Number(
+    resolveCandidateMonth(state, actor, decisionType, candidateCard(state, actor, decisionType, candidate)) || 0
+  );
+  const currentKind = recentPlayDecisionKindCode(decisionType);
+  let relationNumerator = 0.0;
+  let relationDenominator = 0.0;
+  for (let i = 0; i < Math.min(V4_RECENT_PLAY_SLOTS, recent.length); i += 1) {
+    const entry = recent[i];
+    const weight = i === 0 ? 1.0 : (i === 1 ? 0.7 : 0.5);
+    let similarity = 0.0;
+    if (currentMonth > 0 && Number(entry?.month || 0) === currentMonth) {
+      similarity += 1.0;
+    }
+    if (Math.abs(Number(entry?.kindCode ?? 0.0) - currentKind) < 1e-6) {
+      similarity += 0.35;
+    }
+    if (!(similarity > 0)) continue;
+    relationNumerator += weight * similarity * recentPlayOutcomeValue(entry);
+    relationDenominator += weight * similarity;
+  }
+  const relation = relationDenominator > 0
+    ? clampRange(relationNumerator / relationDenominator, -1.0, 1.0)
+    : 0.0;
+
+  return [
+    outcomes[0],
+    outcomes[1],
+    outcomes[2],
+    relation,
+  ];
+}
+
+function buildMaterial10V4FeatureVector(state, actor, decisionType, candidate, recentPlayMemory = null) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreSelf = calculateScore(state.players[actor], state.players[opp], state.ruleKey);
+  const scoreOpp = calculateScore(state.players[opp], state.players[actor], state.ruleKey);
+  const month = resolveCandidateMonth(state, actor, decisionType, candidateCard(state, actor, decisionType, candidate));
+  const recent = buildRecentPlayFeatureVector(state, actor, decisionType, candidate, recentPlayMemory);
+  return [
+    clamp01(currentMultiplierNorm(state, scoreSelf)),
+    candidateComboGain(state, actor, decisionType, candidate),
+    clampRange(candidateBlockGainNorm(state, actor, decisionType, candidate), -1.0, 1.0),
+    immediateMatchPossible(state, decisionType, month),
+    selfSsangpiControlNorm(state, actor),
+    compactOppStopPressureNorm(scoreOpp?.total || 0),
+    recent[0],
+    recent[1],
+    recent[2],
+    recent[3],
+  ];
+}
+
+function buildHand11V4FeatureVector(state, actor, decisionType, candidate, recentPlayMemory = null) {
+  const base = buildHand7FeatureVector(state, actor, decisionType, candidate);
+  const recent = buildRecentPlayFeatureVector(state, actor, decisionType, candidate, recentPlayMemory);
+  return base.concat(recent);
+}
+
+function buildRecentOutcomeSlots(recentPlayMemory = null) {
+  const recent = Array.isArray(recentPlayMemory?.recentPlays) ? recentPlayMemory.recentPlays : [];
+  const outcomes = [0.0, 0.0, 0.0];
+  for (let i = 0; i < Math.min(V4_RECENT_PLAY_SLOTS, recent.length); i += 1) {
+    outcomes[i] = recentPlayOutcomeValue(recent[i]);
+  }
+  return outcomes;
+}
+
+function buildMemory8FeatureVector(
+  state,
+  actor,
+  decisionType,
+  candidate,
+  recentPlayMemory = null,
+  opponentRecentPlayMemory = null
+) {
+  const card = candidateCard(state, actor, decisionType, candidate);
+  const month = resolveCandidateMonth(state, actor, decisionType, card);
+  const postState = buildVisibleAfterStateForHandFeatures(state, actor, decisionType, candidate);
+  const mine = buildRecentOutcomeSlots(recentPlayMemory);
+  const opponent = buildRecentOutcomeSlots(opponentRecentPlayMemory);
+  return [
+    globalContextTrigger(postState, actor),
+    candidateSafeDiscardNorm(state, actor, decisionType, month),
+    mine[0],
+    mine[1],
+    mine[2],
+    opponent[0],
+    opponent[1],
+    opponent[2],
+  ];
+}
+
 function normalizeFeatureProfile(featureSpec, inputDim) {
   const profile = String(featureSpec?.profile || "").trim().toLowerCase();
+  if (profile === "memory8") return "memory8";
+  if (profile === "hand11_v4") return "hand11_v4";
+  if (profile === "material10_v4") return "material10_v4";
   if (profile === "material10") return "material10";
   if (profile === "hand7") return "hand7";
   if (profile === "hand10") return "hand10";
+  if (inputDim === MEMORY8_FEATURES) return "memory8";
+  if (inputDim === HAND11_V4_FEATURES) return "hand11_v4";
   if (inputDim === HAND7_FEATURES) return "hand7";
   if (inputDim === HAND10_FEATURES) return "hand10";
   return DEFAULT_FEATURE_PROFILE;
 }
 
-function featureVector(state, actor, decisionType, candidate, legalCount, inputDim, featureSpec = null) {
+function featureVector(
+  state,
+  actor,
+  decisionType,
+  candidate,
+  legalCount,
+  inputDim,
+  featureSpec = null,
+  recentPlayMemory = null,
+  opponentRecentPlayMemory = null
+) {
   const profile = normalizeFeatureProfile(featureSpec, inputDim);
   let features = null;
   if (profile === "hand7") {
     if (inputDim !== HAND7_FEATURES) {
       throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10)`
+        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${MEMORY8_FEATURES}(memory8),${HAND11_V4_FEATURES}(hand11_v4),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${MATERIAL10_V4_FEATURES}(material10_v4)`
       );
     }
     features = buildHand7FeatureVector(state, actor, decisionType, candidate);
+  } else if (profile === "memory8") {
+    if (inputDim !== MEMORY8_FEATURES) {
+      throw new Error(
+        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${MEMORY8_FEATURES}(memory8),${HAND11_V4_FEATURES}(hand11_v4),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${MATERIAL10_V4_FEATURES}(material10_v4)`
+      );
+    }
+    features = buildMemory8FeatureVector(
+      state,
+      actor,
+      decisionType,
+      candidate,
+      recentPlayMemory,
+      opponentRecentPlayMemory
+    );
+  } else if (profile === "hand11_v4") {
+    if (inputDim !== HAND11_V4_FEATURES) {
+      throw new Error(
+        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${MEMORY8_FEATURES}(memory8),${HAND11_V4_FEATURES}(hand11_v4),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${MATERIAL10_V4_FEATURES}(material10_v4)`
+      );
+    }
+    features = buildHand11V4FeatureVector(state, actor, decisionType, candidate, recentPlayMemory);
   } else if (profile === "hand10") {
     if (inputDim !== HAND10_FEATURES) {
       throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10)`
+        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${MEMORY8_FEATURES}(memory8),${HAND11_V4_FEATURES}(hand11_v4),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${MATERIAL10_V4_FEATURES}(material10_v4)`
       );
     }
     features = buildHand10FeatureVector(state, actor, decisionType, candidate);
+  } else if (profile === "material10_v4") {
+    if (inputDim !== MATERIAL10_V4_FEATURES) {
+      throw new Error(
+        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${MEMORY8_FEATURES}(memory8),${HAND11_V4_FEATURES}(hand11_v4),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${MATERIAL10_V4_FEATURES}(material10_v4)`
+      );
+    }
+    features = buildMaterial10V4FeatureVector(state, actor, decisionType, candidate, recentPlayMemory);
   } else {
     if (inputDim !== MATERIAL10_STAGING_FEATURES) {
       throw new Error(
-        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10)`
+        `feature vector size mismatch: expected ${inputDim}, supported=${HAND7_FEATURES}(hand7),${MEMORY8_FEATURES}(memory8),${HAND11_V4_FEATURES}(hand11_v4),${HAND10_FEATURES}(hand10),${MATERIAL10_STAGING_FEATURES}(material10),${MATERIAL10_V4_FEATURES}(material10_v4)`
       );
     }
     features = buildMaterial10StagingFeatureVector(state, actor, decisionType, candidate);
@@ -1130,9 +1305,12 @@ function aggregate(name, values) {
 }
 
 function compileNeatPythonGenome(raw) {
+  const networkType = isRecurrentNetworkType(raw?.network_type) ? "recurrent" : "feedforward";
   const inputKeys = Array.isArray(raw?.input_keys) ? raw.input_keys.map((x) => Number(x)) : [];
   const outputKeys = Array.isArray(raw?.output_keys) ? raw.output_keys.map((x) => Number(x)) : [];
   const nodesRaw = raw?.nodes && typeof raw.nodes === "object" ? raw.nodes : {};
+  const featureSpec = raw?.feature_spec && typeof raw.feature_spec === "object" ? raw.feature_spec : null;
+  const featureProfile = normalizeFeatureProfile(featureSpec, inputKeys.length);
   const decisionParamsRaw = raw?.decision_params && typeof raw.decision_params === "object"
     ? raw.decision_params
     : {};
@@ -1151,7 +1329,10 @@ function compileNeatPythonGenome(raw) {
       activation: String(v?.activation || "tanh"),
       aggregation: String(v?.aggregation || "sum"),
       bias: Number(v?.bias || 0),
-      response: Number(v?.response || 1)
+      response: Number(v?.response || 1),
+      memoryGateEnabled: !!v?.memory_gate_enabled,
+      memoryGateBias: Number(v?.memory_gate_bias || 0),
+      memoryGateResponse: Number(v?.memory_gate_response ?? 1),
     });
   }
 
@@ -1162,7 +1343,10 @@ function compileNeatPythonGenome(raw) {
         activation: "tanh",
         aggregation: "sum",
         bias: 0,
-        response: 1
+        response: 1,
+        memoryGateEnabled: false,
+        memoryGateBias: 0,
+        memoryGateResponse: 1,
       });
     }
   }
@@ -1218,12 +1402,19 @@ function compileNeatPythonGenome(raw) {
 
   return {
     kind: NEAT_MODEL_FORMAT,
+    networkType,
     inputKeys,
+    inputSet,
     outputKeys,
-    featureSpec: raw?.feature_spec && typeof raw.feature_spec === "object" ? raw.feature_spec : null,
+    featureSpec,
     decisionParams,
+    runtimeMemoryProfile:
+      featureProfile === "material10_v4" || featureProfile === "hand11_v4" || featureProfile === "memory8"
+        ? DEFAULT_RUNTIME_MEMORY_PROFILE
+        : "none",
     nodes,
     incoming,
+    recurrentNodeIds: [...nonInputSet].sort((a, b) => a - b),
     order: order.length === nonInputSet.size ? order : [...nonInputSet].sort((a, b) => a - b)
   };
 }
@@ -1261,8 +1452,337 @@ function isCompiledKHyperneatRuntime(compiledRuntime) {
   return String(compiledRuntime?.formatVersion || "").trim() === "k_hyperneat_executor_v1";
 }
 
+function isRecurrentNetworkType(networkType) {
+  return String(networkType || "").trim().toLowerCase() === "recurrent";
+}
+
+function cloneRecentPlaySummary(summary) {
+  if (!summary || typeof summary !== "object") {
+    return {
+      scoreSwing: 0.0,
+      oppThreat: 0.0,
+    };
+  }
+  return {
+    scoreSwing: clampRange(Number(summary.scoreSwing || 0.0), -1.0, 1.0),
+    oppThreat: clamp01(Number(summary.oppThreat || 0.0)),
+  };
+}
+
+function createEmptyRecentPlayMemoryState() {
+  return {
+    recentPlays: [],
+    pendingPlay: null,
+  };
+}
+
+function createEmptyRecurrentSnapshot(compiled) {
+  const nodeValues = {};
+  for (const nodeId of compiled?.recurrentNodeIds || []) {
+    nodeValues[String(nodeId)] = 0.0;
+  }
+  return {
+    nodeValues,
+    debugEntry: null,
+  };
+}
+
+function cloneRecurrentSnapshot(snapshot, compiled = null) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return compiled
+      ? createEmptyRecurrentSnapshot(compiled)
+      : {
+          nodeValues: {},
+          debugEntry: null,
+        };
+  }
+  const nodeValues = snapshot?.nodeValues && typeof snapshot.nodeValues === "object"
+    ? snapshot.nodeValues
+    : {};
+  return {
+    nodeValues: { ...nodeValues },
+    debugEntry: snapshot?.debugEntry && typeof snapshot.debugEntry === "object"
+      ? { ...snapshot.debugEntry }
+      : null,
+  };
+}
+
+function cloneRecentPlayMemoryState(memoryState) {
+  const recentPlays = Array.isArray(memoryState?.recentPlays)
+    ? memoryState.recentPlays.map((entry) => ({
+        ...entry,
+        afterSummary: cloneRecentPlaySummary(entry?.afterSummary),
+      }))
+    : [];
+  const pendingPlay = memoryState?.pendingPlay && typeof memoryState.pendingPlay === "object"
+    ? {
+        ...memoryState.pendingPlay,
+        afterSummary: cloneRecentPlaySummary(memoryState.pendingPlay.afterSummary),
+      }
+    : null;
+  return {
+    recentPlays,
+    pendingPlay,
+  };
+}
+
+function createEmptyPolicyRuntimeRecord(compiled) {
+  return {
+    snapshot: cloneRecurrentSnapshot(null, compiled),
+    lastTurnSeq: 0,
+    debugHistory: [],
+    recentPlayMemory: createEmptyRecentPlayMemoryState(),
+  };
+}
+
+function normalizeRuntimeRecord(record, compiled) {
+  if (!record || typeof record !== "object") {
+    return createEmptyPolicyRuntimeRecord(compiled);
+  }
+  return {
+    snapshot: cloneRecurrentSnapshot(record.snapshot, compiled),
+    lastTurnSeq: Number(record.lastTurnSeq || 0),
+    debugHistory: Array.isArray(record.debugHistory)
+      ? record.debugHistory.map((entry) => ({ ...entry }))
+      : [],
+    recentPlayMemory: cloneRecentPlayMemoryState(record.recentPlayMemory),
+  };
+}
+
+function getOpponentRecentPlayMemory(state, actor, options = {}) {
+  const opponentRuntimeCtx = options?.opponentRuntimeCtx || null;
+  const opponentModel = options?.opponentModel || null;
+  if (!opponentRuntimeCtx || !opponentModel || !isSupportedPolicyModel(opponentModel)) {
+    return createEmptyRecentPlayMemoryState();
+  }
+  const opponent = actor === "human" ? "ai" : "human";
+  const compiledRuntime = getCompiledPolicyModel(opponentModel);
+  const compiled = selectCompiledModelForDecision(compiledRuntime, "play") || compiledRuntime;
+  if (!compiled) return createEmptyRecentPlayMemoryState();
+  const record = getPreparedRuntimeRecord(state, opponent, opponentModel, compiled, opponentRuntimeCtx);
+  return cloneRecentPlayMemoryState(record?.recentPlayMemory);
+}
+
+export function createModelRuntimeContext() {
+  return { policyStates: new Map() };
+}
+
+export function cloneModelRuntimeContext(runtimeCtx) {
+  const cloned = createModelRuntimeContext();
+  const sourceStates = runtimeCtx?.policyStates instanceof Map ? runtimeCtx.policyStates : null;
+  if (!sourceStates) return cloned;
+  for (const [policyModel, record] of sourceStates.entries()) {
+    cloned.policyStates.set(policyModel, normalizeRuntimeRecord(record));
+  }
+  return cloned;
+}
+
+export function resetModelRuntimeContext(runtimeCtx, policyModel = null) {
+  const policyStates = ensureRuntimePolicyStates(runtimeCtx);
+  if (!policyStates) return;
+  if (policyModel) {
+    policyStates.delete(policyModel);
+    return;
+  }
+  if (policyStates instanceof Map) {
+    policyStates.clear();
+  }
+}
+
+function ensureRuntimePolicyStates(runtimeCtx) {
+  if (!runtimeCtx || typeof runtimeCtx !== "object") return null;
+  if (!(runtimeCtx.policyStates instanceof Map) && !(runtimeCtx.policyStates instanceof WeakMap)) {
+    runtimeCtx.policyStates = new Map();
+  }
+  return runtimeCtx.policyStates;
+}
+
+function shouldResetRuntimeRecord(state, record) {
+  if (!record || typeof record !== "object") return false;
+  const currentTurnSeq = Number(state?.turnSeq || 0);
+  const lastTurnSeq = Number(record?.lastTurnSeq || 0);
+  if (currentTurnSeq <= 0 && lastTurnSeq > 0) return true;
+  if (currentTurnSeq < lastTurnSeq) return true;
+  return false;
+}
+
+function buildActorPositionSummary(state, actor) {
+  const opp = actor === "human" ? "ai" : "human";
+  const scoreSelf = calculateScore(state?.players?.[actor] || {}, state?.players?.[opp] || {}, state?.ruleKey);
+  const scoreOpp = calculateScore(state?.players?.[opp] || {}, state?.players?.[actor] || {}, state?.ruleKey);
+  return {
+    scoreSwing: clampRange(tanhNorm((scoreSelf?.total || 0) - (scoreOpp?.total || 0), 10.0), -1.0, 1.0),
+    oppThreat: clamp01(
+      Math.max(
+        oppComboThreatNorm(state, actor),
+        oppGoThreatNorm(state, actor),
+        oppSsangpiThreatNorm(state, actor)
+      )
+    ),
+  };
+}
+
+function settlePendingRecentPlayMemory(memoryState, state, actor) {
+  const nextState = cloneRecentPlayMemoryState(memoryState);
+  const pending = nextState.pendingPlay;
+  if (!pending) return nextState;
+  const currentTurnSeq = Number(state?.turnSeq || 0);
+  if (currentTurnSeq <= Number(pending.turnSeq || 0)) return nextState;
+  if (Array.isArray(nextState.recentPlays) && nextState.recentPlays.length > 0) {
+    const currentSummary = buildActorPositionSummary(state, actor);
+    const deltaSwing = clampRange(currentSummary.scoreSwing - Number(pending?.afterSummary?.scoreSwing || 0.0), -1.0, 1.0);
+    const deltaThreat = clampRange(Number(pending?.afterSummary?.oppThreat || 0.0) - currentSummary.oppThreat, -1.0, 1.0);
+    const settledScore = clampRange(
+      (0.55 * Number(nextState.recentPlays[0]?.immediateScore || 0.0)) +
+      (0.25 * deltaSwing) +
+      (0.20 * deltaThreat),
+      -1.0,
+      1.0
+    );
+    nextState.recentPlays[0] = {
+      ...nextState.recentPlays[0],
+      settledScore,
+      outcomeScore: settledScore,
+      settled: true,
+    };
+  }
+  nextState.pendingPlay = null;
+  return nextState;
+}
+
+function buildRecentPlayCommit(state, actor, decisionType, candidate, nextState) {
+  const resolvedNextState = nextState || simulateAction(state, actor, decisionType, candidate) || state;
+  const month = Number(
+    resolveCandidateMonth(state, actor, decisionType, candidateCard(state, actor, decisionType, candidate)) || 0
+  );
+  const beforeSummary = buildActorPositionSummary(state, actor);
+  const afterSummary = buildActorPositionSummary(resolvedNextState, actor);
+  const comboGain = candidateComboGain(state, actor, decisionType, candidate);
+  const blockGain = clampRange(candidateBlockGainNorm(state, actor, decisionType, candidate), -1.0, 1.0);
+  const feedRisk = clamp01(
+    Math.max(
+      candidateComboFeedRisk(state, actor, decisionType, candidate),
+      candidatePiFeedRisk(state, actor, decisionType, candidate)
+    )
+  );
+  const safeDiscard = clamp01(candidateSafeDiscardNorm(state, actor, decisionType, month));
+  const swingDelta = clampRange(afterSummary.scoreSwing - beforeSummary.scoreSwing, -1.0, 1.0);
+  const threatDelta = clampRange(beforeSummary.oppThreat - afterSummary.oppThreat, -1.0, 1.0);
+  const immediateScore = clampRange(
+    (0.30 * comboGain) +
+    (0.20 * blockGain) +
+    (0.15 * safeDiscard) +
+    (0.20 * swingDelta) +
+    (0.15 * threatDelta) -
+    (0.30 * feedRisk),
+    -1.0,
+    1.0
+  );
+  const entry = {
+    turnSeq: Number(resolvedNextState?.turnSeq ?? state?.turnSeq ?? 0),
+    month,
+    monthNorm: monthToNorm(month),
+    kindCode: recentPlayDecisionKindCode(decisionType),
+    immediateScore,
+    settledScore: immediateScore,
+    outcomeScore: immediateScore,
+    feedFlag: feedRisk >= 0.35 ? 1 : 0,
+    blockFlag: blockGain >= 0.10 ? 1 : 0,
+    settled: false,
+    afterSummary: cloneRecentPlaySummary(afterSummary),
+  };
+  return {
+    entry,
+    debugEntry: {
+      turnSeq: entry.turnSeq,
+      actor: String(actor || ""),
+      decisionType: String(decisionType || ""),
+      candidate: String(candidate ?? ""),
+      profile: DEFAULT_RUNTIME_MEMORY_PROFILE,
+      month,
+      immediateScore,
+      feedFlag: entry.feedFlag,
+      blockFlag: entry.blockFlag,
+    },
+  };
+}
+
+function updateRecentPlayMemoryOnCommit(memoryState, state, actor, decisionType, candidate, nextState) {
+  const nextMemory = cloneRecentPlayMemoryState(memoryState);
+  if (decisionType !== "play") {
+    return { memoryState: nextMemory, debugEntry: null };
+  }
+  const commit = buildRecentPlayCommit(state, actor, decisionType, candidate, nextState);
+  nextMemory.recentPlays = [commit.entry, ...(nextMemory.recentPlays || [])].slice(0, V4_RECENT_PLAY_SLOTS);
+  nextMemory.pendingPlay = {
+    turnSeq: commit.entry.turnSeq,
+    afterSummary: cloneRecentPlaySummary(commit.entry.afterSummary),
+  };
+  return {
+    memoryState: nextMemory,
+    debugEntry: commit.debugEntry,
+  };
+}
+
+function getPreparedRuntimeRecord(state, actor, policyModel, compiled, runtimeCtx) {
+  const policyStates = ensureRuntimePolicyStates(runtimeCtx);
+  let record = null;
+  if (policyStates && policyModel) {
+    record = policyStates.get(policyModel);
+  }
+  if (!record || shouldResetRuntimeRecord(state, record)) {
+    record = createEmptyPolicyRuntimeRecord(compiled);
+  } else {
+    record = normalizeRuntimeRecord(record, compiled);
+  }
+  record.recentPlayMemory = settlePendingRecentPlayMemory(record.recentPlayMemory, state, actor);
+  if (policyStates && policyModel) {
+    policyStates.set(policyModel, normalizeRuntimeRecord(record, compiled));
+  }
+  return record;
+}
+
+function getBaseRecurrentSnapshot(record, compiled) {
+  if (!isRecurrentNetworkType(compiled?.networkType)) return null;
+  return cloneRecurrentSnapshot(record?.snapshot, compiled);
+}
+
+function commitPolicyRuntimeRecord(state, actor, decisionType, candidate, nextState, policyModel, compiled, runtimeCtx, snapshot) {
+  const policyStates = ensureRuntimePolicyStates(runtimeCtx);
+  if (!policyStates || !policyModel) return;
+  const priorRecord = normalizeRuntimeRecord(policyStates.get(policyModel), compiled);
+  if (snapshot) {
+    priorRecord.snapshot = cloneRecurrentSnapshot(snapshot, compiled);
+  }
+  const commit = updateRecentPlayMemoryOnCommit(
+    priorRecord.recentPlayMemory,
+    state,
+    actor,
+    decisionType,
+    candidate,
+    nextState
+  );
+  priorRecord.recentPlayMemory = commit.memoryState;
+  priorRecord.lastTurnSeq = Number(nextState?.turnSeq ?? state?.turnSeq ?? 0);
+  if (commit.debugEntry) {
+    priorRecord.debugHistory.push({ ...commit.debugEntry });
+  }
+  while (priorRecord.debugHistory.length > DEFAULT_RUNTIME_DEBUG_HISTORY_LIMIT) {
+    priorRecord.debugHistory.shift();
+  }
+  policyStates.set(policyModel, normalizeRuntimeRecord(priorRecord, compiled));
+}
+
+export function getModelRuntimeDebugHistory(runtimeCtx, policyModel) {
+  const policyStates = ensureRuntimePolicyStates(runtimeCtx);
+  if (!policyStates || !policyModel) return [];
+  const record = policyStates.get(policyModel);
+  if (!record || !Array.isArray(record?.debugHistory)) return [];
+  return record.debugHistory.map((entry) => ({ ...entry }));
+}
+
 /* 5) Scoring/post-processing */
-function forward(compiled, inputVec) {
+function forwardFeedforward(compiled, inputVec) {
   const values = new Map();
   for (let i = 0; i < compiled.inputKeys.length; i += 1) {
     values.set(Number(compiled.inputKeys[i]), Number(inputVec[i] || 0));
@@ -1283,6 +1803,69 @@ function forward(compiled, inputVec) {
   }
 
   return compiled.outputKeys.map((outKey) => Number(values.get(Number(outKey)) || 0.0));
+}
+
+function forwardRecurrent(compiled, inputVec, baseSnapshot = null) {
+  const snapshot = cloneRecurrentSnapshot(baseSnapshot, compiled);
+  const inputValues = new Map();
+  for (let i = 0; i < compiled.inputKeys.length; i += 1) {
+    inputValues.set(Number(compiled.inputKeys[i]), Number(inputVec[i] || 0));
+  }
+
+  const nextNodeValues = {};
+  for (const nodeId of compiled.recurrentNodeIds || []) {
+    const node = compiled.nodes.get(nodeId) || {
+      activation: "tanh",
+      aggregation: "sum",
+      bias: 0,
+      response: 1,
+      memoryGateEnabled: false,
+      memoryGateBias: 0,
+      memoryGateResponse: 1,
+    };
+    const incoming = compiled.incoming.get(nodeId) || [];
+    const terms = incoming.map((conn) => {
+      const inNode = Number(conn.in_node || 0);
+      const sourceValue = compiled.inputSet?.has(inNode)
+        ? Number(inputValues.get(inNode) || 0)
+        : Number(snapshot.nodeValues?.[String(inNode)] || 0);
+      return sourceValue * Number(conn.weight || 0);
+    });
+    const recurrentSignal = aggregate(node.aggregation, terms);
+    const candidatePre = Number(node.bias || 0) + Number(node.response || 1) * recurrentSignal;
+    const candidateValue = activation(node.activation, candidatePre);
+    if (node.memoryGateEnabled) {
+      const gatePre = Number(node.memoryGateBias || 0) + Number(node.memoryGateResponse || 1) * recurrentSignal;
+      const updateGate = activation("sigmoid", gatePre);
+      const previousValue = Number(snapshot.nodeValues?.[String(nodeId)] || 0);
+      nextNodeValues[String(nodeId)] =
+        ((1.0 - updateGate) * previousValue) + (updateGate * candidateValue);
+    } else {
+      nextNodeValues[String(nodeId)] = candidateValue;
+    }
+  }
+
+  return {
+    outputs: compiled.outputKeys.map((outKey) => Number(nextNodeValues[String(outKey)] || 0.0)),
+    nextSnapshot: {
+      nodeValues: nextNodeValues,
+      debugEntry: null,
+    },
+  };
+}
+
+function evaluateForward(compiled, inputVec, baseSnapshot = null) {
+  if (isRecurrentNetworkType(compiled?.networkType)) {
+    return forwardRecurrent(compiled, inputVec, baseSnapshot);
+  }
+  return {
+    outputs: forwardFeedforward(compiled, inputVec),
+    nextSnapshot: null,
+  };
+}
+
+function forward(compiled, inputVec, baseSnapshot = null) {
+  return evaluateForward(compiled, inputVec, baseSnapshot).outputs;
 }
 
 function isTwoOutputThresholdModel(compiled) {
@@ -1315,14 +1898,33 @@ function resolveDecisionThreshold(compiled, positiveAction) {
   return 0.0;
 }
 
-function buildTwoOutputOptionScoreBundle(state, actor, compiled, candidates) {
+function buildTwoOutputOptionScoreBundle(
+  state,
+  actor,
+  compiled,
+  candidates,
+  baseRuntimeSnapshot = null,
+  recentPlayMemory = null,
+  opponentRecentPlayMemory = null
+) {
   const positiveAction = candidates.map((candidate) => resolvePositiveOptionAction(candidate)).find(Boolean) || null;
   if (!positiveAction) return null;
   const negativeAction = resolveNegativeOptionAction(positiveAction);
   if (!negativeAction) return null;
   const inputDim = Number(compiled?.inputKeys?.length || 0);
-  const features = featureVector(state, actor, "option", positiveAction, candidates.length, inputDim, compiled?.featureSpec);
-  const outputs = forward(compiled, features);
+  const features = featureVector(
+    state,
+    actor,
+    "option",
+    positiveAction,
+    candidates.length,
+    inputDim,
+    compiled?.featureSpec,
+    recentPlayMemory,
+    opponentRecentPlayMemory
+  );
+  const evaluation = evaluateForward(compiled, features, baseRuntimeSnapshot);
+  const outputs = evaluation.outputs;
   const optionBias = Number(outputs[NEAT_OUT_OPTION_BIAS] || 0.0);
   const threshold = resolveDecisionThreshold(compiled, positiveAction);
   const scoreMap = new Map();
@@ -1336,7 +1938,15 @@ function buildTwoOutputOptionScoreBundle(state, actor, compiled, candidates) {
       scoreMap.set(candidate, -Infinity);
     }
   }
-  return { scoreMap, optionBias, threshold, positiveAction, negativeAction, oracleMargin: 0.0 };
+  return {
+    scoreMap,
+    optionBias,
+    threshold,
+    positiveAction,
+    negativeAction,
+    oracleMargin: 0.0,
+    runtimeSnapshot: evaluation.nextSnapshot,
+  };
 }
 
 function candidateOutputIndex(compiled, decisionType, candidate) {
@@ -1478,6 +2088,28 @@ export function getModelCandidateProbabilities(state, actor, policyModel, option
 
   const scoreMap = new Map();
   const scores = {};
+  const runtimeSnapshots = {};
+  const runtimeRecord = getPreparedRuntimeRecord(
+    state,
+    actor,
+    policyModel,
+    compiled,
+    options.runtimeCtx
+  );
+  const baseRuntimeSnapshot = getBaseRecurrentSnapshot(runtimeRecord, compiled);
+  const recentPlayMemory = runtimeRecord?.recentPlayMemory || createEmptyRecentPlayMemoryState();
+  const opponentRecentPlayMemory = getOpponentRecentPlayMemory(state, actor, options);
+  const memoryDebug = {
+    profile: String(compiled?.runtimeMemoryProfile || "none"),
+    recentOutcomes: buildRecentPlayFeatureVector(
+      state,
+      actor,
+      decisionType,
+      candidates[0],
+      recentPlayMemory
+    ).slice(0, V4_RECENT_PLAY_SLOTS),
+    opponentRecentOutcomes: buildRecentOutcomeSlots(opponentRecentPlayMemory),
+  };
   try {
     if (isCompiledKHyperneatRuntime(compiled)) {
       const bundle = buildKHyperneatCandidateScoreBundle(state, actor, compiled, decisionType, candidates);
@@ -1495,16 +2127,28 @@ export function getModelCandidateProbabilities(state, actor, policyModel, option
         scores,
         inputCount: bundle.inputs.length,
         outputCount: bundle.outputs.length,
+        memoryDebug: null,
       };
     }
 
     if (decisionType === "option" && isTwoOutputThresholdModel(compiled)) {
-      const bundle = buildTwoOutputOptionScoreBundle(state, actor, compiled, candidates);
+      const bundle = buildTwoOutputOptionScoreBundle(
+        state,
+        actor,
+        compiled,
+        candidates,
+        baseRuntimeSnapshot,
+        recentPlayMemory,
+        opponentRecentPlayMemory
+      );
       if (!bundle) return null;
       for (const candidate of candidates) {
         const score = Number(bundle.scoreMap.get(candidate) || -Infinity);
         scoreMap.set(candidate, score);
         scores[String(candidate)] = score;
+        if (bundle.runtimeSnapshot) {
+          runtimeSnapshots[String(candidate)] = cloneRecurrentSnapshot(bundle.runtimeSnapshot, compiled);
+        }
       }
       const probs = scoreToProbabilityMap(candidates, scoreMap, Number(policyModel?.softmax_temp || 1.0));
       return {
@@ -1512,6 +2156,9 @@ export function getModelCandidateProbabilities(state, actor, policyModel, option
         candidates,
         probabilities: probs,
         scores,
+        networkType: compiled.networkType || "feedforward",
+        runtimeSnapshots: Object.keys(runtimeSnapshots).length > 0 ? runtimeSnapshots : null,
+        memoryDebug,
         optionBias: bundle.optionBias,
         optionThreshold: bundle.threshold,
         optionPositiveAction: bundle.positiveAction,
@@ -1522,18 +2169,40 @@ export function getModelCandidateProbabilities(state, actor, policyModel, option
 
     const inputDim = Number(compiled.inputKeys.length || 0);
     for (const candidate of candidates) {
-      const x = featureVector(state, actor, decisionType, candidate, candidates.length, inputDim, compiled?.featureSpec);
-      const outputs = forward(compiled, x);
+      const x = featureVector(
+        state,
+        actor,
+        decisionType,
+        candidate,
+        candidates.length,
+        inputDim,
+        compiled?.featureSpec,
+        recentPlayMemory,
+        opponentRecentPlayMemory
+      );
+      const evaluation = evaluateForward(compiled, x, baseRuntimeSnapshot);
+      const outputs = evaluation.outputs;
       const combined = scoreCandidateWithOracle(state, actor, compiled, outputs, decisionType, candidate);
       scoreMap.set(candidate, combined.total);
       scores[String(candidate)] = combined.total;
+      if (evaluation.nextSnapshot) {
+        runtimeSnapshots[String(candidate)] = cloneRecurrentSnapshot(evaluation.nextSnapshot, compiled);
+      }
     }
   } catch {
     return null;
   }
 
   const probs = scoreToProbabilityMap(candidates, scoreMap, Number(policyModel?.softmax_temp || 1.0));
-  return { decisionType, candidates, probabilities: probs, scores };
+  return {
+    decisionType,
+    candidates,
+    probabilities: probs,
+    scores,
+    networkType: compiled.networkType || "feedforward",
+    runtimeSnapshots: Object.keys(runtimeSnapshots).length > 0 ? runtimeSnapshots : null,
+    memoryDebug,
+  };
 }
 
 export function debugFeatureRows(state, actor, options = {}) {
@@ -1553,15 +2222,41 @@ export function debugFeatureRows(state, actor, options = {}) {
   const kHyperBundle = compiled && isCompiledKHyperneatRuntime(compiled)
     ? buildKHyperneatCandidateScoreBundle(state, actor, compiled, decisionType, candidates)
     : null;
+  const runtimeRecord = compiled
+    ? getPreparedRuntimeRecord(state, actor, options.policyModel || null, compiled, options.runtimeCtx || null)
+    : null;
+  const baseRuntimeSnapshot = compiled && isRecurrentNetworkType(compiled?.networkType)
+    ? getBaseRecurrentSnapshot(runtimeRecord, compiled)
+    : null;
+  const recentPlayMemory = runtimeRecord?.recentPlayMemory || createEmptyRecentPlayMemoryState();
+  const opponentRecentPlayMemory = getOpponentRecentPlayMemory(state, actor, options);
   const optionBundle = compiled && decisionType === "option" && isTwoOutputThresholdModel(compiled)
-    ? buildTwoOutputOptionScoreBundle(state, actor, compiled, candidates)
+    ? buildTwoOutputOptionScoreBundle(
+        state,
+        actor,
+        compiled,
+        candidates,
+        baseRuntimeSnapshot,
+        recentPlayMemory,
+        opponentRecentPlayMemory
+      )
     : null;
 
   const rows = [];
   for (const candidate of candidates) {
     const features = isCompiledKHyperneatRuntime(compiled)
       ? []
-      : featureVector(state, actor, decisionType, candidate, candidates.length, inputDim, compiled?.featureSpec);
+      : featureVector(
+          state,
+          actor,
+          decisionType,
+          candidate,
+          candidates.length,
+          inputDim,
+          compiled?.featureSpec,
+          recentPlayMemory,
+          opponentRecentPlayMemory
+        );
     let score = null;
     let oracleScore = null;
     let residualScore = null;
@@ -1576,7 +2271,8 @@ export function debugFeatureRows(state, actor, options = {}) {
             ? Number(optionBundle.oracleMargin || 0.0)
             : 0.0;
       } else {
-        const outputs = forward(compiled, features);
+        const evaluation = evaluateForward(compiled, features, baseRuntimeSnapshot);
+        const outputs = evaluation.outputs;
         const combined = scoreCandidateWithOracle(state, actor, compiled, outputs, decisionType, candidate);
         score = combined.total;
         oracleScore = combined.oracle;
@@ -1593,6 +2289,8 @@ export function debugFeatureRows(state, actor, options = {}) {
       oracleScore,
       residualScore,
       score,
+      recentOutcomesBefore: buildRecentPlayFeatureVector(state, actor, decisionType, candidate, recentPlayMemory).slice(0, V4_RECENT_PLAY_SLOTS),
+      opponentRecentOutcomesBefore: buildRecentOutcomeSlots(opponentRecentPlayMemory),
     });
   }
 
@@ -1601,6 +2299,8 @@ export function debugFeatureRows(state, actor, options = {}) {
     decisionType,
     inputDim,
     legalCount: candidates.length,
+    memoryProfile: compiled?.runtimeMemoryProfile || null,
+    baseThreatMemory: null,
     optionBias: optionBundle?.optionBias ?? null,
     optionThreshold: optionBundle?.threshold ?? null,
     optionPositiveAction: optionBundle?.positiveAction ?? null,
@@ -1608,8 +2308,8 @@ export function debugFeatureRows(state, actor, options = {}) {
   };
 }
 
-function modelPickCandidate(state, actor, policyModel) {
-  const scored = getModelCandidateProbabilities(state, actor, policyModel);
+function modelPickCandidate(state, actor, policyModel, options = {}) {
+  const scored = getModelCandidateProbabilities(state, actor, policyModel, options);
   if (!scored) return null;
   const scoreMap = new Map();
   for (const c of scored.candidates) {
@@ -1617,15 +2317,23 @@ function modelPickCandidate(state, actor, policyModel) {
   }
   const best = pickBestByScore(scored.candidates, scoreMap);
   if (!best) return null;
-  return { decisionType: scored.decisionType, candidate: best };
+  return {
+    decisionType: scored.decisionType,
+    candidate: best,
+    networkType: scored.networkType || "feedforward",
+    runtimeSnapshot: scored.runtimeSnapshots?.[String(best)] || null,
+    memoryDebug: scored.memoryDebug || null,
+  };
 }
 
 export function modelPolicyPlay(state, actor, policyModel, options = {}) {
   if (!policyModel || !isSupportedPolicyModel(policyModel)) return state;
-  const picked = modelPickCandidate(state, actor, policyModel);
+  const picked = modelPickCandidate(state, actor, policyModel, options);
   if (!picked) return state;
+  const compiledRuntime = getCompiledPolicyModel(policyModel);
+  if (!compiledRuntime) return state;
 
-  const sp = selectPool(state, actor);
+  const sp = selectPool(state, actor, options);
   const decisionType = resolveDecisionType(sp);
   if (!decisionType) return state;
 
@@ -1634,5 +2342,23 @@ export function modelPolicyPlay(state, actor, policyModel, options = {}) {
 
   let c = normalizeDecisionCandidate(decisionType, picked.candidate);
   if (!legal.includes(String(c))) c = legal[0];
-  return applyAction(state, actor, decisionType, c);
+  const nextState = applyAction(state, actor, decisionType, c);
+  if (
+    nextState !== state &&
+    !options.previewPlay &&
+    options.runtimeCtx
+  ) {
+    commitPolicyRuntimeRecord(
+      state,
+      actor,
+      decisionType,
+      c,
+      nextState,
+      policyModel,
+      selectCompiledModelForDecision(compiledRuntime, decisionType),
+      options.runtimeCtx,
+      picked.networkType === "recurrent" ? picked.runtimeSnapshot : null
+    );
+  }
+  return nextState;
 }

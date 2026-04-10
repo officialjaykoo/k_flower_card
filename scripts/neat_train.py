@@ -27,6 +27,7 @@ import os
 import pickle
 import random
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOCAL_NEAT_ROOT = os.path.join(REPO_ROOT, "neat-python")
+
+if os.path.isdir(os.path.join(LOCAL_NEAT_ROOT, "neat")) and LOCAL_NEAT_ROOT not in sys.path:
+    sys.path.insert(0, LOCAL_NEAT_ROOT)
 
 try:
     import neat  # type: ignore
@@ -47,6 +52,7 @@ except Exception:
 # Section 1. Runtime Schema + Primitive Coercion Helpers
 # =============================================================================
 ENV_PREFIX = "KFC_NEAT_"
+_NODE_EXE_CACHE: Optional[str] = None
 REQUIRED_RUNTIME_KEYS = [
     "format_version",
     "generations",
@@ -79,6 +85,44 @@ REQUIRED_RUNTIME_KEYS = [
     "failure_slope_5_max",
     "failure_slope_metric",
 ]
+
+
+def _resolve_node_executable() -> str:
+    global _NODE_EXE_CACHE
+    if _NODE_EXE_CACHE and os.path.exists(_NODE_EXE_CACHE):
+        return _NODE_EXE_CACHE
+
+    env_path = str(os.environ.get(f"{ENV_PREFIX}NODE_EXE") or "").strip()
+    if env_path and os.path.exists(env_path):
+        _NODE_EXE_CACHE = os.path.abspath(env_path)
+        return _NODE_EXE_CACHE
+
+    system_node = shutil.which("node")
+    if system_node and os.path.exists(system_node):
+        _NODE_EXE_CACHE = os.path.abspath(system_node)
+        return _NODE_EXE_CACHE
+
+    tools_root = os.path.join(REPO_ROOT, ".tools")
+    if os.path.isdir(tools_root):
+        candidates = []
+        for name in os.listdir(tools_root):
+            full = os.path.join(tools_root, name)
+            if not os.path.isdir(full):
+                continue
+            if not str(name).lower().startswith("node-"):
+                continue
+            exe_name = "node.exe" if os.name == "nt" else "node"
+            node_path = os.path.join(full, exe_name)
+            if os.path.exists(node_path):
+                candidates.append(os.path.abspath(node_path))
+        if candidates:
+            candidates.sort(reverse=True)
+            _NODE_EXE_CACHE = candidates[0]
+            return _NODE_EXE_CACHE
+
+    raise RuntimeError(
+        "node executable not found. Install Node.js or place a portable Node under .tools/node-*"
+    )
 
 
 def _to_int(value, default):
@@ -451,7 +495,7 @@ def _normalize_runtime_values(cfg: dict) -> dict:
         raise RuntimeError("runtime key 'format_version' must be non-empty")
 
     cfg["generations"] = _required_int(cfg, "generations", 1)
-    cfg["eval_workers"] = _required_int(cfg, "eval_workers", 2)
+    cfg["eval_workers"] = _required_int(cfg, "eval_workers", 1)
     cfg["games_per_genome"] = _required_int(cfg, "games_per_genome", 1)
     cfg["eval_timeout_sec"] = _required_int(cfg, "eval_timeout_sec", 10)
     cfg["max_eval_steps"] = _required_int(cfg, "max_eval_steps", 50)
@@ -469,8 +513,8 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     if not cfg["seed"]:
         raise RuntimeError("runtime key 'seed' must be non-empty")
     cfg["feature_profile"] = str(cfg.get("feature_profile") or "material10").strip().lower()
-    if cfg["feature_profile"] not in ("hand7", "hand10", "material10"):
-        raise RuntimeError("runtime key 'feature_profile' must be one of: hand7, hand10, material10")
+    if cfg["feature_profile"] not in ("hand7", "hand10", "memory8", "hand11_v4", "material10", "material10_v4"):
+        raise RuntimeError("runtime key 'feature_profile' must be one of: hand7, hand10, memory8, hand11_v4, material10, material10_v4")
     cfg["fitness_gold_scale"] = _required_float(cfg, "fitness_gold_scale")
     cfg["fitness_gold_neutral_delta"] = _required_float(cfg, "fitness_gold_neutral_delta")
     cfg["fitness_win_weight"] = _required_float(cfg, "fitness_win_weight")
@@ -503,12 +547,9 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     )
     cfg["control_policy_mode"] = _normalize_control_policy_mode(cfg.get("control_policy_mode"))
     cfg["winner_playoff_topk"] = max(1, _to_int(cfg.get("winner_playoff_topk"), 5))
-    cfg["winner_playoff_finalists"] = max(1, _to_int(cfg.get("winner_playoff_finalists"), 2))
-    cfg["winner_playoff_stage1_games"] = max(
-        1, _to_int(cfg.get("winner_playoff_stage1_games"), cfg["games_per_genome"])
-    )
-    cfg["winner_playoff_stage2_games"] = max(
-        1, _to_int(cfg.get("winner_playoff_stage2_games"), cfg["games_per_genome"])
+    cfg["winner_playoff_games"] = max(
+        1,
+        _to_int(cfg.get("winner_playoff_games"), cfg["games_per_genome"]),
     )
     cfg["winner_playoff_win_rate_tie_threshold"] = max(
         0.0, _to_float(cfg.get("winner_playoff_win_rate_tie_threshold"), 0.01)
@@ -522,8 +563,6 @@ def _normalize_runtime_values(cfg: dict) -> dict:
     cfg["winner_playoff_go_take_rate_tie_threshold"] = max(
         0.0, _to_float(cfg.get("winner_playoff_go_take_rate_tie_threshold"), 0.02)
     )
-    if cfg["winner_playoff_finalists"] > cfg["winner_playoff_topk"]:
-        cfg["winner_playoff_finalists"] = int(cfg["winner_playoff_topk"])
 
     if cfg["fitness_gold_scale"] <= 0:
         raise RuntimeError("runtime key 'fitness_gold_scale' must be > 0")
@@ -678,8 +717,10 @@ def _export_neat_python_genome(genome, config, runtime: Optional[dict] = None) -
     gcfg = config.genome_config
     input_keys = [int(x) for x in gcfg.input_keys]
     output_keys = [int(x) for x in gcfg.output_keys]
+    network_type = "feedforward" if bool(getattr(gcfg, "feed_forward", True)) else "recurrent"
     runtime_ctx = runtime or (_runtime_from_env_cached() if os.environ.get(f"{ENV_PREFIX}FORMAT_VERSION") else {})
     feature_profile = str((runtime_ctx or {}).get("feature_profile") or "material10").strip().lower()
+    runtime_memory_profile = "recent_play_v4" if feature_profile in ("material10_v4", "hand11_v4", "memory8") else "none"
 
     default_activation = str(getattr(gcfg, "activation_default", "tanh") or "tanh")
     default_aggregation = str(getattr(gcfg, "aggregation_default", "sum") or "sum")
@@ -693,6 +734,9 @@ def _export_neat_python_genome(genome, config, runtime: Optional[dict] = None) -
             "aggregation": str(getattr(node_gene, "aggregation", default_aggregation) or default_aggregation),
             "bias": float(getattr(node_gene, "bias", 0.0) or 0.0),
             "response": float(getattr(node_gene, "response", 1.0) or 1.0),
+            "memory_gate_enabled": bool(getattr(node_gene, "memory_gate_enabled", False)),
+            "memory_gate_bias": float(getattr(node_gene, "memory_gate_bias", 0.0) or 0.0),
+            "memory_gate_response": float(getattr(node_gene, "memory_gate_response", 1.0) or 1.0),
         }
 
     connections = []
@@ -710,6 +754,9 @@ def _export_neat_python_genome(genome, config, runtime: Optional[dict] = None) -
 
     return {
         "format_version": "neat_python_genome_v1",
+        "network_type": network_type,
+        "runtime_memory_profile": runtime_memory_profile,
+        "runtime_memory_slots": 3 if runtime_memory_profile == "recent_play_v4" else 0,
         "input_keys": input_keys,
         "output_keys": output_keys,
         "feature_spec": {
@@ -1017,7 +1064,7 @@ def _run_eval_worker_for_genome(
         )
 
         cmd = [
-            "node",
+            _resolve_node_executable(),
             eval_script,
             "--genome",
             genome_path,
@@ -1951,7 +1998,7 @@ def _build_pooled_best_record(records: list[dict], runtime: dict) -> Optional[di
             for item in source_records
             if str(item.get("seed_used") or "").strip()
         ),
-        "record_mode": "pooled_training_stage1_stage2",
+        "record_mode": "pooled_training_playoff",
         "record_sources": [
             {
                 "games": int(_safe_float(item.get("games"), 0.0)),
@@ -1994,17 +2041,14 @@ def _run_winner_playoff(candidate_entries, config, runtime: dict) -> Optional[di
     if not candidate_entries:
         return None
 
-    stage1_topk = max(1, int(runtime.get("winner_playoff_topk", 5)))
-    stage2_topk = max(1, int(runtime.get("winner_playoff_finalists", 2)))
-    stage1_games = max(1, int(runtime.get("winner_playoff_stage1_games", runtime["games_per_genome"])))
-    stage2_games = max(1, int(runtime.get("winner_playoff_stage2_games", runtime["games_per_genome"])))
+    playoff_topk = max(1, int(runtime.get("winner_playoff_topk", 5)))
+    playoff_games = max(1, int(runtime.get("winner_playoff_games", runtime["games_per_genome"])))
     seed_base = str(runtime.get("seed") or "winner_playoff")
 
-    stage1_seed = f"{seed_base}|winner_playoff_stage1"
-    stage2_seed = f"{seed_base}|winner_playoff_stage2"
-    stage1_candidates = list(candidate_entries[:stage1_topk])
-    stage1_results = []
-    for entry in stage1_candidates:
+    playoff_seed = f"{seed_base}|winner_playoff"
+    playoff_candidates = list(candidate_entries[:playoff_topk])
+    playoff_results = []
+    for entry in playoff_candidates:
         training_record = dict(entry.get("record") or {})
         genome = entry.get("genome")
         if genome is None:
@@ -2013,94 +2057,48 @@ def _run_winner_playoff(candidate_entries, config, runtime: dict) -> Optional[di
             genome=genome,
             config=config,
             runtime=runtime,
-            seed_text=stage1_seed,
+            seed_text=playoff_seed,
             generation=int(training_record.get("generation", -1)),
             genome_key=int(training_record.get("genome_key", -1)),
-            games_override=stage1_games,
+            games_override=playoff_games,
             early_stop_win_rate_cutoffs_override=[],
             early_stop_go_take_rate_cutoffs_override=[],
-            context_label="winner_playoff_stage1",
+            context_label="winner_playoff",
         )
         playoff_record["generation"] = int(training_record.get("generation", -1))
         playoff_record["genome_key"] = int(training_record.get("genome_key", -1))
         playoff_record["num_nodes"] = int(training_record.get("num_nodes", 0))
         playoff_record["num_connections"] = int(training_record.get("num_connections", 0))
         playoff_record["num_connections_total"] = int(training_record.get("num_connections_total", 0))
-        stage1_results.append(
+        playoff_results.append(
             {
                 "training_record": training_record,
-                "stage1_record": playoff_record,
+                "playoff_record": playoff_record,
                 "genome": copy.deepcopy(genome),
             }
         )
 
-    if not stage1_results:
+    if not playoff_results:
         return None
 
-    stage1_results.sort(
+    playoff_results.sort(
         key=functools.cmp_to_key(
             lambda a, b: -_playoff_record_compare(
-                a.get("stage1_record") or {},
-                b.get("stage1_record") or {},
+                a.get("playoff_record") or {},
+                b.get("playoff_record") or {},
                 runtime,
             )
         )
     )
-    stage2_candidates = list(stage1_results[:stage2_topk])
-    stage2_results = []
-    for entry in stage2_candidates:
-        training_record = dict(entry.get("training_record") or {})
-        genome = entry.get("genome")
-        if genome is None:
-            continue
-        playoff_record = _run_eval_worker_for_genome(
-            genome=genome,
-            config=config,
-            runtime=runtime,
-            seed_text=stage2_seed,
-            generation=int(training_record.get("generation", -1)),
-            genome_key=int(training_record.get("genome_key", -1)),
-            games_override=stage2_games,
-            early_stop_win_rate_cutoffs_override=[],
-            early_stop_go_take_rate_cutoffs_override=[],
-            context_label="winner_playoff_stage2",
-        )
-        playoff_record["generation"] = int(training_record.get("generation", -1))
-        playoff_record["genome_key"] = int(training_record.get("genome_key", -1))
-        playoff_record["num_nodes"] = int(training_record.get("num_nodes", 0))
-        playoff_record["num_connections"] = int(training_record.get("num_connections", 0))
-        playoff_record["num_connections_total"] = int(training_record.get("num_connections_total", 0))
-        stage2_results.append(
-            {
-                "training_record": training_record,
-                "stage1_record": dict(entry.get("stage1_record") or {}),
-                "stage2_record": playoff_record,
-                "genome": copy.deepcopy(genome),
-            }
-        )
-
-    if not stage2_results:
-        return None
-
-    stage2_results.sort(
-        key=functools.cmp_to_key(
-            lambda a, b: -_playoff_record_compare(
-                a.get("stage2_record") or {},
-                b.get("stage2_record") or {},
-                runtime,
-            )
-        )
-    )
-    winner_entry = stage2_results[0]
+    winner_entry = playoff_results[0]
     return {
         "winner_genome": copy.deepcopy(winner_entry.get("genome")),
-        "winner_record": dict(winner_entry.get("stage2_record") or {}),
+        "winner_record": dict(winner_entry.get("playoff_record") or {}),
         "winner_training_record": dict(winner_entry.get("training_record") or {}),
-        "winner_stage1_record": dict(winner_entry.get("stage1_record") or {}),
-        "winner_stage2_record": dict(winner_entry.get("stage2_record") or {}),
+        "winner_playoff_record": dict(winner_entry.get("playoff_record") or {}),
         "summary": {
-            "mode": "topk_fresh_seed_playoff",
-            "criteria": "stage1 top-K by training fitness, then playoff ranking: win_rate (tie<=threshold), mean_gold_delta (tie<=threshold), go_take_rate, go_fail_rate, fitness; repeat for stage2",
+            "mode": "topk_single_fresh_seed_playoff",
+            "criteria": "top-K by training fitness, then one fresh-seed playoff ranking: win_rate (tie<=threshold), mean_gold_delta (tie<=threshold), go_take_rate, go_fail_rate, fitness",
             "thresholds": {
                 "win_rate_tie_threshold": float(runtime.get("winner_playoff_win_rate_tie_threshold", 0.01)),
                 "mean_gold_delta_tie_threshold": float(
@@ -2111,22 +2109,13 @@ def _run_winner_playoff(candidate_entries, config, runtime: dict) -> Optional[di
                     runtime.get("winner_playoff_go_take_rate_tie_threshold", 0.02)
                 ),
             },
-            "stage1": {
-                "topk": int(stage1_topk),
-                "games": int(stage1_games),
-                "seed": stage1_seed,
+            "playoff": {
+                "topk": int(playoff_topk),
+                "games": int(playoff_games),
+                "seed": playoff_seed,
                 "results": [
-                    _serialize_playoff_entry(entry.get("training_record") or {}, entry.get("stage1_record") or {})
-                    for entry in stage1_results
-                ],
-            },
-            "stage2": {
-                "topk": int(stage2_topk),
-                "games": int(stage2_games),
-                "seed": stage2_seed,
-                "results": [
-                    _serialize_playoff_entry(entry.get("training_record") or {}, entry.get("stage2_record") or {})
-                    for entry in stage2_results
+                    _serialize_playoff_entry(entry.get("training_record") or {}, entry.get("playoff_record") or {})
+                    for entry in playoff_results
                 ],
             },
         },
@@ -2176,6 +2165,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Resume start generation offset for checkpoint naming",
     )
+    parser.add_argument(
+        "--additional-generations",
+        type=int,
+        default=0,
+        help="When resuming, run this many extra generations beyond the checkpoint state",
+    )
     parser.add_argument("--generations", type=int, default=0, help="Override generations")
     parser.add_argument("--workers", type=int, default=0, help="Override worker count")
     parser.add_argument("--games-per-genome", type=int, default=0, help="Override games per genome")
@@ -2185,7 +2180,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--feature-profile",
         default="",
-        help="Override feature profile (hand7, hand10, material10)",
+        help="Override feature profile (hand7, hand10, memory8, hand11_v4, material10, material10_v4)",
     )
     parser.add_argument(
         "--opponent-genome",
@@ -2310,42 +2305,63 @@ def _load_seed_genome(seed_genome_path: str):
 
 
 def _adapt_seed_genome_to_config(cfg, seed_genome, seed_path: str):
-    allowed_input_keys = {int(x) for x in getattr(cfg.genome_config, "input_keys", [])}
-    if not allowed_input_keys:
-        return seed_genome
+    genome_config = getattr(cfg, "genome_config", None)
+    allowed_input_keys = {int(x) for x in getattr(genome_config, "input_keys", [])}
 
     pruned = copy.deepcopy(seed_genome)
     removed = 0
+    hydrated = 0
 
-    for conn_key, conn_gene in list((getattr(pruned, "connections", {}) or {}).items()):
-        try:
-            in_node = int(conn_key[0])
-        except Exception:
-            try:
-                in_node = int(getattr(conn_gene, "key", [0, 0])[0])
-            except Exception:
+    node_gene_type = getattr(genome_config, "node_gene_type", None)
+    for node_gene in (getattr(pruned, "nodes", {}) or {}).values():
+        for attr in getattr(node_gene_type, "_gene_attributes", []) or []:
+            if hasattr(node_gene, attr.name):
                 continue
-        try:
-            out_node = int(conn_key[1])
-        except Exception:
-            try:
-                out_node = int(getattr(conn_gene, "key", [0, 0])[1])
-            except Exception:
+            setattr(node_gene, attr.name, attr.init_value(genome_config))
+            hydrated += 1
+
+    connection_gene_type = getattr(genome_config, "connection_gene_type", None)
+    for conn_gene in (getattr(pruned, "connections", {}) or {}).values():
+        for attr in getattr(connection_gene_type, "_gene_attributes", []) or []:
+            if hasattr(conn_gene, attr.name):
                 continue
-        if in_node < 0 and in_node not in allowed_input_keys:
-            del pruned.connections[conn_key]
-            removed += 1
-            continue
-        if out_node < 0:
-            del pruned.connections[conn_key]
-            removed += 1
+            setattr(conn_gene, attr.name, attr.init_value(genome_config))
+            hydrated += 1
 
-    if removed <= 0:
-        return seed_genome
+    if allowed_input_keys:
+        for conn_key, conn_gene in list((getattr(pruned, "connections", {}) or {}).items()):
+            try:
+                in_node = int(conn_key[0])
+            except Exception:
+                try:
+                    in_node = int(getattr(conn_gene, "key", [0, 0])[0])
+                except Exception:
+                    continue
+            try:
+                out_node = int(conn_key[1])
+            except Exception:
+                try:
+                    out_node = int(getattr(conn_gene, "key", [0, 0])[1])
+                except Exception:
+                    continue
+            if in_node < 0 and in_node not in allowed_input_keys:
+                del pruned.connections[conn_key]
+                removed += 1
+                continue
+            if out_node < 0:
+                del pruned.connections[conn_key]
+                removed += 1
+                continue
 
-    setattr(pruned, "_codex_pruned_seed_inputs", True)
-    setattr(pruned, "_codex_pruned_seed_path", os.path.abspath(seed_path))
-    setattr(pruned, "_codex_pruned_connection_count", int(removed))
+    if removed > 0:
+        setattr(pruned, "_codex_pruned_seed_inputs", True)
+        setattr(pruned, "_codex_pruned_seed_path", os.path.abspath(seed_path))
+        setattr(pruned, "_codex_pruned_connection_count", int(removed))
+    if hydrated > 0:
+        setattr(pruned, "_codex_hydrated_seed_attrs", True)
+        setattr(pruned, "_codex_hydrated_seed_path", os.path.abspath(seed_path))
+        setattr(pruned, "_codex_hydrated_attr_count", int(hydrated))
+
     return pruned
 
 
@@ -3000,6 +3016,9 @@ def main() -> None:
     if args.generations > 0:
         runtime["generations"] = args.generations
         override_keys.append("generations")
+    additional_generations = max(0, int(args.additional_generations))
+    if additional_generations > 0:
+        applied_overrides["additional_generations"] = additional_generations
     if args.workers > 0:
         runtime["eval_workers"] = args.workers
         override_keys.append("eval_workers")
@@ -3083,7 +3102,7 @@ def main() -> None:
     runtime["output_dir"] = os.path.abspath(args.output_dir)
 
     if args.resume:
-        p = _restore_population_from_checkpoint(args.resume)
+        p = _restore_population_from_checkpoint(args.resume, cfg)
     elif seed_genome_specs:
         p = _seed_population_from_specs(cfg, neat.Population(cfg), _normalize_seed_specs(cfg, seed_genome_specs))
     elif seed_genome_path:
@@ -3121,6 +3140,9 @@ def main() -> None:
         start_generation=start_generation,
         explicit_base_generation=explicit_base_generation,
     )
+    run_generation_count = int(runtime["generations"])
+    if bool(args.resume) and additional_generations > 0:
+        run_generation_count = int(additional_generations)
     if base_generation != 0:
         applied_overrides["base_generation"] = int(base_generation)
 
@@ -3140,7 +3162,7 @@ def main() -> None:
     checkpointer = OffsetCheckpointer(
         base_generation=int(base_generation),
         start_generation=int(start_generation),
-        total_generations=int(runtime["generations"]),
+        total_generations=int(run_generation_count),
         generation_interval=max(1, int(runtime["checkpoint_every"])),
         filename_prefix=prefix,
         initial_best_genome=getattr(p, "best_genome", None),
@@ -3152,12 +3174,16 @@ def main() -> None:
 
     def _run_population(eval_callable):
         if bool(args.verbose):
-            return p.run(eval_callable, int(runtime["generations"]))
+            return p.run(eval_callable, int(run_generation_count))
         with open(os.devnull, "w", encoding="utf-8") as devnull:
             with contextlib.redirect_stdout(devnull):
-                return p.run(eval_callable, int(runtime["generations"]))
+                return p.run(eval_callable, int(run_generation_count))
 
-    skip_training_run = bool(args.resume) and int(start_generation) >= int(runtime["generations"])
+    skip_training_run = (
+        bool(args.resume)
+        and additional_generations <= 0
+        and int(start_generation) >= int(runtime["generations"])
+    )
     if skip_training_run:
         winner = getattr(p, "best_genome", None)
         mode = "resume_postprocess"
@@ -3220,7 +3246,7 @@ def main() -> None:
 
     winner_pkl, winner_json_path = _write_genome_exports("winner_genome", best_winner)
 
-    best_record_stage2 = (
+    best_record_playoff = (
         dict(winner_playoff.get("winner_record") or {})
         if winner_playoff is not None and isinstance(winner_playoff.get("winner_record"), dict)
         else selection_best_record
@@ -3230,12 +3256,11 @@ def main() -> None:
         best_record_pooled = _build_pooled_best_record(
             [
                 dict(winner_playoff.get("winner_training_record") or {}),
-                dict(winner_playoff.get("winner_stage1_record") or {}),
-                dict(winner_playoff.get("winner_stage2_record") or {}),
+                dict(winner_playoff.get("winner_playoff_record") or {}),
             ],
             runtime,
         )
-    best_record = best_record_pooled or best_record_stage2
+    best_record = best_record_pooled or best_record_playoff
     best_fitness = _safe_float((best_record or {}).get("fitness"), float("nan"))
     if best_fitness != best_fitness:
         best_fitness = float(getattr(best_winner, "fitness", float("nan")) or 0.0)
@@ -3244,12 +3269,12 @@ def main() -> None:
     champion_exports = {
         "fitness": {
             "criteria": (
-                "pooled training + top-K fresh-seed playoff winner"
+                "pooled training + single top-K fresh-seed playoff winner"
                 if winner_playoff is not None
                 else "full_eval, highest selection fitness"
             ),
             "record": best_record,
-            "record_stage2": best_record_stage2,
+            "record_playoff": best_record_playoff,
             "winner_pickle": winner_pkl,
             "winner_json": winner_json_path,
         }
@@ -3276,12 +3301,14 @@ def main() -> None:
         "mode": mode,
         "profile_name": str(args.profile_name or ""),
         "generations": int(runtime["generations"]),
+        "run_generation_count": int(run_generation_count),
+        "resume_start_generation": int(start_generation),
         "workers": int(runtime["eval_workers"]),
         "games_per_genome": int(runtime["games_per_genome"]),
         "best_fitness": best_fitness,
         "winner_generation": (int(winner_generation) if winner_generation is not None else None),
         "best_record": best_record,
-        "best_record_stage2": best_record_stage2,
+        "best_record_playoff": best_record_playoff,
         "best_record_pooled": best_record_pooled,
         "winner_playoff": (winner_playoff.get("summary") if winner_playoff is not None else None),
         "champions": champion_exports,
@@ -3317,10 +3344,10 @@ def main() -> None:
         "go_take_rate": best_record_summary.get("go_take_rate"),
         "go_fail_rate": best_record_summary.get("go_fail_rate"),
         "winner_selection_mode": (
-            "topk_fresh_seed_playoff" if winner_playoff is not None else "selection_fitness"
+            "topk_single_fresh_seed_playoff" if winner_playoff is not None else "selection_fitness"
         ),
         "best_record_mode": (
-            "pooled_training_stage1_stage2" if winner_playoff is not None else "selection_fitness"
+            "pooled_training_playoff" if winner_playoff is not None else "selection_fitness"
         ),
         "winner_json": winner_json_path,
     }

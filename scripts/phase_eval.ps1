@@ -1,11 +1,14 @@
 ﻿param(
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed,
+  [Parameter(Mandatory = $false)][ValidateSet("feedforward", "recurrent")][string]$NetworkType = "feedforward",
   [Parameter(Mandatory = $false)][ValidateSet("classic")][string]$LineageProfile = "classic"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+. "$PSScriptRoot\toolchain.ps1"
 
 function Read-JsonFile {
   param([Parameter(Mandatory = $true)][string]$Path)
@@ -224,7 +227,21 @@ function Get-LineageLayout {
   }
 }
 
+function Get-NetworkOutputPrefix {
+  param(
+    [Parameter(Mandatory = $true)][string]$BasePrefix,
+    [Parameter(Mandatory = $true)][string]$NetworkType
+  )
+  if ($NetworkType -eq "recurrent") {
+    return "${BasePrefix}_rnn"
+  }
+  return $BasePrefix
+}
+
 $lineageLayout = Get-LineageLayout -Profile $LineageProfile
+$nodeInfo = Resolve-NodeCommand
+Enable-RepoToolchainPath -NodeInfo $nodeInfo
+$node = [string]$nodeInfo.Path
 <#
 
   $savePath = Join-Path $outputDir "phase${Phase}_eval_1000.json"
@@ -399,7 +416,8 @@ $lineageLayout = Get-LineageLayout -Profile $LineageProfile
 #>
 
 $runtimeConfigPath = "scripts/configs/runtime_phase1.json"
-$outputDir = "logs/NEAT/$($lineageLayout.output_prefix)_phase${Phase}_seed$Seed"
+$effectiveOutputPrefix = Get-NetworkOutputPrefix -BasePrefix ([string]$lineageLayout.output_prefix) -NetworkType $NetworkType
+$outputDir = "logs/NEAT/${effectiveOutputPrefix}_phase${Phase}_seed$Seed"
 $gateStatePath = Join-Path $outputDir "gate_state.json"
 $genomePath = Join-Path $outputDir "models/winner_genome.json"
 
@@ -466,7 +484,7 @@ if ($hasPolicy) {
   $cmd += @("--opponent-policy", "$policyValue")
 }
 
-$resultLines = & node @cmd
+$resultLines = & $node @cmd
 $exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
   exit $exitCode

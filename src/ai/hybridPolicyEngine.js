@@ -80,7 +80,11 @@ function runHeuristicPolicy(state, actor, policy, heuristicParams) {
 function runFallbackPolicy(state, actor, options, heuristicParams) {
   const fallbackModel = options?.fallbackModel || null;
   if (fallbackModel) {
-    return runModelPolicyPlay(state, actor, fallbackModel);
+    return runModelPolicyPlay(state, actor, fallbackModel, {
+      runtimeCtx: options?.fallbackRuntimeCtx || options?.runtimeCtx || null,
+      opponentModel: options?.opponentModel || null,
+      opponentRuntimeCtx: options?.opponentRuntimeCtx || null,
+    });
   }
   const fallbackPolicy = normalizeBotPolicy(
     options?.fallbackPolicy || options?.heuristicPolicy || DEFAULT_BOT_POLICY
@@ -121,7 +125,7 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
 
   if (goStopOnly) {
     if (model) {
-      const modelNext = runModelPolicyPlay(state, actor, model);
+      const modelNext = runModelPolicyPlay(state, actor, model, options);
       if (isMoved(state, modelNext)) {
         return {
           next: modelNext,
@@ -162,7 +166,7 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
 
   if (modelMatchPhase && isMatchTurn(state, actor)) {
     if (model) {
-      const modelNext = runModelPolicyPlay(state, actor, model);
+      const modelNext = runModelPolicyPlay(state, actor, model, options);
       if (isMoved(state, modelNext)) {
         return {
           next: modelNext,
@@ -215,7 +219,7 @@ export function hybridPolicyPlayDetailed(state, actor, options = {}) {
   }
 
   if (model) {
-    const modelNext = runModelPolicyPlay(state, actor, model);
+    const modelNext = runModelPolicyPlay(state, actor, model, options);
     if (isMoved(state, modelNext)) {
       return {
         next: modelNext,

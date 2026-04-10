@@ -6,6 +6,7 @@ import {
   getModelLabel
 } from "../ai/policies.js";
 import { aiPlay, getAiPlayProbabilities } from "../ai/aiPlay.js";
+import { createModelRuntimeContext } from "../ai/modelPolicyEngine.js";
 import { advanceAutoTurns } from "../engine/runner.js";
 import { DEFAULT_LANGUAGE } from "../ui/i18n/i18n.js";
 
@@ -18,6 +19,14 @@ import { DEFAULT_LANGUAGE } from "../ui/i18n/i18n.js";
 
 function createEmptyModelSlots() {
   return { single: null, attack: null, defense: null };
+}
+
+function createRuntimeSlots() {
+  return {
+    single: createModelRuntimeContext(),
+    attack: createModelRuntimeContext(),
+    defense: createModelRuntimeContext(),
+  };
 }
 
 async function fetchPolicyModel(path) {
@@ -35,11 +44,40 @@ function pickStaticMoeModel(slotModels) {
   return slotModels.attack || slotModels.defense || slotModels.single || null;
 }
 
+function pickStaticMoeSlotKey(slotModels) {
+  if (slotModels.attack) return "attack";
+  if (slotModels.defense) return "defense";
+  if (slotModels.single) return "single";
+  return null;
+}
+
+function resolveSelectedModelRuntime(pick, slotModels, slotRuntime) {
+  const cfg = MODEL_CATALOG[pick] || null;
+  if (cfg?.kind === "policy_model") {
+    return {
+      model: slotModels.single || slotModels.attack || slotModels.defense || null,
+      runtimeCtx: slotRuntime.single,
+    };
+  }
+  if (cfg?.kind === "policy_model_moe") {
+    const runtimeSlotKey = pickStaticMoeSlotKey(slotModels);
+    return {
+      model: pickStaticMoeModel(slotModels),
+      runtimeCtx: runtimeSlotKey ? slotRuntime[runtimeSlotKey] : null,
+    };
+  }
+  return { model: null, runtimeCtx: null };
+}
+
 export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotPlayerFn }) {
   /* 1) Runtime refs/state */
   const policyModelRef = useRef({
     human: createEmptyModelSlots(),
     ai: createEmptyModelSlots()
+  });
+  const policyRuntimeRef = useRef({
+    human: createRuntimeSlots(),
+    ai: createRuntimeSlots(),
   });
   const [modelVersion, setModelVersion] = useState(0);
 
@@ -87,19 +125,33 @@ export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotP
       const pick = runtimeUi.modelPicks?.[playerKey];
       const cfg = MODEL_CATALOG[pick] || null;
       const slotModels = policyModelRef.current[playerKey] || createEmptyModelSlots();
+      const slotRuntime = policyRuntimeRef.current[playerKey] || createRuntimeSlots();
+      const opponentKey = playerKey === "human" ? "ai" : "human";
+      const opponentSlots = resolveSelectedModelRuntime(
+        runtimeUi.modelPicks?.[opponentKey],
+        policyModelRef.current[opponentKey] || createEmptyModelSlots(),
+        policyRuntimeRef.current[opponentKey] || createRuntimeSlots()
+      );
 
       if (cfg?.kind === "policy_model") {
         return {
           source: "model",
           model: slotModels.single || slotModels.attack || slotModels.defense || null,
+          runtimeCtx: slotRuntime.single,
+          opponentModel: opponentSlots.model,
+          opponentRuntimeCtx: opponentSlots.runtimeCtx,
           heuristicPolicy: DEFAULT_BOT_POLICY
         };
       }
 
       if (cfg?.kind === "policy_model_moe") {
+        const runtimeSlotKey = pickStaticMoeSlotKey(slotModels);
         return {
           source: "model",
           model: pickStaticMoeModel(slotModels),
+          runtimeCtx: runtimeSlotKey ? slotRuntime[runtimeSlotKey] : null,
+          opponentModel: opponentSlots.model,
+          opponentRuntimeCtx: opponentSlots.runtimeCtx,
           heuristicPolicy: DEFAULT_BOT_POLICY
         };
       }
@@ -143,11 +195,13 @@ export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotP
       const cfg = MODEL_CATALOG[pick] || null;
       if (!cfg) {
         policyModelRef.current[slot] = createEmptyModelSlots();
+        policyRuntimeRef.current[slot] = createRuntimeSlots();
         return;
       }
       if (cfg.kind === "policy_model") {
         const single = await fetchPolicyModel(cfg.policyPath);
         policyModelRef.current[slot] = { single, attack: null, defense: null };
+        policyRuntimeRef.current[slot] = createRuntimeSlots();
         return;
       }
       if (cfg.kind === "policy_model_moe") {
@@ -156,9 +210,11 @@ export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotP
           fetchPolicyModel(cfg.policyPathDefense)
         ]);
         policyModelRef.current[slot] = { single: null, attack, defense };
+        policyRuntimeRef.current[slot] = createRuntimeSlots();
         return;
       }
       policyModelRef.current[slot] = createEmptyModelSlots();
+      policyRuntimeRef.current[slot] = createRuntimeSlots();
     };
 
     Promise.all([loadFor("human"), loadFor("ai")])
@@ -170,6 +226,8 @@ export function useAiRuntime({ ui, state, translateFn, participantTypeFn, isBotP
         if (!mounted) return;
         policyModelRef.current.human = createEmptyModelSlots();
         policyModelRef.current.ai = createEmptyModelSlots();
+        policyRuntimeRef.current.human = createRuntimeSlots();
+        policyRuntimeRef.current.ai = createRuntimeSlots();
         setModelVersion((v) => v + 1);
       });
 

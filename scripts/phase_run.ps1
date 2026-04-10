@@ -2,12 +2,16 @@
   [Parameter(Mandatory = $true)][ValidateSet("1", "2", "3")][string]$Phase,
   [Parameter(Mandatory = $true)][int]$Seed,
   [Parameter(Mandatory = $false)][ValidateSet("classic")][string]$LineageProfile = "classic",
-  [Parameter(Mandatory = $false)][ValidateSet("hand7", "hand10", "material10")][string]$FeatureProfile = "",
+  [Parameter(Mandatory = $false)][ValidateSet("feedforward", "recurrent")][string]$NetworkType = "feedforward",
+  [Parameter(Mandatory = $false)][ValidateSet("hand7", "hand10", "memory8", "hand11_v4", "material10", "material10_v4")][string]$FeatureProfile = "",
+  [Parameter(Mandatory = $false)][string]$RuntimeConfigPath = "",
   [Parameter(Mandatory = $false)][string[]]$BootstrapSeedSpec = @()
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+. "$PSScriptRoot\toolchain.ps1"
 
 function Read-JsonFile {
   param([Parameter(Mandatory = $true)][string]$Path)
@@ -312,8 +316,34 @@ function Get-LineageLayout {
   }
 }
 
+function Get-NetworkOutputPrefix {
+  param(
+    [Parameter(Mandatory = $true)][string]$BasePrefix,
+    [Parameter(Mandatory = $true)][string]$NetworkType
+  )
+  if ($NetworkType -eq "recurrent") {
+    return "${BasePrefix}_rnn"
+  }
+  return $BasePrefix
+}
+
+function Get-NetworkOutputPrefixes {
+  param(
+    [Parameter(Mandatory = $true)][string]$BasePrefix,
+    [Parameter(Mandatory = $true)][string]$NetworkType
+  )
+  $primaryPrefix = Get-NetworkOutputPrefix -BasePrefix $BasePrefix -NetworkType $NetworkType
+  if ($primaryPrefix -eq $BasePrefix) {
+    return @($primaryPrefix)
+  }
+  return @($primaryPrefix, $BasePrefix)
+}
+
 function Resolve-BootstrapWinnerPath {
-  param([Parameter(Mandatory = $true)][string]$Spec)
+  param(
+    [Parameter(Mandatory = $true)][string]$Spec,
+    [Parameter(Mandatory = $true)][string]$NetworkType
+  )
 
   $raw = [string]$Spec
   if ([string]::IsNullOrWhiteSpace($raw)) {
@@ -327,34 +357,40 @@ function Resolve-BootstrapWinnerPath {
   $bootstrapLayout = Get-LineageLayout -Profile "classic"
   $bootstrapPhase = [int]$m.Groups[1].Value
   $bootstrapSeed = [int]$m.Groups[2].Value
-  $summaryPath = "logs/NEAT/$($bootstrapLayout.output_prefix)_phase${bootstrapPhase}_seed$bootstrapSeed/run_summary.json"
-  $winnerPath = ""
-  if (Test-Path $summaryPath) {
-    $summary = Read-JsonFile -Path $summaryPath
-    $repairStatus = [string](Get-PropertyValue -Object $summary -Name "winner_repair_status")
-    if ($repairStatus -eq "summary_repaired_winner_unrecoverable") {
-      throw "bootstrap winner is unrecoverable for $Spec; run_summary was repaired but exact winner genome could not be restored"
+  $candidatePrefixes = Get-NetworkOutputPrefixes -BasePrefix ([string]$bootstrapLayout.output_prefix) -NetworkType $NetworkType
+  $checkedLocations = @()
+  foreach ($candidatePrefix in $candidatePrefixes) {
+    $summaryPath = "logs/NEAT/${candidatePrefix}_phase${bootstrapPhase}_seed$bootstrapSeed/run_summary.json"
+    $winnerPath = ""
+    if (Test-Path $summaryPath) {
+      $summary = Read-JsonFile -Path $summaryPath
+      $repairStatus = [string](Get-PropertyValue -Object $summary -Name "winner_repair_status")
+      if ($repairStatus -eq "summary_repaired_winner_unrecoverable") {
+        throw "bootstrap winner is unrecoverable for $Spec; run_summary was repaired but exact winner genome could not be restored"
+      }
+      $winnerPath = [string](Get-PropertyValue -Object $summary -Name "winner_pickle")
     }
-    $winnerPath = [string](Get-PropertyValue -Object $summary -Name "winner_pickle")
+    if ([string]::IsNullOrWhiteSpace($winnerPath)) {
+      $winnerPath = "logs/NEAT/${candidatePrefix}_phase${bootstrapPhase}_seed$bootstrapSeed/models/winner_genome.pkl"
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($winnerPath)
+    $checkedLocations += $fullPath
+    if (Test-Path $fullPath) {
+      return $fullPath
+    }
   }
-  if ([string]::IsNullOrWhiteSpace($winnerPath)) {
-    $winnerPath = "logs/NEAT/$($bootstrapLayout.output_prefix)_phase${bootstrapPhase}_seed$bootstrapSeed/models/winner_genome.pkl"
-  }
-  $fullPath = [System.IO.Path]::GetFullPath($winnerPath)
-  if (-not (Test-Path $fullPath)) {
-    throw "bootstrap winner genome not found: $fullPath"
-  }
-  return $fullPath
+  throw "bootstrap winner genome not found for $Spec. Checked: $([string]::Join(', ', $checkedLocations))"
 }
 
-$python = ".venv\Scripts\python.exe"
-if (-not (Test-Path $python)) {
-  throw "python not found: $python"
-}
+$pythonInfo = Resolve-PythonCommand
+$nodeInfo = Resolve-NodeCommand
+Enable-RepoToolchainPath -PythonInfo $pythonInfo -NodeInfo $nodeInfo
+$python = [string]$pythonInfo.Path
 
 $lineageLayout = Get-LineageLayout -Profile $LineageProfile
-$runtimeConfig = "scripts/configs/runtime_phase1.json"
-$outputDir = "logs/NEAT/$($lineageLayout.output_prefix)_phase${Phase}_seed$Seed"
+$runtimeConfig = if ([string]::IsNullOrWhiteSpace($RuntimeConfigPath)) { "scripts/configs/runtime_phase1.json" } else { [string]$RuntimeConfigPath }
+$effectiveOutputPrefix = Get-NetworkOutputPrefix -BasePrefix ([string]$lineageLayout.output_prefix) -NetworkType $NetworkType
+$outputDir = "logs/NEAT/${effectiveOutputPrefix}_phase${Phase}_seed$Seed"
 
 if (-not (Test-Path $runtimeConfig)) {
   throw "runtime config not found: $runtimeConfig"
@@ -370,9 +406,24 @@ if ([string]::IsNullOrWhiteSpace($effectiveFeatureProfile)) {
 $effectiveFeatureProfile = $effectiveFeatureProfile.Trim().ToLowerInvariant()
 
 switch ($effectiveFeatureProfile) {
-  "hand7" { $configFeedforward = "scripts/configs/neat_feedforward_hand7.ini" }
-  "hand10" { $configFeedforward = [string]$lineageLayout.config_feedforward }
-  "material10" { $configFeedforward = [string]$lineageLayout.config_feedforward }
+  "hand7" {
+    $configFeedforward = if ($NetworkType -eq "recurrent") { "scripts/configs/neat_recurrent_hand7.ini" } else { "scripts/configs/neat_feedforward_hand7.ini" }
+  }
+  "hand11_v4" {
+    $configFeedforward = if ($NetworkType -eq "recurrent") { "scripts/configs/neat_recurrent_hand11_v4.ini" } else { "scripts/configs/neat_feedforward_hand11_v4.ini" }
+  }
+  "memory8" {
+    $configFeedforward = if ($NetworkType -eq "recurrent") { "scripts/configs/neat_recurrent_memory8.ini" } else { "scripts/configs/neat_feedforward_memory8.ini" }
+  }
+  "hand10" {
+    $configFeedforward = if ($NetworkType -eq "recurrent") { "scripts/configs/neat_recurrent.ini" } else { [string]$lineageLayout.config_feedforward }
+  }
+  "material10" {
+    $configFeedforward = if ($NetworkType -eq "recurrent") { "scripts/configs/neat_recurrent.ini" } else { [string]$lineageLayout.config_feedforward }
+  }
+  "material10_v4" {
+    $configFeedforward = if ($NetworkType -eq "recurrent") { "scripts/configs/neat_recurrent.ini" } else { [string]$lineageLayout.config_feedforward }
+  }
   default { throw "unsupported feature profile: $effectiveFeatureProfile" }
 }
 if (-not (Test-Path $configFeedforward)) {
@@ -385,7 +436,7 @@ $cmd = @(
   "--runtime-config", $runtimeConfig,
   "--output-dir", $outputDir,
   "--seed", "$Seed",
-  "--profile-name", "$($lineageLayout.profile_name_prefix)phase${Phase}_seed$Seed"
+  "--profile-name", "$($lineageLayout.profile_name_prefix)phase${Phase}_seed$Seed$(if ($NetworkType -eq 'recurrent') { '_rnn' } else { '' })"
 )
 
 if (-not [string]::IsNullOrWhiteSpace($FeatureProfile)) {
@@ -399,15 +450,15 @@ if ($BootstrapSeedSpec.Count -gt 0) {
   if ($bootstrapSpecs.Count -eq 0) {
   }
   elseif ($bootstrapSpecs.Count -eq 1) {
-    $bootstrapWinnerPath = Resolve-BootstrapWinnerPath -Spec $bootstrapSpecs[0]
+    $bootstrapWinnerPath = Resolve-BootstrapWinnerPath -Spec $bootstrapSpecs[0] -NetworkType $NetworkType
     $cmd += @(
       "--seed-genome", "$bootstrapWinnerPath",
       "--seed-genome-count", "48"
     )
   }
   elseif ($bootstrapSpecs.Count -eq 2) {
-    $bootstrapWinnerPath1 = Resolve-BootstrapWinnerPath -Spec $bootstrapSpecs[0]
-    $bootstrapWinnerPath2 = Resolve-BootstrapWinnerPath -Spec $bootstrapSpecs[1]
+    $bootstrapWinnerPath1 = Resolve-BootstrapWinnerPath -Spec $bootstrapSpecs[0] -NetworkType $NetworkType
+    $bootstrapWinnerPath2 = Resolve-BootstrapWinnerPath -Spec $bootstrapSpecs[1] -NetworkType $NetworkType
     $cmd += @(
       "--seed-genome-spec", "$bootstrapWinnerPath1", "24",
       "--seed-genome-spec", "$bootstrapWinnerPath2", "24"
@@ -424,9 +475,18 @@ elseif ($Phase -ne "1") {
     $previousLabel = "phase$previousPhase"
     $previousRuntimePath = $runtimeConfig
     $previousRuntime = Read-JsonFile -Path $previousRuntimePath
-    $previousSummaryPath = "logs/NEAT/$($lineageLayout.output_prefix)_phase${previousPhase}_seed$Seed/run_summary.json"
-    if (-not (Test-Path $previousSummaryPath)) {
-      throw "$previousLabel run summary not found: $previousSummaryPath"
+    $previousSummaryPath = $null
+    $previousPrefix = $null
+    foreach ($candidatePrefix in (Get-NetworkOutputPrefixes -BasePrefix ([string]$lineageLayout.output_prefix) -NetworkType $NetworkType)) {
+      $candidateSummaryPath = "logs/NEAT/${candidatePrefix}_phase${previousPhase}_seed$Seed/run_summary.json"
+      if (Test-Path $candidateSummaryPath) {
+        $previousSummaryPath = $candidateSummaryPath
+        $previousPrefix = $candidatePrefix
+        break
+      }
+    }
+    if ($null -eq $previousSummaryPath) {
+      throw "$previousLabel run summary not found for network type '$NetworkType'"
     }
     $previousSummary = Read-JsonFile -Path $previousSummaryPath
     $previousAppliedOverrides = Get-PropertyValue -Object $previousSummary -Name "applied_overrides"
@@ -443,7 +503,7 @@ elseif ($Phase -ne "1") {
     $cumulativeBaseGeneration = $previousBaseGeneration + $previousGenerations
     $previousWinnerRaw = [string](Get-PropertyValue -Object $previousSummary -Name "winner_pickle")
     if ([string]::IsNullOrWhiteSpace($previousWinnerRaw)) {
-      $previousWinnerRaw = "logs/NEAT/$($lineageLayout.output_prefix)_phase${previousPhase}_seed$Seed/models/winner_genome.pkl"
+      $previousWinnerRaw = "logs/NEAT/${previousPrefix}_phase${previousPhase}_seed$Seed/models/winner_genome.pkl"
     }
     $previousWinnerPath = [System.IO.Path]::GetFullPath($previousWinnerRaw)
     if (-not (Test-Path $previousWinnerPath)) {

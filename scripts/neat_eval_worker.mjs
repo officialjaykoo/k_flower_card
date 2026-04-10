@@ -485,6 +485,10 @@ function classifyOptionDecision(candidates) {
 // =============================================================================
 // Section 2. Engine Action Helpers + Feature Helpers
 // =============================================================================
+function simulateAction(state, actor, decisionType, candidate) {
+  const simulationState = state ? structuredClone(state) : state;
+  return applyAction(simulationState, actor, decisionType, candidate);
+}
 
 // =============================================================================
 // Section 3. Decision Inference Helpers
@@ -500,7 +504,7 @@ function heuristicCandidateForDecision(state, actor, decisionType, candidates, h
   }
   const target = stateProgressKey(nextByHeuristic);
   for (const c of candidates) {
-    const simulated = applyAction(state, actor, decisionType, c);
+    const simulated = simulateAction(state, actor, decisionType, c);
     if (simulated && stateProgressKey(simulated) === target) {
       return normalizeDecisionCandidate(decisionType, c);
     }
@@ -512,7 +516,7 @@ function inferChosenCandidateFromTransition(stateBefore, actor, decisionType, ca
   if (!stateAfter || !Array.isArray(candidates) || !candidates.length) return null;
   const target = stateProgressKey(stateAfter);
   for (const candidate of candidates) {
-    const simulated = applyAction(stateBefore, actor, decisionType, candidate);
+    const simulated = simulateAction(stateBefore, actor, decisionType, candidate);
     if (simulated && stateProgressKey(simulated) === target) {
       return normalizeDecisionCandidate(decisionType, candidate);
     }
@@ -638,6 +642,10 @@ function runEvalRound(
 ) {
   const rng = createSeededRng(`${seed}|rng`);
   let state = initialState;
+  const runtimeCtxByActor = {
+    human: { policyStates: new Map() },
+    ai: { policyStates: new Map() },
+  };
   const opponentSpec = resolveOpponentSpec(opponentPolicy, opponentGenomePath);
   const controlPolicyMode = normalizeControlPolicyMode(controlOptions.controlPolicyMode || "pure_model");
   const imitation = {
@@ -682,15 +690,25 @@ function runEvalRound(
     let controlDecisionOwnedByModel = false;
 
     if (actor === controlActor) {
+      const opponentActor = actor === "human" ? "ai" : "human";
       next = (
         resolveResolvedPlayerAction(state, actor, {
           kind: "model",
           model: controlModel,
+          runtimeCtx: runtimeCtxByActor[actor],
+          opponentModel: opponentSpec?.model || null,
+          opponentRuntimeCtx: runtimeCtxByActor[opponentActor],
         })?.next || state
       );
       controlDecisionOwnedByModel = true;
     } else {
-      next = resolveResolvedPlayerAction(state, actor, opponentSpec)?.next || state;
+      const opponentActor = actor === "human" ? "ai" : "human";
+      next = resolveResolvedPlayerAction(state, actor, {
+        ...opponentSpec,
+        runtimeCtx: runtimeCtxByActor[actor],
+        opponentModel: controlModel,
+        opponentRuntimeCtx: runtimeCtxByActor[opponentActor],
+      })?.next || state;
     }
 
     if (!next || stateProgressKey(next) === before) {
