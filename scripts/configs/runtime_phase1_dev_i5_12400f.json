@@ -1,0 +1,12 @@
+{
+  "extends": "runtime_phase1.json",
+  "format_version": "neat_runtime_phase1_dev_i5_12400f_v1",
+  "eval_workers": 6,
+  "checkpoint_every": 1,
+  "_notes_dev_pc": {
+    "cpu": "Intel Core i5-12400F, 6 cores / 12 threads",
+    "ram": "32GB",
+    "worker_policy": "Use 6 JS eval workers by default. Use --workers 4 for background use or --workers 8 only when the PC is dedicated to training.",
+    "gpu_policy": "runtime_phase1.json now enables native_inference_backend=auto so js_worker can offload NEAT forward passes to the Rust policy bridge and use CUDA when the model stays within the supported activation/sum-aggregation subset."
+  }
+}

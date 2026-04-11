@@ -19,6 +19,7 @@ import {
   encodeMatgoFocusedCandidateInputs,
   getMatgoKHyperneatOutputBindings,
 } from "./kHyperneatMatgoAdapter.js";
+import { evaluateCompiledPolicyBatch } from "./rustPolicyBridge.js";
 
 /* ============================================================================
  * NEAT model policy runtime
@@ -1868,6 +1869,137 @@ function forward(compiled, inputVec, baseSnapshot = null) {
   return evaluateForward(compiled, inputVec, baseSnapshot).outputs;
 }
 
+function normalizeNativeInferenceBackend(mode) {
+  const raw = String(mode || "off").trim().toLowerCase();
+  if (!raw || raw === "off" || raw === "disabled" || raw === "false") return "off";
+  if (raw === "auto") return "auto";
+  if (raw === "cpu" || raw === "rust_cpu") return "cpu";
+  if (raw === "cuda" || raw === "cuda_native" || raw === "native_cuda" || raw === "rust_cuda") {
+    return "cuda_native";
+  }
+  throw new Error(`invalid native inference backend: ${mode}`);
+}
+
+function noteNativeInferenceUsage(stats, backendUsed) {
+  if (!stats || typeof stats !== "object") return;
+  stats.last_backend_used = String(backendUsed || "unknown").trim() || "unknown";
+}
+
+async function evaluateManyForwardAsync(compiled, rows, baseSnapshot, policyModel, options = {}) {
+  const backend = normalizeNativeInferenceBackend(options.nativeInferenceBackend);
+  if (options.nativeInferenceStats && typeof options.nativeInferenceStats === "object") {
+    options.nativeInferenceStats.backend_requested = backend;
+    options.nativeInferenceStats.compiled_kind = String(compiled?.kind || "");
+  }
+  if (
+    backend !== "off" &&
+    compiled &&
+    String(compiled?.kind || "").trim() === NEAT_MODEL_FORMAT &&
+    policyModel
+  ) {
+    try {
+      if (options.nativeInferenceStats && typeof options.nativeInferenceStats === "object") {
+        options.nativeInferenceStats.native_path_attempts =
+          Number(options.nativeInferenceStats.native_path_attempts || 0) + 1;
+      }
+      const nativeResult = await evaluateCompiledPolicyBatch(
+        compiled,
+        rows,
+        baseSnapshot,
+        {
+          nativeInferenceBackend: backend,
+          nativeInferenceStats: options.nativeInferenceStats,
+        }
+      );
+      if (options.nativeInferenceStats && typeof options.nativeInferenceStats === "object") {
+        options.nativeInferenceStats.native_path_returns =
+          Number(options.nativeInferenceStats.native_path_returns || 0) + 1;
+      }
+      if (nativeResult && Array.isArray(nativeResult.outputs)) {
+        if (options.nativeInferenceStats && typeof options.nativeInferenceStats === "object") {
+          options.nativeInferenceStats.native_output_batches =
+            Number(options.nativeInferenceStats.native_output_batches || 0) + 1;
+        }
+        noteNativeInferenceUsage(options.nativeInferenceStats, nativeResult.backendUsed);
+        return rows.map((row, index) => ({
+          outputs: Array.isArray(nativeResult.outputs[index]) ? nativeResult.outputs[index] : [],
+          nextSnapshot: Array.isArray(nativeResult.snapshots)
+            ? (nativeResult.snapshots[index] || null)
+            : null,
+        }));
+      }
+      if (options.nativeInferenceStats && typeof options.nativeInferenceStats === "object") {
+        options.nativeInferenceStats.native_invalid_results =
+          Number(options.nativeInferenceStats.native_invalid_results || 0) + 1;
+      }
+    } catch (err) {
+      if (options.nativeInferenceStats && typeof options.nativeInferenceStats === "object") {
+        options.nativeInferenceStats.last_error = String(err && err.message ? err.message : err);
+      }
+    }
+  }
+  return rows.map((row) => evaluateForward(compiled, row, baseSnapshot));
+}
+
+async function buildTwoOutputOptionScoreBundleAsync(
+  state,
+  actor,
+  compiled,
+  policyModel,
+  candidates,
+  baseRuntimeSnapshot = null,
+  recentPlayMemory = null,
+  opponentRecentPlayMemory = null,
+  options = {}
+) {
+  const positiveAction = candidates.map((candidate) => resolvePositiveOptionAction(candidate)).find(Boolean) || null;
+  if (!positiveAction) return null;
+  const negativeAction = resolveNegativeOptionAction(positiveAction);
+  if (!negativeAction) return null;
+  const inputDim = Number(compiled?.inputKeys?.length || 0);
+  const features = featureVector(
+    state,
+    actor,
+    "option",
+    positiveAction,
+    candidates.length,
+    inputDim,
+    compiled?.featureSpec,
+    recentPlayMemory,
+    opponentRecentPlayMemory
+  );
+  const evaluation = (await evaluateManyForwardAsync(
+    compiled,
+    [features],
+    baseRuntimeSnapshot,
+    policyModel,
+    options
+  ))[0] || { outputs: [], nextSnapshot: null };
+  const outputs = evaluation.outputs || [];
+  const optionBias = Number(outputs[NEAT_OUT_OPTION_BIAS] || 0.0);
+  const threshold = resolveDecisionThreshold(compiled, positiveAction);
+  const scoreMap = new Map();
+  for (const candidate of candidates) {
+    const action = canonicalOptionAction(candidate);
+    if (action === positiveAction) {
+      scoreMap.set(candidate, optionBias - threshold);
+    } else if (action === negativeAction) {
+      scoreMap.set(candidate, threshold - optionBias);
+    } else {
+      scoreMap.set(candidate, -Infinity);
+    }
+  }
+  return {
+    scoreMap,
+    optionBias,
+    threshold,
+    positiveAction,
+    negativeAction,
+    oracleMargin: 0.0,
+    runtimeSnapshot: evaluation.nextSnapshot || null,
+  };
+}
+
 function isTwoOutputThresholdModel(compiled) {
   return Array.isArray(compiled?.outputKeys) && compiled.outputKeys.length === 2;
 }
@@ -2205,6 +2337,140 @@ export function getModelCandidateProbabilities(state, actor, policyModel, option
   };
 }
 
+export async function getModelCandidateProbabilitiesAsync(state, actor, policyModel, options = {}) {
+  const compiledRuntime = getCompiledPolicyModel(policyModel);
+  if (!compiledRuntime) return null;
+
+  const sp = selectPool(state, actor, options);
+  const decisionType = resolveDecisionType(sp);
+  if (!decisionType) return null;
+  const compiled = selectCompiledModelForDecision(compiledRuntime, decisionType);
+  if (!compiled) return null;
+
+  const candidates = legalCandidatesForDecision(sp, decisionType);
+  if (!candidates.length) return null;
+
+  const scoreMap = new Map();
+  const scores = {};
+  const runtimeSnapshots = {};
+  const runtimeRecord = getPreparedRuntimeRecord(
+    state,
+    actor,
+    policyModel,
+    compiled,
+    options.runtimeCtx
+  );
+  const baseRuntimeSnapshot = getBaseRecurrentSnapshot(runtimeRecord, compiled);
+  const recentPlayMemory = runtimeRecord?.recentPlayMemory || createEmptyRecentPlayMemoryState();
+  const opponentRecentPlayMemory = getOpponentRecentPlayMemory(state, actor, options);
+  const memoryDebug = {
+    profile: String(compiled?.runtimeMemoryProfile || "none"),
+    recentOutcomes: buildRecentPlayFeatureVector(
+      state,
+      actor,
+      decisionType,
+      candidates[0],
+      recentPlayMemory
+    ).slice(0, V4_RECENT_PLAY_SLOTS),
+    opponentRecentOutcomes: buildRecentOutcomeSlots(opponentRecentPlayMemory),
+  };
+
+  try {
+    if (isCompiledKHyperneatRuntime(compiled)) {
+      return getModelCandidateProbabilities(state, actor, policyModel, options);
+    }
+
+    if (decisionType === "option" && isTwoOutputThresholdModel(compiled)) {
+      const bundle = await buildTwoOutputOptionScoreBundleAsync(
+        state,
+        actor,
+        compiled,
+        policyModel,
+        candidates,
+        baseRuntimeSnapshot,
+        recentPlayMemory,
+        opponentRecentPlayMemory,
+        options
+      );
+      if (!bundle) return null;
+      for (const candidate of candidates) {
+        const score = Number(bundle.scoreMap.get(candidate) || -Infinity);
+        scoreMap.set(candidate, score);
+        scores[String(candidate)] = score;
+        if (bundle.runtimeSnapshot) {
+          runtimeSnapshots[String(candidate)] = cloneRecurrentSnapshot(bundle.runtimeSnapshot, compiled);
+        }
+      }
+      const probs = scoreToProbabilityMap(candidates, scoreMap, Number(policyModel?.softmax_temp || 1.0));
+      return {
+        decisionType,
+        candidates,
+        probabilities: probs,
+        scores,
+        networkType: compiled.networkType || "feedforward",
+        runtimeSnapshots: Object.keys(runtimeSnapshots).length > 0 ? runtimeSnapshots : null,
+        memoryDebug,
+        optionBias: bundle.optionBias,
+        optionThreshold: bundle.threshold,
+        optionPositiveAction: bundle.positiveAction,
+        optionNegativeAction: bundle.negativeAction,
+        optionOracleMargin: bundle.oracleMargin,
+      };
+    }
+
+    const inputDim = Number(compiled.inputKeys.length || 0);
+    const rows = candidates.map((candidate) =>
+      featureVector(
+        state,
+        actor,
+        decisionType,
+        candidate,
+        candidates.length,
+        inputDim,
+        compiled?.featureSpec,
+        recentPlayMemory,
+        opponentRecentPlayMemory
+      )
+    );
+    const evaluations = await evaluateManyForwardAsync(
+      compiled,
+      rows,
+      baseRuntimeSnapshot,
+      policyModel,
+      options
+    );
+    for (let i = 0; i < candidates.length; i += 1) {
+      const candidate = candidates[i];
+      const evaluation = evaluations[i] || { outputs: [], nextSnapshot: null };
+      const outputs = evaluation.outputs || [];
+      const combined = scoreCandidateWithOracle(state, actor, compiled, outputs, decisionType, candidate);
+      scoreMap.set(candidate, combined.total);
+      scores[String(candidate)] = combined.total;
+      if (evaluation.nextSnapshot) {
+        runtimeSnapshots[String(candidate)] = cloneRecurrentSnapshot(evaluation.nextSnapshot, compiled);
+      }
+    }
+  } catch (err) {
+    if (options.nativeInferenceStats && typeof options.nativeInferenceStats === "object") {
+      options.nativeInferenceStats.async_fallback_count =
+        Number(options.nativeInferenceStats.async_fallback_count || 0) + 1;
+      options.nativeInferenceStats.last_async_error = String(err && err.message ? err.message : err);
+    }
+    return getModelCandidateProbabilities(state, actor, policyModel, options);
+  }
+
+  const probs = scoreToProbabilityMap(candidates, scoreMap, Number(policyModel?.softmax_temp || 1.0));
+  return {
+    decisionType,
+    candidates,
+    probabilities: probs,
+    scores,
+    networkType: compiled.networkType || "feedforward",
+    runtimeSnapshots: Object.keys(runtimeSnapshots).length > 0 ? runtimeSnapshots : null,
+    memoryDebug,
+  };
+}
+
 export function debugFeatureRows(state, actor, options = {}) {
   const sp = selectPool(state, actor, options);
   const decisionType = resolveDecisionType(sp);
@@ -2326,9 +2592,68 @@ function modelPickCandidate(state, actor, policyModel, options = {}) {
   };
 }
 
+async function modelPickCandidateAsync(state, actor, policyModel, options = {}) {
+  const scored = await getModelCandidateProbabilitiesAsync(state, actor, policyModel, options);
+  if (!scored) return null;
+  const scoreMap = new Map();
+  for (const c of scored.candidates) {
+    scoreMap.set(c, Number(scored.scores?.[String(c)] || -Infinity));
+  }
+  const best = pickBestByScore(scored.candidates, scoreMap);
+  if (!best) return null;
+  return {
+    decisionType: scored.decisionType,
+    candidate: best,
+    networkType: scored.networkType || "feedforward",
+    runtimeSnapshot: scored.runtimeSnapshots?.[String(best)] || null,
+    memoryDebug: scored.memoryDebug || null,
+  };
+}
+
 export function modelPolicyPlay(state, actor, policyModel, options = {}) {
   if (!policyModel || !isSupportedPolicyModel(policyModel)) return state;
   const picked = modelPickCandidate(state, actor, policyModel, options);
+  if (!picked) return state;
+  const compiledRuntime = getCompiledPolicyModel(policyModel);
+  if (!compiledRuntime) return state;
+
+  const sp = selectPool(state, actor, options);
+  const decisionType = resolveDecisionType(sp);
+  if (!decisionType) return state;
+
+  const legal = legalCandidatesForDecision(sp, decisionType);
+  if (!legal.length) return state;
+
+  let c = normalizeDecisionCandidate(decisionType, picked.candidate);
+  if (!legal.includes(String(c))) c = legal[0];
+  const nextState = applyAction(state, actor, decisionType, c);
+  if (
+    nextState !== state &&
+    !options.previewPlay &&
+    options.runtimeCtx
+  ) {
+    commitPolicyRuntimeRecord(
+      state,
+      actor,
+      decisionType,
+      c,
+      nextState,
+      policyModel,
+      selectCompiledModelForDecision(compiledRuntime, decisionType),
+      options.runtimeCtx,
+      picked.networkType === "recurrent" ? picked.runtimeSnapshot : null
+    );
+  }
+  return nextState;
+}
+
+export function getCompiledPolicyModelForDebug(policyModel) {
+  return getCompiledPolicyModel(policyModel);
+}
+
+export async function modelPolicyPlayAsync(state, actor, policyModel, options = {}) {
+  if (!policyModel || !isSupportedPolicyModel(policyModel)) return state;
+  const picked = await modelPickCandidateAsync(state, actor, policyModel, options);
   if (!picked) return state;
   const compiledRuntime = getCompiledPolicyModel(policyModel);
   if (!compiledRuntime) return state;

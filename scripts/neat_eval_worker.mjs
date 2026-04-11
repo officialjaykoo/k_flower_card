@@ -5,7 +5,14 @@ import { getActionPlayerKey } from "../src/engine/runner.js";
 import { aiPlay } from "../src/ai/aiPlay.js";
 import { resolveBotPolicy } from "../src/ai/policies.js";
 import { resolvePlayerSpecCore } from "../src/ai/evalCore/playerSpecCore.js";
-import { resolveResolvedPlayerAction } from "../src/ai/evalCore/resolvedPlayerAction.js";
+import {
+  resolveResolvedPlayerActionAsync,
+} from "../src/ai/evalCore/resolvedPlayerAction.js";
+import {
+  closeAllRustPolicyBridges,
+  getRustPolicyBridgeStats,
+  resetRustPolicyBridgeStats,
+} from "../src/ai/rustPolicyBridge.js";
 import {
   canonicalOptionAction,
   normalizeOptionCandidates,
@@ -348,6 +355,7 @@ function parseArgs(argv) {
     earlyStopWinRateCutoffs: [],
     earlyStopGoTakeRateCutoffs: [],
     controlPolicyMode: "pure_model",
+    nativeInferenceBackend: "off",
   };
 
   while (args.length > 0) {
@@ -422,6 +430,7 @@ function parseArgs(argv) {
       );
     }
     else if (key === "--control-policy-mode") out.controlPolicyMode = normalizeControlPolicyMode(value);
+    else if (key === "--native-inference-backend") out.nativeInferenceBackend = String(value || "off").trim().toLowerCase();
     else if (key === "--control-heuristic-policy") {
       throw new Error(`deprecated option: ${key} (control fallback modes were removed)`);
     }
@@ -469,6 +478,20 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(out.fitnessWinNeutralRate) || out.fitnessWinNeutralRate <= 0 || out.fitnessWinNeutralRate >= 1) {
     throw new Error("--fitness-win-neutral-rate is required and must be in (0,1)");
+  }
+  if (
+    out.nativeInferenceBackend !== "off" &&
+    out.nativeInferenceBackend !== "auto" &&
+    out.nativeInferenceBackend !== "cpu" &&
+    out.nativeInferenceBackend !== "cuda" &&
+    out.nativeInferenceBackend !== "cuda_native" &&
+    out.nativeInferenceBackend !== "native_cuda" &&
+    out.nativeInferenceBackend !== "rust_cuda" &&
+    out.nativeInferenceBackend !== "rust_cpu"
+  ) {
+    throw new Error(
+      `invalid --native-inference-backend: ${out.nativeInferenceBackend} (allowed: off, auto, cpu, cuda_native)`
+    );
   }
   return out;
 }
@@ -630,7 +653,7 @@ function controlGoldDiff(state, controlActor) {
   return controlGold - oppGold;
 }
 
-function runEvalRound(
+async function runEvalRound(
   initialState,
   controlModel,
   seed,
@@ -648,6 +671,8 @@ function runEvalRound(
   };
   const opponentSpec = resolveOpponentSpec(opponentPolicy, opponentGenomePath);
   const controlPolicyMode = normalizeControlPolicyMode(controlOptions.controlPolicyMode || "pure_model");
+  const nativeInferenceBackend = String(controlOptions.nativeInferenceBackend || "off");
+  const nativeInferenceStats = controlOptions.nativeInferenceStats || null;
   const imitation = {
     totals: { play: 0, match: 0, option: 0 },
     matches: { play: 0, match: 0, option: 0 },
@@ -692,23 +717,27 @@ function runEvalRound(
     if (actor === controlActor) {
       const opponentActor = actor === "human" ? "ai" : "human";
       next = (
-        resolveResolvedPlayerAction(state, actor, {
+        (await resolveResolvedPlayerActionAsync(state, actor, {
           kind: "model",
           model: controlModel,
           runtimeCtx: runtimeCtxByActor[actor],
           opponentModel: opponentSpec?.model || null,
           opponentRuntimeCtx: runtimeCtxByActor[opponentActor],
-        })?.next || state
+          nativeInferenceBackend,
+          nativeInferenceStats,
+        }))?.next || state
       );
       controlDecisionOwnedByModel = true;
     } else {
       const opponentActor = actor === "human" ? "ai" : "human";
-      next = resolveResolvedPlayerAction(state, actor, {
+      next = (await resolveResolvedPlayerActionAsync(state, actor, {
         ...opponentSpec,
         runtimeCtx: runtimeCtxByActor[actor],
         opponentModel: controlModel,
         opponentRuntimeCtx: runtimeCtxByActor[opponentActor],
-      })?.next || state;
+        nativeInferenceBackend,
+        nativeInferenceStats,
+      }))?.next || state;
     }
 
     if (!next || stateProgressKey(next) === before) {
@@ -830,7 +859,7 @@ function buildImitationMetrics(totals, matches) {
 // =============================================================================
 // Section 5. Entrypoint
 // =============================================================================
-function main() {
+async function main() {
   const evalStartMs = Date.now();
   const opts = parseArgs(process.argv.slice(2));
   const full = path.resolve(opts.genomePath);
@@ -894,6 +923,11 @@ function main() {
   let nextEarlyStopCutoffIdx = 0;
   let nextEarlyStopGoTakeRateCutoffIdx = 0;
   const kiboWriter = opts.kiboOut ? fs.createWriteStream(opts.kiboOut, { encoding: "utf8" }) : null;
+  const nativeInferenceStats = {
+    request_count: 0,
+    by_backend: {},
+  };
+  resetRustPolicyBridgeStats();
 
   try {
     for (let gi = 0; gi < requestedGames; gi += 1) {
@@ -912,7 +946,7 @@ function main() {
           : startRound(seed, firstTurnKey)
         : startRound(seed, firstTurnKey);
       const beforeGoldDiff = controlGoldDiff(roundStart, controlActor);
-      const gameResult = runEvalRound(
+      const gameResult = await runEvalRound(
         roundStart,
         controlModel,
         seed,
@@ -922,6 +956,8 @@ function main() {
         opts.opponentGenomePath,
         {
           controlPolicyMode: opts.controlPolicyMode,
+          nativeInferenceBackend: opts.nativeInferenceBackend,
+          nativeInferenceStats,
         }
       );
       const endState = gameResult?.endState || gameResult;
@@ -1051,6 +1087,7 @@ function main() {
     if (kiboWriter) {
       kiboWriter.end();
     }
+    await closeAllRustPolicyBridges();
   }
 
   if (completedGames <= 0) {
@@ -1147,6 +1184,9 @@ function main() {
     early_stop_observed_go_take_rate: earlyStop?.observedGoTakeRate ?? null,
     early_stop_observed_go_opportunity_count: earlyStop?.observedGoOpportunityCount ?? null,
     control_policy_mode: opts.controlPolicyMode,
+    native_inference_backend: opts.nativeInferenceBackend,
+    native_inference_stats: nativeInferenceStats,
+    native_inference_bridge_stats: getRustPolicyBridgeStats(),
     opponent_eval_tuning: {
       fast_path: false,
       imitation_reference_enabled: true,
@@ -1271,10 +1311,8 @@ function main() {
   process.stdout.write(`${JSON.stringify(summary)}\n`);
 }
 
-try {
-  main();
-} catch (err) {
+main().catch((err) => {
   const msg = err && err.stack ? err.stack : String(err);
   process.stderr.write(`${msg}\n`);
   process.exit(1);
-}
+});

@@ -1,4 +1,4 @@
-import { aiPlay } from "../aiPlay.js";
+import { aiPlay, aiPlayAsync } from "../aiPlay.js";
 import { hybridPolicyPlayDetailed } from "../hybridPolicyEngine.js";
 
 export function buildAiPlayOptions(playerSpec) {
@@ -9,6 +9,8 @@ export function buildAiPlayOptions(playerSpec) {
       runtimeCtx: playerSpec.runtimeCtx || null,
       opponentModel: playerSpec.opponentModel || null,
       opponentRuntimeCtx: playerSpec.opponentRuntimeCtx || null,
+      nativeInferenceBackend: playerSpec.nativeInferenceBackend || "off",
+      nativeInferenceStats: playerSpec.nativeInferenceStats || null,
     };
   }
   return {
@@ -43,6 +45,30 @@ export function resolveResolvedPlayerAction(state, actor, playerSpec) {
 
   return {
     next: aiPlay(state, actor, buildAiPlayOptions(playerSpec)),
+    actionSource: "heuristic",
+    route: "heuristic",
+  };
+}
+
+export async function resolveResolvedPlayerActionAsync(state, actor, playerSpec) {
+  if (playerSpec?.kind === "hybrid_play") {
+    return resolveResolvedPlayerAction(state, actor, playerSpec);
+  }
+
+  if (playerSpec?.model) {
+    if (playerSpec?.nativeInferenceStats && typeof playerSpec.nativeInferenceStats === "object") {
+      playerSpec.nativeInferenceStats.resolve_calls =
+        Number(playerSpec.nativeInferenceStats.resolve_calls || 0) + 1;
+    }
+    return {
+      next: await aiPlayAsync(state, actor, buildAiPlayOptions(playerSpec)),
+      actionSource: "model",
+      route: "model",
+    };
+  }
+
+  return {
+    next: await aiPlayAsync(state, actor, buildAiPlayOptions(playerSpec)),
     actionSource: "heuristic",
     route: "heuristic",
   };

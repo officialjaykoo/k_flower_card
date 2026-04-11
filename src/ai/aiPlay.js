@@ -3,7 +3,9 @@ import { botPlay, getHeuristicCardProbabilities } from "./heuristicPolicyEngine.
 import {
   cloneModelRuntimeContext,
   getModelCandidateProbabilities,
-  modelPolicyPlay as runModelPolicyPlay
+  getModelCandidateProbabilitiesAsync,
+  modelPolicyPlay as runModelPolicyPlay,
+  modelPolicyPlayAsync as runModelPolicyPlayAsync
 } from "./modelPolicyEngine.js";
 
 /*
@@ -28,6 +30,21 @@ export function aiPlay(state, actor, options = {}) {
   });
 }
 
+export async function aiPlayAsync(state, actor, options = {}) {
+  const source = normalizeSource(options.source);
+  const heuristicPolicy = resolveHeuristicPolicy(options);
+  if (source === "model") {
+    const next = await runModelPolicyPlayAsync(state, actor, options.model || null, options);
+    if (next !== state) return next;
+  }
+  return botPlay(state, actor, {
+    policy: heuristicPolicy,
+    heuristicParams: options.heuristicParams && typeof options.heuristicParams === "object"
+      ? options.heuristicParams
+      : null
+  });
+}
+
 // Probability preview API for hand-card UI overlays.
 export function getAiPlayProbabilities(state, actor, options = {}) {
   const source = normalizeSource(options.source);
@@ -40,6 +57,28 @@ export function getAiPlayProbabilities(state, actor, options = {}) {
       const scored = getModelCandidateProbabilities(state, actor, options.model, {
         runtimeCtx,
         previewPlay: !!options.previewPlay
+      });
+      if (scored && scored.decisionType === "play") {
+        return scored.probabilities || null;
+      }
+    }
+  }
+  return getHeuristicCardProbabilities(state, actor, heuristicPolicy);
+}
+
+export async function getAiPlayProbabilitiesAsync(state, actor, options = {}) {
+  const source = normalizeSource(options.source);
+  const heuristicPolicy = resolveHeuristicPolicy(options);
+  if (source === "model") {
+    if (options.model) {
+      const runtimeCtx = options.previewPlay
+        ? cloneModelRuntimeContext(options.runtimeCtx || null)
+        : (options.runtimeCtx || null);
+      const scored = await getModelCandidateProbabilitiesAsync(state, actor, options.model, {
+        runtimeCtx,
+        previewPlay: !!options.previewPlay,
+        nativeInferenceBackend: options.nativeInferenceBackend,
+        nativeInferenceStats: options.nativeInferenceStats,
       });
       if (scored && scored.decisionType === "play") {
         return scored.probabilities || null;

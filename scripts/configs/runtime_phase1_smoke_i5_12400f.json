@@ -1,0 +1,10 @@
+{
+  "extends": "runtime_phase1_smoke.json",
+  "format_version": "neat_runtime_phase1_smoke_i5_12400f_v1",
+  "eval_workers": 6,
+  "_notes_dev_pc": {
+    "cpu": "Intel Core i5-12400F, 6 cores / 12 threads",
+    "ram": "32GB",
+    "worker_policy": "CPU-only smoke profile using 6 JS eval workers."
+  }
+}

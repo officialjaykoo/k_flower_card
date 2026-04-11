@@ -11,3 +11,4 @@ Des-HyperNEAT-Python/
 archive/
 vendor/
 DesAdapter/artifacts/
+neat-rust/target/
